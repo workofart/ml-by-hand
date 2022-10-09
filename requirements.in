@@ -1,0 +1,15 @@
+numpy
+scikit-learn
+pandas
+matplotlib
+seaborn
+pre-commit
+tqdm
+pyright
+ipykernel
+datasets
+pytest
+torch
+torchvision
+torchaudio
+ruff
