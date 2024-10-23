@@ -2,8 +2,18 @@ import numpy as np
 
 class Tensor:
     def __init__(self, data, prev=(), requires_grad=False):
-        self.data = data
-        self.grad = 0
+        # Handle different input types
+        if np.isscalar(data):
+            data = np.array(data)  # Creates 0-dim array
+        elif isinstance(data, (list, tuple)):
+            data = np.array(data)
+        elif isinstance(data, np.ndarray):
+            data = data
+        else:
+            raise TypeError(f"Unsupported type: {type(data)}")
+        
+        self.data = data.astype(np.float64)
+        self.grad = np.zeros_like(self.data, dtype=np.float64)
         self._backward = lambda: None
         self.prev = set(prev)  # all the operations before this Tensor
         self.requires_grad = requires_grad
@@ -49,6 +59,51 @@ class Tensor:
             """
             self.grad += result.grad * other.data
             other.grad += result.grad * self.data
+        result._backward = _backward
+        return result
+    
+    def __matmul__(self, other):
+        if not isinstance(other, Tensor):
+            other = Tensor(other)
+        
+        result = Tensor(
+            data=np.matmul(self.data, other.data),
+            prev=(self, other),
+            requires_grad=self.requires_grad or other.requires_grad,
+        )
+        def _backward():
+            """
+            d(loss) / dx
+            = self.grad
+            = d(loss) / d(x·y) * d(x·y) / dx
+            = result.grad * d(x·y) / dx
+            = result.grad * y.T
+            
+            d(loss) / dy
+            = other.grad
+            = d(loss) / d(x·y) * d(x·y) / dy
+            = result.grad * d(x·y) / dy
+            = x.T * result.grad
+            Note:
+                need to move x.T to the left because:
+                1) Each element in result is a dot product of a row from x with a column from y
+                2) When we backprop, we need x.T on the left to match dimensions:
+                   x = (num_samples, num_features)
+                   y = (num_features, num_classes)
+                   x.T = (num_features, num_samples)
+                   result.grad = (num_samples, num_classes)
+                   x.T * result.grad = (num_features, num_classes)  # same shape as y
+            """
+
+            # When result.grad is scalar (like in our test case)
+            if isinstance(result.grad, (int, float)) or result.grad.ndim == 0:
+                
+                self.grad += result.grad * other.data.T  # Scalar multiplication
+                other.grad += result.grad * self.data.T
+            # When result.grad is a matrix
+            else:
+                self.grad += np.matmul(result.grad, other.data.T)  # Matrix multiplication
+                other.grad += np.matmul(self.data.T, result.grad)
         result._backward = _backward
         return result
 

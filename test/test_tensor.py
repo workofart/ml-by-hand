@@ -20,7 +20,12 @@ def test_tensor():
     assert y.grad == 0.0
     assert x.requires_grad == True
     assert len(y.prev) == 0
-
+    
+    x = Tensor([1.0, 2.0], requires_grad=True)
+    y = Tensor([3.0, 4.0], requires_grad=True)
+    z = (x @ y)
+    assert np.array_equal(z.data, 1.0 * 3.0 + 2.0 * 4.0)
+    
 def test_complex_tensor_ops():
     x = Tensor(2.0, requires_grad=True)
     y = Tensor(1.5, requires_grad=True)
@@ -50,3 +55,21 @@ def test_backward():
     assert z.grad == 1.0
     assert np.isclose(x.grad, 1.0 / 3.0, atol=1e-5) # dz/dx = d(x/y)/dx = 1/y = 1/3
     assert np.isclose(y.grad, -2.0 / 9.0, atol=1e-5) # dz/dy = d(x/y)/dy = -x/y^2 = -2/9
+    
+    # Vector-vector mat-mul
+    x = Tensor([1.0, 2.0], requires_grad=True)
+    y = Tensor([3.0, 4.0], requires_grad=True)
+    z = (x @ y)
+    z.backward()
+    assert z.grad == 1
+    assert np.array_equal(x.grad, np.array([3.0, 4.0]).T)
+    assert np.array_equal(y.grad, np.array([1.0, 2.0]).T)
+
+    # matrix-matrix mat-mul
+    x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+    y = Tensor([[5.0, 6.0], [7.0, 8.0]], requires_grad=True)
+    z = (x @ y)
+    z.backward()
+    assert z.grad == 1
+    assert np.array_equal(x.grad, np.array([[5.0, 7.0], [6.0, 8.0]]))
+    assert np.array_equal(y.grad, np.array([[1.0, 3.0], [2.0, 4.0]]))
