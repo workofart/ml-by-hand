@@ -31,8 +31,21 @@ class Tensor:
             d(x + y) / dy = 1
             We need to multiply by result.grad because of the chain rule
             """
-            self.grad += 1 * result.grad
-            other.grad += 1 * result.grad
+            def reverse_broadcast(grad_to_add, target_shape):
+                # Calculate the number of dimensions to add to target_shape to match grad_to_add
+                num_extra_dims = len(grad_to_add.shape) - len(target_shape)
+                
+                # Create a new shape for target_shape with ones in the extra dimensions
+                expanded_target_shape = (1,) * num_extra_dims + target_shape
+                
+                # Identify the axes to sum over by comparing shapes
+                axes_to_sum = tuple(i for i, (g_dim, t_dim) in enumerate(zip(grad_to_add.shape, expanded_target_shape)) if g_dim != t_dim)
+                
+                # Sum over the identified axes
+                return np.sum(grad_to_add, axis=axes_to_sum).reshape(target_shape)
+            
+            self.grad += result.grad
+            other.grad += reverse_broadcast(result.grad, other.data.shape)
         result._backward = _backward
         return result
 
@@ -125,8 +138,14 @@ class Tensor:
                     
             # Matrix @ Matrix case (result is matrix)
             else:
-                self.grad += np.matmul(result.grad, other.data.T)
-                other.grad += np.matmul(self.data.T, result.grad)
+                # Ensure result.grad is 2D
+                if result.grad.ndim == 1:
+                    result_grad = result.grad.reshape(1, -1)
+                else:
+                    result_grad = result.grad
+                    
+                self.grad += np.matmul(result_grad, other.data.T)
+                other.grad += np.matmul(self.data.T, result_grad)
                     
         result._backward = _backward
         return result
