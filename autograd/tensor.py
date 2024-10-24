@@ -1,18 +1,13 @@
 import numpy as np
 
 class Tensor:
-    def __init__(self, data, prev=(), requires_grad=False):
-        # Handle different input types
-        if np.isscalar(data):
-            data = np.array(data)  # Creates 0-dim array
-        elif isinstance(data, (list, tuple)):
+    def __init__(self, data, prev=(), requires_grad=True):
+        if isinstance(data, (list, tuple)):
             data = np.array(data)
-        elif isinstance(data, np.ndarray):
-            data = data
         else:
-            raise TypeError(f"Unsupported type: {type(data)}")
+            data = data
         
-        self.data = data.astype(np.float64)
+        self.data = data
         self.grad = np.zeros_like(self.data, dtype=np.float64)
         self._backward = lambda: None
         self.prev = set(prev)  # all the operations before this Tensor
@@ -57,17 +52,41 @@ class Tensor:
             d(xy) / dx = y
             d(xy) / dy = x
             """
-            self.grad += result.grad * other.data
-            other.grad += result.grad * self.data
+            grad = result.grad
+            # Handle broadcasting: sum along broadcasted dimensions
+            if np.isscalar(self.data) or (isinstance(other.data, np.ndarray) and self.data.shape != other.data.shape):
+                self.grad += np.sum(other.data * grad)
+            else:
+                self.grad += other.data * grad
+                
+            # Handle broadcasting: sum along broadcasted dimensions
+            if np.isscalar(other.data) or (isinstance(self.data, np.ndarray) and self.data.shape != other.data.shape):
+                other.grad += np.sum(self.data * grad)
+            else:
+                other.grad += self.data * grad
+            # self.grad += result.grad * other.data
+            # other.grad += result.grad * self.data
         result._backward = _backward
         return result
     
     def __matmul__(self, other):
         if not isinstance(other, Tensor):
             other = Tensor(other)
+            
+        # Raise error if either input is scalar (0D) - Same as Pytorch assumption
+        if np.isscalar(self.data) or np.isscalar(other.data):
+            raise RuntimeError("both arguments to matmul need to be at least 1D")
+        
+        # Handle matrix multiplication shapes:
+        # - If input is 1D vector, reshape it for matrix multiplication:
+        #   - First operand (x): reshape to (1, n) row vector
+        #   - Second operand (y): reshape to (n, 1) column vector
+        # - If input is 2D matrix, keep original shape
+        x = self.data.reshape((1, -1)) if self.data.ndim == 1 else self.data
+        y = other.data.reshape((-1, 1)) if other.data.ndim == 1 else other.data
         
         result = Tensor(
-            data=np.matmul(self.data, other.data),
+            data=np.matmul(x, y).squeeze(),
             prev=(self, other),
             requires_grad=self.requires_grad or other.requires_grad,
         )
@@ -93,17 +112,22 @@ class Tensor:
                    x.T = (num_features, num_samples)
                    result.grad = (num_samples, num_classes)
                    x.T * result.grad = (num_features, num_classes)  # same shape as y
-            """
-
-            # When result.grad is scalar (like in our test case)
-            if isinstance(result.grad, (int, float)) or result.grad.ndim == 0:
-                
-                self.grad += result.grad * other.data.T  # Scalar multiplication
-                other.grad += result.grad * self.data.T
-            # When result.grad is a matrix
-            else:
-                self.grad += np.matmul(result.grad, other.data.T)  # Matrix multiplication
+            """         
+            # Vector @ Vector case (result is scalar)
+            if self.data.ndim == 1 and other.data.ndim == 1:
+                self.grad += result.grad * other.data
+                other.grad += result.grad * self.data
+                    
+            # Matrix @ Vector case (result is vector)
+            elif self.data.ndim == 2 and other.data.ndim == 1:
+                self.grad += np.outer(result.grad, other.data)
                 other.grad += np.matmul(self.data.T, result.grad)
+                    
+            # Matrix @ Matrix case (result is matrix)
+            else:
+                self.grad += np.matmul(result.grad, other.data.T)
+                other.grad += np.matmul(self.data.T, result.grad)
+                    
         result._backward = _backward
         return result
 
@@ -159,7 +183,10 @@ class Tensor:
                 # that point to the current node
                 topological_sorted_tensors.append(node)
         dfs(self)
-        self.grad = 1
+        
+        # Note that this is important to ensure our gradients shape is not a scalar
+        # to ensure we follow the same matmul assumption as Pytorch.
+        self.grad = np.ones_like(self.data)
         for tensor in reversed(topological_sorted_tensors):
             tensor._backward()
             
