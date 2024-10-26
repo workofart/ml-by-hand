@@ -1,7 +1,10 @@
 from unittest import TestCase
-from autograd.nn import Linear
+from autograd.nn import Linear, ReLU, Sigmoid, BinaryCrossEntropyLoss
 import random
 import numpy as np
+import torch # for test comparisons
+
+from autograd.tensor import Tensor
 
 random.seed(1337)
 np.random.seed(1337)
@@ -69,3 +72,30 @@ class TestLinear(TestCase):
                 [1, 1],
             ]
         )
+        
+    def test_relu(self):
+        x = Tensor(np.array([[1, -2, 3], [-4, 5, -6]]))
+        
+        # Test forward pass
+        relu = ReLU()
+        out = relu(x)
+        assert np.array_equal(out.data, [[1, 0, 3], [0, 5, 0]])
+    
+    def test_sigmoid(self):
+        x = Tensor(np.array([[1, -2, 3], [-4, 5, -6]]))
+        
+        # Test forward pass
+        sigmoid = Sigmoid()
+        out = sigmoid(x)
+        assert np.allclose(out.data, torch.sigmoid(torch.tensor(x.data)).numpy())
+        
+    
+    def test_binary_cross_entropy_loss(self):
+        # With logits
+        y_pred = Tensor(np.array([0.5, 0, 0.75]))
+        y_true = Tensor(np.array([0.0, 1.0, 1.0]))
+        
+        y_pred_probs = Sigmoid().forward(y_pred)
+        bce_loss = BinaryCrossEntropyLoss()(y_pred_probs, y_true)
+        torch_loss = torch.nn.BCELoss()
+        assert bce_loss == torch_loss(torch.sigmoid(torch.tensor((y_pred.data))), torch.tensor(y_true.data))
