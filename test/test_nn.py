@@ -1,5 +1,6 @@
 from unittest import TestCase
-from autograd.nn import Linear, ReLU, Sigmoid, BinaryCrossEntropyLoss
+from autograd.nn import Linear, BinaryCrossEntropyLoss
+from autograd.functional import relu, sigmoid
 import random
 import numpy as np
 import torch # for test comparisons
@@ -77,17 +78,42 @@ class TestLinear(TestCase):
         x = Tensor(np.array([[1, -2, 3], [-4, 5, -6]]))
         
         # Test forward pass
-        relu = ReLU()
-        out = relu(x)
-        assert np.array_equal(out.data, [[1, 0, 3], [0, 5, 0]])
+        out1 = relu(x)
+        assert np.array_equal(out1.data, [[1, 0, 3], [0, 5, 0]])
+        
+        out2 = relu(x)
+        assert np.array_equal(out2.data, [[1, 0, 3], [0, 5, 0]])
+        
+        # Test backward pass
+        out1.backward()
+        assert np.array_equal(
+            x.grad,
+            np.array([[1, 0, 1], [0, 1, 0]])
+        )
+        
+        # This should accumulate gradient for x
+        out2.backward()
+        assert np.array_equal(
+            x.grad,
+            np.array([[2, 0, 2], [0, 2, 0]])
+        )
     
     def test_sigmoid(self):
         x = Tensor(np.array([[1, -2, 3], [-4, 5, -6]]))
+        x_torch = torch.tensor(x.data.astype(float), requires_grad=True)
         
         # Test forward pass
-        sigmoid = Sigmoid()
         out = sigmoid(x)
-        assert np.allclose(out.data, torch.sigmoid(torch.tensor(x.data)).numpy())
+        torch_out = torch.sigmoid(x_torch)
+        
+        assert np.allclose(out.data, torch_out.detach().numpy())
+        
+        # Test backward pass
+        out.backward()
+        torch_out.sum().backward()
+        assert np.allclose(x.grad, x_torch.grad.numpy())
+        
+
         
     
     def test_binary_cross_entropy_loss(self):
@@ -95,7 +121,7 @@ class TestLinear(TestCase):
         y_pred = Tensor(np.array([0.5, 0, 0.75]))
         y_true = Tensor(np.array([0.0, 1.0, 1.0]))
         
-        y_pred_probs = Sigmoid().forward(y_pred)
+        y_pred_probs = sigmoid(y_pred)
         bce_loss = BinaryCrossEntropyLoss()(y_pred_probs, y_true)
         torch_loss = torch.nn.BCELoss()
         assert bce_loss == torch_loss(torch.sigmoid(torch.tensor((y_pred.data))), torch.tensor(y_true.data))

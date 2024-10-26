@@ -58,42 +58,6 @@ class Linear(Module):
         # this is just a linear transformation (dot matrix multiplication)
         return x @ self._parameters['weight'] + self._parameters['bias']
     
-class ReLU:
-    """
-    Retified Linear Unit (ReLU) activation function.
-    ReLU(x) = max(0, x)
-    """
-    
-    def __init__(self):
-        self._mask = None
-    
-    def __call__(self, x):
-        return self.forward(x)
-    
-    def forward(self, x: Tensor):
-        self._mask = (x.data > 0)
-        return Tensor(np.maximum(0.0, x.data))
-    
-    def backward(self, grad_output):
-        return grad_output * self._mask
-    
-    
-class Sigmoid:
-    """
-    Sigmoid activation function
-    """
-    def __init__(self) -> None:
-        self._mask = None
-        
-    def __call__(self, x):
-        return self.forward(x)
-    
-    def forward(self, x: Tensor):
-        return Tensor(1 / (1 + np.exp(-x.data)))
-        
-    # def backward(self, grad_output):
-    #     return grad_output * self._mask * (1 - self._mask)
-    
 class BinaryCrossEntropyLoss:
     def __init__(self):
         self.predictions = None
@@ -112,6 +76,7 @@ class BinaryCrossEntropyLoss:
         # compute the loss
         return -np.mean(self.targets * np.log(predictions) + (1 - self.targets) * np.log(1 - predictions))
     
-    # def backward(self):
-    #     return (self.predictions - self.targets) / self.predictions.shape[0]
+    def backward(self):
+        # dL/dp = -(y/p) + (1-y)/(1-p)
+        return -(self.targets / self.predictions) + (1 - self.targets) / (1 - self.predictions)
         
