@@ -57,26 +57,3 @@ class Linear(Module):
     
         # this is just a linear transformation (dot matrix multiplication)
         return x @ self._parameters['weight'] + self._parameters['bias']
-    
-class BinaryCrossEntropyLoss:
-    def __init__(self):
-        self.predictions = None
-        self.targets = None
-    
-    def __call__(self, predictions, targets):
-        if predictions.data.shape != targets.data.shape:
-            raise ValueError("predictions and targets must have the same shape")
-            
-        # Clip probabilities to prevent log(0)
-        predictions = np.clip(predictions.data, 1e-7, 1 - 1e-7)
-        
-        self.predictions = predictions.data
-        self.targets = targets.data
-        
-        # compute the loss
-        return -np.mean(self.targets * np.log(predictions) + (1 - self.targets) * np.log(1 - predictions))
-    
-    def backward(self):
-        # dL/dp = -(y/p) + (1-y)/(1-p)
-        return -(self.targets / self.predictions) + (1 - self.targets) / (1 - self.predictions)
-        
