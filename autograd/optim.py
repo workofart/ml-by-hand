@@ -21,8 +21,9 @@ class Optimizer:
         """
         Set the gradients of all optimized tensors to zero.
         """
-        for param in self.model_parameters:
-            param.grad = 0
+        for k, module in self.model_parameters.items():
+            for param_name, param in module.items():
+                param.grad = 0
     
     def step(self):
         """
@@ -39,7 +40,8 @@ class SGD(Optimizer):
         super(SGD, self).__init__(model_parameters, lr, **kwargs)
         
     def step(self):
-        for param in self.model_parameters:
-            param.data -= self.lr * param.grad
+        for k, module in self.model_parameters.items():
+            for param_name, param in module.items():
+                param.data -= self.lr * param.grad
 
     

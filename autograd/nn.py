@@ -37,8 +37,8 @@ class Module:
     def parameters(self):
         params = self._parameters.copy()
         
-        for module in self._modules.values():
-            params.update(module.parameters)
+        for k, module in self._modules.items():
+            params.update({ k: module.parameters })
             
         return params
     
@@ -66,8 +66,8 @@ class Linear(Module):
         if not isinstance(x, Tensor):
             x = Tensor(x)
         
-        print("x.data shape:", x.data.shape)
-        print("weights shape:", self._parameters['weight'].data.shape)
+        # print("x.data shape:", x.data.shape)
+        # print("weights shape:", self._parameters['weight'].data.shape)
     
         # this is just a linear transformation (dot matrix multiplication)
         return x @ self._parameters['weight'] + self._parameters['bias']

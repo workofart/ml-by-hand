@@ -7,7 +7,14 @@ class TestSGD(TestCase):
         self.param1 = Tensor(1.0)
         self.param2 = Tensor(2.0)
         self.params = [self.param1, self.param2]
-        self.optimizer = SGD(model_parameters=self.params, lr=0.01)
+        self.optimizer = SGD(
+            model_parameters={
+                "sample_module": {
+                    "weight": self.param1,
+                    "bias": self.param2
+                },
+            },
+        lr=0.01)
         
     def test_zero_grad(self):
         self.optimizer.zero_grad()
