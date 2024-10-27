@@ -77,8 +77,6 @@ class Tensor:
                 other.grad += np.sum(self.data * grad)
             else:
                 other.grad += self.data * grad
-            # self.grad += result.grad * other.data
-            # other.grad += result.grad * self.data
         result._backward = _backward
         return result
     

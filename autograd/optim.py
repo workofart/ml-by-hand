@@ -1,4 +1,4 @@
-
+import numpy as np
 
 class Optimizer:
     """
@@ -23,7 +23,7 @@ class Optimizer:
         """
         for k, module in self.model_parameters.items():
             for param_name, param in module.items():
-                param.grad = 0
+                param.grad = np.zeros_like(param.data)
     
     def step(self):
         """
@@ -40,6 +40,7 @@ class SGD(Optimizer):
         super(SGD, self).__init__(model_parameters, lr, **kwargs)
         
     def step(self):
+        # print("Gradient norm", sum([np.linalg.norm(v.grad) for k, module in self.model_parameters.items() for _, v in module.items() ]))
         for k, module in self.model_parameters.items():
             for param_name, param in module.items():
                 param.data -= self.lr * param.grad
