@@ -74,7 +74,7 @@ class TestLinear(TestCase):
             ]
         )
 
-class TestActivations(TestCase):  
+class TestActivations(TestCase):
     def test_relu(self):
         x = Tensor(np.array([[1, -2, 3], [-4, 5, -6]]))
         
@@ -115,7 +115,6 @@ class TestActivations(TestCase):
         assert np.allclose(x.grad, x_torch.grad.numpy())
         
 
-        
 class TestLoss(TestCase):
     def test_binary_cross_entropy_loss(self):
         # With logits

@@ -126,6 +126,10 @@ class Tensor:
                    result.grad = (num_samples, num_classes)
                    x.T * result.grad = (num_features, num_classes)  # same shape as y
             """         
+            print(f"result.grad shape: {result.grad.shape}")
+            print(f"other.data shape: {other.data.shape}")
+            print(f"self.data shape: {self.data.shape}")
+            
             # Vector @ Vector case (result is scalar)
             if self.data.ndim == 1 and other.data.ndim == 1:
                 self.grad += result.grad * other.data
@@ -144,6 +148,7 @@ class Tensor:
                 else:
                     result_grad = result.grad
                     
+                print(f"result_grad shape: {result_grad.shape}")
                 self.grad += np.matmul(result_grad, other.data.T)
                 other.grad += np.matmul(self.data.T, result_grad)
                     
@@ -209,5 +214,6 @@ class Tensor:
         for tensor in reversed(topological_sorted_tensors):
             tensor._backward()
             
-            
-        
+    def reshape(self, shape):
+        self.data = self.data.reshape(shape)
+        return self

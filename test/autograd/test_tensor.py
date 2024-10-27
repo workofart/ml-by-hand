@@ -79,6 +79,7 @@ class TestTensor(TestCase):
         y = Tensor([[5.0, 6.0], [7.0, 8.0]], requires_grad=True)
         z = (x @ y)
         z.backward()
+        assert np.array_equal(z.data, np.array([[19.0, 22.0], [43.0, 50.0]]))
         # result.grad * y.T
         assert np.array_equal(x.grad, np.array([[11.0, 15.0], [11.0, 15.0]]))
         # x.T * result.grad

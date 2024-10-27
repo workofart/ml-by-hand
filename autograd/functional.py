@@ -1,3 +1,4 @@
+from typing import Union
 from autograd.tensor import Tensor
 import numpy as np
 
@@ -38,7 +39,7 @@ def sigmoid(x: Tensor) -> Tensor:
     return out
 
 ###################### Loss Functions #####################
-def binary_cross_entropy(y_pred: Tensor, y_true: Tensor) -> Tensor:
+def binary_cross_entropy(y_pred: Tensor, y_true: Union[Tensor, np.ndarray]) -> Tensor:
     """
     Binary Cross Entropy Loss
     -(x * log(y) + (1 - x) * log(1 - y)
@@ -46,21 +47,23 @@ def binary_cross_entropy(y_pred: Tensor, y_true: Tensor) -> Tensor:
     if y_pred.data.shape != y_true.data.shape:
         raise ValueError("y_pred and y_true must have the same shape")
         
-    y_true = y_true.data
-
+    y_true = np.array(y_true.data)
+    y_pred_prob = y_pred.data + 1e-7
     # compute the loss
     # Clip probabilities to prevent log(0)
     out = Tensor(
-        data=-np.mean(y_true * np.log(y_pred.data + 1e-7) + (1 - y_true) * np.log(1 - y_pred.data + 1e-7)),
+        data=-np.mean(y_true * np.log(y_pred_prob) + (1 - y_true) * np.log(1 - y_pred_prob)),
         prev=(y_pred,), # this is very important to connect the loss tensor with the y_pred tensor
     )
     
     def _backward():
         # dL/dpred = -(y/p - (1-y)/(1-p))
+        print(f"y_true shape: {y_true.shape}")
+        print(f"y_pred shape: {y_pred.data.shape}")
         if y_pred.grad is None:
-            y_pred.grad = -(y_true / y_pred.data - (1 - y_true) / (1 - y_pred.data)) / len(y_pred.data)
+            y_pred.grad = -(y_true / y_pred_prob - (1 - y_true) / (1 - y_pred_prob)) / len(y_pred_prob)
         else:
-            y_pred.grad += -(y_true / y_pred.data - (1 - y_true) / (1 - y_pred.data)) / len(y_pred.data)
+            y_pred.grad += -(y_true / y_pred_prob - (1 - y_true) / (1 - y_pred_prob)) / len(y_pred_prob)
     
     out._backward = _backward
     return out
