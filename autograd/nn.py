@@ -5,6 +5,7 @@ class Module:
     def __init__(self):
         self._parameters = {}
         self._modules = {}
+        self._is_training = None
     
     def zero_grad(self):
         for p in self._parameters:
@@ -28,6 +29,9 @@ class Module:
             self._parameters[name] = value
         else:
             super().__setattr__(name, value)
+            
+    def __getattr__(self, name):
+        return self._modules[name]
     
     @property
     def parameters(self):
@@ -37,6 +41,16 @@ class Module:
             params.update(module.parameters)
             
         return params
+    
+    def train(self):
+        for module in self._modules.values():
+            module.train()
+        self._is_training = True
+    
+    def eval(self):
+        for module in self._modules.values():
+            module.eval()
+        self._is_training = False
     
 class Linear(Module):
     def __init__(self, input_size, output_size, **kwargs):
@@ -48,7 +62,7 @@ class Linear(Module):
         # bias is always 1-dimensional
         self._parameters['bias'] = Tensor(np.zeros(output_size))
         
-    def forward(self, x):
+    def forward(self, x) -> Tensor:
         if not isinstance(x, Tensor):
             x = Tensor(x)
         
