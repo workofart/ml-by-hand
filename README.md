@@ -42,10 +42,12 @@ End-to-end training implementation for a binary classifier on the [breast cancer
   - All the unit tests for the above functionality
   - End-to-end training run by combining all the components on a real dataset
 
-## Dependencies
-- Numpy
-- Pytorch (only used for validating gradient calculation correctness in the tests)
-- sklearn.datasets (for providing datasets to validate end-to-end training)
+## Environment Setup & Dependencies
+`./bootstrap.sh` will install all the necessary dependencies.
+
+Then you can activate the installed virtual environment by `source .venv/bin/activate`
+
+`numpy` is the main dependencies. `pytorch` is only used for validating gradient calculation correctness in the tests, and `sklearn.datasets` is for providing datasets to validate end-to-end training.
 
 ## Tests
 Comprehensive unit tests and integration tests available in `test/autograd`
