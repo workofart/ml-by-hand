@@ -1,6 +1,8 @@
 import numpy as np
 from .tensor import Tensor
+import logging
 
+logger = logging.getLogger(__name__)
 
 class Module:
     def __init__(self):
@@ -23,7 +25,6 @@ class Module:
         return self.forward(x)
 
     def __setattr__(self, name, value):
-        # print(f"Setting attributes {name} = {value}")
         if isinstance(value, Module):
             self._modules[name] = value
         elif isinstance(value, Tensor):
@@ -68,8 +69,8 @@ class Linear(Module):
         if not isinstance(x, Tensor):
             x = Tensor(x)
 
-        # print("x.data shape:", x.data.shape)
-        # print("weights shape:", self._parameters['weight'].data.shape)
+        logger.debug(f"{x.data.shape=}")
+        logger.debug(f"Linear forward {self._parameters['weight'].data.shape=}")
 
         # this is just a linear transformation (dot matrix multiplication)
         return x @ self._parameters["weight"] + self._parameters["bias"]

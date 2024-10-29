@@ -1,7 +1,9 @@
 from typing import Union
 from autograd.tensor import Tensor
 import numpy as np
+import logging
 
+logger = logging.getLogger(__name__)
 
 def relu(x: Tensor) -> Tensor:
     """
@@ -27,13 +29,13 @@ def sigmoid(x: Tensor) -> Tensor:
     out = Tensor(1 / (1 + np.exp(np.clip(-x.data, -709, 709))), prev=(x,))
 
     def _backward():
-        # print(f"Sigmoid backward shapes:")
-        # print(f"out.grad shape: {out.grad.shape}")
-        # print(f"out.data shape: {out.data.shape}")
-        # print(f"x.grad shape: {x.grad.shape}")
+        logger.debug("Sigmoid backward shapes:")
+        logger.debug(f"out.grad shape: {out.grad.shape}")
+        logger.debug(f"out.data shape: {out.data.shape}")
+        logger.debug(f"x.grad shape: {x.grad.shape}")
         # d(sigmoid(x))/dx = sigmoid(x) * (1 - sigmoid(x))
         x.grad += out.grad * out.data * (1 - out.data)
-        # print(f"After backward x.grad shape: {x.grad.shape}")
+        logger.debug(f"After backward x.grad shape: {x.grad.shape}")
 
     out._backward = _backward
     return out
@@ -66,13 +68,12 @@ def binary_cross_entropy(y_pred: Tensor, y_true: Union[Tensor, np.ndarray]) -> T
 
     def _backward():
         # dL/dpred = -(y/p - (1-y)/(1-p))
-        # print(f"y_true shape: {y_true.shape}")
-        # print(f"y_pred shape: {y_pred.data.shape}")
+        logger.debug(f"y_true shape: {y_true.shape}")
+        logger.debug(f"y_pred shape: {y_pred.data.shape}")
         y_pred.grad += -(y_true / y_pred_prob - (1 - y_true) / (1 - y_pred_prob)) / len(
             y_pred_prob
         )
-        # print(f"grad shape: {grad.shape}")
-        # print(f"y_pred.grad shape after: {y_pred.grad.shape}")
+        logger.debug(f"y_pred.grad shape after: {y_pred.grad.shape}")
 
     out._backward = _backward
     return out

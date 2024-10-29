@@ -143,9 +143,6 @@ class Tensor:
                    result.grad = (num_samples, num_classes)
                    x.T * result.grad = (num_features, num_classes)  # same shape as y
             """
-            # print("In matmul backward:")
-            # print(f"self.data shape: {self.data.shape}")
-
             # Vector @ Vector case (result is scalar)
             if self.data.ndim == 1 and other.data.ndim == 1:
                 self.grad += result.grad * other.data
@@ -169,12 +166,6 @@ class Tensor:
                     result_grad = result_grad.reshape(
                         self.data.shape[0], other.data.shape[1]
                     )
-
-                # print(f"self.grad shape before: {self.grad.shape}")
-                # print(f"other.grad shape before: {other.grad.shape}")
-
-                # print(f"other.data shape: {other.data.shape}")
-                # print(f"result_grad shape: {result_grad.shape}")
                 self.grad += np.matmul(result_grad, other.data.T)
                 other.grad += np.matmul(self.data.T, result_grad)
 
