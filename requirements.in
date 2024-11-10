@@ -4,6 +4,7 @@ pre-commit
 tqdm
 pyright
 pytest
+openml
 torch
 torchvision
 torchaudio
