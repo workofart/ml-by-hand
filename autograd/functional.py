@@ -5,6 +5,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
 def relu(x: Tensor) -> Tensor:
     """
     Retified Linear Unit (ReLU) activation function.
