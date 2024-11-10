@@ -24,7 +24,7 @@ We are creating an autograd engine from scratch and use it to build/train more c
 ## Demo/Examples
 
 `examples/` contains various examples of neural networks built using the library that tackle some classical problems
-- MNIST classifier: [`examples/mnist_classifier.py`](https://github.com/workofart/ml-by-hand/blob/main/examples/mnist_classifier.py)
+- MNIST classifier: [`examples/mnist.py`](https://github.com/workofart/ml-by-hand/blob/main/examples/mnist.py)
 - End-to-end training implementation for a binary classifier on the [breast cancer dataset](https://scikit-learn.org/stable/modules/generated/sklearn.datasets.load_breast_cancer.html) can be found in [`tests/autograd/test_train.py`](https://github.com/workofart/ml-by-hand/blob/c1156ee0c7a252484df1cd5234316a299e008b8b/test/autograd/test_train.py#L7-L66).
 
 ## Technical Overview
