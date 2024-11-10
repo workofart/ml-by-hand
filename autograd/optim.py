@@ -3,6 +3,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
 class Optimizer:
     """
     Base Optimizer Class
@@ -45,7 +46,9 @@ class SGD(Optimizer):
         super(SGD, self).__init__(model_parameters, lr, **kwargs)
 
     def step(self):
-        logger.debug(f"Gradient norm {sum([np.linalg.norm(v.grad) for k, module in self.model_parameters.items() for _, v in module.items() ])}")
+        logger.debug(
+            f"Gradient norm {sum([np.linalg.norm(v.grad) for k, module in self.model_parameters.items() for _, v in module.items() ])}"
+        )
         for k, module in self.model_parameters.items():
             for param_name, param in module.items():
                 param.data -= self.lr * param.grad

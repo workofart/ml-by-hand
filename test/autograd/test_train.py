@@ -6,6 +6,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
 class Classifier(nn.Module):
     def __init__(self, input_size, hidden_size, output_size):
         super(Classifier, self).__init__()
@@ -18,6 +19,7 @@ class Classifier(nn.Module):
         x = functional.relu(self.linear2(x))
         x = functional.sigmoid(self.linear3(x))
         return x
+
 
 class TestTrain(TestCase):
     def test_binary_classification(self):
