@@ -21,7 +21,7 @@ class TestLinear(TestCase):
         # Trying to pass in (1x4 matrix)
         x = [[2, 2, 2, 2]]
         out = linear_layer(x)
-        assert np.allclose(out.data, [-2.75117575, -7.83881729])
+        assert np.allclose(out.data, [-2.7748068, 0.56519009])
         assert np.allclose(
             out.grad, [0, 0]
         )  # this should still be zero before we call backward

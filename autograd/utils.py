@@ -43,23 +43,48 @@ def precision(y_true, y_pred):
 
 
 def train(
-    model: nn.Module, X: np.ndarray, y: np.ndarray, loss_fn, optimizer, epochs=100
+    model: nn.Module,
+    X: np.ndarray,
+    y: np.ndarray,
+    loss_fn,
+    optimizer,
+    epochs=100,
+    batch_size=256,
 ):
     model.train()
+    n_samples = len(X)
+    n_batches = (n_samples + batch_size - 1) // batch_size  # ceil division
+
     for epoch in range(epochs):
-        optimizer.zero_grad()
+        total_loss = 0.0
 
-        # shuffle X and y
-        shuffle_idx = np.random.permutation(len(X))
-        X = X[shuffle_idx]
-        y = y[shuffle_idx]
+        # Create random permutation for shuffling
+        indices = np.random.permutation(n_samples)
+        X_shuffled = X[indices]
+        y_shuffled = y[indices]
 
-        # Forward pass
-        y_pred = model(X)
-        loss = loss_fn(y_pred, y)
+        # Process data in batches
+        for batch_idx in range(n_batches):
+            start_idx = batch_idx * batch_size
+            end_idx = min((batch_idx + 1) * batch_size, n_samples)
+
+            # Get batch data
+            batch_X = X_shuffled[start_idx:end_idx]
+            batch_y = y_shuffled[start_idx:end_idx]
+
+            # Zero gradients for each batch
+            optimizer.zero_grad()
+
+            # Forward pass
+            y_pred = model(batch_X)
+            loss = loss_fn(y_pred, batch_y)
+            total_loss += loss.data * (end_idx - start_idx)  # weight by batch size
+
+            # Backward pass and optimize
+            loss.backward()
+            optimizer.step()
+
+        # Calculate average loss for the epoch
+        avg_loss = total_loss / n_samples
         if epoch in range(0, epochs, max(1, epochs // 10)) or epoch == epochs - 1:
-            logger.info(f"Epoch: {epoch}, Loss: {loss.data:.2f}")
-
-        # Backward pass and optimize
-        loss.backward()
-        optimizer.step()
+            logger.info(f"Epoch: {epoch}, Average Loss: {avg_loss:.4f}")
