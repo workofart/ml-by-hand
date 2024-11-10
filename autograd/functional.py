@@ -51,24 +51,27 @@ def softmax(x: Tensor) -> Tensor:
     """
     # Subtract the maximum value for numerical stability
     exp_x = np.exp(x.data - np.max(x.data, axis=-1, keepdims=True))
-    out = Tensor(exp_x / np.sum(exp_x, axis=-1, keepdims=True), prev=(x,))
+    probs = exp_x / np.sum(exp_x, axis=-1, keepdims=True)
+    out = Tensor(probs, prev=(x,))
 
     def _backward():
         # There are two cases for this gradient because each element in the matrix affects
         # every other elements' gradient due to the fact of sum(e^x) in the denominator.
         # Let's denote i, j as the ith and jth elements in the matrix.
         # Case 1: i == j
-        # d(softmax(x))/dx_i = softmax(x)_i * (1 - softmax(x)_i)
+        # d(softmax(x))/dx_i = softmax(x)_i * (1[i==j] - softmax(x)_i)
         # Case 2: i != j
         # d(softmax(x))/dx_i = -softmax(x)_i * softmax(x)_j
-        for i in range(x.data.shape[0]):
-            for j in range(x.data.shape[1]):
-                if i == j:
-                    grad = out.data[i, j] * (1 - out.data[i, j])
-                else:
-                    grad = -out.data[i, i] * out.data[j, j]
+        # We first create the identify matrix to represent 1[i==j]
+        identity_matrix = np.eye(x.data.shape[1])  # number of classes as shape
 
-                x.grad[i, j] += out.grad[i, j] * grad
+        # For each sample in batch
+        for sample_idx in range(x.data.shape[0]):
+            # Compute grad using broadcasting
+            grad = probs[sample_idx][:, None] * (
+                identity_matrix - probs[sample_idx][None, :]
+            )
+            x.grad[sample_idx] += out.grad[sample_idx] @ grad
 
     out._backward = _backward
     return out
@@ -135,7 +138,11 @@ def sparse_cross_entropy(y_pred: Tensor, y_true: Union[Tensor, np.ndarray]) -> T
     if y_pred.data.min() < 0 or y_pred.data.max() > 1:
         raise ValueError("y_pred must contain probabilities between 0 and 1")
 
-    y_true = np.array(y_true.data) if isinstance(y_true, Tensor) else y_true
+    y_true = (
+        np.array(y_true.data, dtype=np.float64)
+        if isinstance(y_true, Tensor)
+        else y_true
+    )
     n_samples = len(y_true)
 
     # Clip probabilities to prevent log(0)
