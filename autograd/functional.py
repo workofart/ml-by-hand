@@ -5,6 +5,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+########### Activation Functions ###############
 
 def relu(x: Tensor) -> Tensor:
     """
@@ -42,15 +43,47 @@ def sigmoid(x: Tensor) -> Tensor:
     return out
 
 
+def softmax(x: Tensor) -> Tensor:
+    """
+    Softmax activation function
+    softmax(x) = e^x / sum(e^x)
+    """
+    # Subtract the maximum value for numerical stability
+    exp_x = np.exp(x.data - np.max(x.data, axis=-1, keepdims=True))
+    out = Tensor(exp_x / np.sum(exp_x, axis=-1, keepdims=True), prev=(x,))
+
+    def _backward():
+        # There are two cases for this gradient because each element in the matrix affects
+        # every other elements' gradient due to the fact of sum(e^x) in the denominator.
+        # Let's denote i, j as the ith and jth elements in the matrix.
+        # Case 1: i == j
+        # d(softmax(x))/dx_i = softmax(x)_i * (1 - softmax(x)_i)
+        # Case 2: i != j
+        # d(softmax(x))/dx_i = -softmax(x)_i * softmax(x)_j
+        for i in range(x.data.shape[0]):
+            for j in range(x.data.shape[1]):
+                if i == j:
+                    grad = out.data[i, j] * (1 - out.data[i, j])
+                else:
+                    grad = -out.data[i, i] * out.data[j, j]
+                    
+                x.grad[i, j] += out.grad[i, j] * grad
+
+    out._backward = _backward
+    return out
+
+
 ###################### Loss Functions #####################
 def binary_cross_entropy(y_pred: Tensor, y_true: Union[Tensor, np.ndarray]) -> Tensor:
     """
     Binary Cross Entropy Loss
+    Note: We assume the input y_pred contain probabilities not logits.
     -(x * log(y)) + (1 - x) * log(1 - y)
     """
+    if y_pred.data.min() < 0 or y_pred.data.max() > 1:
+        raise ValueError("y_pred must contain probabilities between 0 and 1")
 
-    y_true = np.array(y_true.data)
-
+    y_true = np.array(y_true.data) if isinstance(y_true, Tensor) else y_true
     if y_pred.data.shape[0] != y_true.shape[0]:
         raise ValueError("y_pred and y_true must have the same shape")
 
@@ -78,3 +111,52 @@ def binary_cross_entropy(y_pred: Tensor, y_true: Union[Tensor, np.ndarray]) -> T
 
     out._backward = _backward
     return out
+
+def binary_cross_entropy_with_logits(y_pred: Tensor, y_true: Union[Tensor, np.ndarray]) -> Tensor:
+    """
+    Binary Cross Entropy Loss with logits input
+    Use binary_cross_entropy if y_pred contain probabilities
+    -(x * log(y)) + (1 - x) * log(1 - y)
+    """
+    return binary_cross_entropy(sigmoid(y_pred), y_true)
+
+def sparse_cross_entropy(y_pred: Tensor, y_true: Union[Tensor, np.ndarray]) -> Tensor:
+    """
+    Sparse Cross Entropy
+    Note: this assumes y_pred contains probabilities, not logits
+    -y_true * log(y_pred)
+    """
+        # Input validation
+    if y_pred.data.min() < 0 or y_pred.data.max() > 1:
+        raise ValueError("y_pred must contain probabilities between 0 and 1")
+    
+    y_true = np.array(y_true.data) if isinstance(y_true, Tensor) else y_true
+    n_samples = len(y_true)
+    
+    # Clip probabilities to prevent log(0)
+    y_pred_prob = np.clip(y_pred.data, 1e-15, 1 - 1e-15)
+    
+    # Calculate cross entropy directly using the true class probabilities
+    selected_probs = y_pred_prob[range(n_samples), y_true]
+    loss = -np.mean(np.log(selected_probs))
+    
+    out = Tensor(
+        data=loss,
+        prev=(y_pred,)
+    )
+    
+    def _backward():
+        grad = np.zeros_like(y_pred_prob)
+        grad[range(n_samples), y_true] = -1.0 / selected_probs
+        y_pred.grad += grad / n_samples
+        
+    out._backward = _backward
+    return out
+
+def sparse_cross_entropy_with_logits(y_pred: Tensor, y_true: Union[Tensor, np.ndarray]) -> Tensor:
+    """
+    Sparse Cross Entropy with logits input
+    Use sparse_cross_entropy if y_pred contains probabilities
+    -y_true * log(y_pred)
+    """
+    return sparse_cross_entropy(softmax(y_pred), y_true)
