@@ -7,6 +7,7 @@ logger = logging.getLogger(__name__)
 
 ########### Activation Functions ###############
 
+
 def relu(x: Tensor) -> Tensor:
     """
     Retified Linear Unit (ReLU) activation function.
@@ -66,7 +67,7 @@ def softmax(x: Tensor) -> Tensor:
                     grad = out.data[i, j] * (1 - out.data[i, j])
                 else:
                     grad = -out.data[i, i] * out.data[j, j]
-                    
+
                 x.grad[i, j] += out.grad[i, j] * grad
 
     out._backward = _backward
@@ -112,7 +113,10 @@ def binary_cross_entropy(y_pred: Tensor, y_true: Union[Tensor, np.ndarray]) -> T
     out._backward = _backward
     return out
 
-def binary_cross_entropy_with_logits(y_pred: Tensor, y_true: Union[Tensor, np.ndarray]) -> Tensor:
+
+def binary_cross_entropy_with_logits(
+    y_pred: Tensor, y_true: Union[Tensor, np.ndarray]
+) -> Tensor:
     """
     Binary Cross Entropy Loss with logits input
     Use binary_cross_entropy if y_pred contain probabilities
@@ -120,40 +124,41 @@ def binary_cross_entropy_with_logits(y_pred: Tensor, y_true: Union[Tensor, np.nd
     """
     return binary_cross_entropy(sigmoid(y_pred), y_true)
 
+
 def sparse_cross_entropy(y_pred: Tensor, y_true: Union[Tensor, np.ndarray]) -> Tensor:
     """
     Sparse Cross Entropy
     Note: this assumes y_pred contains probabilities, not logits
     -y_true * log(y_pred)
     """
-        # Input validation
+    # Input validation
     if y_pred.data.min() < 0 or y_pred.data.max() > 1:
         raise ValueError("y_pred must contain probabilities between 0 and 1")
-    
+
     y_true = np.array(y_true.data) if isinstance(y_true, Tensor) else y_true
     n_samples = len(y_true)
-    
+
     # Clip probabilities to prevent log(0)
     y_pred_prob = np.clip(y_pred.data, 1e-15, 1 - 1e-15)
-    
+
     # Calculate cross entropy directly using the true class probabilities
     selected_probs = y_pred_prob[range(n_samples), y_true]
     loss = -np.mean(np.log(selected_probs))
-    
-    out = Tensor(
-        data=loss,
-        prev=(y_pred,)
-    )
-    
+
+    out = Tensor(data=loss, prev=(y_pred,))
+
     def _backward():
         grad = np.zeros_like(y_pred_prob)
         grad[range(n_samples), y_true] = -1.0 / selected_probs
         y_pred.grad += grad / n_samples
-        
+
     out._backward = _backward
     return out
 
-def sparse_cross_entropy_with_logits(y_pred: Tensor, y_true: Union[Tensor, np.ndarray]) -> Tensor:
+
+def sparse_cross_entropy_with_logits(
+    y_pred: Tensor, y_true: Union[Tensor, np.ndarray]
+) -> Tensor:
     """
     Sparse Cross Entropy with logits input
     Use sparse_cross_entropy if y_pred contains probabilities
