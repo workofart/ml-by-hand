@@ -26,7 +26,7 @@ class ColorFormatter(logging.Formatter):
         )
         return formatter.format(record)
     
-def setup_logger(name=""):
+def setup_logger(name=None):
     logger = logging.getLogger(name)
     level = logging.DEBUG if os.getenv('DEBUG') else logging.INFO
     logger.setLevel(level)
@@ -37,5 +37,3 @@ def setup_logger(name=""):
 
     return logger
 
-# Create and configure logger
-logger = setup_logger()

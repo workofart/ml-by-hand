@@ -52,6 +52,8 @@ Then you can activate the installed virtual environment by `source .venv/bin/act
 ## Tests
 Comprehensive unit tests and integration tests available in `test/autograd`
 
+Run `python -m pytest`
+
 ## Future Work
 Potential use autograd engine to create and train state-of-the-art neural network architectures, prioritizing educational value over training efficiency.
 
