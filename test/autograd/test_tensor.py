@@ -20,7 +20,7 @@ class TestTensor(TestCase):
         assert (y**x).data == 9.0
         assert x.grad == 0.0
         assert y.grad == 0.0
-        assert x.requires_grad == True
+        assert x.requires_grad
         assert len(y.prev) == 0
 
         x = Tensor([1.0, 2.0], requires_grad=True)

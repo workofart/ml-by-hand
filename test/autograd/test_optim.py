@@ -1,4 +1,4 @@
-from autograd.nn import Tensor, Linear
+from autograd.nn import Tensor
 from autograd.optim import SGD
 from unittest import TestCase
 
