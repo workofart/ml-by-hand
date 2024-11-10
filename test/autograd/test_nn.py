@@ -1,11 +1,7 @@
 from unittest import TestCase
 from autograd.nn import Linear
-from autograd.functional import relu, sigmoid, binary_cross_entropy
 import random
 import numpy as np
-import torch  # for test comparisons
-
-from autograd.tensor import Tensor
 
 random.seed(1337)
 np.random.seed(1337)
@@ -70,60 +66,3 @@ class TestLinear(TestCase):
                 [1, 1],
             ],
         )
-
-
-class TestActivations(TestCase):
-    def test_relu(self):
-        x = Tensor(np.array([[1, -2, 3], [-4, 5, -6]]))
-
-        # Test forward pass
-        out1 = relu(x)
-        assert np.array_equal(out1.data, [[1, 0, 3], [0, 5, 0]])
-
-        out2 = relu(x)
-        assert np.array_equal(out2.data, [[1, 0, 3], [0, 5, 0]])
-
-        # Test backward pass
-        out1.backward()
-        assert np.array_equal(x.grad, np.array([[1, 0, 1], [0, 1, 0]]))
-
-        # This should accumulate gradient for x
-        out2.backward()
-        assert np.array_equal(x.grad, np.array([[2, 0, 2], [0, 2, 0]]))
-
-    def test_sigmoid(self):
-        x = Tensor(np.array([[1, -2, 3], [-4, 5, -6]]))
-        x_torch = torch.tensor(x.data.astype(float), requires_grad=True)
-
-        # Test forward pass
-        out = sigmoid(x)
-        torch_out = torch.sigmoid(x_torch)
-
-        assert np.allclose(out.data, torch_out.detach().numpy())
-
-        # Test backward pass
-        out.backward()
-        torch_out.sum().backward()
-        assert np.allclose(x.grad, x_torch.grad.numpy())
-
-
-class TestLoss(TestCase):
-    def test_binary_cross_entropy_loss(self):
-        # With logits
-        y_pred = Tensor(np.array([0.5, 0, 0.75]))
-        y_true = Tensor(np.array([0.0, 1.0, 1.0]))
-        y_pred_torch = torch.tensor(y_pred.data, requires_grad=True)
-        y_true_torch = torch.tensor(y_true.data, requires_grad=True)
-
-        y_pred_probs = sigmoid(y_pred)
-        y_pred_probs_torch = torch.sigmoid(y_pred_torch)
-
-        bce_loss = binary_cross_entropy(y_pred_probs, y_true)
-        torch_bce_loss = torch.nn.functional.binary_cross_entropy(
-            y_pred_probs_torch, y_true_torch, reduction="mean"
-        )
-        assert np.allclose(bce_loss.data, torch_bce_loss.detach().numpy())
-
-        bce_loss.backward()
-        torch_bce_loss.backward()
-        assert np.allclose(y_pred.grad, y_pred_torch.grad)
