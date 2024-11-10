@@ -82,7 +82,7 @@ if __name__ == "__main__":
     )
 
     logger.info("=" * 66)
-    logger.info("║            Starting to train Multi-class MNIST model              ║")
+    logger.info("║            Starting to train Multi-class MNIST model           ║")
     logger.info("=" * 66)
 
     model = MnistMultiClassClassifier()
@@ -92,7 +92,7 @@ if __name__ == "__main__":
         y=y_train.astype(int),
         loss_fn=functional.sparse_cross_entropy,
         optimizer=optim.SGD(model.parameters, lr=1e-3),
-        epochs=200,
+        epochs=500,
     )
 
     y_pred = model(X_test).data

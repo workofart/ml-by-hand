@@ -61,10 +61,18 @@ class Linear(Module):
         super().__init__(**kwargs)
 
         # weight is a matrix of shape (input_size, output_size)
-        self._parameters["weight"] = Tensor(np.random.randn(input_size, output_size))
+        # Xavier Normal Initialization
+        # https://proceedings.mlr.press/v9/glorot10a/glorot10a.pdf
+        self._parameters["weight"] = Tensor(
+            np.random.uniform(
+                low=-np.sqrt(6.0 / (input_size + output_size)),
+                high=np.sqrt(6.0 / (input_size + output_size)),
+                size=(input_size, output_size),
+            )
+        )
 
         # bias is always 1-dimensional
-        self._parameters["bias"] = Tensor(np.zeros(output_size))
+        self._parameters["bias"] = Tensor(np.random.rand(output_size))
 
     def forward(self, x) -> Tensor:
         if not isinstance(x, Tensor):

@@ -8,7 +8,7 @@ We are creating an autograd engine from scratch and use it to build/train more c
 - All mathematical operations explicitly derived for comprehensive understanding
 
 > What I cannot create, I do not understand
-> 
+>
 > -- Richard Feynman
 
 <details>
@@ -21,8 +21,11 @@ We are creating an autograd engine from scratch and use it to build/train more c
   This project took inspiration from [Micrograd](https://github.com/karpathy/micrograd/tree/master), and kept the API interface as close as possible to [Pytorch](https://github.com/pytorch/pytorch/tree/main) to reduce extra usage overhead and utilize it to validate correctness.
 </details>
 
-## Demo
-End-to-end training implementation for a binary classifier on the [breast cancer dataset](https://scikit-learn.org/stable/modules/generated/sklearn.datasets.load_breast_cancer.html) can be found in [`tests/autograd/test_train.py`](https://github.com/workofart/ml-by-hand/blob/c1156ee0c7a252484df1cd5234316a299e008b8b/test/autograd/test_train.py#L7-L66).
+## Demo/Examples
+
+`examples/` contains various examples of neural networks built using the library that tackle some classical problems
+- MNIST classifier: [`examples/mnist_classifier.py`](https://github.com/workofart/ml-by-hand/blob/main/examples/mnist_classifier.py)
+- End-to-end training implementation for a binary classifier on the [breast cancer dataset](https://scikit-learn.org/stable/modules/generated/sklearn.datasets.load_breast_cancer.html) can be found in [`tests/autograd/test_train.py`](https://github.com/workofart/ml-by-hand/blob/c1156ee0c7a252484df1cd5234316a299e008b8b/test/autograd/test_train.py#L7-L66).
 
 ## Technical Overview
 - `tensor` (base class)
