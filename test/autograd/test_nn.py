@@ -1,7 +1,9 @@
 from unittest import TestCase
-from autograd.nn import Linear
+from autograd.nn import Linear, BatchNorm
+from autograd.tensor import Tensor
 import random
 import numpy as np
+import torch
 
 random.seed(1337)
 np.random.seed(1337)
@@ -65,4 +67,70 @@ class TestLinear(TestCase):
                 [1, 1],
                 [1, 1],
             ],
+        )
+
+
+class TestBatchNorm(TestCase):
+    def setUp(self) -> None:
+        momentum = 0.1
+        self.input_size = 2
+        self.batch_size = 3
+        self.bn = BatchNorm(input_size=self.input_size, momentum=momentum)
+        self.torch_bn = torch.nn.BatchNorm1d(
+            num_features=self.input_size, momentum=momentum
+        )
+        # Initialize torch_bn weights and bias to match your implementation
+        self.torch_bn.weight.data = torch.ones(self.input_size)
+        self.torch_bn.bias.data = torch.zeros(self.input_size)
+
+    def test_forward(self):
+        # Feature 1: [1, 4, 7], Feature 2: [2, 5, 8]
+        # Feature 1 Mean: 4, Feature 2 Mean: 5
+        # Feature 1 Var: 6, Feature 2 Var: 6
+        # Feature 1 Normalized: [-1, 0, 1], Feature 2 Normalized: [-1, 0, 1]
+        x_data = np.array(
+            [
+                [1.0, 2.0],
+                [4.0, 5.0],
+                [7.0, 8.0],
+            ]
+        )
+        x = Tensor(x_data)
+        x_torch = torch.Tensor(x_data)
+
+        self.bn.train()
+        self.torch_bn.train()
+        output = self.bn(x)
+        output_torch = self.torch_bn(x_torch)
+
+        # Compare results
+        assert np.allclose(output.data, output_torch.detach().numpy(), atol=1e-5)
+
+        # Compare running stats
+        assert np.allclose(
+            self.bn.running_mean, self.torch_bn.running_mean.numpy(), atol=1e-5
+        )
+        assert np.allclose(
+            self.bn.running_var, self.torch_bn.running_var.numpy(), atol=1e-5
+        )
+
+        # Test Inference mode
+        self.bn.eval()
+        self.torch_bn.eval()
+
+        x = Tensor(x_data)
+        x_torch = torch.FloatTensor(x_data)
+
+        output = self.bn(x)
+        output_torch = self.torch_bn(x_torch)
+
+        # Compare results in eval mode
+        assert np.allclose(output.data, output_torch.detach().numpy(), atol=1e-5)
+
+        # Verify running stats haven't changed in eval mode
+        assert np.allclose(
+            self.bn.running_mean, self.torch_bn.running_mean.numpy(), atol=1e-5
+        )
+        assert np.allclose(
+            self.bn.running_var, self.torch_bn.running_var.numpy(), atol=1e-5
         )
