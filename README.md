@@ -36,11 +36,12 @@ We are creating an autograd engine from scratch and use it to build/train more c
   - Module (base class)
   - Linear (basic building block for a perceptron/hidden layer)
 - `functional` (including backprop derivation defined in `backward()`)
-  - Activation functions: relu, sigmoid
-  - Loss: binary_cross_entropy
+  - Activation functions: relu, sigmoid, softmax
+  - Loss: binary_cross_entropy, sparse_cross_entropy
 - `optim`
   - Optimizer (base class)
   - SGD (stochastic gradient descent)
+  - Adam
 - `test/`
   - All the unit tests for the above functionality
   - End-to-end training run by combining all the components on a real dataset
