@@ -134,3 +134,23 @@ class TestBatchNorm(TestCase):
         assert np.allclose(
             self.bn.running_var, self.torch_bn.running_var.numpy(), atol=1e-5
         )
+
+    def test_backward(self):
+        x_data = np.array([[1.0, 2.0], [4.0, 5.0], [7.0, 8.0]], dtype=np.float32)
+        x = Tensor(x_data)
+        x_torch = torch.tensor(x_data, requires_grad=True, dtype=torch.float32)
+
+        self.bn.train()
+        self.torch_bn.train()
+
+        output = self.bn(x)
+        output_torch = self.torch_bn(x_torch)
+
+        # Create a simple loss = sum of all elements
+        loss = output.sum()
+        loss_torch = output_torch.sum()
+
+        loss.backward()
+        loss_torch.backward()
+
+        assert np.allclose(x.grad, x_torch.grad.numpy(), atol=1e-5)
