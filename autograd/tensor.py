@@ -1,4 +1,7 @@
 import numpy as np
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class Tensor:
@@ -17,7 +20,13 @@ class Tensor:
     # For each of these primitive operations, we need to adjust the backward gradient computation accordingly
     def __add__(self, other):
         if not isinstance(other, Tensor):
-            other = Tensor(other)
+            # Ensure other is converted to a Tensor with the same shape as self
+            other = Tensor(
+                data=np.full_like(self.data, other)
+                if np.isscalar(other) or other.ndim == 0
+                else other,
+                requires_grad=False,  # we don't need to compute gradients for these scalars or constants
+            )
 
         result = Tensor(
             data=self.data + other.data,
@@ -191,9 +200,24 @@ class Tensor:
             where x is self
             y is other
             """
+            # Gradient w.r.t base (self)
             self.grad += other.data * (self.data ** (other.data - 1)) * result.grad
-            if self.data > 0:
-                other.grad += (self.data**other.data) * np.log(self.data) * result.grad
+
+            # Gradient w.r.t exponent (other)
+            valid_base = self.data > 0
+            grad_y = (self.data**other.data) * np.log(np.abs(self.data)) * result.grad
+
+            # Handle scalar and array cases
+            if np.isscalar(other.data):
+                grad_y = (
+                    np.sum(grad_y[valid_base])
+                    if isinstance(grad_y, np.ndarray)
+                    else grad_y
+                )
+            else:
+                grad_y = np.where(valid_base, grad_y, 0)
+
+            other.grad += grad_y
 
         result._backward = _backward
         return result
@@ -209,6 +233,105 @@ class Tensor:
 
     def __repr__(self):
         return f"Tensor(data={self.data}, grad={self.grad})"
+
+    def sum(self, axis=None, keepdims=False):
+        """
+        Compute the sum of tensor elements
+
+        params:
+            axis (int or tuple of ints, optional): Axis or axes along which a sum is performed. The default, axis=None, sums all of the elements of the input tensor.
+            keepdims (bool, optional): If this is set to True, the axes which are reduced are left in the result as dimensions with size one. With this option, the result will broadcast correctly against the input tensor.
+        For example:
+            - original tensor shape(3,4,5), axis(1,2), keepdims(True) -> result shape(3,1,1)
+            - original tensor shape(3,4,5), axis(1,2), keepdims(False) -> result shape(3,)
+            - original tensor shape(3,4,5), axis(None), keepdims(True) -> result shape(1,)
+            - original tensor shape(3,4,5), axis(None), keepdims(False) -> result shape()
+        """
+        # Handle scalar case
+        if not hasattr(self.data, "ndim") or self.data.ndim == 0:
+            return Tensor(
+                data=self.data, prev=(self,), requires_grad=self.requires_grad
+            )
+
+        # Normalize axis
+        axis = (axis,) if isinstance(axis, int) else axis
+
+        # Compute sum
+        result = Tensor(
+            data=np.sum(self.data, axis=axis, keepdims=keepdims),
+            prev=(self,),
+            requires_grad=self.requires_grad,
+        )
+
+        result._backward = lambda: self._reduce_ops_backward(result, axis, keepdims)
+        return result
+
+    def mean(self, axis=None, keepdims=False):
+        """
+        Compute the mean of tensor elements
+
+        params:
+            axis (int or tuple of ints, optional): Axis or axes along which a mean is performed. The default, axis=None, averages all of the elements of the input tensor.
+            keepdims (bool, optional): If this is set to True, the axes which are reduced are left in the result as dimensions with size one. With this option, the result will broadcast correctly against the input tensor.
+        For example:
+            - original tensor shape(3,4,5), axis(1,2), keepdims(True) -> result shape(3,1,1)
+            - original tensor shape(3,4,5), axis(1,2), keepdims(False) -> result shape(3,)
+            - original tensor shape(3,4,5), axis(None), keepdims(True) -> result shape(1,)
+            - original tensor shape(3,4,5), axis(None), keepdims(False) -> result shape()
+        """
+        # Normalize axis to a tuple
+        axis = (axis,) if isinstance(axis, int) else axis
+
+        # Create result tensor
+        result = Tensor(
+            data=np.mean(self.data, axis=axis, keepdims=keepdims),
+            prev=(self,),
+            requires_grad=self.requires_grad,
+        )
+
+        result._backward = lambda: self._reduce_ops_backward(
+            output=result, axis=axis, keepdims=keepdims
+        )
+        return result
+
+    def _reduce_ops_backward(self, output, axis=None, keepdims=False):
+        """
+        This function is a general backward pass function for computing gradients for
+        "reduce" operations such as sum, mean, max, min, etc.
+        d(reduce_func) / dx = 1 / count for each element that was reduced
+        Each element contributes equally to the final mean value
+        Global mean gradient is scaled by 1 / count
+        """
+        # Compute number of summed elements
+        num_elements = (
+            np.prod([self.data.shape[ax] for ax in axis]) if axis else self.data.size
+        )
+        grad_value = output.grad / num_elements
+
+        # Create gradient array, to ensure each element has the same gradient contribution
+        grad = np.full_like(self.data, grad_value)
+
+        # Handle keepdims case
+        # We need to preserve the information about:
+        # - Distribute gradient proportionally
+        # - Preserve tensor shape
+        # - Maintain computational graph integrity
+
+        # For example:
+        # Original tensor: (2, 2, 3)
+        # Sum result (keepdims=True): (2, 1, 1)
+        # Indexing mechanism:
+        # - Keep first dimension fully (slice(None))
+        # - Reduce second dimension to first index (0)
+        # - Reduce third dimension to first index (0)
+        if axis and keepdims:
+            slices = [slice(None)] * self.data.ndim
+            for ax in axis:
+                slices[ax] = slice(0, 1)
+            grad[tuple(slices)] = grad_value
+
+        # Accumulate gradient
+        self.grad += grad
 
     def forward(self, data):
         pass
