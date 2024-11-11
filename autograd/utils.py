@@ -50,6 +50,7 @@ def train(
     optimizer,
     epochs=100,
     batch_size=256,
+    shuffle_each_epoch=False,
 ):
     model.train()
     n_samples = len(X)
@@ -58,10 +59,14 @@ def train(
     for epoch in range(epochs):
         total_loss = 0.0
 
-        # Create random permutation for shuffling
-        indices = np.random.permutation(n_samples)
-        X_shuffled = X[indices]
-        y_shuffled = y[indices]
+        if shuffle_each_epoch:
+            # Create random permutation for shuffling
+            indices = np.random.permutation(n_samples)
+            X_shuffled = X[indices]
+            y_shuffled = y[indices]
+        else:
+            X_shuffled = X
+            y_shuffled = y
 
         # Process data in batches
         for batch_idx in range(n_batches):
