@@ -45,4 +45,6 @@ class TestTrain(TestCase):
         y_pred = model(X).data
 
         # compare y_pred and y on the classification accuracy
-        logger.info(f"Accuracy: {(sum((y_pred > 0.5).astype(int) == y) / X.shape[0])}")
+        accuracy = sum((y_pred > 0.5).astype(int) == y) / X.shape[0]
+        logger.info(f"Accuracy: {accuracy}")
+        assert accuracy > 0.9

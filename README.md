@@ -35,6 +35,7 @@ We are creating an autograd engine from scratch and use it to build/train more c
 - `nn` (neural network components)
   - Module (base class)
   - Linear (basic building block for a perceptron/hidden layer)
+  - BatchNorm (batch normalization)
 - `functional` (including backprop derivation defined in `backward()`)
   - Activation functions: relu, sigmoid, softmax
   - Loss: binary_cross_entropy, sparse_cross_entropy

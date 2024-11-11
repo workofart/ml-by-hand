@@ -83,3 +83,64 @@ class Linear(Module):
 
         # this is just a linear transformation (dot matrix multiplication)
         return x @ self._parameters["weight"] + self._parameters["bias"]
+
+
+class BatchNorm(Module):
+    """
+    Batch Normalization: Accelerating Deep Network Training by Reducing Internal Covariate Shift
+
+    This layer normalizes the input tensor by subtracting the batch mean and dividing by the batch standard deviation.
+
+    Paper: http://arxiv.org/abs/1502.03167
+    """
+
+    def __init__(self, input_size, momentum=0.1, epsilon=1e-5, **kwargs):
+        super().__init__(**kwargs)
+
+        self.momentum = momentum  # used in running mean and variance calculation
+        self.epsilon = epsilon  # small constant for numeric stability
+
+        # Running stats (used for inference)
+        self.running_mean = np.zeros(input_size)
+        self.running_var = np.ones(input_size)
+
+        # gamma and beta are learnable parameters
+        # gamma is responsible for scaling the normalized input
+        # beta is responsible for shifting the normalized input
+        # self._parameters["weight"] = Tensor(np.ones((1, input_size)))
+        # self._parameters["bias"] = Tensor(np.zeros((1, input_size)))
+        self._parameters["weight"] = Tensor(np.ones(input_size))
+        self._parameters["bias"] = Tensor(np.zeros(input_size))
+
+    def forward(self, x: Tensor) -> Tensor:
+        """
+        Note that the backward pass is implemented via primitive operations in the Tensor class.
+        The operations in the forward pass have all been implemented as Tensor-level operations.
+        """
+        if self._is_training:
+            # Compute batch statistics using Tensor operations
+            batch_mean = x.mean(axis=0)
+            diff = x - batch_mean
+            var = (diff**2).sum(axis=0)
+
+            biased_batch_var = var / x.data.shape[0]
+            # Unbiased variance (divide by N-1) is based on Bessel's correction
+            unbiased_batch_var = var / (x.data.shape[0] - 1)
+            std_dev = (biased_batch_var + self.epsilon) ** 0.5
+
+            # Update running statistics
+            self.running_mean = (
+                1 - self.momentum
+            ) * self.running_mean + self.momentum * batch_mean.data
+            self.running_var = (
+                1 - self.momentum
+            ) * self.running_var + self.momentum * unbiased_batch_var.data
+
+            normalized = diff / std_dev
+        else:
+            normalized = (x - self.running_mean) / np.sqrt(
+                self.running_var + self.epsilon
+            )
+
+        # Scale and shift
+        return normalized * self._parameters["weight"] + self._parameters["bias"]

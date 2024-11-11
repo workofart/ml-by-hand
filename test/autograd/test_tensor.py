@@ -86,3 +86,116 @@ class TestTensor(TestCase):
         # x.T * result.grad
         assert np.array_equal(y.grad, np.array([[4.0, 4.0], [6.0, 6.0]]))
         assert np.array_equal(z.grad, np.array([[1, 1], [1, 1]]))
+
+    def test_sum(self):
+        # Scalar tensor sum
+        x = Tensor(5.0, requires_grad=True)
+        s = x.sum()
+        assert s.data == 5.0
+        assert s.requires_grad == x.requires_grad
+
+        # 1D tensor sum (global)
+        x = Tensor([1.0, 2.0, 3.0], requires_grad=True)
+        s = x.sum()
+        assert s.data == 6.0
+        assert s.prev == {x}
+
+        # 1D tensor sum (axis)
+        x = Tensor([1.0, 2.0, 3.0], requires_grad=True)
+        s = x.sum(axis=0)
+        assert s.data == 6.0
+
+        # 2D tensor sum (global)
+        x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+        s = x.sum()
+        assert s.data == 10.0
+
+        # 2D tensor sum (axis=0)
+        x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+        s = x.sum(axis=0)  # (2, 2) -> (2,)
+        assert np.array_equal(s.data, [4.0, 6.0])
+
+        # 2D tensor sum (axis=1)
+        x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+        s = x.sum(axis=1)  # (2, 2) -> (2,)
+        assert np.array_equal(s.data, [3.0, 7.0])
+
+        # 2D tensor sum with keepdims
+        x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+        s = x.sum(axis=0, keepdims=True)
+        assert s.data.shape == (1, 2)  # (2,2) -> (1,2)
+        assert np.array_equal(s.data, [[4.0, 6.0]])
+
+        # 3D tensor sum
+        x = Tensor(
+            [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]], requires_grad=True
+        )
+        s = x.sum(axis=(1, 2))  # (2,2,2) -> (2,)
+        assert np.array_equal(s.data, [10.0, 26.0])
+
+        # Verify requires_grad propagation
+        x = Tensor([1.0, 2.0, 3.0], requires_grad=False)
+        s = x.sum()
+        assert not s.requires_grad
+
+    def test_mean(self):
+        # Scalar tensor mean
+        x = Tensor(5.0, requires_grad=True)
+        m = x.mean()
+        assert m.data == 5.0
+        assert m.requires_grad == x.requires_grad
+
+        # 1D tensor mean (global)
+        x = Tensor([1.0, 2.0, 3.0], requires_grad=True)
+        m = x.mean()
+        assert m.data == 2.0
+        assert m.prev == {x}
+
+        # 1D tensor mean (axis)
+        x = Tensor([1.0, 2.0, 3.0], requires_grad=True)
+        m = x.mean(axis=0)
+        assert m.data == 2.0
+
+        # 2D tensor mean (global)
+        x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+        m = x.mean()
+        assert m.data == 2.5
+
+        # 2D tensor mean (axis=0)
+        x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+        m = x.mean(axis=0)  # (2, 2) -> (2,)
+        assert np.array_equal(m.data, [2.0, 3.0])
+
+        # 2D tensor mean (axis=1)
+        x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+        m = x.mean(axis=1)  # (2, 2) -> (2,)
+        assert np.array_equal(m.data, [1.5, 3.5])
+
+        # 2D tensor mean with keepdims
+        x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+        m = x.mean(axis=0, keepdims=True)
+        assert m.data.shape == (1, 2)  # (2,2) -> (1,2)
+        assert np.array_equal(m.data, [[2.0, 3.0]])
+
+        # 3D tensor mean
+        x = Tensor(
+            [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]], requires_grad=True
+        )
+        m = x.mean(axis=(1, 2))  # (2,2,2) -> (2,)
+        assert np.array_equal(m.data, [2.5, 6.5])
+
+        # Multiple axis mean
+        x = Tensor(
+            [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]], requires_grad=True
+        )
+        m = x.mean(axis=(0, 1))  # (2,2,2) -> (2,)
+        # Intermediate after axis 0:
+        # [[3.0, 4.0], [5.0, 6.0]]
+        # Imediate after axis 1:
+        # [4.0, 5.0]
+        assert np.array_equal(m.data, [4.0, 5.0])
+
+        # Verify requires_grad propagation
+        x = Tensor([1.0, 2.0, 3.0], requires_grad=False)
+        m = x.mean()
+        assert not m.requires_grad
