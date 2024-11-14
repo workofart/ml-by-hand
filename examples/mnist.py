@@ -1,6 +1,5 @@
 from autograd import nn, optim, functional, utils
 from openml.datasets import get_dataset
-from openml.datasets import get_dataset
 import logging
 import numpy as np
 
