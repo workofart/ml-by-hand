@@ -1,27 +1,33 @@
 from autograd import nn, functional, optim
 from autograd import utils
 from openml.datasets import get_dataset
-import numpy as np
 import logging
 
 logger = logging.getLogger(__name__)
-np.random.seed(1337)
+# np.random.seed(1337) # need to comment out for dropout to work
 
 
+# Best so far: 45% accuracy on CIFAR-10
 class CifarMulticlassClassifier(nn.Module):
     def __init__(self, num_classes: int):
         super().__init__()
         self.h1 = nn.Linear(
-            3072, 64
+            3072, 1024
         )  # cifar-10 image has shape 32 x 32 x 3 (color channels)
-        self.h2 = nn.Linear(64, 64)
-        self.h3 = nn.Linear(64, num_classes)
+        self.h2 = nn.Linear(1024, 512)
+        self.h3 = nn.Linear(512, 256)
+        self.h4 = nn.Linear(256, num_classes)
+        self.bn1 = nn.BatchNorm(1024)
+        self.dropout = nn.Dropout(p=0.3)
 
     def forward(self, x):
-        x = functional.relu(self.h1(x))
+        x = functional.relu(self.bn1(self.h1(x)))
+        x = self.dropout(x)
         x = functional.relu(self.h2(x))
-        x = self.h3(x)
-        return functional.softmax(x)
+        x = self.dropout(x)
+        x = functional.relu(self.h3(x))
+        x = self.dropout(x)
+        return functional.softmax(self.h4(x))
 
 
 def train_cifar_multiclass_model(model: nn.Module, X_train, y_train, X_test, y_test):
@@ -34,11 +40,11 @@ def train_cifar_multiclass_model(model: nn.Module, X_train, y_train, X_test, y_t
         X=X_train,
         y=y_train.astype(int),
         loss_fn=functional.sparse_cross_entropy,
-        optimizer=optim.SGD(model.parameters, lr=1e-3),
-        epochs=500,
-        batch_size=1024,
+        optimizer=optim.Adam(model.parameters, lr=1e-3),
+        epochs=100,
+        batch_size=512,
     )
-
+    model.eval()
     y_pred = model(X_test).data
 
     logger.info(
@@ -55,6 +61,7 @@ if __name__ == "__main__":
         target="class", dataset_format="array"
     )
     X = X / 255.0  # normalize to [0, 1] to speed up convergence
+    X = (X - X.mean(axis=0)) / X.std(axis=0)  # center the data
 
     X_train, X_test, y_train, y_test = utils.train_test_split(X, y, test_size=0.1)
     cifar10_model = CifarMulticlassClassifier(num_classes=10)
@@ -65,6 +72,7 @@ if __name__ == "__main__":
         target="class", dataset_format="array"
     )
     X = X / 255.0  # normalize to [0, 1] to speed up convergence
+    X = (X - X.mean(axis=0)) / X.std(axis=0)  # center the data
 
     X_train, X_test, y_train, y_test = utils.train_test_split(X, y, test_size=0.1)
     cifar100_model = CifarMulticlassClassifier(num_classes=100)
