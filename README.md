@@ -25,6 +25,7 @@ We are creating an autograd engine from scratch and use it to build/train more c
 
 `examples/` contains various examples of neural networks built using the library that tackle some classical problems
 - MNIST classifier: [`examples/mnist.py`](https://github.com/workofart/ml-by-hand/blob/main/examples/mnist.py)
+- CIFAR-10/CIFAR-100 classifier: [`examples/cifar.py`](https://github.com/workofart/ml-by-hand/blob/main/examples/cifar.py)
 - End-to-end training implementation for a binary classifier on the [breast cancer dataset](https://scikit-learn.org/stable/modules/generated/sklearn.datasets.load_breast_cancer.html) can be found in [`tests/autograd/test_train.py`](https://github.com/workofart/ml-by-hand/blob/c1156ee0c7a252484df1cd5234316a299e008b8b/test/autograd/test_train.py#L7-L66).
 
 ## Technical Overview
@@ -36,6 +37,7 @@ We are creating an autograd engine from scratch and use it to build/train more c
   - Module (base class)
   - Linear (basic building block for a perceptron/hidden layer)
   - BatchNorm (batch normalization)
+  - Dropout (regularization)
 - `functional` (including backprop derivation defined in `backward()`)
   - Activation functions: relu, sigmoid, softmax
   - Loss: binary_cross_entropy, sparse_cross_entropy
@@ -52,7 +54,7 @@ We are creating an autograd engine from scratch and use it to build/train more c
 
 Then you can activate the installed virtual environment by `source .venv/bin/activate`
 
-`numpy` is the main dependencies. `pytorch` is only used for validating gradient calculation correctness in the tests, and `sklearn.datasets` is for providing datasets to validate end-to-end training.
+`numpy` is the main dependencies. `pytorch` is only used for validating gradient calculation correctness in the tests.
 
 ## Tests
 Comprehensive unit tests and integration tests available in `test/autograd`

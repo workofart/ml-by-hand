@@ -32,7 +32,7 @@ class CifarMulticlassClassifier(nn.Module):
 
 def train_cifar_multiclass_model(model: nn.Module, X_train, y_train, X_test, y_test):
     logger.info("=" * 66)
-    logger.info("Starting to train Multi-class CIFAR-10 model")
+    logger.info("Starting to train Multi-class CIFAR model")
     logger.info("=" * 66)
 
     utils.train(

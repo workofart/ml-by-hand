@@ -165,7 +165,11 @@ class Dropout(Module):
         if self._is_training:
             mask = np.random.binomial(1, 1 - self.p, size=x.data.shape)
             return (
-                x * mask / (1 - self.p) # we scale the output by 1/(1-p) to keep the expected output the same
+                x
+                * mask
+                / (
+                    1 - self.p
+                )  # we scale the output by 1/(1-p) to keep the expected output the same
                 if self.p < 1
                 else x * 0  # when p=1, drop everything by multiplying by 0
             )
