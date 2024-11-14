@@ -1,5 +1,5 @@
 from unittest import TestCase
-from autograd.nn import Linear, BatchNorm
+from autograd.nn import Linear, BatchNorm, Dropout
 from autograd.tensor import Tensor
 import random
 import numpy as np
@@ -154,3 +154,21 @@ class TestBatchNorm(TestCase):
         loss_torch.backward()
 
         assert np.allclose(x.grad, x_torch.grad.numpy(), atol=1e-5)
+
+
+class TestDropout(TestCase):
+    def test_forward(self):
+        dropout = Dropout(p=1)
+        dropout.train()
+        x = Tensor(np.array([[1, 2], [3, 4], [5, 6]]))
+        output = dropout(x)
+        assert np.allclose(output.data, np.array([[0, 0], [0, 0], [0, 0]]))
+
+        dropout.eval()
+        output = dropout(x)
+        assert np.allclose(output.data, np.array([[1, 2], [3, 4], [5, 6]]))
+
+        dropout = Dropout(p=0)
+        dropout.train()
+        output = dropout(x)
+        assert np.allclose(output.data, np.array([[1, 2], [3, 4], [5, 6]]))

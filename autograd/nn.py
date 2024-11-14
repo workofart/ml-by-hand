@@ -144,3 +144,29 @@ class BatchNorm(Module):
 
         # Scale and shift
         return normalized * self._parameters["weight"] + self._parameters["bias"]
+
+
+class Dropout(Module):
+    def __init__(self, p=0.5, **kwargs):
+        """
+        The Dropout layer randomly sets a fraction of input units to 0 at each update during training time.
+
+        "It prevents overfitting and provides a way of approximately combining exponentially many different
+        neural network architectures efficiently."
+        Paper: https://arxiv.org/abs/1207.0580
+
+        Args:
+            p (float, optional): Fraction of the input units to drop. Defaults to 0.5.
+        """
+        super().__init__(**kwargs)
+        self.p = p
+
+    def forward(self, x: Tensor) -> Tensor:
+        if self._is_training:
+            mask = np.random.binomial(1, 1 - self.p, size=x.data.shape)
+            return (
+                x * mask / (1 - self.p) # we scale the output by 1/(1-p) to keep the expected output the same
+                if self.p < 1
+                else x * 0  # when p=1, drop everything by multiplying by 0
+            )
+        return x

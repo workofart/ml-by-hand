@@ -6,8 +6,6 @@ logger = logging.getLogger(__name__)
 
 
 def train_test_split(X, y, test_size=0.2, random_state=None):
-    np.random.seed(random_state or 1337)
-
     num_samples = len(X)
     num_test = int(num_samples * test_size)
 
