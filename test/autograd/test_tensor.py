@@ -199,3 +199,41 @@ class TestTensor(TestCase):
         x = Tensor([1.0, 2.0, 3.0], requires_grad=False)
         m = x.mean()
         assert not m.requires_grad
+
+    def test_maximum(self):
+        x = Tensor([1.0, 2.0, 3.0], requires_grad=True)
+        y = Tensor([2.0, 1.0, 3.0], requires_grad=True)
+        z = x.maximum(y)
+        assert np.array_equal(z.data, [2.0, 2.0, 3.0])
+
+        z.backward()
+        assert np.array_equal(
+            x.grad, [0.0, 1.0, 1.0]
+        )  # we flow the gradient to self when self == other
+        assert np.array_equal(y.grad, [1.0, 0.0, 0.0])
+
+    def test_max(self):
+        # For 1D tensor, we should test without axis first
+        x = Tensor([1.0, 2.0, 3.0], requires_grad=True)
+        z = x.max()
+        assert z.data == 3.0
+        assert z.prev == {x}
+
+        z.backward()
+        assert np.array_equal(x.grad, [0.0, 0.0, 1.0])
+
+        # For testing max with axis=0, we should use a 2D tensor instead
+        x = Tensor([[1.0, 2.0, 3.0], [2.0, 1.0, 0.0]], requires_grad=True)
+        z = x.max(axis=0)  # Should return maximum along each column
+        assert np.array_equal(z.data, [2.0, 2.0, 3.0])
+
+        z = x.max(axis=0, keepdims=True)
+        assert z.data.shape == (1, 3)
+        assert np.array_equal(z.data, [[2.0, 2.0, 3.0]])
+
+        z = x.max(axis=1)
+        assert np.array_equal(z.data, [3.0, 2.0])
+
+        z = x.max(axis=1, keepdims=True)
+        assert z.data.shape == (2, 1)  # (2,3) -> (2,1)
+        assert np.array_equal(z.data, [[3.0], [2.0]])

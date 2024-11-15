@@ -31,7 +31,7 @@ We are creating an autograd engine from scratch and use it to build/train more c
 ## Technical Overview
 - `tensor` (base class)
   - support scalar, vector, N-dimensional matrices
-  - arithmetic: add, mul, matmul, pow, sub, division, neg
+  - arithmetic: add, mul, matmul, pow, sub, division, neg, max, mean
   - core: forward, backward, reshape
 - `nn` (neural network components)
   - Module (base class)
@@ -40,7 +40,7 @@ We are creating an autograd engine from scratch and use it to build/train more c
   - Dropout (regularization)
 - `functional` (including backprop derivation defined in `backward()`)
   - Activation functions: relu, sigmoid, softmax
-  - Loss: binary_cross_entropy, sparse_cross_entropy
+  - Loss: binary_cross_entropy, sparse_cross_entropy, hinge_loss
 - `optim`
   - Optimizer (base class)
   - SGD (stochastic gradient descent)

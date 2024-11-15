@@ -1,5 +1,6 @@
 import numpy as np
 import logging
+from typing import Union, Self
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +108,7 @@ class Tensor:
         result._backward = _backward
         return result
 
-    def __matmul__(self, other):
+    def __matmul__(self, other: Union[Self, float, int]):
         if not isinstance(other, Tensor):
             other = Tensor(other)
 
@@ -222,18 +223,6 @@ class Tensor:
         result._backward = _backward
         return result
 
-    def __sub__(self, other):
-        return self + (-other)
-
-    def __truediv__(self, other):
-        return self * other**-1
-
-    def __neg__(self):
-        return self * -1
-
-    def __repr__(self):
-        return f"Tensor(data={self.data}, grad={self.grad})"
-
     def sum(self, axis=None, keepdims=False):
         """
         Compute the sum of tensor elements
@@ -292,6 +281,77 @@ class Tensor:
         result._backward = lambda: self._reduce_ops_backward(
             output=result, axis=axis, keepdims=keepdims
         )
+        return result
+
+    def max(self, axis=None, keepdims=False):
+        """
+        Compute the max of tensor elements
+
+        Args:
+            axis (int or tuple of ints, optional): Axis or axes along which a max is performed. The default, axis=None, maxes all of the elements of the input tensor.
+            keepdims (bool, optional): If this is set to True, the axes which are reduced are left in the result as dimensions with size one. With this option, the result will broadcast correctly against the input tensor.
+        """
+        axis = (axis,) if isinstance(axis, int) else axis
+
+        result = Tensor(
+            data=np.max(self.data, axis=axis, keepdims=keepdims),
+            prev=(self,),
+            requires_grad=self.requires_grad,
+        )
+
+        def _backward():
+            """
+            d(loss) / dx = d(loss) / d(max(x)) * d(max(x)) / dx
+            d(loss) / d(max(x)) = result.grad
+            d(max(x)) / dx = 1 if x == max(x), 0 otherwise
+            """
+            # Initialize gradient array with zeros
+            grad = np.zeros_like(self.data)
+
+            if axis is None:
+                # For global max, gradient flows only to elements equal to max value
+                # Create boolean mask of elements equal to max
+                mask = self.data == np.max(self.data)
+                # Multiply mask by upstream gradient
+                grad = mask * result.grad
+            else:
+                # For max along specific axes, handle each axis separately
+                for ax in axis:
+                    # Create mask of elements equal to max along this axis
+                    # keepdims=True preserves original dimensions for broadcasting
+                    mask = self.data == np.max(self.data, axis=ax, keepdims=True)
+
+                    # For elements that are max values, distribute gradient evenly
+                    # Divide by len(axis) since each axis contributes equally to final gradient
+                    grad[mask] = result.grad / len(axis)
+
+            # Add computed gradient to accumulated gradient
+            self.grad += grad
+
+        result._backward = _backward
+        return result
+
+    def maximum(self, other: Union[Self, float, int]):
+        """
+        Element-wise maximum between self and other
+        """
+        if not isinstance(other, Tensor):
+            other = Tensor(other, requires_grad=False)
+
+        result = Tensor(
+            data=np.maximum(self.data, other.data),
+            prev=(self, other),
+            requires_grad=self.requires_grad or other.requires_grad,
+        )
+
+        def _backward():
+            # For max(self,other), the gradient flows to self where self>other, and to other where other>self
+            # When self=other, gradient is split between both (we'll give it to self in this case)
+            mask = self.data >= other.data
+            self.grad += result.grad * mask
+            other.grad += result.grad * (~mask)
+
+        result._backward = _backward
         return result
 
     def _reduce_ops_backward(self, output, axis=None, keepdims=False):
@@ -361,3 +421,37 @@ class Tensor:
     def reshape(self, *shape):
         self.data = self.data.reshape(*shape)
         return self
+
+    ##### Wrappers #####
+    def __radd__(self, other):
+        return self + other
+
+    def __rmul__(self, other):
+        return self * other
+
+    def __sub__(self, other):
+        return self + (-other)
+
+    def __rsub__(self, other):
+        return other + (-self)
+
+    def __truediv__(self, other):
+        return self * other**-1
+
+    def __neg__(self):
+        return self * -1
+
+    def __repr__(self):
+        return f"Tensor(data={self.data}, grad={self.grad})"
+
+    def __lt__(self, other):
+        return self.data < other
+
+    def __le__(self, other):
+        return self.data <= other
+
+    def __gt__(self, other):
+        return self.data > other
+
+    def __ge__(self, other):
+        return self.data >= other
