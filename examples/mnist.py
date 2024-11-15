@@ -31,19 +31,58 @@ class MnistMultiClassClassifier(nn.Module):
 
 
 class MnistOneVsRestBinaryClassifier(nn.Module):
-    def __init__(self):
+    def __init__(self, with_logits=True):
         super().__init__()
         self.h1 = nn.Linear(784, 64)  # mnist image has shape 28*28=784
         self.h2 = nn.Linear(64, 64)
         self.h3 = nn.Linear(64, 1)
+        self.with_logits = with_logits
 
     def forward(self, x):
         x = functional.relu(self.h1(x))
         x = functional.relu(self.h2(x))
         x = self.h3(x)
-        return functional.sigmoid(
-            x
-        )  # <<--- this is the only difference between this and the multiclass classifier
+        if self.with_logits:
+            return functional.sigmoid(x)
+        return x
+
+
+def train_mnist_with_hinge_loss(X_train, y_train, X_test, y_test):
+    logger.info("=" * 50)
+    logger.info("Starting to train One vs Rest MNIST model")
+    logger.info("=" * 50)
+    one_vs_rest_models = []
+    for digit in range(10):
+        logger.info(f"Training {digit=}")
+        y_binary = (y_train == digit).astype(int)
+        y_binary = 2 * y_binary - 1  # Convert from {0,1} to {-1,1}
+        model = MnistOneVsRestBinaryClassifier(with_logits=False)
+
+        utils.train(
+            model=model,
+            X=X_train,
+            y=y_binary,
+            loss_fn=lambda pred, true: functional.hinge_loss(
+                pred, true, reduction="mean"
+            ),
+            optimizer=optim.Adam(model.parameters, lr=1e-3),
+            epochs=10,
+        )
+        one_vs_rest_models.append(model)
+
+    logger.info("Training complete")
+    # 10 models, each model predicts probability of digit 0-9
+    # predictions_by_digit[i][j] is the probability that the ith test example is the jth digit
+    predictions_by_digit = np.array(
+        [model(X_test).data for model in one_vs_rest_models]
+    ).T
+
+    logger.info(
+        f"Test Accuracy: {utils.accuracy(predictions_by_digit.argmax(axis=1), y_test.astype(int))}"
+    )
+    logger.info(
+        f"Test Precision: {utils.precision(predictions_by_digit.argmax(axis=1), y_test.astype(int))}"
+    )
 
 
 def train_mnist_one_vs_rest_model(X_train, y_train, X_test, y_test):
@@ -54,7 +93,7 @@ def train_mnist_one_vs_rest_model(X_train, y_train, X_test, y_test):
     for digit in range(10):
         logger.info(f"Training {digit=}")
         y_binary = (y_train == digit).astype(int)
-        model = MnistOneVsRestBinaryClassifier()
+        model = MnistOneVsRestBinaryClassifier(with_logits=False)
 
         utils.train(
             model=model,
@@ -82,7 +121,7 @@ def train_mnist_one_vs_rest_model(X_train, y_train, X_test, y_test):
 
 
 def train_mnist_multiclass_model(
-    X_train, y_train, X_test, y_test, optimizer, model, msg=""
+    X_train, y_train, X_test, y_test, optimizer, model, loss_fn, msg=""
 ):
     logger.info("=" * 66)
     logger.info(f"Starting to train Multi-class MNIST model {msg}")
@@ -91,7 +130,7 @@ def train_mnist_multiclass_model(
         model=model,
         X=X_train,
         y=y_train.astype(int),
-        loss_fn=functional.sparse_cross_entropy,
+        loss_fn=loss_fn,
         optimizer=optimizer,
         epochs=30,
     )
@@ -124,6 +163,7 @@ if __name__ == "__main__":
         y_test,
         optimizer=optim.SGD(model.parameters, lr=1e-3),
         model=model,
+        loss_fn=functional.sparse_cross_entropy,
         msg="(without batch norm, SGD optimizer)",
     )
 
@@ -135,6 +175,7 @@ if __name__ == "__main__":
         y_test,
         optimizer=optim.SGD(model.parameters, lr=1e-3),
         model=model,
+        loss_fn=functional.sparse_cross_entropy,
         msg="(with batch norm, SGD optimizer)",
     )
 
@@ -146,7 +187,10 @@ if __name__ == "__main__":
         y_test,
         optimizer=optim.Adam(model.parameters, lr=1e-3),
         model=model,
+        loss_fn=functional.sparse_cross_entropy,
         msg="(with batch norm, Adam optimizer)",
     )
 
     train_mnist_one_vs_rest_model(X_train, y_train, X_test, y_test)
+
+    train_mnist_with_hinge_loss(X_train, y_train, X_test, y_test)

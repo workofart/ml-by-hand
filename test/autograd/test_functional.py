@@ -145,3 +145,49 @@ class TestLossFunctions(TestCase):
                 .detach()
                 .numpy(),
             )
+
+    def test_hinge_loss(self):
+        y_pred = Tensor(data=np.array([1.0, 2.0, 3.0]), requires_grad=True)
+        y_true = np.array([1.0, -1.0, 1.0])
+
+        # Test no reduction
+        hinge_loss_none = functional.hinge_loss(y_pred, y_true, reduction="none")
+        expected_none = np.maximum(0, 1 - y_true * y_pred.data)  # [0, 3, 0]
+        assert np.allclose(hinge_loss_none.data, expected_none)
+
+        # Test mean reduction
+        hinge_loss_mean = functional.hinge_loss(y_pred, y_true, reduction="mean")
+        expected_mean = np.mean(expected_none)  # 1.0
+        assert np.allclose(hinge_loss_mean.data, expected_mean)
+
+        # Test sum reduction
+        hinge_loss_sum = functional.hinge_loss(y_pred, y_true, reduction="sum")
+        expected_sum = np.sum(expected_none)  # 3.0
+        assert np.allclose(hinge_loss_sum.data, expected_sum)
+
+        # Test gradients for each reduction
+        # No reduction
+        hinge_loss_none.backward()
+        expected_grad_none = np.where(
+            1 - y_true * y_pred.data > 0, -y_true, 0
+        )  # [0, 1, 0]
+        assert np.allclose(y_pred.grad, expected_grad_none)
+        y_pred.grad = 0  # Reset gradients
+
+        # Mean reduction
+        y_pred_mean = Tensor(data=np.array([1.0, 2.0, 3.0]), requires_grad=True)
+        hinge_loss_mean = functional.hinge_loss(y_pred_mean, y_true, reduction="mean")
+        hinge_loss_mean.backward()
+        expected_grad_mean = expected_grad_none / len(expected_grad_none)  # [0, 1/3, 0]
+        assert np.allclose(y_pred_mean.grad, expected_grad_mean)
+
+        # Sum reduction
+        y_pred_sum = Tensor(data=np.array([1.0, 2.0, 3.0]), requires_grad=True)
+        hinge_loss_sum = functional.hinge_loss(y_pred_sum, y_true, reduction="sum")
+        hinge_loss_sum.backward()
+        expected_grad_sum = expected_grad_none  # [0, 1, 0]
+        assert np.allclose(y_pred_sum.grad, expected_grad_sum)
+
+        # Test invalid reduction
+        with self.assertRaises(ValueError):
+            functional.hinge_loss(y_pred, y_true, reduction="invalid")

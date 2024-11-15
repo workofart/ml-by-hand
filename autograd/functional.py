@@ -14,7 +14,7 @@ def relu(x: Tensor) -> Tensor:
     ReLU(x) = max(0, x)
     """
 
-    out = Tensor(np.maximum(0, x.data), prev=(x,))
+    out = x.maximum(0)
 
     def _backward():
         # dL/dx = dL/dy * dy/dx
@@ -29,7 +29,7 @@ def sigmoid(x: Tensor) -> Tensor:
     Sigmoid activation function
     """
     # 709 is the maximum value that can be passed to np.exp without overflowing
-    out = Tensor(1 / (1 + np.exp(np.clip(-x.data, -709, 709))), prev=(x,))
+    out = Tensor(1 / (1 + np.exp(np.clip(-x.data, -709, 709))), prev={x})
 
     def _backward():
         logger.debug("Sigmoid backward shapes:")
@@ -52,7 +52,7 @@ def softmax(x: Tensor) -> Tensor:
     # Subtract the maximum value for numerical stability
     exp_x = np.exp(x.data - np.max(x.data, axis=-1, keepdims=True))
     probs = exp_x / np.sum(exp_x, axis=-1, keepdims=True)
-    out = Tensor(probs, prev=(x,))
+    out = Tensor(probs, prev={x})
 
     def _backward():
         # There are two cases for this gradient because each element in the matrix affects
@@ -172,3 +172,51 @@ def sparse_cross_entropy_with_logits(
     -y_true * log(y_pred)
     """
     return sparse_cross_entropy(softmax(y_pred), y_true)
+
+
+def hinge_loss(
+    y_pred: Tensor, y_true: Union[Tensor, np.ndarray], reduction: str = "none"
+) -> Tensor:
+    """
+    Hinge Loss
+    If the point is correctly classified, y_pred * y_true > 1, the loss is 0 (loss functions typically don't go into the negatives so we take the max of 0 and 1 - y_true * y_pred)
+    Otherwise, y_pred * y_true < 1, then the loss is 1 - y_true * y_pred > 0.
+
+    loss = max(0, 1 - y_true * y_pred)
+
+    Objective Function: ||w||^2 + C * sum(max(0, 1 - y_true * y_pred))
+    where:
+        C is a hyperparameter that controls the trade-off between maximizing the margin (through regularization) and minimizing the loss.
+        w is the weight vector (||w||^2 is the regularization term)
+
+    Paper: https://ieeexplore.ieee.org/document/708428
+    """
+    if not isinstance(y_true, Tensor):
+        y_true = Tensor(y_true, requires_grad=False)
+
+    loss = relu(1 - y_true * y_pred)
+
+    if reduction == "mean":
+        loss = loss.mean()
+    elif reduction == "sum":
+        loss = loss.sum()
+    elif reduction != "none":
+        raise ValueError(
+            f"Invalid reduction option: {reduction}. Choose from 'none', 'mean', or 'sum'"
+        )
+
+    def _backward():
+        """
+        d (1/2||w||^2)/dw = w (we multiple 1/2 because it makes the gradient calculation easier)
+        d(C * sum(max(0, 1 - y_true * y_pred)))/dw = C * max(0, 1 - y_true * y_pred)
+        = 1 - y_true * y_pred (if y_true * y_pred < 1)
+        = 0 (if y_true * y_pred >= 1)
+        """
+        margin_violated = 1 - y_true.data * y_pred.data > 0
+        grad = -y_true.data * margin_violated
+        if reduction == "mean":
+            grad = grad / len(grad)
+        y_pred.grad += loss.grad * grad
+
+    loss._backward = _backward
+    return loss
