@@ -299,9 +299,36 @@ class Tensor:
             requires_grad=self.requires_grad,
         )
 
-        result._backward = lambda: self._reduce_ops_backward(
-            output=result, axis=axis, keepdims=keepdims
-        )
+        def _backward():
+            """
+            d(loss) / dx = d(loss) / d(max(x)) * d(max(x)) / dx
+            d(loss) / d(max(x)) = result.grad
+            d(max(x)) / dx = 1 if x == max(x), 0 otherwise
+            """
+            # Initialize gradient array with zeros
+            grad = np.zeros_like(self.data)
+
+            if axis is None:
+                # For global max, gradient flows only to elements equal to max value
+                # Create boolean mask of elements equal to max
+                mask = self.data == np.max(self.data)
+                # Multiply mask by upstream gradient
+                grad = mask * result.grad
+            else:
+                # For max along specific axes, handle each axis separately
+                for ax in axis:
+                    # Create mask of elements equal to max along this axis
+                    # keepdims=True preserves original dimensions for broadcasting
+                    mask = self.data == np.max(self.data, axis=ax, keepdims=True)
+
+                    # For elements that are max values, distribute gradient evenly
+                    # Divide by len(axis) since each axis contributes equally to final gradient
+                    grad[mask] = result.grad / len(axis)
+
+            # Add computed gradient to accumulated gradient
+            self.grad += grad
+
+        result._backward = _backward
         return result
 
     def maximum(self, other: Union[Self, float, int]):
