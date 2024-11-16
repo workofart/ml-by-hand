@@ -223,6 +223,33 @@ class Tensor:
         result._backward = _backward
         return result
 
+    def __getitem__(self, idx):
+        """
+        Support indexing operations on Tensor
+        """
+        result = Tensor(
+            data=self.data[idx], prev=(self,), requires_grad=self.requires_grad
+        )
+
+        def _backward():
+            # Create a gradient array of zeros with the same shape as the original data
+            grad = np.zeros_like(self.data)
+            # Use numpy's advanced indexing to accumulate gradients
+            np.add.at(grad, idx, result.grad)
+            self.grad += grad
+
+        result._backward = _backward
+        return result
+
+    def __setitem__(self, idx, value):
+        """
+        Support assignment operations on Tensor
+        """
+        if isinstance(value, Tensor):
+            self.data[idx] = value.data
+        else:
+            self.data[idx] = value
+
     def sum(self, axis=None, keepdims=False):
         """
         Compute the sum of tensor elements
@@ -417,6 +444,18 @@ class Tensor:
         self.grad = np.ones_like(self.data)
         for tensor in reversed(topological_sorted_tensors):
             tensor._backward()
+
+    @property
+    def shape(self):
+        """
+        Return the shape of the tensor data.
+        For scalars, returns an empty tuple ().
+        For vectors, returns a tuple with one element (n,).
+        For matrices, returns a tuple with two elements (m,n).
+        """
+        if np.isscalar(self.data):
+            return ()
+        return self.data.shape
 
     def reshape(self, *shape):
         self.data = self.data.reshape(*shape)

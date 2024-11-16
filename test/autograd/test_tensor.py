@@ -237,3 +237,36 @@ class TestTensor(TestCase):
         z = x.max(axis=1, keepdims=True)
         assert z.data.shape == (2, 1)  # (2,3) -> (2,1)
         assert np.array_equal(z.data, [[3.0], [2.0]])
+
+    def test_getitem(self):
+        x = Tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], requires_grad=True)
+        y = x[0, 1]
+        assert y.data == 2.0
+        assert y.prev == {x}
+        y.backward()
+        assert np.array_equal(x.grad, np.array([[0.0, 1.0, 0.0], [0.0, 0.0, 0.0]]))
+
+        x = Tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], requires_grad=True)
+        z = x[0:2, 1]
+        assert np.array_equal(z.data, [2.0, 5.0])
+        z.backward()
+        assert np.array_equal(x.grad, np.array([[0.0, 1.0, 0.0], [0.0, 1.0, 0.0]]))
+
+        x = Tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], requires_grad=True)
+        a = x[0]
+        assert np.array_equal(a.data, [1.0, 2.0, 3.0])
+        a.backward()
+        assert np.array_equal(x.grad, np.array([[1.0, 1.0, 1.0], [0.0, 0.0, 0.0]]))
+
+        x = Tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], requires_grad=True)
+        b = x[-1, -1]
+        c = b * 2
+        assert b.data == 6.0
+        assert c.data == 12.0
+        c.backward()
+        assert np.array_equal(x.grad, np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 2.0]]))
+
+    def test_setitem(self):
+        x = Tensor([1.0, 2.0, 3.0], requires_grad=True)
+        x[0] = 4.0
+        np.array_equal(x.data, [4.0, 2.0, 3.0])
