@@ -88,6 +88,12 @@ def binary_cross_entropy(y_pred: Tensor, y_true: Union[Tensor, np.ndarray]) -> T
         raise ValueError("y_pred must contain probabilities between 0 and 1")
 
     y_true = np.array(y_true.data) if isinstance(y_true, Tensor) else y_true
+
+    if y_true.ndim == 1 and y_pred.data.ndim == 1:
+        pass
+    elif y_true.ndim == 1:
+        y_true = y_true.reshape(-1, 1)
+
     if y_pred.data.shape[0] != y_true.shape[0]:
         raise ValueError("y_pred and y_true must have the same shape")
 

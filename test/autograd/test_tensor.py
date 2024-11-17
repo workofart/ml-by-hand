@@ -19,8 +19,8 @@ class TestTensor(TestCase):
         assert (y / x).data == 1.5
         assert (x**y).data == 8.0
         assert (y**x).data == 9.0
-        assert x.grad == 0.0
-        assert y.grad == 0.0
+        assert x.grad is None  # lazy init until backward is called
+        assert y.grad is None  # lazy init until backward is called
         assert x.requires_grad
         assert len(y.prev) == 0
 
@@ -39,11 +39,11 @@ class TestTensor(TestCase):
     def test_backward(self):
         x = Tensor(2.0, requires_grad=True)
         y = Tensor(3.0, requires_grad=True)
-        z = y * x
+        z = x * y
 
         assert z.data == 6.0
         assert z.prev == {x, y}
-        assert z.grad == 0.0
+        assert z.grad is None
 
         # then we will call backward and check the gradients
         z.backward()
@@ -202,16 +202,108 @@ class TestTensor(TestCase):
         assert not m.requires_grad
 
     def test_maximum(self):
+        # Test case 1: Basic vector maximum
         x = Tensor([1.0, 2.0, 3.0], requires_grad=True)
         y = Tensor([2.0, 1.0, 3.0], requires_grad=True)
+        x_torch = torch.tensor([1.0, 2.0, 3.0], requires_grad=True)
+        y_torch = torch.tensor([2.0, 1.0, 3.0], requires_grad=True)
+
         z = x.maximum(y)
-        assert np.array_equal(z.data, [2.0, 2.0, 3.0])
+        z_torch = torch.maximum(x_torch, y_torch)
+        assert np.array_equal(z.data, z_torch.detach().numpy())
 
         z.backward()
-        assert np.array_equal(
-            x.grad, [0.0, 1.0, 1.0]
-        )  # we flow the gradient to self when self == other
-        assert np.array_equal(y.grad, [1.0, 0.0, 0.0])
+        z_torch.backward(torch.ones_like(z_torch))
+        assert np.array_equal(x.grad, x_torch.grad.numpy())
+        assert np.array_equal(y.grad, y_torch.grad.numpy())
+
+        # Test case 2: Maximum with scalar
+        x = Tensor([1.0, 2.0, 3.0], requires_grad=True)
+        x_torch = torch.tensor([1.0, 2.0, 3.0], requires_grad=True)
+
+        z = x.maximum(2.0)
+        z_torch = torch.maximum(x_torch, torch.tensor(2.0))
+        assert np.array_equal(z.data, z_torch.detach().numpy())
+
+        z.backward()
+        z_torch.backward(torch.ones_like(z_torch))
+        assert np.array_equal(x.grad, x_torch.grad.numpy())
+
+        # Test case 3: 2D tensor maximum
+        x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+        y = Tensor([[2.0, 1.0], [3.0, 5.0]], requires_grad=True)
+        x_torch = torch.tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+        y_torch = torch.tensor([[2.0, 1.0], [3.0, 5.0]], requires_grad=True)
+
+        z = x.maximum(y)
+        z_torch = torch.maximum(x_torch, y_torch)
+        assert np.array_equal(z.data, z_torch.detach().numpy())
+
+        z.backward()
+        z_torch.backward(torch.ones_like(z_torch))
+        assert np.array_equal(x.grad, x_torch.grad.numpy())
+        assert np.array_equal(y.grad, y_torch.grad.numpy())
+
+        # Test case 4: Broadcasting
+        x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+        y = Tensor([2.0, 3.0], requires_grad=True)
+        x_torch = torch.tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+        y_torch = torch.tensor([2.0, 3.0], requires_grad=True)
+
+        z = x.maximum(y)
+        z_torch = torch.maximum(x_torch, y_torch)
+        assert np.array_equal(z.data, z_torch.detach().numpy())
+
+        z.backward()
+        z_torch.backward(torch.ones_like(z_torch))
+        assert np.array_equal(x.grad, x_torch.grad.numpy())
+        assert np.array_equal(y.grad, y_torch.grad.numpy())
+
+        # Test case 5: requires_grad propagation
+        x = Tensor([1.0, 2.0, 3.0], requires_grad=False)
+        y = Tensor([2.0, 1.0, 4.0], requires_grad=True)
+        x_torch = torch.tensor([1.0, 2.0, 3.0], requires_grad=False)
+        y_torch = torch.tensor([2.0, 1.0, 4.0], requires_grad=True)
+
+        z = x.maximum(y)
+        z_torch = torch.maximum(x_torch, y_torch)
+        assert z.requires_grad == z_torch.requires_grad
+
+        z.backward()
+        z_torch.backward(torch.ones_like(z_torch))
+        assert x.grad is None
+        assert np.array_equal(y.grad, y_torch.grad.numpy())
+
+        # Test case 6: Gradient accumulation
+        x = Tensor([1.0, 2.0, 3.0], requires_grad=True)
+        y = Tensor([2.0, 1.0, 3.0], requires_grad=True)
+        x_torch = torch.tensor([1.0, 2.0, 3.0], requires_grad=True)
+        y_torch = torch.tensor([2.0, 1.0, 3.0], requires_grad=True)
+
+        z1 = x.maximum(y)
+        z2 = x.maximum(y)
+        z1_torch = torch.maximum(x_torch, y_torch)
+        z2_torch = torch.maximum(x_torch, y_torch)
+
+        (z1 + z2).backward()
+        (z1_torch + z2_torch).backward(torch.ones_like(z1_torch + z2_torch))
+        assert np.array_equal(x.grad, x_torch.grad.numpy())
+        assert np.array_equal(y.grad, y_torch.grad.numpy())
+
+        # Test case 7: Maximum with negative numbers
+        x = Tensor([-1.0, -2.0, -3.0], requires_grad=True)
+        y = Tensor([-2.0, -1.0, -3.0], requires_grad=True)
+        x_torch = torch.tensor([-1.0, -2.0, -3.0], requires_grad=True)
+        y_torch = torch.tensor([-2.0, -1.0, -3.0], requires_grad=True)
+
+        z = x.maximum(y)
+        z_torch = torch.maximum(x_torch, y_torch)
+        assert np.array_equal(z.data, z_torch.detach().numpy())
+
+        z.backward()
+        z_torch.backward(torch.ones_like(z_torch))
+        assert np.array_equal(x.grad, x_torch.grad.numpy())
+        assert np.array_equal(y.grad, y_torch.grad.numpy())
 
     def test_max(self):
         # For 1D tensor, we should test without axis first
@@ -239,77 +331,74 @@ class TestTensor(TestCase):
         assert z.data.shape == (2, 1)  # (2,3) -> (2,1)
         assert np.array_equal(z.data, [[3.0], [2.0]])
 
-    def test_pad(self):
-        # Test case 1: Basic 1D tensor padding with constant values
+    def test_transpose(self):
+        # Test case 1: Basic 2D transpose
+        x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+        y = x.transpose()  # Default behavior should reverse dims
+        assert np.array_equal(y.data, [[1.0, 3.0], [2.0, 4.0]])
+        y.backward()
+        assert np.array_equal(x.grad, np.ones_like(x.data))
+
+        # Test case 2: 3D tensor transpose with explicit dims
+        x = Tensor(
+            [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]], requires_grad=True
+        )
+        y = x.transpose(1, 0, 2)  # permute first two dims
+        expected = np.array([[[1.0, 2.0], [5.0, 6.0]], [[3.0, 4.0], [7.0, 8.0]]])
+        assert np.array_equal(y.data, expected)
+        y.backward()
+        assert np.array_equal(x.grad, np.ones_like(x.data))
+
+        # Test case 3: Transpose with gradient accumulation
+        x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+        y1 = x.transpose()
+        y2 = x.transpose()
+        (y1 + y2).backward()
+        assert np.array_equal(x.grad, 2 * np.ones_like(x.data))
+
+        # Test case 4: 1D tensor transpose (should be no-op)
         x = Tensor([1.0, 2.0, 3.0], requires_grad=True)
-        y = x.pad(pad_width=(1, 1), mode="constant", constant_values=0)
-        x_torch = torch.tensor([1.0, 2.0, 3.0], requires_grad=True)
-        y_torch = torch.nn.functional.pad(x_torch, (1, 1), mode="constant", value=0)
-
-        y.sum().backward()
-        y_torch.sum().backward()
-
-        assert np.array_equal(x.grad, x_torch.grad.numpy())
-
-        # Test case 2: Basic 2D tensor padding with constant values
-        x = Tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], requires_grad=True)
-        y = x.pad(pad_width=1, mode="constant", constant_values=0)
-        expected = np.array(
-            [
-                [0.0, 0.0, 0.0, 0.0, 0.0],
-                [0.0, 1.0, 2.0, 3.0, 0.0],
-                [0.0, 4.0, 5.0, 6.0, 0.0],
-                [0.0, 0.0, 0.0, 0.0, 0.0],
-            ]
-        )
-        assert np.array_equal(y.data, expected)
-        y.backward()
-        assert np.array_equal(x.grad, np.ones_like(x.data))
-
-        # Test case 3: 3D tensor padding
-        x = Tensor(np.ones((2, 3, 3)), requires_grad=True)
-        y = x.pad(pad_width=((0, 0), (1, 1), (1, 1)))
-        expected_shape = (2, 5, 5)
-        assert y.data.shape == expected_shape
-        y.backward()
-        assert np.array_equal(x.grad, np.ones_like(x.data))
-
-        # Test case 4: 4D tensor padding (batch, channels, height, width)
-        x = Tensor(np.ones((2, 3, 4, 4)), requires_grad=True)
-        y = x.pad(pad_width=((0, 0), (0, 0), (1, 1), (1, 1)))
-        expected_shape = (2, 3, 6, 6)
-        assert y.data.shape == expected_shape
-        y.backward()
-        assert np.array_equal(x.grad, np.ones_like(x.data))
-
-        # Test case 5: Different constant values
-        x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
-        y = x.pad(pad_width=1, constant_values=9.0)
-        expected = np.array(
-            [
-                [9.0, 9.0, 9.0, 9.0],
-                [9.0, 1.0, 2.0, 9.0],
-                [9.0, 3.0, 4.0, 9.0],
-                [9.0, 9.0, 9.0, 9.0],
-            ]
-        )
-        assert np.array_equal(y.data, expected)
-        y.backward()
-        assert np.array_equal(x.grad, np.ones_like(x.data))
-
-        # Test case 6: Zero padding
-        x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
-        y = x.pad(pad_width=0)
+        y = x.transpose()
         assert np.array_equal(y.data, x.data)
         y.backward()
         assert np.array_equal(x.grad, np.ones_like(x.data))
 
-        # Test case 7: Gradient accumulation
+        # Test case 5: Compare with PyTorch
+        x_tensor = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+        x_torch = torch.tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+
+        y_tensor = x_tensor.transpose()
+        y_torch = x_torch.transpose(0, 1)
+
+        assert np.array_equal(y_tensor.data, y_torch.detach().numpy())
+
+        y_tensor.backward()
+        y_torch.backward(torch.ones_like(y_torch))
+
+        assert np.array_equal(x_tensor.grad, x_torch.grad.numpy())
+
+        # Test case 6: Transpose of non-contiguous tensor
+        x = Tensor(
+            [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]], requires_grad=True
+        )
+        y = x[:2, 1:].transpose()  # Take a slice and transpose
+        assert np.array_equal(y.data, [[2.0, 5.0], [3.0, 6.0]])
+        y.backward()
+        expected_grad = np.array([[0.0, 1.0, 1.0], [0.0, 1.0, 1.0], [0.0, 0.0, 0.0]])
+        assert np.array_equal(x.grad, expected_grad)
+
+        # Test case 7: Multiple transpositions
         x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
-        y1 = x.pad(pad_width=1)
-        y2 = x.pad(pad_width=1)
-        (y1 + y2).backward()
-        assert np.array_equal(x.grad, 2 * np.ones_like(x.data))
+        y = x.transpose().transpose()  # Should get back original
+        assert np.array_equal(y.data, x.data)
+        y.backward()
+        assert np.array_equal(x.grad, np.ones_like(x.data))
+
+        # Test case 8: requires_grad=False
+        x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=False)
+        y = x.transpose()
+        assert not y.requires_grad
+        assert len(y.prev) == 0
 
     def test_getitem(self):
         x = Tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], requires_grad=True)
@@ -343,3 +432,134 @@ class TestTensor(TestCase):
         x = Tensor([1.0, 2.0, 3.0], requires_grad=True)
         x[0] = 4.0
         np.array_equal(x.data, [4.0, 2.0, 3.0])
+
+    def test_iadd(self):
+        # Test case 1: Basic in-place addition
+        x = Tensor([1.0, 2.0, 3.0], requires_grad=True)
+        y = Tensor([4.0, 5.0, 6.0], requires_grad=True)
+        x += y
+        assert np.array_equal(x.data, [5.0, 7.0, 9.0])
+        x.backward()
+        assert np.array_equal(x.grad, [1.0, 1.0, 1.0])
+        assert np.array_equal(y.grad, [1.0, 1.0, 1.0])
+
+        # Test case 2: Scalar addition
+        x = Tensor([1.0, 2.0, 3.0], requires_grad=True)
+        x += 2.0
+        assert np.array_equal(x.data, [3.0, 4.0, 5.0])
+        x.backward()
+        assert np.array_equal(x.grad, [1.0, 1.0, 1.0])
+
+        # Test case 3: Broadcasting
+        x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+        y = Tensor([1.0, 2.0], requires_grad=True)
+        x += y
+        assert np.array_equal(x.data, [[2.0, 4.0], [4.0, 6.0]])
+        x.backward()
+        assert np.array_equal(x.grad, [[1.0, 1.0], [1.0, 1.0]])
+        assert np.array_equal(y.grad, [2.0, 2.0])  # Sum across broadcasted dimension
+
+        # Test case 4: requires_grad propagation
+        x = Tensor([1.0, 2.0], requires_grad=False)
+        y = Tensor([3.0, 4.0], requires_grad=True)
+        x += y
+        assert x.requires_grad  # Should be True because y requires grad
+        assert np.array_equal(x.data, [4.0, 6.0])
+        x.backward()
+        assert np.array_equal(y.grad, [1.0, 1.0])
+
+    def test_pad(self):
+        # Test case 1: 1D tensor padding
+        x = Tensor([1.0, 2.0, 3.0], requires_grad=True)
+        x_torch = torch.tensor([1.0, 2.0, 3.0], requires_grad=True)
+
+        y = x.pad((1, 1))  # pad both sides by 1
+        y_torch = torch.nn.functional.pad(x_torch, (1, 1))
+
+        assert np.array_equal(y.data, y_torch.detach().numpy())
+        y.backward()
+        y_torch.backward(torch.ones_like(y_torch))
+        assert np.array_equal(x.grad, x_torch.grad.numpy())
+
+        # Test case 2: 2D tensor padding
+        x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+        x_torch = torch.tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+
+        # Convert PyTorch-style padding (left, right, top, bottom) to numpy-style
+        y = x.pad((1, 1, 1, 1))  # pad all sides by 1
+        y_torch = torch.nn.functional.pad(x_torch, (1, 1, 1, 1))
+
+        assert np.array_equal(y.data, y_torch.detach().numpy())
+        y.backward()
+        y_torch.backward(torch.ones_like(y_torch))
+        assert np.array_equal(x.grad, x_torch.grad.numpy())
+
+        # Test case 3: 3D tensor padding (e.g., single-channel image)
+        x = Tensor([[[1.0, 2.0], [3.0, 4.0]]], requires_grad=True)
+        x_torch = torch.tensor([[[1.0, 2.0], [3.0, 4.0]]], requires_grad=True)
+
+        y = x.pad(((0, 0), (1, 1), (1, 1)))  # no padding on first dim, pad others by 1
+        y_torch = torch.nn.functional.pad(x_torch, (1, 1, 1, 1, 0, 0))
+
+        assert np.array_equal(y.data, y_torch.detach().numpy())
+        y.backward()
+        y_torch.backward(torch.ones_like(y_torch))
+        assert np.array_equal(x.grad, x_torch.grad.numpy())
+
+        # Test case 4: 4D tensor padding (batch of images)
+        x = Tensor([[[[1.0, 2.0], [3.0, 4.0]]]], requires_grad=True)
+        x_torch = torch.tensor([[[[1.0, 2.0], [3.0, 4.0]]]], requires_grad=True)
+
+        y = x.pad(((0, 0), (0, 0), (1, 1), (1, 1)))  # pad only spatial dimensions
+        y_torch = torch.nn.functional.pad(x_torch, (1, 1, 1, 1, 0, 0, 0, 0))
+
+        assert np.array_equal(y.data, y_torch.detach().numpy())
+        y.backward()
+        y_torch.backward(torch.ones_like(y_torch))
+        assert np.array_equal(x.grad, x_torch.grad.numpy())
+
+        # Test case 5: Asymmetric padding
+        x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+        x_torch = torch.tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+
+        y = x.pad((0, 1, 1, 0))  # pad right by 1, top by 1
+        y_torch = torch.nn.functional.pad(x_torch, (0, 1, 1, 0))
+
+        assert np.array_equal(y.data, y_torch.detach().numpy())
+        y.backward()
+        y_torch.backward(torch.ones_like(y_torch))
+        assert np.array_equal(x.grad, x_torch.grad.numpy())
+
+        # Test case 6: Padding with constant value
+        x = Tensor([1.0, 2.0, 3.0], requires_grad=True)
+        x_torch = torch.tensor([1.0, 2.0, 3.0], requires_grad=True)
+
+        y = x.pad((1, 1), constant_values=5.0)
+        y_torch = torch.nn.functional.pad(x_torch, (1, 1), value=5.0)
+
+        assert np.array_equal(y.data, y_torch.detach().numpy())
+        y.backward()
+        y_torch.backward(torch.ones_like(y_torch))
+        assert np.array_equal(x.grad, x_torch.grad.numpy())
+
+        # Test case 7: requires_grad=False
+        x = Tensor([1.0, 2.0, 3.0], requires_grad=False)
+        x_torch = torch.tensor([1.0, 2.0, 3.0], requires_grad=False)
+
+        y = x.pad((1, 1))
+        y_torch = torch.nn.functional.pad(x_torch, (1, 1))
+
+        assert np.array_equal(y.data, y_torch.detach().numpy())
+        assert not y.requires_grad
+
+        # Test case 8: Integer padding
+        x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+        x_torch = torch.tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+
+        y = x.pad(1)  # pad all sides by 1
+        y_torch = torch.nn.functional.pad(x_torch, (1, 1, 1, 1))
+
+        assert np.array_equal(y.data, y_torch.detach().numpy())
+        y.backward()
+        y_torch.backward(torch.ones_like(y_torch))
+        assert np.array_equal(x.grad, x_torch.grad.numpy())
