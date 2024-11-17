@@ -3,10 +3,11 @@ from autograd.nn import Linear, BatchNorm, Dropout
 from autograd.tensor import Tensor
 import random
 import numpy as np
-import torch
+import torch  # for comparison
 
 random.seed(1337)
 np.random.seed(1337)
+torch.manual_seed(1337)
 
 
 class TestLinear(TestCase):
@@ -24,15 +25,9 @@ class TestLinear(TestCase):
         x = [[2, 2, 2, 2]]
         out = linear_layer(x)
         assert np.allclose(out.data, [-2.7748068, 0.56519009])
-        assert np.allclose(
-            out.grad, [0, 0]
-        )  # this should still be zero before we call backward
-        assert np.allclose(
-            parameters["weight"].grad, np.zeros_like(parameters["weight"].data)
-        )
-        assert np.allclose(
-            parameters["bias"].grad, np.zeros_like(parameters["bias"].data)
-        )
+        assert out.grad is None
+        assert parameters["weight"].grad is None
+        assert parameters["bias"].grad is None
         out.backward()
 
         # weight gradient = x.T @ out.grad = [[2], [2], [2], [2]] * [1, 1]
@@ -46,7 +41,7 @@ class TestLinear(TestCase):
             ],
         )
         assert np.array_equal(parameters["bias"].grad, [1, 1])
-        assert np.array_equal(out.grad, [1, 1])
+        assert np.array_equal(out.grad, [[1, 1]])
 
         # Trying to pass in (4x1 matrix)
         x = [[2], [2], [2], [2]]
