@@ -1,5 +1,6 @@
 from autograd.tensor import Tensor
 import numpy as np
+import torch  # for comparison
 from unittest import TestCase
 
 
@@ -237,6 +238,78 @@ class TestTensor(TestCase):
         z = x.max(axis=1, keepdims=True)
         assert z.data.shape == (2, 1)  # (2,3) -> (2,1)
         assert np.array_equal(z.data, [[3.0], [2.0]])
+
+    def test_pad(self):
+        # Test case 1: Basic 1D tensor padding with constant values
+        x = Tensor([1.0, 2.0, 3.0], requires_grad=True)
+        y = x.pad(pad_width=(1, 1), mode="constant", constant_values=0)
+        x_torch = torch.tensor([1.0, 2.0, 3.0], requires_grad=True)
+        y_torch = torch.nn.functional.pad(x_torch, (1, 1), mode="constant", value=0)
+
+        y.sum().backward()
+        y_torch.sum().backward()
+
+        assert np.array_equal(x.grad, x_torch.grad.numpy())
+
+        # Test case 2: Basic 2D tensor padding with constant values
+        x = Tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], requires_grad=True)
+        y = x.pad(pad_width=1, mode="constant", constant_values=0)
+        expected = np.array(
+            [
+                [0.0, 0.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 2.0, 3.0, 0.0],
+                [0.0, 4.0, 5.0, 6.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0, 0.0],
+            ]
+        )
+        assert np.array_equal(y.data, expected)
+        y.backward()
+        assert np.array_equal(x.grad, np.ones_like(x.data))
+
+        # Test case 3: 3D tensor padding
+        x = Tensor(np.ones((2, 3, 3)), requires_grad=True)
+        y = x.pad(pad_width=((0, 0), (1, 1), (1, 1)))
+        expected_shape = (2, 5, 5)
+        assert y.data.shape == expected_shape
+        y.backward()
+        assert np.array_equal(x.grad, np.ones_like(x.data))
+
+        # Test case 4: 4D tensor padding (batch, channels, height, width)
+        x = Tensor(np.ones((2, 3, 4, 4)), requires_grad=True)
+        y = x.pad(pad_width=((0, 0), (0, 0), (1, 1), (1, 1)))
+        expected_shape = (2, 3, 6, 6)
+        assert y.data.shape == expected_shape
+        y.backward()
+        assert np.array_equal(x.grad, np.ones_like(x.data))
+
+        # Test case 5: Different constant values
+        x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+        y = x.pad(pad_width=1, constant_values=9.0)
+        expected = np.array(
+            [
+                [9.0, 9.0, 9.0, 9.0],
+                [9.0, 1.0, 2.0, 9.0],
+                [9.0, 3.0, 4.0, 9.0],
+                [9.0, 9.0, 9.0, 9.0],
+            ]
+        )
+        assert np.array_equal(y.data, expected)
+        y.backward()
+        assert np.array_equal(x.grad, np.ones_like(x.data))
+
+        # Test case 6: Zero padding
+        x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+        y = x.pad(pad_width=0)
+        assert np.array_equal(y.data, x.data)
+        y.backward()
+        assert np.array_equal(x.grad, np.ones_like(x.data))
+
+        # Test case 7: Gradient accumulation
+        x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+        y1 = x.pad(pad_width=1)
+        y2 = x.pad(pad_width=1)
+        (y1 + y2).backward()
+        assert np.array_equal(x.grad, 2 * np.ones_like(x.data))
 
     def test_getitem(self):
         x = Tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], requires_grad=True)

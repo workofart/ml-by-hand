@@ -247,6 +247,11 @@ class Tensor:
         """
         if isinstance(value, Tensor):
             self.data[idx] = value.data
+
+            def _backward():
+                self.grad[idx] += value.grad
+
+            value._backward = _backward
         else:
             self.data[idx] = value
 
@@ -279,7 +284,25 @@ class Tensor:
             requires_grad=self.requires_grad,
         )
 
-        result._backward = lambda: self._reduce_ops_backward(result, axis, keepdims)
+        def _backward():
+            grad = result.grad
+            if axis is None:
+                self.grad = np.ones_like(self.data) * grad
+            else:
+                if isinstance(axis, int):
+                    axes = (axis,)
+                else:
+                    axes = axis
+                grad = grad.reshape(
+                    [
+                        1 if ax in axes else self.data.shape[ax]
+                        for ax in range(self.data.ndim)
+                    ]
+                )
+                self.grad = np.broadcast_to(grad, self.data.shape)
+            # self.grad += grad
+
+        result._backward = _backward
         return result
 
     def mean(self, axis=None, keepdims=False):
@@ -305,9 +328,41 @@ class Tensor:
             requires_grad=self.requires_grad,
         )
 
-        result._backward = lambda: self._reduce_ops_backward(
-            output=result, axis=axis, keepdims=keepdims
-        )
+        def _backward():
+            # Compute number of summed elements
+            num_elements = (
+                np.prod([self.data.shape[ax] for ax in axis])
+                if axis
+                else self.data.size
+            )
+            grad_value = result.grad / num_elements
+
+            # Create gradient array, to ensure each element has the same gradient contribution
+            grad = np.full_like(self.data, grad_value)
+
+            # Handle keepdims case
+            # We need to preserve the information about:
+            # - Distribute gradient proportionally
+            # - Preserve tensor shape
+            # - Maintain computational graph integrity
+
+            # For example:
+            # Original tensor: (2, 2, 3)
+            # Sum result (keepdims=True): (2, 1, 1)
+            # Indexing mechanism:
+            # - Keep first dimension fully (slice(None))
+            # - Reduce second dimension to first index (0)
+            # - Reduce third dimension to first index (0)
+            if axis and keepdims:
+                slices = [slice(None)] * self.data.ndim
+                for ax in axis:
+                    slices[ax] = slice(0, 1)
+                grad[tuple(slices)] = grad_value
+
+            # Accumulate gradient
+            self.grad += grad
+
+        result._backward = _backward
         return result
 
     def max(self, axis=None, keepdims=False):
@@ -381,44 +436,81 @@ class Tensor:
         result._backward = _backward
         return result
 
-    def _reduce_ops_backward(self, output, axis=None, keepdims=False):
-        """
-        This function is a general backward pass function for computing gradients for
-        "reduce" operations such as sum, mean, max, min, etc.
-        d(reduce_func) / dx = 1 / count for each element that was reduced
-        Each element contributes equally to the final mean value
-        Global mean gradient is scaled by 1 / count
-        """
-        # Compute number of summed elements
-        num_elements = (
-            np.prod([self.data.shape[ax] for ax in axis]) if axis else self.data.size
+    def pad(self, pad_width, mode="constant", constant_values=0):
+        # Convert PyTorch-style padding (left, right) to numpy-style padding
+        if isinstance(pad_width, tuple) and len(pad_width) == 2:
+            pad_width = (
+                (pad_width[0], pad_width[1]),
+            )  # Convert to numpy pad_width format
+
+        result = Tensor(
+            data=np.pad(
+                self.data,
+                pad_width=pad_width,
+                constant_values=constant_values,
+                mode=mode,
+            ),
+            prev=(self,),
+            requires_grad=self.requires_grad,
         )
-        grad_value = output.grad / num_elements
 
-        # Create gradient array, to ensure each element has the same gradient contribution
-        grad = np.full_like(self.data, grad_value)
+        def _backward():
+            if self.grad is None:
+                self.grad = np.zeros_like(self.data)
+            # Store original pad_width
+            nonlocal pad_width
 
-        # Handle keepdims case
-        # We need to preserve the information about:
-        # - Distribute gradient proportionally
-        # - Preserve tensor shape
-        # - Maintain computational graph integrity
+            if isinstance(pad_width, int):
+                if len(self.data.shape) == 1:
+                    pad_width = (pad_width, pad_width)
+                elif len(self.data.shape) == 2:
+                    pad_width = ((pad_width, pad_width), (pad_width, pad_width))
+                elif len(self.data.shape) == 3:
+                    pad_width = ((0, 0), (pad_width, pad_width), (pad_width, pad_width))
+                elif len(self.data.shape) == 4:
+                    pad_width = (
+                        (0, 0),
+                        (0, 0),
+                        (pad_width, pad_width),
+                        (pad_width, pad_width),
+                    )
+                else:
+                    raise ValueError("Unsupported number of dimensions")
 
-        # For example:
-        # Original tensor: (2, 2, 3)
-        # Sum result (keepdims=True): (2, 1, 1)
-        # Indexing mechanism:
-        # - Keep first dimension fully (slice(None))
-        # - Reduce second dimension to first index (0)
-        # - Reduce third dimension to first index (0)
-        if axis and keepdims:
-            slices = [slice(None)] * self.data.ndim
-            for ax in axis:
-                slices[ax] = slice(0, 1)
-            grad[tuple(slices)] = grad_value
+            if (
+                len(self.data.shape) == 4
+            ):  # For 4D tensors (batch, channels, height, width)
+                self.grad += result.grad[
+                    :,
+                    :,
+                    pad_width[2][0] : result.grad.shape[2] - pad_width[2][1],
+                    pad_width[3][0] : result.grad.shape[3] - pad_width[3][1],
+                ]
+            elif len(self.data.shape) == 3:  # For 3D tensors
+                self.grad += result.grad[
+                    :,
+                    pad_width[1][0] : result.grad.shape[1] - pad_width[1][1],
+                    pad_width[2][0] : result.grad.shape[2] - pad_width[2][1],
+                ]
+            elif len(self.data.shape) == 2:  # For 2D tensors
+                self.grad += result.grad[
+                    pad_width[0][0] : result.grad.shape[0] - pad_width[0][1],
+                    pad_width[1][0] : result.grad.shape[1] - pad_width[1][1],
+                ]
+            elif len(self.data.shape) == 1:  # For 1D tensors
+                if isinstance(pad_width[0], tuple):
+                    self.grad = result.grad[
+                        pad_width[0][0] : result.grad.shape[0] - pad_width[0][1]
+                    ]
+                else:
+                    self.grad = result.grad[
+                        pad_width[0] : result.grad.shape[0] - pad_width[0]
+                    ]
+            else:
+                raise ValueError("Unsupported number of dimensions")
 
-        # Accumulate gradient
-        self.grad += grad
+        result._backward = _backward
+        return result
 
     def forward(self, data):
         pass
