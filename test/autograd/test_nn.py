@@ -1,5 +1,5 @@
 from unittest import TestCase
-from autograd.nn import Linear, BatchNorm, Dropout
+from autograd.nn import Linear, BatchNorm, Dropout, Conv2d
 from autograd.tensor import Tensor
 import random
 import numpy as np
@@ -213,3 +213,95 @@ class TestDropout(TestCase):
         dropout.train()
         output = dropout(x)
         assert np.allclose(output.data, np.array([[1, 2], [3, 4], [5, 6]]))
+
+
+class TestConv2d(TestCase):
+    def setUp(self):
+        self.conv2d = Conv2d(
+            in_channels=3, out_channels=2, kernel_size=3, stride=1, padding_mode="valid"
+        )
+        self.x = Tensor(np.random.randn(1, 3, 32, 32))  # shape: (N, in_channels, H, W)
+        self.x_torch = torch.from_numpy(self.x.data).float()
+        self.torch_conv2d = torch.nn.Conv2d(
+            in_channels=3, out_channels=2, kernel_size=3, stride=1, padding=0
+        )
+
+        # Copy our weights to PyTorch conv layer
+        with torch.no_grad():
+            self.torch_conv2d.weight.data = torch.from_numpy(
+                self.conv2d._parameters["weight"].data
+            ).float()
+            self.torch_conv2d.bias.data = torch.from_numpy(
+                self.conv2d._parameters["bias"].data
+            ).float()
+
+    def test_forward(self):
+        output = self.conv2d(self.x)
+        assert output.data.shape == (1, 2, 30, 30)  # shape: (N, out_channels, H', W')
+
+        output_torch = self.torch_conv2d(self.x_torch)
+        assert np.allclose(output.data, output_torch.detach().numpy(), atol=1e-5)
+
+    def test_backward(self):
+        # Create input tensor
+        x = Tensor(np.random.rand(1, 2, 3, 3))  # shape: (N, in_channels, H, W)
+
+        # Create Conv2d layer
+        conv = Conv2d(in_channels=2, out_channels=1, kernel_size=3, padding_mode="same")
+
+        # Forward pass
+        output = conv(x)
+        target = Tensor(np.random.randn(*output.data.shape))
+        loss = ((output - target) ** 2).sum()
+        loss.backward()
+
+        # Create PyTorch tensors and layer
+        x_torch = torch.tensor(x.data, requires_grad=True)
+        conv_torch = torch.nn.Conv2d(2, 1, 3, padding="same")
+        with torch.no_grad():
+            conv_torch.weight.data = torch.from_numpy(conv._parameters["weight"].data)
+            conv_torch.bias.data = torch.from_numpy(conv._parameters["bias"].data)
+
+        # Forward pass in PyTorch
+        output_torch = conv_torch(x_torch)
+        target_torch = torch.tensor(target.data, requires_grad=True)
+        loss_torch = ((output_torch - target_torch) ** 2).sum()
+
+        # Backward pass in PyTorch
+        loss_torch.backward()
+
+        # Assert gradients match
+        assert np.allclose(x.grad.data, x_torch.grad.numpy(), rtol=1e-5, atol=1e-5)
+
+    def test_sum_operation(self):
+        x = Tensor(np.array([[1.0, 2.0], [3.0, 4.0]]), requires_grad=True)
+        y = x.sum()
+        y.backward()
+        assert np.allclose(x.grad.data, np.ones_like(x.data)), "Sum gradient incorrect"
+
+    def test_simple_conv2d(self):
+        # Create a simple 1x1x2x2 input
+        x = Tensor(np.array([[[[1.0, 2.0], [3.0, 4.0]]]]))
+
+        # Create Conv2d with 1x1 kernel
+        conv = Conv2d(in_channels=1, out_channels=1, kernel_size=1)
+
+        # Set weights and bias for easy verification
+        conv._parameters["weight"].data = np.ones((1, 1, 1, 1))
+        conv._parameters["bias"].data = np.zeros(1)
+
+        # Forward pass
+        output = conv(x)
+        print("\nSimple Conv2d test:")
+        print("Input:", x.data)
+        print("Output:", output.data)
+        print("Number of dependencies:", len(output.prev))
+
+        # Backward pass
+        loss = output.sum(keepdims=True)
+        loss.backward()
+
+        print("\nGradients:")
+        print("Input grad:", x.grad)
+        print("Weight grad:", conv._parameters["weight"].grad)
+        print("Bias grad:", conv._parameters["bias"].grad)

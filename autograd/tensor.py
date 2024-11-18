@@ -86,7 +86,9 @@ class Tensor:
                 shape = shape  # Keep single-dimension shape as is
 
         if self.data.size != np.prod(shape):
-            raise ValueError("Size of new view must match size of original tensor")
+            raise ValueError(
+                f"Size of new view must match size of original tensor: {self.data.size} != {np.prod(shape)}"
+            )
         return self._make_view(
             lambda x: x.reshape(shape), lambda x: x.reshape(self.data.shape)
         )
@@ -481,6 +483,21 @@ class Tensor:
             self.requires_grad = True
             self.prev.add(value)
 
+            original_backward = self._backward
+
+            def _backward():
+                # Call original backward first if it exists
+                original_backward()
+
+                if value.requires_grad:
+                    # Get the gradient at the assigned location
+                    if np.isscalar(value.data):
+                        value.grad = self.grad.data[idx].sum()
+                    else:
+                        value.grad = self.grad.data[idx]
+
+            self._backward = _backward
+
     def sum(self, axis=None, keepdims=False):
         """
         Compute the sum of tensor elements
@@ -723,13 +740,15 @@ class Tensor:
                 pad_width = ((0, 0), (pad_width, pad_width), (pad_width, pad_width))
             elif len(self.data.shape) == 4:
                 pad_width = (
-                    (0, 0),
-                    (0, 0),
-                    (pad_width, pad_width),
-                    (pad_width, pad_width),
+                    (0, 0),  # batch
+                    (0, 0),  # channels
+                    (pad_width, pad_width),  # height
+                    (pad_width, pad_width),  # width
                 )
             else:
-                raise ValueError("Unsupported number of dimensions")
+                raise ValueError(
+                    f"Unsupported number of dimensions: {len(self.data.shape)}"
+                )
 
         # Convert PyTorch-style padding to numpy-style padding
         elif isinstance(pad_width, tuple):

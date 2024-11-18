@@ -85,6 +85,106 @@ class Linear(Module):
         return x @ self._parameters["weight"] + self._parameters["bias"]
 
 
+class Conv2d(Module):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size,
+        stride=1,
+        padding_mode="valid",
+        **kwargs,
+    ):
+        """
+        Applies a 2D convolution over an input tensor.
+        The shape convention is the same as PyTorch:
+            input_shape = (N, in_channels, H, W)
+            output_shape = (N, out_channels, H', W')
+
+        where:
+        - N is the batch size
+        - in_channels is the number of input channels
+        - out_channels is the number of kernels, where each kernel is convolved with the input tensor in all input channels
+
+        Args:
+            in_channels (int): Number of input channels.
+            out_channels (int): Number of output channels.
+            kernel_size (int): Size of the convolutional kernel.
+            stride (int, optional): Stride of the convolution. Defaults to 1.
+            padding_mode (str, optional): The amount of padding_mode to add to the input. Defaults to 'valid'.
+            - "valid" means no padding.
+            - "same" means padding such that the output shape is the same as the input shape.
+        """
+        super().__init__(**kwargs)
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding_mode = padding_mode
+
+        # The layer contains N number of kernels, which is equivalent to the out_channels
+        # Each kernel is of shape (in_channels, H, W)
+        # Each kernel needs to be convolved with the input tensor
+        # The resulting tensor will have the shape (out_channels, H', W')
+        self._parameters["weight"] = Tensor(
+            np.random.rand(
+                self.out_channels, self.in_channels, self.kernel_size, self.kernel_size
+            )
+        )
+        self._parameters["bias"] = Tensor(
+            np.random.rand(self.out_channels)
+        )  # one bias per kernel
+
+    def forward(self, x):
+        if not isinstance(x, Tensor):
+            x = Tensor(x)
+
+        batch_size, in_channels, H, W = x.data.shape
+
+        if self.padding_mode == "same":
+            pad_h = (self.kernel_size - 1) // 2
+            pad_w = (self.kernel_size - 1) // 2
+            H_out = H
+            W_out = W
+            x_padded = x.pad(
+                pad_width=((0, 0), (0, 0), (pad_h, pad_h), (pad_w, pad_w)),
+                mode="constant",
+                constant_values=0,
+            )
+        elif self.padding_mode == "valid":
+            x_padded = x
+            H_out = (H - self.kernel_size) // self.stride + 1
+            W_out = (W - self.kernel_size) // self.stride + 1
+        else:
+            raise ValueError(f"Invalid padding mode: {self.padding_mode}")
+
+        # Instead of creating a new output tensor, let's build it up through operations
+        output = Tensor(np.zeros((batch_size, self.out_channels, H_out, W_out)))
+
+        for h_out in range(H_out):
+            for w_out in range(W_out):
+                h_start, w_start = h_out * self.stride, w_out * self.stride
+                h_end, w_end = h_start + self.kernel_size, w_start + self.kernel_size
+
+                # Extract window: (batch_size, in_channels, kernel_size, kernel_size)
+                window = x_padded[:, :, h_start:h_end, w_start:w_end]
+
+                # For each output channel
+                for c_out in range(self.out_channels):
+                    # Element-wise multiply and sum across in_channels, height, and width
+                    # kernel shape: (in_channels, kernel_size, kernel_size)
+                    kernel = self._parameters["weight"][c_out]
+
+                    conv_result = (window * kernel).sum(
+                        axis=(1, 2, 3)
+                    )  # sum over in_channels and spatial dims
+
+                    output[:, c_out, h_out, w_out] = (
+                        conv_result + self._parameters["bias"][c_out]
+                    )
+        return output
+
+
 class BatchNorm(Module):
     """
     Batch Normalization: Accelerating Deep Network Training by Reducing Internal Covariate Shift
