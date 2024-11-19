@@ -339,6 +339,13 @@ class TestTensor(TestCase):
         y.backward()
         assert np.array_equal(x.grad, np.ones_like(x.data))
 
+        # PyTorch comparison
+        x_torch = torch.tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+        y_torch = x_torch.transpose(0, 1)
+        assert np.array_equal(y.data, y_torch.detach().numpy())
+        y_torch.backward(torch.ones_like(y_torch))
+        assert np.array_equal(x.grad, x_torch.grad.numpy())
+
         # Test case 2: 3D tensor transpose with explicit dims
         x = Tensor(
             [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]], requires_grad=True
@@ -349,6 +356,15 @@ class TestTensor(TestCase):
         y.backward()
         assert np.array_equal(x.grad, np.ones_like(x.data))
 
+        # PyTorch comparison
+        x_torch = torch.tensor(
+            [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]], requires_grad=True
+        )
+        y_torch = x_torch.transpose(1, 0)
+        assert np.array_equal(y.data, y_torch.detach().numpy())
+        y_torch.backward(torch.ones_like(y_torch))
+        assert np.array_equal(x.grad, x_torch.grad.numpy())
+
         # Test case 3: Transpose with gradient accumulation
         x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
         y1 = x.transpose()
@@ -356,12 +372,26 @@ class TestTensor(TestCase):
         (y1 + y2).backward()
         assert np.array_equal(x.grad, 2 * np.ones_like(x.data))
 
+        # PyTorch comparison
+        x_torch = torch.tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+        y1_torch = x_torch.transpose(0, 1)
+        y2_torch = x_torch.transpose(0, 1)
+        (y1_torch + y2_torch).backward(torch.ones_like(y1_torch + y2_torch))
+        assert np.array_equal(x.grad, x_torch.grad.numpy())
+
         # Test case 4: 1D tensor transpose (should be no-op)
         x = Tensor([1.0, 2.0, 3.0], requires_grad=True)
         y = x.transpose()
         assert np.array_equal(y.data, x.data)
         y.backward()
         assert np.array_equal(x.grad, np.ones_like(x.data))
+
+        # PyTorch comparison
+        x_torch = torch.tensor([1.0, 2.0, 3.0], requires_grad=True)
+        y_torch = x_torch.clone()
+        assert np.array_equal(y.data, y_torch.detach().numpy())
+        y_torch.backward(torch.ones_like(y_torch))
+        assert np.array_equal(x.grad, x_torch.grad.numpy())
 
         # Test case 5: Compare with PyTorch
         x_tensor = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
@@ -387,6 +417,15 @@ class TestTensor(TestCase):
         expected_grad = np.array([[0.0, 1.0, 1.0], [0.0, 1.0, 1.0], [0.0, 0.0, 0.0]])
         assert np.array_equal(x.grad, expected_grad)
 
+        # PyTorch comparison
+        x_torch = torch.tensor(
+            [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]], requires_grad=True
+        )
+        y_torch = x_torch[:2, 1:].transpose(0, 1)
+        assert np.array_equal(y.data, y_torch.detach().numpy())
+        y_torch.backward(torch.ones_like(y_torch))
+        assert np.array_equal(x.grad, x_torch.grad.numpy())
+
         # Test case 7: Multiple transpositions
         x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
         y = x.transpose().transpose()  # Should get back original
@@ -394,11 +433,23 @@ class TestTensor(TestCase):
         y.backward()
         assert np.array_equal(x.grad, np.ones_like(x.data))
 
+        # PyTorch comparison
+        x_torch = torch.tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+        y_torch = x_torch.transpose(0, 1).transpose(0, 1)  # Should get back original
+        assert np.array_equal(y.data, y_torch.detach().numpy())
+        y_torch.backward(torch.ones_like(y_torch))
+        assert np.array_equal(x.grad, x_torch.grad.numpy())
+
         # Test case 8: requires_grad=False
         x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=False)
         y = x.transpose()
         assert not y.requires_grad
         assert len(y.prev) == 0
+
+        # PyTorch comparison
+        x_torch = torch.tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=False)
+        y_torch = x_torch.transpose(0, 1)
+        assert not y_torch.requires_grad
 
     def test_getitem(self):
         x = Tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], requires_grad=True)
@@ -429,9 +480,25 @@ class TestTensor(TestCase):
         assert np.array_equal(x.grad, np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 2.0]]))
 
     def test_setitem(self):
+        # Scalar assignment
+        x = Tensor([1.0, 2.0, 3.0], requires_grad=True)
+        x[0] = Tensor([4.0], requires_grad=True)
+        assert np.array_equal(x.data, [4.0, 2.0, 3.0])
+
+        # Slice assignment
+        x = Tensor([1.0, 2.0, 3.0, 4.0], requires_grad=True)
+        x[1:3] = Tensor([5.0, 6.0], requires_grad=True)
+        assert np.array_equal(x.data, [1.0, 5.0, 6.0, 4.0])
+
+        # Non-tensor assignment
         x = Tensor([1.0, 2.0, 3.0], requires_grad=True)
         x[0] = 4.0
-        np.array_equal(x.data, [4.0, 2.0, 3.0])
+        assert np.array_equal(x.data, [4.0, 2.0, 3.0])
+
+        # Multidimensional assignment
+        x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+        x[0, 1] = Tensor([5.0], requires_grad=True)
+        assert np.array_equal(x.data, [[1.0, 5.0], [3.0, 4.0]])
 
     def test_iadd(self):
         # Test case 1: Basic in-place addition
@@ -562,4 +629,71 @@ class TestTensor(TestCase):
         assert np.array_equal(y.data, y_torch.detach().numpy())
         y.backward()
         y_torch.backward(torch.ones_like(y_torch))
+        assert np.array_equal(x.grad, x_torch.grad.numpy())
+
+    def test_view(self):
+        # Test 1: Basic view operation and backward
+        x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+        y = x.view(4)
+        # Recreate the test case with PyTorch
+        x_torch = torch.tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+        y_torch = x_torch.view(4)
+
+        # original tensor should not be modified
+        assert np.array_equal(x.data, x_torch.detach().numpy())
+        assert np.array_equal(y.data, y_torch.detach().numpy())
+
+        y.backward()
+        y_torch.backward(torch.ones_like(y_torch))
+        assert np.array_equal(x.grad, x_torch.grad.numpy())
+
+        # Modify through view
+        y_detached = y.detach()
+        y_detached[0] = 5.0
+        y_torch_detached = y_torch.detach()
+        y_torch_detached[0] = 5.0
+
+        assert np.array_equal(x.data, x_torch.detach().numpy())
+        y.backward()
+        y_torch.backward(torch.ones_like(y_torch))
+        assert np.array_equal(x.grad, x_torch.grad.numpy())
+
+        # Test 2: Matrix multiplication with views
+        x = Tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], requires_grad=True)
+        x_view = x.view(3, 2)  # Reshape to (3, 2)
+        y = Tensor([[5.0, 6.0], [7.0, 8.0]], requires_grad=True)  # (2, 2)
+
+        x_torch = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], requires_grad=True)
+        x_torch_view = x_torch.view(3, 2)
+        y_torch = torch.tensor([[5.0, 6.0], [7.0, 8.0]], requires_grad=True)
+
+        xy = x_view @ y  # Result will be (3, 2)
+        xy_torch = x_torch_view @ y_torch
+
+        assert np.array_equal(xy.data, xy_torch.detach().numpy())
+        xy.backward()
+        xy_torch.backward(torch.ones_like(xy_torch))
+
+        # Compare the base tensor's gradient
+        assert np.array_equal(
+            x.grad, x_torch.grad.numpy()
+        )  # Compare base tensor gradients
+        assert np.array_equal(y.grad, y_torch.grad.numpy())
+
+        # Test 3: Power operation on views
+        x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+        x_view = x.view(2, 2)
+
+        # Create new PyTorch tensor for power operation
+        x_torch = torch.tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+        x_torch_view = x_torch.view(2, 2)
+
+        y = x_view**2
+        y_torch = x_torch_view**2
+
+        assert np.array_equal(y.data, y_torch.detach().numpy())
+        y.backward()
+        y_torch.backward(torch.ones_like(y_torch))
+
+        # Compare gradients
         assert np.array_equal(x.grad, x_torch.grad.numpy())
