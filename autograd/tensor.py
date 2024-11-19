@@ -53,8 +53,6 @@ class Tensor:
 
         def _backward():
             if view.grad is not None:
-                if base_tensor.grad is None:
-                    base_tensor.grad = np.zeros_like(base_tensor.data)
                 masked_grad = view.grad * view._backward_mask
                 base_tensor.grad += inverse_view_fn(masked_grad)
 
@@ -368,9 +366,6 @@ class Tensor:
                         self.grad = grad
                         self._backward()
                     else:
-                        self.grad = (
-                            np.zeros_like(data) if self.grad is None else self.grad
-                        )
                         self.grad += grad
 
                 if other.requires_grad:
@@ -379,11 +374,6 @@ class Tensor:
                         other.grad = grad
                         other._backward()
                     else:
-                        other.grad = (
-                            np.zeros_like(other_data)
-                            if other.grad is None
-                            else other.grad
-                        )
                         other.grad += grad
                 return
 
@@ -408,7 +398,6 @@ class Tensor:
                     self.grad = grad
                     self._backward()
                 else:
-                    self.grad = np.zeros_like(data) if self.grad is None else self.grad
                     self.grad += grad
 
             # Compute gradient of loss w.r.t. other.data
@@ -424,9 +413,6 @@ class Tensor:
                     other.grad = grad
                     other._backward()
                 else:
-                    other.grad = (
-                        np.zeros_like(other_data) if other.grad is None else other.grad
-                    )
                     other.grad += grad
 
         result._backward = _backward
@@ -465,7 +451,6 @@ class Tensor:
                     self.grad = grad
                     self._backward()
                 else:
-                    self.grad = np.zeros_like(data) if self.grad is None else self.grad
                     self.grad += grad
 
             # Gradient w.r.t exponent (other)
@@ -487,9 +472,6 @@ class Tensor:
                     other.grad = grad_y
                     other._backward()
                 else:
-                    other.grad = (
-                        np.zeros_like(other_data) if other.grad is None else other.grad
-                    )
                     other.grad += grad_y
 
         result._backward = _backward
