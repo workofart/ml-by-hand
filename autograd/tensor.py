@@ -11,7 +11,6 @@ class Tensor:
         self._base_grad = None  # lazy initialize, we will only initialize if needed in the backward pass
 
         self._backward = lambda: None
-        self._backward_mask = None
         self.prev = (
             set(prev) if prev else set()
         )  # all the operations before this Tensor
@@ -220,12 +219,12 @@ class Tensor:
 
             # Update self gradient
             if self.requires_grad:
-                self._base_grad += self._view_backward_fn(result.grad)
+                self._base_grad += result.grad
 
             # Update other gradient
             if other.requires_grad:
                 other._base_grad += reverse_broadcast(
-                    other._view_backward_fn(result.grad), other._base_data.shape
+                    result.grad, other._base_data.shape
                 )
 
         result._backward = _backward
@@ -333,12 +332,10 @@ class Tensor:
             # Handle vector @ vector case separately (1D @ 1D)
             if self.data.ndim == 1 and other.data.ndim == 1:
                 if self.requires_grad:
-                    self.grad += self._view_backward_fn(result.grad.item()) * other.data
+                    self.grad += result.grad.item() * other.data
 
                 if other.requires_grad:
-                    other.grad += (
-                        other._view_backward_fn(result.grad.item()) * self.data
-                    )
+                    other.grad += result.grad.item() * self.data
                 return
 
             # Handle N-D tensor multiplication (2D and higher)
@@ -400,11 +397,7 @@ class Tensor:
 
             # Gradient w.r.t base (self)
             if self.requires_grad:
-                self.grad += (
-                    other.data
-                    * (self.data ** (other.data - 1))
-                    * self._view_backward_fn(result.grad)
-                )
+                self.grad += other.data * (self.data ** (other.data - 1)) * result.grad
 
             # Gradient w.r.t exponent (other)
             if other.requires_grad:
@@ -422,7 +415,7 @@ class Tensor:
                     )
                 else:
                     grad_y = np.where(valid_base, grad_y, 0)
-                other.grad += other._view_backward_fn(grad_y)
+                other.grad += grad_y
 
         result._backward = _backward
         return result
@@ -449,7 +442,7 @@ class Tensor:
 
             if other.requires_grad:
                 if np.isscalar(other.data) or other.data.shape == ():
-                    other.grad += self._view_backward_fn(float(np.sum(self.grad)))
+                    other.grad += float(np.sum(self.grad))
                 else:
                     # Handle broadcasting
                     grad = self.grad
@@ -462,8 +455,7 @@ class Tensor:
                         for i, (g, o) in enumerate(zip(grad.shape, other.data.shape)):
                             if o == 1:
                                 grad = np.sum(grad, axis=i, keepdims=True)
-                    other.grad += other._view_backward_fn(grad)
-                    # other.grad = other.grad + grad if other.grad is not None else grad
+                    other.grad += grad
 
         self._backward = _backward
         return self
@@ -590,9 +582,7 @@ class Tensor:
                 )
 
             # Add to existing gradient
-            self.grad += self._view_backward_fn(
-                np.broadcast_to(result.grad, expanded_shape)
-            )
+            self.grad += np.broadcast_to(result.grad, expanded_shape)
 
         result._backward = _backward
         return result
@@ -652,7 +642,7 @@ class Tensor:
                 grad[tuple(slices)] = grad_value
 
             # Accumulate gradient
-            self.grad += self._view_backward_fn(grad)
+            self.grad += grad
 
         result._backward = _backward
         return result
@@ -697,7 +687,7 @@ class Tensor:
                     grad[mask] = result.grad / len(axis)
 
             # Add computed gradient to accumulated gradient
-            self.grad += self._view_backward_fn(grad)
+            self.grad += grad
 
         result._backward = _backward
         return result
@@ -732,7 +722,7 @@ class Tensor:
                     # Ensure the gradient has the correct shape for broadcasting
                     while len(grad.shape) < len(self.data.shape):
                         grad = np.expand_dims(grad, axis=0)
-                self.grad += self._view_backward_fn(grad)
+                self.grad += grad
 
             if other.requires_grad:
                 grad = result.grad * (y_matches * (1.0 - 0.5 * x_matches))
@@ -745,7 +735,7 @@ class Tensor:
                     # Ensure the gradient has the correct shape for broadcasting
                     while len(grad.shape) < len(other.data.shape):
                         grad = np.expand_dims(grad, axis=0)
-                other.grad += other._view_backward_fn(grad)
+                other.grad += grad
 
         result._backward = _backward
         return result
@@ -833,35 +823,27 @@ class Tensor:
             if (
                 len(self.data.shape) == 4
             ):  # For 4D tensors (batch, channels, height, width)
-                self.grad += self._view_backward_fn(
-                    result.grad[
-                        :,
-                        :,
-                        pad_width[2][0] : result.grad.shape[2] - pad_width[2][1],
-                        pad_width[3][0] : result.grad.shape[3] - pad_width[3][1],
-                    ]
-                )
+                self.grad += result.grad[
+                    :,
+                    :,
+                    pad_width[2][0] : result.grad.shape[2] - pad_width[2][1],
+                    pad_width[3][0] : result.grad.shape[3] - pad_width[3][1],
+                ]
             elif len(self.data.shape) == 3:  # For 3D tensors
-                self.grad += self._view_backward_fn(
-                    result.grad[
-                        :,
-                        pad_width[1][0] : result.grad.shape[1] - pad_width[1][1],
-                        pad_width[2][0] : result.grad.shape[2] - pad_width[2][1],
-                    ]
-                )
+                self.grad += result.grad[
+                    :,
+                    pad_width[1][0] : result.grad.shape[1] - pad_width[1][1],
+                    pad_width[2][0] : result.grad.shape[2] - pad_width[2][1],
+                ]
             elif len(self.data.shape) == 2:  # For 2D tensors
-                self.grad += self._view_backward_fn(
-                    result.grad[
-                        pad_width[0][0] : result.grad.shape[0] - pad_width[0][1],
-                        pad_width[1][0] : result.grad.shape[1] - pad_width[1][1],
-                    ]
-                )
+                self.grad += result.grad[
+                    pad_width[0][0] : result.grad.shape[0] - pad_width[0][1],
+                    pad_width[1][0] : result.grad.shape[1] - pad_width[1][1],
+                ]
             elif len(self.data.shape) == 1:  # For 1D tensors
-                self.grad += self._view_backward_fn(
-                    result.grad[
-                        pad_width[0][0] : result.grad.shape[0] - pad_width[0][1]
-                    ]
-                )
+                self.grad += result.grad[
+                    pad_width[0][0] : result.grad.shape[0] - pad_width[0][1]
+                ]
             else:
                 raise ValueError("Unsupported number of dimensions")
 
