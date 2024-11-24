@@ -336,11 +336,6 @@ class Tensor:
                 # Ensure gradient matches the original tensor's shape before view
                 other.grad = grad_other.reshape(other.data.shape)
 
-                # Accumulate gradient
-                # other.grad = (
-                #     (other.grad + grad_other) if other.grad is not None else grad_other
-                # )
-
         result._backward = _backward
         return result
 
@@ -553,10 +548,6 @@ class Tensor:
         )
 
         def _backward():
-            # Create gradient array, to ensure each element has the same gradient contribution
-            if result.grad is None:
-                return
-
             upstream_grad = result.grad.data
 
             # Handle keepdims case
@@ -665,10 +656,6 @@ class Tensor:
         )
 
         def _backward():
-            # Ensure we have a gradient to propagate
-            if result.grad is None:
-                return
-
             upstream_grad = result.grad.data
 
             # Create masks for where each input equals the maximum
@@ -774,53 +761,38 @@ class Tensor:
                 mode=mode,
                 constant_values=constant_values,
             ),
+            prev={self},
             requires_grad=self.requires_grad,
         )
 
-        # Update previous operations
-        result.prev = {self}
-
         def _backward():
-            # Ensure we have a gradient to propagate
-            if result.grad is None:
-                return
-
-            # Gradient extraction based on tensor dimensions
             if (
                 len(self.data.shape) == 4
             ):  # For 4D tensors (batch, channels, height, width)
-                grad_slice = [
-                    slice(None),
-                    slice(None),
-                    slice(pad_width[2][0], result.grad.shape[2] - pad_width[2][1]),
-                    slice(pad_width[3][0], result.grad.shape[3] - pad_width[3][1]),
+                self.grad = result.grad[
+                    :,
+                    :,
+                    pad_width[2][0] : result.grad.shape[2] - pad_width[2][1],
+                    pad_width[3][0] : result.grad.shape[3] - pad_width[3][1],
                 ]
-                extracted_grad = result.grad.data[tuple(grad_slice)]
             elif len(self.data.shape) == 3:  # For 3D tensors
-                grad_slice = [
-                    slice(None),
-                    slice(pad_width[1][0], result.grad.shape[1] - pad_width[1][1]),
-                    slice(pad_width[2][0], result.grad.shape[2] - pad_width[2][1]),
+                self.grad = result.grad[
+                    :,
+                    pad_width[1][0] : result.grad.shape[1] - pad_width[1][1],
+                    pad_width[2][0] : result.grad.shape[2] - pad_width[2][1],
                 ]
-                extracted_grad = result.grad.data[tuple(grad_slice)]
             elif len(self.data.shape) == 2:  # For 2D tensors
-                grad_slice = [
-                    slice(pad_width[0][0], result.grad.shape[0] - pad_width[0][1]),
-                    slice(pad_width[1][0], result.grad.shape[1] - pad_width[1][1]),
+                self.grad = result.grad[
+                    pad_width[0][0] : result.grad.shape[0] - pad_width[0][1],
+                    pad_width[1][0] : result.grad.shape[1] - pad_width[1][1],
                 ]
-                extracted_grad = result.grad.data[tuple(grad_slice)]
             elif len(self.data.shape) == 1:  # For 1D tensors
-                grad_slice = [
-                    slice(pad_width[0][0], result.grad.shape[0] - pad_width[0][1])
+                self.grad = result.grad[
+                    pad_width[0][0] : result.grad.shape[0] - pad_width[0][1]
                 ]
-                extracted_grad = result.grad.data[tuple(grad_slice)]
             else:
                 raise ValueError("Unsupported number of dimensions")
 
-            # Accumulate gradient
-            self.grad = extracted_grad
-
-        # Attach backward method
         result._backward = _backward
         return result
 
@@ -831,13 +803,17 @@ class Tensor:
         if not self.requires_grad:
             return
 
-        # Initialize gradient if none provided
-        if grad is None:
-            grad = Tensor(np.ones_like(self.data), requires_grad=False)
-        elif not isinstance(grad, Tensor):
-            grad = Tensor(grad, requires_grad=False)
+        # TODO: Refactor to disallow scalar gradients to follow the same matmul assumption as Pytorch.
 
-        # Initialize gradient
+        # Initialize gradient if none provided
+        # Handle scalar case first
+        if grad is None:
+            if np.isscalar(self.data) or (
+                isinstance(self.data, np.ndarray) and self.data.ndim == 0
+            ):
+                grad = np.array(1.0)
+            else:
+                grad = np.ones_like(self.data)
         self.grad = grad
 
         # Build computational graph in reverse order
@@ -849,13 +825,14 @@ class Tensor:
                 visited.add(node)
                 for prev in node.prev:
                     if prev.requires_grad:
-                        # Initialize the intermediate gradients
+                        # Initialize the intermediate gradients, the initialization above is
+                        # only for the leaf (last) node in which we call backward().
                         if prev.grad is None:
-                            prev.grad = Tensor(
-                                np.zeros_like(prev.data, dtype=np.float64),
-                                requires_grad=False,
-                            )
+                            prev.grad = np.zeros_like(prev.data, dtype=np.float64)
                         dfs(prev)
+                # the order in which we append to the list is in reverse order
+                # because we always move backwards looking at the previous nodes
+                # that point to the current node
                 topological_sorted_tensors.append(node)
 
         dfs(self)
