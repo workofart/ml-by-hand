@@ -18,7 +18,7 @@ def relu(x: Tensor) -> Tensor:
 
     def _backward():
         # dL/dx = dL/dy * dy/dx
-        x.grad += out.grad * (x.data > 0)
+        x.grad = out.grad * (x.data > 0)
 
     out._backward = _backward
     return out
@@ -37,7 +37,7 @@ def sigmoid(x: Tensor) -> Tensor:
         logger.debug(f"out.data shape: {out.data.shape}")
         logger.debug(f"x.grad shape: {x.grad.shape}")
         # d(sigmoid(x))/dx = sigmoid(x) * (1 - sigmoid(x))
-        x.grad += out.grad * out.data * (1 - out.data)
+        x.grad = out.grad * out.data * (1 - out.data)
         logger.debug(f"After backward x.grad shape: {x.grad.shape}")
 
     out._backward = _backward
@@ -71,7 +71,7 @@ def softmax(x: Tensor) -> Tensor:
             grad = probs[sample_idx][:, None] * (
                 identity_matrix - probs[sample_idx][None, :]
             )
-            x.grad[sample_idx] += out.grad[sample_idx] @ grad
+            x.grad[sample_idx] = out.grad[sample_idx] @ grad
 
     out._backward = _backward
     return out

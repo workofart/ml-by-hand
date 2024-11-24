@@ -160,15 +160,9 @@ class Tensor:
             return np.transpose(x, _get_transpose_axes(dim0, dim1))
 
         def backward_fn(grad):
-            if grad.shape == self.data.shape:
-                # transpose gradient passed to backward() function back to original orientation
-                return Tensor(
-                    np.transpose(grad.data, _get_transpose_axes(dim0, dim1)),
-                    requires_grad=False,
-                )
-            return (
-                grad if isinstance(grad, Tensor) else Tensor(grad, requires_grad=False)
-            )
+            grad_data = grad.data if isinstance(grad, Tensor) else np.asarray(grad)
+            transposed_grad = np.transpose(grad_data, _get_transpose_axes(dim0, dim1))
+            return transposed_grad
 
         # Create new view
         return self._make_view(forward_fn, backward_fn)
@@ -281,18 +275,10 @@ class Tensor:
             # Handle vector @ vector case separately (1D @ 1D)
             if self.data.ndim == 1 and other.data.ndim == 1:
                 if self.requires_grad:
-                    self.grad = (
-                        (self.grad + result.grad * other.data)
-                        if self.grad is not None
-                        else result.grad * other.data
-                    )
+                    self.grad = result.grad * other.data
 
                 if other.requires_grad:
-                    other.grad = (
-                        (other.grad + result.grad * self.data)
-                        if other.grad is not None
-                        else result.grad * self.data
-                    )
+                    other.grad = result.grad * self.data
                 return
 
             # Handle N-D tensor multiplication (2D and higher)
@@ -364,7 +350,7 @@ class Tensor:
             # Gradient w.r.t base (self)
             if self.requires_grad:
                 grad = other * (self ** (other - 1)) * result.grad
-                self.grad = self.grad + grad if self.grad is not None else grad
+                self.grad = grad
 
             # Gradient w.r.t exponent (other)
             if other.requires_grad:
@@ -382,7 +368,7 @@ class Tensor:
                 else:
                     grad_y = np.where(valid_base, grad_y.data, 0)
 
-                other.grad = other.grad + grad_y if other.grad is not None else grad_y
+                other.grad = grad_y
 
         result._backward = _backward
         return result
@@ -426,7 +412,7 @@ class Tensor:
                             grad = grad.sum(axis=len(grad.shape) - 1 - i, keepdims=True)
 
                     grad = grad.reshape(other.data.shape)
-                other.grad = other.grad + grad if other.grad is not None else grad
+                other.grad = grad
 
         self._backward = _backward
         return self
@@ -440,27 +426,20 @@ class Tensor:
 
         def backward_fn(grad):
             grad_data = grad.data if isinstance(grad, Tensor) else np.asarray(grad)
+            return grad_data  # don't expand to full size yet
 
-            # passed to backward() function Create zero array matching original shape
-            full_grad = np.zeros_like(self.data)
+        view = self._make_view(forward_fn, backward_fn)
 
-            # Simplified indexing logic
-            try:
-                # Handle both scalar and array gradients
-                if np.ndim(grad_data) == 0:
-                    grad_value = float(grad_data)
-                else:
-                    # Ensure gradient matches indexed shape
-                    grad_value = grad_data.reshape(np.array(self.data[idx]).shape)
+        def _backward():
+            if view.grad is not None:
+                backward_grad = view._view_backward_fn(view.grad)
+                # Create full-size gradient only at the final step
+                full_grad = np.zeros_like(self.data)
+                full_grad[idx] = backward_grad
+                self.grad = full_grad
 
-                # Accumulate gradient
-                full_grad[idx] = grad_value
-            except Exception as e:
-                raise ValueError(f"Gradient shape mismatch: {e}")
-
-            return full_grad
-
-        return self._make_view(forward_fn, backward_fn)
+        view._backward = _backward
+        return view
 
     def __setitem__(
         self, idx: Union[int, slice, tuple], value: Union[Self, float, int]
@@ -596,11 +575,7 @@ class Tensor:
             scaled_grad = broadcasted_grad / num_elements
 
             # Accumulate gradient
-            self.grad = (
-                self.grad + Tensor(scaled_grad, requires_grad=False)
-                if self.grad is not None
-                else Tensor(scaled_grad, requires_grad=False)
-            )
+            self.grad = scaled_grad
 
         result._backward = _backward
         return result
@@ -642,20 +617,16 @@ class Tensor:
                     grad = np.zeros_like(self.data)
 
                     # Create mask of max elements along specified axes
-                    max_mask = self.data == np.max(self.data, axis=axis, keepdims=True)
+                    max_mask = self.data == np.max(self.data, axis=ax, keepdims=True)
 
                     # Distribute gradient to max elements
                     # If multiple elements are max, distribute gradient equally
                     grad[max_mask] = upstream_grad / np.sum(
-                        max_mask, axis=axis, keepdims=True
+                        max_mask, axis=ax, keepdims=True
                     )
 
             # Add computed gradient to accumulated gradient
-            self.grad = (
-                (self.grad + Tensor(grad, requires_grad=False))
-                if self.grad is not None
-                else Tensor(grad, requires_grad=False)
-            )
+            self.grad = grad
 
         result._backward = _backward
         return result
@@ -828,11 +799,7 @@ class Tensor:
                 raise ValueError("Unsupported number of dimensions")
 
             # Accumulate gradient
-            self.grad = (
-                (self.grad + Tensor(extracted_grad, requires_grad=False))
-                if self.grad is not None
-                else Tensor(extracted_grad, requires_grad=False)
-            )
+            self.grad = extracted_grad
 
         # Attach backward method
         result._backward = _backward
