@@ -141,12 +141,29 @@ class TestBatchNorm(TestCase):
         output = self.bn(x)
         output_torch = self.torch_bn(x_torch)
 
+        # Debug: Print normalization details
+        print("Normalized output:")
+        print("Our implementation:", output.data)
+        print("PyTorch implementation:", output_torch.detach().numpy())
+
+        # Debug: Print running stats
+        print("\nRunning Stats:")
+        print("Our running mean:", self.bn.running_mean)
+        print("PyTorch running mean:", self.torch_bn.running_mean.numpy())
+        print("Our running var:", self.bn.running_var)
+        print("PyTorch running var:", self.torch_bn.running_var.numpy())
+
         # Create a simple loss = sum of all elements
         loss = output.sum()
         loss_torch = output_torch.sum()
 
         loss.backward()
         loss_torch.backward()
+
+        # Debug: Print gradients
+        print("\nGradients:")
+        print("Our input gradient:", x.grad)
+        print("PyTorch input gradient:", x_torch.grad)
 
         assert np.allclose(x.grad.data, x_torch.grad.numpy(), atol=1e-5)
 

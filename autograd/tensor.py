@@ -30,16 +30,23 @@ class Tensor:
             self._grad = None
             return
 
-        # Convert to Tensor if not already
-        if not isinstance(value, Tensor):
-            value = Tensor(value, requires_grad=False)
-
-        # Set or accumulate gradient
-        if self._grad is None:
-            self._grad = value
+        # Convert to numpy array directly if it's a Tensor
+        if isinstance(value, Tensor):
+            value_data = value.data
         else:
-            # Ensure we're adding compatible shapes
-            self._grad = self._grad + value
+            value_data = np.asarray(value)
+
+        # Set or accumulate gradient using numpy operations
+        if self._grad is None:
+            self._grad = Tensor(value_data, requires_grad=False)
+        else:
+            # IMPORTANT: this is not the same as self.data + value_data
+            # We need to do in-place addition here to preserve any views or references
+            # to the original gradient. For example, multiple operations
+            # (e.g. __mul__, __add__) might update the same gradient tensor,
+            # and we need to ensure that all updates are correctly reflected in
+            # the same underlying array.
+            self._grad.data += value_data
 
     def _make_view(self, view_forward_fn, view_backward_fn) -> Self:
         """Create a view of the tensor"""
@@ -217,10 +224,22 @@ class Tensor:
 
         def _backward():
             if self.requires_grad:
-                self.grad = other * result.grad
+                # Handle broadcasting for self's gradient
+                grad = other * result.grad
+                if grad.shape != self.shape:
+                    # Sum across broadcasted dimensions
+                    reduce_dims = tuple(range(len(grad.shape) - len(self.shape)))
+                    grad = grad.sum(axis=reduce_dims)
+                self.grad = grad
 
             if other.requires_grad:
-                other.grad = self * result.grad
+                # Handle broadcasting for other's gradient
+                grad = self * result.grad
+                if grad.shape != other.shape:
+                    # Sum across broadcasted dimensions
+                    reduce_dims = tuple(range(len(grad.shape) - len(other.shape)))
+                    grad = grad.sum(axis=reduce_dims)
+                other.grad = grad
 
         result = Tensor(
             self.data * other.data,
