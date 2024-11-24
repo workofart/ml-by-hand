@@ -114,7 +114,7 @@ def binary_cross_entropy(y_pred: Tensor, y_true: Union[Tensor, np.ndarray]) -> T
         # dL/dpred = -(y/p - (1-y)/(1-p))
         logger.debug(f"y_true shape: {y_true.shape}")
         logger.debug(f"y_pred shape: {y_pred.data.shape}")
-        y_pred.grad += -(y_true / y_pred_prob - (1 - y_true) / (1 - y_pred_prob)) / len(
+        y_pred.grad = -(y_true / y_pred_prob - (1 - y_true) / (1 - y_pred_prob)) / len(
             y_pred_prob
         )
         logger.debug(f"y_pred.grad shape after: {y_pred.grad.shape}")
@@ -163,7 +163,7 @@ def sparse_cross_entropy(y_pred: Tensor, y_true: Union[Tensor, np.ndarray]) -> T
     def _backward():
         grad = np.zeros_like(y_pred_prob)
         grad[range(n_samples), y_true] = -1.0 / selected_probs
-        y_pred.grad += grad / n_samples
+        y_pred.grad = grad / n_samples
 
     out._backward = _backward
     return out
@@ -222,7 +222,7 @@ def hinge_loss(
         grad = -y_true.data * margin_violated
         if reduction == "mean":
             grad = grad / len(grad)
-        y_pred.grad += loss.grad * grad
+        y_pred.grad = loss.grad * grad
 
     loss._backward = _backward
     return loss

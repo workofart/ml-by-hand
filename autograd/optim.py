@@ -29,7 +29,7 @@ class Optimizer:
         """
         for k, module in self.model_parameters.items():
             for param_name, param in module.items():
-                param.grad = np.zeros_like(param.data)
+                param.grad = None
 
     def step(self):
         """
@@ -48,11 +48,11 @@ class SGD(Optimizer):
 
     def step(self):
         logger.debug(
-            f"Gradient norm {sum([np.linalg.norm(v.grad) for k, module in self.model_parameters.items() for _, v in module.items() ])}"
+            f"Gradient norm {sum([np.linalg.norm(v.grad.data) for k, module in self.model_parameters.items() for _, v in module.items() ])}"
         )
         for k, module in self.model_parameters.items():
             for param_name, param in module.items():
-                param.data -= self.lr * param.grad
+                param.data -= self.lr * param.grad.data
 
 
 class Adam(Optimizer):
@@ -88,7 +88,7 @@ class Adam(Optimizer):
                 param_id = id(
                     param
                 )  # to avoid cases where the same parameter name is shared across different modules
-                grad = param.grad
+                grad = param.grad.data
 
                 # update first order momentum
                 self.m[param_id] = (

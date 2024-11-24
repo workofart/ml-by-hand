@@ -51,7 +51,7 @@ class TestLossFunctions(TestCase):
 
         bce_loss.backward()
         torch_bce_loss.backward()
-        assert np.allclose(y_pred_probs.grad, y_pred_probs_torch.grad)
+        assert np.allclose(y_pred_probs.grad.data, y_pred_probs_torch.grad)
 
         # Test Case 2: Pass in logits, not probabilities
         with self.assertRaises((ValueError, RuntimeError)):
@@ -76,7 +76,7 @@ class TestLossFunctions(TestCase):
 
         bce_loss.backward()
         torch_bce_loss.backward()
-        assert np.allclose(y_pred_logits.grad, y_pred_logits_torch.grad)
+        assert np.allclose(y_pred_logits.grad.data, y_pred_logits_torch.grad)
 
     def test_sparse_cross_entropy(self):
         y_pred_logits = Tensor(
@@ -113,7 +113,7 @@ class TestLossFunctions(TestCase):
 
         sce_loss.backward()
         ce_loss_torch.backward()
-        assert np.allclose(y_pred_logits.grad, y_pred_logits_torch.grad)
+        assert np.allclose(y_pred_logits.grad.data, y_pred_logits_torch.grad)
 
         # Test Case 2: Pass in probabilities
         # Torch accepts logits
@@ -171,22 +171,22 @@ class TestLossFunctions(TestCase):
         expected_grad_none = np.where(
             1 - y_true * y_pred.data > 0, -y_true, 0
         )  # [0, 1, 0]
-        assert np.allclose(y_pred.grad, expected_grad_none)
-        y_pred.grad = 0  # Reset gradients
+        assert np.allclose(y_pred.grad.data, expected_grad_none)
+        y_pred.grad = None  # Reset gradients
 
         # Mean reduction
         y_pred_mean = Tensor(data=np.array([1.0, 2.0, 3.0]), requires_grad=True)
         hinge_loss_mean = functional.hinge_loss(y_pred_mean, y_true, reduction="mean")
         hinge_loss_mean.backward()
         expected_grad_mean = expected_grad_none / len(expected_grad_none)  # [0, 1/3, 0]
-        assert np.allclose(y_pred_mean.grad, expected_grad_mean)
+        assert np.allclose(y_pred_mean.grad.data, expected_grad_mean)
 
         # Sum reduction
         y_pred_sum = Tensor(data=np.array([1.0, 2.0, 3.0]), requires_grad=True)
         hinge_loss_sum = functional.hinge_loss(y_pred_sum, y_true, reduction="sum")
         hinge_loss_sum.backward()
         expected_grad_sum = expected_grad_none  # [0, 1, 0]
-        assert np.allclose(y_pred_sum.grad, expected_grad_sum)
+        assert np.allclose(y_pred_sum.grad.data, expected_grad_sum)
 
         # Test invalid reduction
         with self.assertRaises(ValueError):

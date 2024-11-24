@@ -19,8 +19,8 @@ class TestSGD(TestCase):
 
     def test_zero_grad(self):
         self.optimizer.zero_grad()
-        self.assertEqual(self.param1.grad, 0)
-        self.assertEqual(self.param2.grad, 0)
+        self.assertEqual(self.param1.grad, None)
+        self.assertEqual(self.param2.grad, None)
 
     def test_step(self):
         self.param1.grad = 0.1
@@ -50,16 +50,12 @@ class TestAdam(TestCase):
         self.grad1_val = 0.1
         self.grad2_val = 0.2
         self.param1 = Tensor(1.0)
-        self.param1.grad = self.grad1_val
         self.param2 = Tensor(2.0)
-        self.param2.grad = self.grad2_val
         self.params = [self.param1, self.param2]
         self.torch_params = [
             torch.nn.Parameter(torch.tensor(1.0)),
             torch.nn.Parameter(torch.tensor(2.0)),
         ]
-        self.torch_params[0].grad = torch.tensor(self.grad1_val)
-        self.torch_params[1].grad = torch.tensor(self.grad2_val)
 
         # Init optimizers
         self.optim = Adam(
@@ -83,12 +79,12 @@ class TestAdam(TestCase):
 
         assert np.allclose(
             self.param1.data,
-            self.torch_params[0].data.item(),
+            self.torch_params[0].detach().numpy(),
             atol=1e-6,
         )
         assert np.allclose(
             self.param2.data,
-            self.torch_params[1].data.item(),
+            self.torch_params[1].detach().numpy(),
             atol=1e-6,
         )
 
@@ -106,20 +102,17 @@ class TestAdam(TestCase):
             # Compare parameters
             assert np.allclose(
                 self.param1.data,
-                self.torch_params[0].data.item(),
+                self.torch_params[0].detach().numpy(),
                 atol=1e-6,
             )
             assert np.allclose(
                 self.param2.data,
-                self.torch_params[1].data.item(),
+                self.torch_params[1].detach().numpy(),
                 atol=1e-6,
             )
 
             # Set new gradients for next step
-            self.param1.grad = self.grad1_val
-            self.param2.grad = self.grad2_val
-            self.torch_params[0].grad = torch.tensor(self.grad1_val)
-            self.torch_params[1].grad = torch.tensor(self.grad2_val)
+            self.setUp()
 
     def test_different_gradients(self):
         # Test with different gradient values
@@ -148,11 +141,11 @@ class TestAdam(TestCase):
             # Compare results
             assert np.allclose(
                 self.param1.data,
-                self.torch_params[0].data.item(),
+                self.torch_params[0].detach().numpy(),
                 atol=1e-6,
             )
             assert np.allclose(
                 self.param2.data,
-                self.torch_params[1].data.item(),
+                self.torch_params[1].detach().numpy(),
                 atol=1e-6,
             )

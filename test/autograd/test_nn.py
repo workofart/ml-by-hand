@@ -32,7 +32,7 @@ class TestLinear(TestCase):
 
         # weight gradient = x.T @ out.grad = [[2], [2], [2], [2]] * [1, 1]
         assert np.array_equal(
-            parameters["weight"].grad,
+            parameters["weight"].grad.data,
             [
                 [2, 2],
                 [2, 2],
@@ -40,8 +40,8 @@ class TestLinear(TestCase):
                 [2, 2],
             ],
         )
-        assert np.array_equal(parameters["bias"].grad, [1, 1])
-        assert np.array_equal(out.grad, [[1, 1]])
+        assert np.array_equal(parameters["bias"].grad.data, [1, 1])
+        assert np.array_equal(out.grad.data, [[1, 1]])
 
         # Trying to pass in (4x1 matrix)
         x = [[2], [2], [2], [2]]
@@ -52,10 +52,10 @@ class TestLinear(TestCase):
         assert parameters["bias"].data.shape == (2,)
 
         out.backward()
-        assert np.allclose(parameters["weight"].grad, [[8], [8]])
-        assert np.allclose(parameters["bias"].grad, [[4], [4]])
+        assert np.allclose(parameters["weight"].grad.data, [[8], [8]])
+        assert np.allclose(parameters["bias"].grad.data, [[4], [4]])
         assert np.array_equal(
-            out.grad,
+            out.grad.data,
             [
                 [1, 1],
                 [1, 1],
@@ -148,7 +148,36 @@ class TestBatchNorm(TestCase):
         loss.backward()
         loss_torch.backward()
 
-        assert np.allclose(x.grad, x_torch.grad.numpy(), atol=1e-5)
+        assert np.allclose(x.grad.data, x_torch.grad.numpy(), atol=1e-5)
+
+    def test_batchnorm_components(self):
+        x_data = np.array([[1.0, 2.0], [4.0, 5.0], [7.0, 8.0]], dtype=np.float32)
+        x = Tensor(x_data)
+
+        # 1. Test mean calculation
+        mean = x.mean(axis=0)
+        print("Mean:", mean.data)
+
+        # 2. Test centering (x - mean)
+        centered = x - mean
+        print("Centered:", centered.data)
+        print("Centered sum:", centered.data.sum(axis=0))  # Should be ~0
+
+        # 3. Test variance calculation
+        var = (centered**2).sum(axis=0) / x.data.shape[0]
+        print("Variance:", var.data)
+
+        # 4. Test normalization
+        std = (var + 1e-5) ** 0.5
+        normalized = centered / std
+        print("Normalized:", normalized.data)
+        print("Normalized mean:", normalized.data.mean(axis=0))  # Should be ~0
+        print("Normalized std:", normalized.data.std(axis=0))  # Should be ~1
+
+        # 5. Test gradients
+        normalized.sum().backward()
+        print("Input gradients:", x.grad.data)
+        print("Gradient sum per feature:", x.grad.data.sum(axis=0))  # Should be ~0
 
 
 class TestDropout(TestCase):
