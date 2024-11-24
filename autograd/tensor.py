@@ -161,7 +161,7 @@ class Tensor:
 
         def backward_fn(grad):
             if grad.shape == self.data.shape:
-                # transpose gradient back to original orientation
+                # transpose gradient passed to backward() function back to original orientation
                 return Tensor(
                     np.transpose(grad.data, _get_transpose_axes(dim0, dim1)),
                     requires_grad=False,
@@ -200,9 +200,7 @@ class Tensor:
 
             if self.requires_grad:
                 # Should use grad setter instead of direct assignment
-                self.grad = (
-                    self.grad + result.grad if self.grad is not None else result.grad
-                )
+                self.grad = result.grad
 
             if other.requires_grad:
                 # Need to handle broadcasting reduction here
@@ -214,11 +212,7 @@ class Tensor:
                     )
                     reduced_grad = result.grad.sum(axis=reduce_dims)
 
-                other.grad = (
-                    other.grad + reduced_grad
-                    if other.grad is not None
-                    else reduced_grad
-                )
+                other.grad = reduced_grad
 
         result._backward = _backward
         return result
@@ -229,12 +223,10 @@ class Tensor:
 
         def _backward():
             if self.requires_grad:
-                grad = other * result.grad  # Let Tensor handle the operation
-                self.grad = self.grad + grad if self.grad is not None else grad
+                self.grad = other * result.grad
 
             if other.requires_grad:
-                grad = self * result.grad  # Let Tensor handle the operation
-                other.grad = other.grad + grad if other.grad is not None else grad
+                other.grad = self * result.grad
 
         result = Tensor(
             self.data * other.data,
@@ -323,12 +315,7 @@ class Tensor:
                 grad_self = np.matmul(result.grad.data, other.data.swapaxes(-1, -2))
 
                 # Ensure gradient matches the original tensor's shape before view
-                grad_self = grad_self.reshape(self.data.shape)
-
-                # Accumulate gradient
-                self.grad = (
-                    (self.grad + grad_self) if self.grad is not None else grad_self
-                )
+                self.grad = grad_self.reshape(self.data.shape)
 
             # Compute gradient of loss w.r.t. other.data
             # d(loss) / d(other.data) = d(loss) / d(result) * d(result) / d(other.data)
@@ -342,12 +329,12 @@ class Tensor:
                 grad_other = np.matmul(self.data.swapaxes(-1, -2), result.grad.data)
 
                 # Ensure gradient matches the original tensor's shape before view
-                grad_other = grad_other.reshape(other.data.shape)
+                other.grad = grad_other.reshape(other.data.shape)
 
                 # Accumulate gradient
-                other.grad = (
-                    (other.grad + grad_other) if other.grad is not None else grad_other
-                )
+                # other.grad = (
+                #     (other.grad + grad_other) if other.grad is not None else grad_other
+                # )
 
         result._backward = _backward
         return result
@@ -454,7 +441,7 @@ class Tensor:
         def backward_fn(grad):
             grad_data = grad.data if isinstance(grad, Tensor) else np.asarray(grad)
 
-            # Create zero array matching original shape
+            # passed to backward() function Create zero array matching original shape
             full_grad = np.zeros_like(self.data)
 
             # Simplified indexing logic
