@@ -158,31 +158,50 @@ class Conv2d(Module):
         else:
             raise ValueError(f"Invalid padding mode: {self.padding_mode}")
 
-        # Instead of creating a new output tensor, let's build it up through operations
-        output = Tensor(np.zeros((batch_size, self.out_channels, H_out, W_out)))
+        # Extract windows while maintaining computational graph
+        windows = self._extract_windows(
+            x_padded, H_out, W_out
+        )  # shape: (batch_size, H_out * W_out, in_channels * kernel_size * kernel_size)
 
-        for h_out in range(H_out):
-            for w_out in range(W_out):
-                h_start, w_start = h_out * self.stride, w_out * self.stride
-                h_end, w_end = h_start + self.kernel_size, w_start + self.kernel_size
+        # Reshape kernel for matrix multiplication
+        kernel_flat = self._parameters["weight"].reshape(
+            self.out_channels, -1
+        )  # shape: (out_channels, in_channels * kernel_size * kernel_size)
 
-                # Extract window: (batch_size, in_channels, kernel_size, kernel_size)
-                window = x_padded[:, :, h_start:h_end, w_start:w_end]
+        # Compute convolution using matrix multiplication
+        output = (
+            windows @ kernel_flat.T
+        )  # shape: (batch_size, H_out * W_out, out_channels)
 
-                # For each output channel
-                for c_out in range(self.out_channels):
-                    # Element-wise multiply and sum across in_channels, height, and width
-                    # kernel shape: (in_channels, kernel_size, kernel_size)
-                    kernel = self._parameters["weight"][c_out]
+        # Reshape output to (N, out_channels, H_out, W_out)
+        output = output.reshape(batch_size, H_out, W_out, self.out_channels)
+        output = output.permute(0, 3, 1, 2)
 
-                    conv_result = (window * kernel).sum(
-                        axis=(1, 2, 3)
-                    )  # sum over in_channels and spatial dims
+        # Add bias
+        for c in range(self.out_channels):
+            output[:, c] = output[:, c] + self._parameters["bias"][c]
 
-                    output[:, c_out, h_out, w_out] = (
-                        conv_result + self._parameters["bias"][c_out]
-                    )
         return output
+
+    def _extract_windows(self, x_padded, H_out, W_out):
+        """Extract all windows using Tensor operations to maintain the computational graph"""
+        batch_size, in_channels, H, W = x_padded.shape
+        windows_list = []
+
+        for i in range(0, H - self.kernel_size + 1, self.stride):
+            for j in range(0, W - self.kernel_size + 1, self.stride):
+                window = x_padded[
+                    :, :, i : i + self.kernel_size, j : j + self.kernel_size
+                ]
+                # Reshape window to (batch_size, in_channels * kernel_size * kernel_size)
+                window_flat = window.reshape(batch_size, -1)
+                windows_list.append(window_flat)
+
+        # Stack windows along a new dimension instead of concatenating
+        windows = Tensor.stack(
+            windows_list, axis=1
+        )  # shape: (batch_size, H_out * W_out, in_channels * kernel_size * kernel_size)
+        return windows
 
 
 class BatchNorm(Module):

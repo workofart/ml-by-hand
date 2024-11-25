@@ -895,7 +895,31 @@ class Tensor:
         return self.data.shape
 
     def reshape(self, *shape):
-        return self.view(*shape)
+        """Reshape tensor while maintaining gradient information."""
+        if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
+            shape = shape[0]
+
+        view = Tensor(
+            self.data.reshape(shape),
+            requires_grad=self.requires_grad,
+            prev={self} if self.requires_grad else None,
+        )
+
+        if self.requires_grad:
+
+            def _backward():
+                if view.grad is not None:
+                    grad_data = (
+                        view.grad.data if isinstance(view.grad, Tensor) else view.grad
+                    )
+                    if self.grad is None:
+                        self.grad = Tensor(grad_data.reshape(self.data.shape))
+                    else:
+                        self.grad.data += grad_data.reshape(self.data.shape)
+
+            view._backward = _backward
+
+        return view
 
     def detach(self) -> Self:
         """
