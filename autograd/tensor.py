@@ -56,27 +56,26 @@ class Tensor:
             requires_grad=self.requires_grad,
         )
 
-        # Store the forward and backward functions
-        view._view_forward_fn = lambda x: view_forward_fn(self._view_forward_fn(x))
-        view._view_backward_fn = lambda x: self._view_backward_fn(view_backward_fn(x))
+        # Store the view functions
+        view._view_forward_fn = lambda x: view_forward_fn(x)
+        view._view_backward_fn = lambda x: view_backward_fn(x)
 
         def _backward_view():
             if view.grad is not None:
-                # Transform the gradient using the composed backward function
+                # Transform gradient to original shape
                 grad_data = (
                     view.grad.data if isinstance(view.grad, Tensor) else view.grad
                 )
-                transformed_grad = view._view_backward_fn(grad_data)
+                transformed_grad = view_backward_fn(grad_data)
 
-                if self._grad is None:
-                    self._grad = Tensor(transformed_grad, requires_grad=False)
+                # Initialize or accumulate gradient in original tensor
+                if self.grad is None:
+                    self.grad = transformed_grad
                 else:
-                    # Ensure shapes match before accumulation
-                    if self._grad.data.shape != transformed_grad.shape:
-                        raise ValueError(
-                            f"Gradient shapes don't match: existing {self._grad.data.shape} vs new {transformed_grad.shape}"
-                        )
-                    self._grad.data += transformed_grad
+                    if isinstance(self.grad, Tensor):
+                        self.grad.data += transformed_grad
+                    else:
+                        self.grad += transformed_grad
 
         view._backward = _backward_view
         return view
@@ -86,11 +85,8 @@ class Tensor:
         Create a view of the tensor with the same data but with the specified shape
         A view function is a callable that transforms the original tensor data into a new shape or representation without copying the underlying data.
         """
-        if len(shape) == 1:
-            if isinstance(shape[0], (tuple, list)):
-                shape = tuple(shape[0])
-            else:
-                shape = shape  # Keep single-dimension shape as is
+        if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
+            shape = shape[0]
 
         # Handle -1 in shape
         if -1 in shape:
@@ -316,6 +312,8 @@ class Tensor:
                    result.grad = (num_samples, num_classes)
                    x.T * result.grad = (num_features, num_classes)  # same shape as y
             """
+            grad_data = result.grad.data
+
             # Handle vector @ vector case separately (1D @ 1D)
             if self.data.ndim == 1 and other.data.ndim == 1:
                 if self.requires_grad:
@@ -341,11 +339,15 @@ class Tensor:
             # other.T:      (p, m) --> T operation is equivalent to swapaxes(-1, -2)
             # matmul(result.grad, other.T) = (n, p) @ (p, m) = (n, m) = self.grad
             if self.requires_grad:
-                # Compute gradient using matrix multiplication rules
-                grad_self = np.matmul(result.grad.data, other.data.swapaxes(-1, -2))
-
-                # Ensure gradient matches the original tensor's shape before view
-                self.grad = grad_self.reshape(self.data.shape)
+                if grad_data.ndim == self.data.ndim == 2:
+                    # Simple matrix multiplication case
+                    self_grad = np.matmul(grad_data, other.data.T)
+                else:
+                    # Batched case: handle each batch independently
+                    self_grad = np.matmul(
+                        grad_data, other.data.T
+                    )  # Broadcasting handles batches
+                self.grad = self_grad
 
             # Compute gradient of loss w.r.t. other.data
             # d(loss) / d(other.data) = d(loss) / d(result) * d(result) / d(other.data)
@@ -355,11 +357,15 @@ class Tensor:
             # self.T:       (m, n) --> T operation is equivalent to swapaxes(-1, -2)
             # matmul(self.T, result.grad) = (m, n) @ (n, p) = (m, p) = other.grad
             if other.requires_grad:
-                # Compute gradient using matrix multiplication rules
-                grad_other = np.matmul(self.data.swapaxes(-1, -2), result.grad.data)
-
-                # Ensure gradient matches the original tensor's shape before view
-                other.grad = grad_other.reshape(other.data.shape)
+                if grad_data.ndim == 2:
+                    # Simple matrix multiplication case
+                    other_grad = np.matmul(self.data.T, grad_data)
+                else:
+                    # Batched case: sum gradients over batch dimension
+                    other_grad = np.sum(
+                        np.matmul(self.data.transpose(0, 2, 1), grad_data), axis=0
+                    )
+                other.grad = other_grad
 
         result._backward = _backward
         return result
@@ -881,6 +887,11 @@ class Tensor:
         # Backward pass
         for tensor in reversed(topological_sorted_tensors):
             tensor._backward()
+
+        # Clear computational graph (safely)
+        visited.clear()  # Clear the set we used for topo sort
+        for node in topological_sorted_tensors:
+            node.prev.clear()  # Clear references but don't recurse
 
     @property
     def shape(self):

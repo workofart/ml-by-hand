@@ -147,6 +147,82 @@ class TestTensorOps(TestTensor):
         )
         assert np.array_equal(z.grad.data, np.array([[1, 1], [1, 1]]))
 
+    def test_backward_batch_matmul(self):
+        # Similar shapes to our Conv2d windows case
+        batch_size, windows, features = 3, 784, 144
+        out_channels = 32
+
+        x = Tensor(np.random.randn(batch_size, windows, features))
+        w = Tensor(np.random.randn(out_channels, features))
+
+        # Forward: (3, 784, 144) @ (32, 144).T -> (3, 784, 32)
+        z = x @ w.T
+
+        # Backward
+        grad = np.ones_like(z.data)
+        z.backward(grad)
+
+        # Verify gradient shapes
+        assert x.grad.shape == (batch_size, windows, features)
+        assert w.grad.shape == (out_channels, features)
+
+        # Compare with PyTorch
+        x_torch = torch.tensor(x.data, requires_grad=True)
+        w_torch = torch.tensor(w.data, requires_grad=True)
+
+        z_torch = x_torch @ w_torch.T
+        z_torch.backward(torch.ones_like(z_torch))
+
+        # Use allclose instead of array_equal for floating point comparison
+        np.testing.assert_allclose(x.grad.data, x_torch.grad.numpy(), rtol=1e-10)
+        np.testing.assert_allclose(w.grad.data, w_torch.grad.numpy(), rtol=1e-10)
+
+    def test_batched_matmul_gradient_computation(self):
+        # Create small batch example with explicit float dtype
+        batch_size = 2
+        x = Tensor(
+            np.array(
+                [  # (2, 2, 2)
+                    [[1.0, 1.0], [1.0, 1.0]],
+                    [[1.0, 1.0], [1.0, 1.0]],
+                ],
+                dtype=np.float64,
+            )
+        )
+        w = Tensor(
+            np.array(
+                [  # (2, 2)
+                    [1.0, 1.0],
+                    [1.0, 1.0],
+                ],
+                dtype=np.float64,
+            )
+        )
+
+        # Manual batch-wise computation
+        manual_x_grad = np.zeros_like(x.data)  # (2, 2, 2)
+        manual_w_grad = np.zeros_like(w.data)  # (2, 2)
+
+        for b in range(batch_size):
+            # Compute gradient for each batch separately
+            batch_grad = np.ones((2, 2), dtype=np.float64)  # gradient for this batch
+
+            # Gradient for x[b]
+            manual_x_grad[b] = np.matmul(batch_grad, w.data)  # (2,2) @ (2,2)
+
+            # Accumulate gradient for w
+            manual_w_grad += np.matmul(x.data[b].T, batch_grad)  # (2,2).T @ (2,2)
+
+        # Compare with PyTorch
+        x_torch = torch.tensor(x.data, requires_grad=True)
+        w_torch = torch.tensor(w.data, requires_grad=True)
+        z_torch = x_torch @ w_torch.T
+        z_torch.backward(torch.ones_like(z_torch))
+
+        # Verify our manual computation matches PyTorch
+        np.testing.assert_array_equal(manual_x_grad, x_torch.grad.numpy())
+        np.testing.assert_array_equal(manual_w_grad, w_torch.grad.numpy())
+
     def test_shift_invariance(self):
         x_data = np.array([[1.0, 2.0], [4.0, 5.0], [7.0, 8.0]], dtype=np.float32)
         x = Tensor(x_data)

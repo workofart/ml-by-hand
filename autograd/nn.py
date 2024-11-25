@@ -159,19 +159,13 @@ class Conv2d(Module):
             raise ValueError(f"Invalid padding mode: {self.padding_mode}")
 
         # Extract windows while maintaining computational graph
-        windows = self._extract_windows(
-            x_padded, H_out, W_out
-        )  # shape: (batch_size, H_out * W_out, in_channels * kernel_size * kernel_size)
+        windows = self._extract_windows(x_padded)
 
         # Reshape kernel for matrix multiplication
-        kernel_flat = self._parameters["weight"].reshape(
-            self.out_channels, -1
-        )  # shape: (out_channels, in_channels * kernel_size * kernel_size)
+        kernel_flat = self._parameters["weight"].reshape(self.out_channels, -1)
 
         # Compute convolution using matrix multiplication
-        output = (
-            windows @ kernel_flat.T
-        )  # shape: (batch_size, H_out * W_out, out_channels)
+        output = windows @ kernel_flat.T
 
         # Reshape output to (N, out_channels, H_out, W_out)
         output = output.reshape(batch_size, H_out, W_out, self.out_channels)
@@ -180,10 +174,9 @@ class Conv2d(Module):
         # Add bias
         for c in range(self.out_channels):
             output[:, c] = output[:, c] + self._parameters["bias"][c]
-
         return output
 
-    def _extract_windows(self, x_padded, H_out, W_out):
+    def _extract_windows(self, x_padded):
         """Extract all windows using Tensor operations to maintain the computational graph"""
         batch_size, in_channels, H, W = x_padded.shape
         windows_list = []
@@ -197,10 +190,7 @@ class Conv2d(Module):
                 window_flat = window.reshape(batch_size, -1)
                 windows_list.append(window_flat)
 
-        # Stack windows along a new dimension instead of concatenating
-        windows = Tensor.stack(
-            windows_list, axis=1
-        )  # shape: (batch_size, H_out * W_out, in_channels * kernel_size * kernel_size)
+        windows = Tensor.stack(windows_list, axis=1)
         return windows
 
 
