@@ -26,6 +26,11 @@ class TestTensor(TestCase):
             requires_grad=True,
         )
         self.four_d_matrix = Tensor([[[[1.0, 2.0], [3.0, 4.0]]]], requires_grad=True)
+        self.batch_tensor1 = Tensor(np.random.randn(2, 3, 4, 4))
+        self.batch_tensor2 = Tensor(np.random.randn(2, 3, 4, 4))
+        self.channel_weights = Tensor(
+            np.random.randn(3, 1, 1), requires_grad=True
+        )  # (C,1,1) for broadcasting
 
         # Torch tensors for comparison
         self.x_vector_torch = torch.tensor(self.x_vector.data, requires_grad=True)
@@ -55,6 +60,15 @@ class TestTensor(TestCase):
         )
         self.four_d_matrix_torch = torch.tensor(
             self.four_d_matrix.data, requires_grad=True
+        )
+        self.batch_tensor1_torch = torch.tensor(
+            self.batch_tensor1.data, requires_grad=True
+        )
+        self.batch_tensor2_torch = torch.tensor(
+            self.batch_tensor2.data, requires_grad=True
+        )
+        self.channel_weights_torch = torch.tensor(
+            self.channel_weights.data, requires_grad=True
         )
 
 
@@ -147,6 +161,44 @@ class TestTensorOps(TestTensor):
         )
         assert np.array_equal(z.grad.data, np.array([[1, 1], [1, 1]]))
 
+    def test_batch_addition(self):
+        """Test addition with batched tensors"""
+        # Test basic batch addition
+        result = self.batch_tensor1 + self.batch_tensor2
+        result_torch = self.batch_tensor1_torch + self.batch_tensor2_torch
+
+        # Check forward pass
+        np.testing.assert_allclose(result.data, result_torch.detach().numpy())
+
+        # Check backward pass
+        result.backward(np.ones_like(result.data))
+        result_torch.backward(torch.ones_like(result_torch))
+
+        np.testing.assert_allclose(
+            self.batch_tensor1.grad.data, self.batch_tensor1_torch.grad.numpy()
+        )
+        np.testing.assert_allclose(
+            self.batch_tensor2.grad.data, self.batch_tensor2_torch.grad.numpy()
+        )
+
+    def test_batch_broadcasting_addition(self):
+        """Test addition with broadcasting across batch dimensions"""
+        # Broadcasting (3,1,1) to (2,3,4,4)
+        result = self.batch_tensor1 + self.channel_weights
+        result_torch = self.batch_tensor1_torch + self.channel_weights_torch
+
+        np.testing.assert_allclose(result.data, result_torch.detach().numpy())
+
+        result.backward(np.ones_like(result.data))
+        result_torch.backward(torch.ones_like(result_torch))
+
+        np.testing.assert_allclose(
+            self.batch_tensor1.grad.data, self.batch_tensor1_torch.grad.numpy()
+        )
+        np.testing.assert_allclose(
+            self.channel_weights.grad.data, self.channel_weights_torch.grad.numpy()
+        )
+
     def test_backward_batch_matmul(self):
         # Similar shapes to our Conv2d windows case
         batch_size, windows, features = 3, 784, 144
@@ -222,6 +274,38 @@ class TestTensorOps(TestTensor):
         # Verify our manual computation matches PyTorch
         np.testing.assert_array_equal(manual_x_grad, x_torch.grad.numpy())
         np.testing.assert_array_equal(manual_w_grad, w_torch.grad.numpy())
+
+    def test_batch_multiplication(self):
+        """Test element-wise multiplication with batched tensors"""
+        result = self.batch_tensor1 * self.batch_tensor2
+        result_torch = self.batch_tensor1_torch * self.batch_tensor2_torch
+
+        np.testing.assert_allclose(result.data, result_torch.detach().numpy())
+
+        result.backward(np.ones_like(result.data))
+        result_torch.backward(torch.ones_like(result_torch))
+
+        np.testing.assert_allclose(
+            self.batch_tensor1.grad.data, self.batch_tensor1_torch.grad.numpy()
+        )
+        np.testing.assert_allclose(
+            self.batch_tensor2.grad.data, self.batch_tensor2_torch.grad.numpy()
+        )
+
+    def test_batch_power(self):
+        """Test power operation with batched tensors"""
+        # Test power with scalar exponent
+        result = self.batch_tensor1**2
+        result_torch = self.batch_tensor1_torch**2
+
+        np.testing.assert_allclose(result.data, result_torch.detach().numpy())
+
+        result.backward(np.ones_like(result.data))
+        result_torch.backward(torch.ones_like(result_torch))
+
+        np.testing.assert_allclose(
+            self.batch_tensor1.grad.data, self.batch_tensor1_torch.grad.numpy()
+        )
 
     def test_shift_invariance(self):
         x_data = np.array([[1.0, 2.0], [4.0, 5.0], [7.0, 8.0]], dtype=np.float32)
@@ -414,6 +498,23 @@ class TestTensorMaximum(TestTensor):
         )
         assert np.array_equal(
             self.y_vector_negative.grad.data, self.y_vector_negative_torch.grad.numpy()
+        )
+
+    def test_batch_maximum(self):
+        """Test maximum operation with batched tensors"""
+        result = self.batch_tensor1.maximum(self.batch_tensor2)
+        result_torch = torch.maximum(self.batch_tensor1_torch, self.batch_tensor2_torch)
+
+        np.testing.assert_allclose(result.data, result_torch.detach().numpy())
+
+        result.backward(np.ones_like(result.data))
+        result_torch.backward(torch.ones_like(result_torch))
+
+        np.testing.assert_allclose(
+            self.batch_tensor1.grad.data, self.batch_tensor1_torch.grad.numpy()
+        )
+        np.testing.assert_allclose(
+            self.batch_tensor2.grad.data, self.batch_tensor2_torch.grad.numpy()
         )
 
 

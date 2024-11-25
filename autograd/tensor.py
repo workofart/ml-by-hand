@@ -40,6 +40,7 @@ class Tensor:
         if self._grad is None:
             self._grad = Tensor(value_data, requires_grad=False)
         else:
+            value_data = self.expand(value_data.shape)._view_backward_fn(value_data)
             # IMPORTANT: this is not the same as self.data + value_data
             # We need to do in-place addition here to preserve any views or references
             # to the original gradient. For example, multiple operations
@@ -143,10 +144,11 @@ class Tensor:
 
             # Distribute gradients to input tensors
             for tensor, grad in zip(tensors, grads):
-                # Squeeze the gradient to match the input tensor's shape
+                if not tensor.requires_grad:
+                    continue
 
-                # Convert to Tensor and accumulate
-                tensor.grad = Tensor(np.squeeze(grad, axis=axis), requires_grad=False)
+                # Use reshape to match original tensor shape
+                tensor.grad = Tensor(grad).reshape(tensor.shape)
 
         result._backward = _backward
         return result
@@ -162,111 +164,88 @@ class Tensor:
         def _backward():
             start_idx = 0
             for t in tensors:
+                if not t.requires_grad:
+                    continue
+
+                # Create view using _make_view instead of view
                 shape = list(t.data.shape)
                 slice_idx = [slice(None)] * len(shape)
                 slice_idx[axis] = slice(start_idx, start_idx + shape[axis])
-                t.grad = Tensor(result.grad.data[tuple(slice_idx)], requires_grad=False)
+
+                def forward_fn(x):
+                    return x[tuple(slice_idx)]
+
+                def backward_fn(grad):
+                    # Create full-size gradient
+                    full_grad = np.zeros_like(result.grad.data)
+                    full_grad[tuple(slice_idx)] = grad
+                    return full_grad
+
+                # Use _make_view directly
+                t.grad = result.grad._make_view(forward_fn, backward_fn)
                 start_idx += shape[axis]
 
         result._backward = _backward
 
         return result
 
-    def transpose(self, dim0=0, dim1=1):
-        ndim = self.data.ndim
-        if not (0 <= dim0 < ndim and 0 <= dim1 < ndim):
-            raise ValueError(
-                f"Dimensions out of range for tensor with {ndim} dimensions"
-            )
-
-        def _get_transpose_axes(dim0: int, dim1: int) -> Tuple[int, ...]:
-            axes = list(range(self.data.ndim))
-            axes[dim0], axes[dim1] = axes[dim1], axes[dim0]
-            return tuple(axes)
-
-        def forward_fn(x):
-            return np.transpose(x, _get_transpose_axes(dim0, dim1))
-
-        def backward_fn(grad):
-            grad_data = grad.data if isinstance(grad, Tensor) else np.asarray(grad)
-            transposed_grad = np.transpose(grad_data, _get_transpose_axes(dim0, dim1))
-            return transposed_grad
-
-        # Create new view
-        return self._make_view(forward_fn, backward_fn)
-
     def __add__(self, other):
+        """Compute op: addition with explicit movement"""
         if not isinstance(other, Tensor):
-            # Ensure other is converted to a Tensor with the same shape as self
-            other = Tensor(
-                data=np.full_like(self.data, other)
-                if np.isscalar(other) or other.ndim == 0
-                else other,
-                requires_grad=False,  # we don't need to compute gradients for these scalars or constants
-            )
+            other = Tensor(other, requires_grad=False)
 
+        # 1. Calculate broadcast shape
+        broadcast_shape = np.broadcast_shapes(self.shape, other.shape)
+
+        # 2. Movement ops: expand both tensors to broadcast shape
+        x = self.expand(broadcast_shape)
+        y = other.expand(broadcast_shape)
+
+        # 3. Simple compute op (no shape logic)
         result = Tensor(
-            data=self.data + other.data,
+            data=x.data + y.data,
             prev={self, other},
             requires_grad=self.requires_grad or other.requires_grad,
         )
 
+        # 4. Backward pass just focuses on gradient computation
         def _backward():
-            """
-            d(loss) / dx = d(loss) / d(x + y) * d(x + y) / dx
-            d(loss) / d(x + y) = result.grad
-            d(x + y) / dx = 1
-            d(x + y) / dy = 1
-            We need to multiply by result.grad because of the chain rule
-            """
-
-            if self.requires_grad:
-                # Should use grad setter instead of direct assignment
+            if self.requires_grad and result.grad is not None:
                 self.grad = result.grad
 
-            if other.requires_grad:
-                # Need to handle broadcasting reduction here
-                reduced_grad = result.grad
-                if result.grad.shape != other.shape:
-                    # Sum across broadcasted dimensions
-                    reduce_dims = tuple(
-                        range(len(result.grad.shape) - len(other.shape))
-                    )
-                    reduced_grad = result.grad.sum(axis=reduce_dims)
-
-                other.grad = reduced_grad
+            if other.requires_grad and result.grad is not None:
+                other.grad = result.grad
 
         result._backward = _backward
         return result
 
-    def __mul__(self, other: Union[float, int, "Tensor"]) -> "Tensor":
+    def __mul__(self, other):
         """Multiply two tensors element-wise"""
-        other = other if isinstance(other, Tensor) else Tensor(other)
+        if not isinstance(other, Tensor):
+            other = Tensor(other, requires_grad=False)
 
-        def _backward():
-            if self.requires_grad:
-                # Handle broadcasting for self's gradient
-                grad = other * result.grad
-                if grad.shape != self.shape:
-                    # Sum across broadcasted dimensions
-                    reduce_dims = tuple(range(len(grad.shape) - len(self.shape)))
-                    grad = grad.sum(axis=reduce_dims)
-                self.grad = grad
+        # 1. Calculate broadcast shape
+        broadcast_shape = np.broadcast_shapes(self.shape, other.shape)
 
-            if other.requires_grad:
-                # Handle broadcasting for other's gradient
-                grad = self * result.grad
-                if grad.shape != other.shape:
-                    # Sum across broadcasted dimensions
-                    reduce_dims = tuple(range(len(grad.shape) - len(other.shape)))
-                    grad = grad.sum(axis=reduce_dims)
-                other.grad = grad
+        # 2. Movement ops: expand both tensors to broadcast shape
+        x = self.expand(broadcast_shape)
+        y = other.expand(broadcast_shape)
 
+        # 3. Simple compute op
         result = Tensor(
-            self.data * other.data,
-            prev=(self, other) if (self.requires_grad or other.requires_grad) else (),
+            data=x.data * y.data,
+            prev={self, other},
             requires_grad=self.requires_grad or other.requires_grad,
         )
+
+        # 4. Backward pass
+        def _backward():
+            if self.requires_grad and result.grad is not None:
+                self.grad = other * result.grad
+
+            if other.requires_grad and result.grad is not None:
+                other.grad = self * result.grad
+
         result._backward = _backward
         return result
 
@@ -274,108 +253,109 @@ class Tensor:
         if not isinstance(other, Tensor):
             other = Tensor(other, requires_grad=False)
 
-        # Raise error if either input is scalar (0D) - Same as Pytorch assumption
-        if np.isscalar(self.data) or np.isscalar(other.data):
-            raise RuntimeError("both arguments to matmul need to be at least 1D")
+        # Handle vector @ vector case separately (1D @ 1D)
+        if self.data.ndim == 1 and other.data.ndim == 1:
+            result = Tensor(
+                data=np.dot(self.data, other.data),  # Returns scalar
+                prev={self, other},
+                requires_grad=self.requires_grad or other.requires_grad,
+            )
 
-        # Handle matrix multiplication shapes:
-        # - If input is 1D vector, reshape it for matrix multiplication:
-        #   - First operand (x): reshape to (1, n) row vector
-        #   - Second operand (y): reshape to (n, 1) column vector
-        # - If input is 2D matrix, keep original shape
-        result = Tensor(
-            data=np.matmul(self.data, other.data),
-            requires_grad=self.requires_grad or other.requires_grad,
-            prev={self, other} if (self.requires_grad or other.requires_grad) else None,
-        )
+            def _backward():
+                if self.requires_grad and result.grad is not None:
+                    self.grad = result.grad.data * other.data
+                if other.requires_grad and result.grad is not None:
+                    other.grad = result.grad.data * self.data
 
-        def _backward():
-            """
-            d(loss) / dx
-            = self.grad
-            = d(loss) / d(x·y) * d(x·y) / dx
-            = result.grad * d(x·y) / dx
-            = result.grad * y.T
+            result._backward = _backward
+            return result
 
-            d(loss) / dy
-            = other.grad
-            = d(loss) / d(x·y) * d(x·y) / dy
-            = result.grad * d(x·y) / dy
-            = x.T * result.grad
-            Note:
-                need to move x.T to the left because:
-                1) Each element in result is a dot product of a row from x with a column from y
-                2) When we backprop, we need x.T on the left to match dimensions:
-                   x = (num_samples, num_features)
-                   y = (num_features, num_classes)
-                   x.T = (num_features, num_samples)
-                   result.grad = (num_samples, num_classes)
-                   x.T * result.grad = (num_features, num_classes)  # same shape as y
-            """
-            grad_data = result.grad.data
+        # Matrix multiplication case
+        else:
+            # 1. Handle vector cases with reshape
+            x, y = self, other
+            if self.data.ndim == 1:
+                x = self.reshape(1, -1)  # row vector
+            if other.data.ndim == 1:
+                y = other.reshape(-1, 1)  # column vector
 
-            # Handle vector @ vector case separately (1D @ 1D)
-            if self.data.ndim == 1 and other.data.ndim == 1:
-                if self.requires_grad:
-                    self.grad = result.grad * other.data
+            # Handle matrix multiplication shapes:
+            # - If input is 1D vector, reshape it for matrix multiplication:
+            #   - First operand (x): reshape to (1, n) row vector
+            #   - Second operand (y): reshape to (n, 1) column vector
+            # - If input is 2D matrix, keep original shape
+            result = Tensor(
+                data=np.matmul(x.data, y.data),
+                prev={self, other},
+                requires_grad=self.requires_grad or other.requires_grad,
+            )
 
-                if other.requires_grad:
-                    other.grad = result.grad * self.data
-                return
+            def _backward():
+                """
+                d(loss) / dx
+                = self.grad
+                = d(loss) / d(x·y) * d(x·y) / dx
+                = result.grad * d(x·y) / dx
+                = result.grad * y.T
 
-            # Handle N-D tensor multiplication (2D and higher)
-            # Let's say we intially have a self.data of shape (n, m)
-            # and other.data of shape (m, p)
-            # Then result.data will be of shape (n, p)
-            # We need to compute the gradient of the loss w.r.t. self.data
-            # d(loss) / d(self.data) = d(loss) / d(result) * d(result) / d(self.data)
-            # d(result) / d(self.data) = other.data.T
+                d(loss) / dy
+                = other.grad
+                = d(loss) / d(x·y) * d(x·y) / dy
+                = result.grad * d(x·y) / dy
+                = x.T * result.grad
+                Note:
+                    need to move x.T to the left because:
+                    1) Each element in result is a dot product of a row from x with a column from y
+                    2) When we backprop, we need x.T on the left to match dimensions:
+                    x = (num_samples, num_features)
+                    y = (num_features, num_classes)
+                    x.T = (num_features, num_samples)
+                    result.grad = (num_samples, num_classes)
+                    x.T * result.grad = (num_features, num_classes)  # same shape as y
+                """
+                # Handle N-D tensor multiplication (2D and higher)
+                # Let's say we intially have a self.data of shape (n, m)
+                # and other.data of shape (m, p)
+                # Then result.data will be of shape (n, p)
+                # We need to compute the gradient of the loss w.r.t. self.data
+                # d(loss) / d(self.data) = d(loss) / d(result) * d(result) / d(self.data)
+                # d(result) / d(self.data) = other.data.T
+                if self.requires_grad and result.grad is not None:
+                    self.grad = result.grad.data @ other.data.T
 
-            # The usage of swapaxes is to ensure that the matrix multiplication is correct
-            # when the dimensions are not in the expected order
-            # self.data:    (n, m)
-            # other.data:   (m, p)
-            # result.grad:  (n, p)
-            # other.T:      (p, m) --> T operation is equivalent to swapaxes(-1, -2)
-            # matmul(result.grad, other.T) = (n, p) @ (p, m) = (n, m) = self.grad
-            if self.requires_grad:
-                if grad_data.ndim == self.data.ndim == 2:
-                    # Simple matrix multiplication case
-                    self_grad = np.matmul(grad_data, other.data.T)
-                else:
-                    # Batched case: handle each batch independently
-                    self_grad = np.matmul(
-                        grad_data, other.data.T
-                    )  # Broadcasting handles batches
-                self.grad = self_grad
-
-            # Compute gradient of loss w.r.t. other.data
-            # d(loss) / d(other.data) = d(loss) / d(result) * d(result) / d(other.data)
-            # d(result) / d(other.data) = self.data.T
-            # self.data:    (n, m)
-            # result.grad:  (n, p)
-            # self.T:       (m, n) --> T operation is equivalent to swapaxes(-1, -2)
-            # matmul(self.T, result.grad) = (m, n) @ (n, p) = (m, p) = other.grad
-            if other.requires_grad:
-                if grad_data.ndim == 2:
-                    # Simple matrix multiplication case
-                    other_grad = np.matmul(self.data.T, grad_data)
-                else:
-                    # Batched case: sum gradients over batch dimension
-                    other_grad = np.sum(
-                        np.matmul(self.data.transpose(0, 2, 1), grad_data), axis=0
+                # Compute gradient of loss w.r.t. other.data
+                # d(loss) / d(other.data) = d(loss) / d(result) * d(result) / d(other.data)
+                # d(result) / d(other.data) = self.data.T
+                # self.data:    (n, m)
+                # result.grad:  (n, p)
+                # self.T:       (m, n) --> T operation is equivalent to swapaxes(-1, -2)
+                # matmul(self.T, result.grad) = (m, n) @ (n, p) = (m, p) = other.grad
+                if other.requires_grad and result.grad is not None:
+                    x_transposed = (
+                        self.transpose(1, 2)
+                        if self.data.ndim == 3
+                        else self.transpose()
                     )
-                other.grad = other_grad
+                    other.grad = (
+                        np.sum(x_transposed.data @ result.grad.data, axis=0)
+                        if self.data.ndim == 3
+                        else x_transposed.data @ result.grad.data
+                    )
 
-        result._backward = _backward
-        return result
+            result._backward = _backward
+            return result
 
     def __pow__(self, other):
         if not isinstance(other, Tensor):
             other = Tensor(other, requires_grad=False)
 
+        # Use expand for broadcasting
+        broadcast_shape = np.broadcast_shapes(self.shape, other.shape)
+        x = self.expand(broadcast_shape)
+        y = other.expand(broadcast_shape)
+
         result = Tensor(
-            data=self.data**other.data,
+            data=x.data**y.data,
             prev={self, other},
             requires_grad=self.requires_grad or other.requires_grad,
         )
@@ -389,31 +369,14 @@ class Tensor:
             where x is self
             y is other
             """
-            if result.grad is None:
-                return
-
-            # Gradient w.r.t base (self)
             if self.requires_grad:
-                grad = other * (self ** (other - 1)) * result.grad
+                grad = y * (x ** (y - 1)) * result.grad
                 self.grad = grad
 
-            # Gradient w.r.t exponent (other)
             if other.requires_grad:
-                valid_base = self.data > 0
-                grad_y = (self**other) * np.log(np.abs(self.data)) * result.grad
-
-                if np.isscalar(other.data):
-                    grad_data = grad_y.data[valid_base]
-                    grad_y = (
-                        np.sum(grad_data)
-                        if isinstance(grad_data, np.ndarray)
-                        else grad_data
-                    )
-
-                else:
-                    grad_y = np.where(valid_base, grad_y.data, 0)
-
-                other.grad = grad_y
+                valid_base = x.data > 0
+                grad_y = (x**y) * np.log(np.abs(x.data)) * result.grad
+                other.grad = np.where(valid_base, grad_y.data, 0)
 
         result._backward = _backward
         return result
@@ -426,38 +389,24 @@ class Tensor:
         if not isinstance(other, Tensor):
             other = Tensor(other)
 
+        # Use expand for broadcasting
+        broadcast_shape = np.broadcast_shapes(self.shape, other.shape)
+        expanded_other = other.expand(broadcast_shape)
+
         # Update data in-place
-        self.data += other.data
+        self.data += expanded_other.data
         self.prev.add(other)
         self.requires_grad = self.requires_grad or other.requires_grad
 
-        # Store original backward function
         original_backward = self._backward
 
         def _backward():
-            # Call original backward first
             original_backward()
-
-            if other.requires_grad:
-                # Create gradient tensor
-                grad = (
-                    self.grad
-                    if self.grad is not None
-                    else Tensor(np.ones_like(self.data), requires_grad=False)
+            if other.requires_grad and self.grad is not None:
+                # Use expand to handle broadcasting in gradient
+                other.grad = self.grad.expand(broadcast_shape)._view_backward_fn(
+                    self.grad.data
                 )
-
-                if grad.shape != other.data.shape:
-                    # Sum across broadcasted dimensions
-                    sum_axes = tuple(range(len(grad.shape) - len(other.data.shape)))
-                    if sum_axes:
-                        grad = grad.sum(axis=sum_axes)
-                    # Handle broadcasting within common dimensions
-                    for i, (g, o) in enumerate(zip(grad.shape, other.data.shape)):
-                        if o == 1:
-                            grad = grad.sum(axis=len(grad.shape) - 1 - i, keepdims=True)
-
-                    grad = grad.reshape(other.data.shape)
-                other.grad = grad
 
         self._backward = _backward
         return self
@@ -466,25 +415,16 @@ class Tensor:
         """Get item from tensor using numpy-style indexing"""
 
         def forward_fn(x):
-            result = x[idx]
-            return float(result) if np.isscalar(result) else result
+            return x[idx]
 
         def backward_fn(grad):
-            grad_data = grad.data if isinstance(grad, Tensor) else np.asarray(grad)
-            return grad_data  # don't expand to full size yet
+            # Create a zero tensor of the original shape
+            out = np.zeros_like(self.data)
+            # Place the gradient in the correct location
+            out[idx] = grad
+            return out
 
-        view = self._make_view(forward_fn, backward_fn)
-
-        def _backward():
-            if view.grad is not None:
-                backward_grad = view._view_backward_fn(view.grad)
-                # Create full-size gradient only at the final step
-                full_grad = np.zeros_like(self.data)
-                full_grad[idx] = backward_grad
-                self.grad = full_grad
-
-        view._backward = _backward
-        return view
+        return self._make_view(forward_fn, backward_fn)
 
     def __setitem__(
         self, idx: Union[int, slice, tuple], value: Union[Self, float, int]
@@ -554,17 +494,9 @@ class Tensor:
         )
 
         def _backward():
-            # Expand along the summed axes
-            if keepdims:
-                expanded_shape = self.data.shape
-            else:
-                # Convert generator to list before adding to shape
-                expanded_shape = tuple(
-                    s for i, s in enumerate(self.data.shape) if i != axis
-                )
-
-            # Add to existing gradient
-            self.grad = np.broadcast_to(result.grad.data, expanded_shape)
+            # Use expand to handle gradient broadcasting
+            grad_shape = self.data.shape if keepdims else self.data.shape
+            self.grad = result.grad.expand(grad_shape)
 
         result._backward = _backward
         return result
@@ -593,44 +525,16 @@ class Tensor:
         )
 
         def _backward():
-            upstream_grad = result.grad.data
+            # Use expand for gradient broadcasting
+            grad = result.grad.expand(self.shape if keepdims else self.data.shape)
 
-            # Handle keepdims case
-            # We need to preserve the information about:
-            # - Distribute gradient proportionally
-            # - Preserve tensor shape
-            # - Maintain computational graph integrity
-
-            # For example:
-            # Original tensor: (2, 2, 3)
-            # Sum result (keepdims=True): (2, 1, 1)
-            # Indexing mechanism:
-            # - Keep first dimension fully (slice(None))
-            # - Reduce second dimension to first index (0)
-            # - Reduce third dimension to first index (0)
-
-            # If keepdims is False and axis is specified, we need to reshape upstream gradient
-            if not keepdims and axis is not None:
-                # Add back reduced dimensions
-                if isinstance(axis, (tuple, list)):
-                    for ax in sorted(axis):
-                        upstream_grad = np.expand_dims(upstream_grad, ax)
-                else:
-                    upstream_grad = np.expand_dims(upstream_grad, axis)
-
-            # Broadcast upstream gradient to match input shape
-            broadcasted_grad = np.broadcast_to(upstream_grad, self.data.shape)
-
-            # Scale gradient by number of elements we averaged over
+            # Scale gradient by number of elements
             num_elements = (
                 np.prod([self.data.shape[ax] for ax in axis])
                 if axis is not None
                 else self.data.size
             )
-            scaled_grad = broadcasted_grad / num_elements
-
-            # Accumulate gradient
-            self.grad = scaled_grad
+            self.grad = grad.data / num_elements
 
         result._backward = _backward
         return result
@@ -657,31 +561,22 @@ class Tensor:
             d(loss) / d(max(x)) = result.grad
             d(max(x)) / dx = 1 if x == max(x), 0 otherwise
             """
-            upstream_grad = result.grad.data
-
+            # Create mask of max elements
             if axis is None:
-                # For global max, gradient flows only to elements equal to max value
-                # Create boolean mask of elements equal to max
                 mask = self.data == np.max(self.data)
-                # Multiply mask by upstream gradient
-                grad = mask * upstream_grad
+                grad = result.grad.expand(self.shape) if keepdims else result.grad
+                self.grad = grad.data * mask
             else:
-                # For max along specific axes, handle each axis separately
-                for ax in axis:
-                    # Max along specific axes
-                    grad = np.zeros_like(self.data)
+                # Expand gradient to match original shape
+                grad = result.grad.expand(self.shape)
 
-                    # Create mask of max elements along specified axes
-                    max_mask = self.data == np.max(self.data, axis=ax, keepdims=True)
+                # Create mask for max elements along specified axes
+                max_vals = np.max(self.data, axis=axis, keepdims=True)
+                mask = self.data == max_vals
 
-                    # Distribute gradient to max elements
-                    # If multiple elements are max, distribute gradient equally
-                    grad[max_mask] = upstream_grad / np.sum(
-                        max_mask, axis=ax, keepdims=True
-                    )
-
-            # Add computed gradient to accumulated gradient
-            self.grad = grad
+                # Distribute gradient to max elements
+                count = np.sum(mask, axis=axis, keepdims=True)
+                self.grad = grad.data * mask / count
 
         result._backward = _backward
         return result
@@ -694,56 +589,29 @@ class Tensor:
         if not isinstance(other, Tensor):
             other = Tensor(other, requires_grad=False)
 
+        # Use expand for broadcasting
+        broadcast_shape = np.broadcast_shapes(self.shape, other.shape)
+        x = self.expand(broadcast_shape)
+        y = other.expand(broadcast_shape)
+
         result = Tensor(
-            data=np.maximum(self.data, other.data),
+            data=np.maximum(x.data, y.data),
             prev={self, other},
             requires_grad=self.requires_grad or other.requires_grad,
         )
 
         def _backward():
             upstream_grad = result.grad.data
+            x_matches = x.data == result.data
+            y_matches = y.data == result.data
 
-            # Create masks for where each input equals the maximum
-            x_matches = self.data == result.data
-            y_matches = other.data == result.data
-
-            # Gradient computation for self
             if self.requires_grad:
-                # Gradient logic:
-                # - Full gradient where self is max
-                # - Halved gradient where both are max
                 grad = upstream_grad * (x_matches * (1.0 - 0.5 * y_matches))
+                self.grad = x._view_backward_fn(grad)
 
-                # Handle broadcasting
-                if grad.shape != self.data.shape:
-                    # Reduce extra dimensions
-                    reduce_axes = tuple(range(len(grad.shape) - len(self.data.shape)))
-                    grad = np.sum(grad, axis=reduce_axes)
-
-                    # Ensure correct shape for broadcasting
-                    while len(grad.shape) < len(self.data.shape):
-                        grad = np.expand_dims(grad, axis=0)
-
-                # Accumulate gradient using the grad.setter to accumulate
-                self.grad = Tensor(grad, requires_grad=False)
-
-            # Gradient computation for other
             if other.requires_grad:
-                # Similar gradient logic for other tensor
                 grad = upstream_grad * (y_matches * (1.0 - 0.5 * x_matches))
-
-                # Handle broadcasting
-                if grad.shape != other.data.shape:
-                    # Reduce extra dimensions
-                    reduce_axes = tuple(range(len(grad.shape) - len(other.data.shape)))
-                    grad = np.sum(grad, axis=reduce_axes)
-
-                    # Ensure correct shape for broadcasting
-                    while len(grad.shape) < len(other.data.shape):
-                        grad = np.expand_dims(grad, axis=0)
-
-                # Accumulate gradient using the grad.setter to accumulate
-                other.grad = Tensor(grad, requires_grad=False)
+                other.grad = y._view_backward_fn(grad)
 
         result._backward = _backward
         return result
@@ -758,49 +626,23 @@ class Tensor:
             mode: Padding mode (default: "constant")
             constant_values: Value to pad with (default: 0)
         """
-        # Handle integer padding
+        # Normalize pad_width to numpy style
         if isinstance(pad_width, int):
-            if len(self.data.shape) == 1:
-                pad_width = ((pad_width, pad_width),)
-            elif len(self.data.shape) == 2:
-                pad_width = ((pad_width, pad_width), (pad_width, pad_width))
-            elif len(self.data.shape) == 3:
-                pad_width = ((0, 0), (pad_width, pad_width), (pad_width, pad_width))
-            elif len(self.data.shape) == 4:
-                pad_width = (
-                    (0, 0),  # batch
-                    (0, 0),  # channels
-                    (pad_width, pad_width),  # height
-                    (pad_width, pad_width),  # width
+            # For int, create tuple of tuples for all dimensions
+            pad_width = tuple((pad_width, pad_width) for _ in range(self.data.ndim))
+        elif isinstance(pad_width, (tuple, list)):
+            if len(pad_width) == 2 and not isinstance(pad_width[0], (tuple, list)):
+                # (left, right) -> pad only last dimension
+                pad_width = tuple((0, 0) for _ in range(self.data.ndim - 1)) + (
+                    tuple(pad_width),
                 )
-            else:
-                raise ValueError(
-                    f"Unsupported number of dimensions: {len(self.data.shape)}"
+            elif len(pad_width) == 4 and not isinstance(pad_width[0], (tuple, list)):
+                # (left, right, top, bottom) -> pad last two dimensions
+                pad_width = tuple((0, 0) for _ in range(self.data.ndim - 2)) + (
+                    (pad_width[2], pad_width[3]),  # height/rows padding
+                    (pad_width[0], pad_width[1]),  # width/cols padding
                 )
 
-        # Convert PyTorch-style padding to numpy-style padding
-        elif isinstance(pad_width, tuple):
-            if len(pad_width) == 2 and not isinstance(pad_width[0], tuple):
-                # (left, right) format
-                if len(self.data.shape) == 2:
-                    pad_width = ((0, 0), (pad_width[0], pad_width[1]))
-                elif len(self.data.shape) == 1:
-                    pad_width = ((pad_width[0], pad_width[1]),)
-                else:
-                    raise ValueError(
-                        "Unsupported number of dimensions for this padding style"
-                    )
-            elif len(pad_width) == 4 and not isinstance(pad_width[0], tuple):
-                # (left, right, top, bottom) format
-                if len(self.data.shape) == 2:
-                    pad_width = (
-                        (pad_width[2], pad_width[3]),
-                        (pad_width[0], pad_width[1]),
-                    )
-                else:
-                    raise ValueError("4-tuple padding only supported for 2D tensors")
-
-        # Create result tensor
         result = Tensor(
             data=np.pad(
                 self.data,
@@ -813,32 +655,14 @@ class Tensor:
         )
 
         def _backward():
-            if (
-                len(self.data.shape) == 4
-            ):  # For 4D tensors (batch, channels, height, width)
-                self.grad = result.grad[
-                    :,
-                    :,
-                    pad_width[2][0] : result.grad.shape[2] - pad_width[2][1],
-                    pad_width[3][0] : result.grad.shape[3] - pad_width[3][1],
-                ]
-            elif len(self.data.shape) == 3:  # For 3D tensors
-                self.grad = result.grad[
-                    :,
-                    pad_width[1][0] : result.grad.shape[1] - pad_width[1][1],
-                    pad_width[2][0] : result.grad.shape[2] - pad_width[2][1],
-                ]
-            elif len(self.data.shape) == 2:  # For 2D tensors
-                self.grad = result.grad[
-                    pad_width[0][0] : result.grad.shape[0] - pad_width[0][1],
-                    pad_width[1][0] : result.grad.shape[1] - pad_width[1][1],
-                ]
-            elif len(self.data.shape) == 1:  # For 1D tensors
-                self.grad = result.grad[
-                    pad_width[0][0] : result.grad.shape[0] - pad_width[0][1]
-                ]
-            else:
-                raise ValueError("Unsupported number of dimensions")
+            if result.grad is None:
+                return
+
+            # Extract the unpadded region
+            slices = tuple(
+                slice(p[0], s - p[1]) for s, p in zip(result.data.shape, pad_width)
+            )
+            self.grad = result.grad.data[slices]
 
         result._backward = _backward
         return result
@@ -905,32 +729,79 @@ class Tensor:
             return ()
         return self.data.shape
 
-    def reshape(self, *shape):
-        """Reshape tensor while maintaining gradient information."""
+    ########### Movement ops ###########
+    def reshape(self, *shape) -> "Tensor":
+        """Movement op: reshape"""
         if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
             shape = shape[0]
 
-        view = Tensor(
-            self.data.reshape(shape),
-            requires_grad=self.requires_grad,
-            prev={self} if self.requires_grad else None,
+        return self._make_view(
+            lambda x: x.reshape(shape), lambda grad: grad.reshape(self.shape)
         )
 
-        if self.requires_grad:
+    def expand(self, *shape) -> "Tensor":
+        """Movement op: broadcast without copying"""
+        if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
+            shape = shape[0]
 
-            def _backward():
-                if view.grad is not None:
-                    grad_data = (
-                        view.grad.data if isinstance(view.grad, Tensor) else view.grad
-                    )
-                    if self.grad is None:
-                        self.grad = Tensor(grad_data.reshape(self.data.shape))
-                    else:
-                        self.grad.data += grad_data.reshape(self.data.shape)
+        def _view_backward_fn(grad):
+            # Handle extra leading dimensions
+            if len(grad.shape) > len(self.shape):
+                reduce_dims = list(range(len(grad.shape) - len(self.shape)))
+            else:
+                reduce_dims = []
 
-            view._backward = _backward
+            # Handle broadcasting dimensions
+            for i, (self_dim, grad_dim) in enumerate(
+                zip(self.shape[::-1], grad.shape[-len(self.shape) :][::-1])
+            ):
+                if self_dim == 1 and grad_dim != 1:
+                    reduce_dims.append(len(grad.shape) - 1 - i)
 
-        return view
+            # Sum across all reduction dimensions
+            if reduce_dims:
+                grad = np.sum(grad, axis=tuple(reduce_dims), keepdims=True)
+
+            # Ensure final shape matches original
+            if grad.shape != self.shape:
+                grad = grad.reshape(self.shape)
+
+            return grad
+
+        return self._make_view(lambda x: np.broadcast_to(x, shape), _view_backward_fn)
+
+    def permute(self, *dims) -> "Tensor":
+        """Movement op: reorder dimensions"""
+        if len(dims) == 1 and isinstance(dims[0], (tuple, list)):
+            dims = dims[0]
+
+        return self._make_view(
+            lambda x: np.transpose(x, dims),
+            lambda grad: np.transpose(grad, [dims.index(i) for i in range(len(dims))]),
+        )
+
+    def transpose(self, dim0=0, dim1=1):
+        ndim = self.data.ndim
+        if not (0 <= dim0 < ndim and 0 <= dim1 < ndim):
+            raise ValueError(
+                f"Dimensions out of range for tensor with {ndim} dimensions"
+            )
+
+        def _get_transpose_axes(dim0: int, dim1: int) -> Tuple[int, ...]:
+            axes = list(range(self.data.ndim))
+            axes[dim0], axes[dim1] = axes[dim1], axes[dim0]
+            return tuple(axes)
+
+        def forward_fn(x):
+            return np.transpose(x, _get_transpose_axes(dim0, dim1))
+
+        def backward_fn(grad):
+            grad_data = grad.data if isinstance(grad, Tensor) else np.asarray(grad)
+            transposed_grad = np.transpose(grad_data, _get_transpose_axes(dim0, dim1))
+            return transposed_grad
+
+        # Create new view
+        return self._make_view(forward_fn, backward_fn)
 
     def detach(self) -> Self:
         """
@@ -956,63 +827,6 @@ class Tensor:
                 "T property is only defined for 2D tensors. Use transpose() for higher dimensions."
             )
         return self.transpose(1, 0)
-
-    def permute(self, *dims) -> Self:
-        """
-        Permute the dimensions of the tensor.
-
-        Args:
-            *dims: The desired ordering of dimensions
-
-        Returns:
-            Tensor: A view of the tensor with the dimensions permuted.
-
-        Raises:
-            ValueError: If the number of dimensions doesn't match or if dimensions are repeated
-        """
-        # Convert dims to tuple if it's a single argument
-        if len(dims) == 1 and isinstance(dims[0], (tuple, list)):
-            dims = tuple(dims[0])
-
-        # Validate dimensions
-        if len(dims) != self.data.ndim:
-            raise ValueError(
-                f"Number of dims ({len(dims)}) must match tensor dimensions ({self.data.ndim})"
-            )
-
-        # Check for repeated dimensions
-        if len(set(dims)) != len(dims):
-            raise ValueError("Repeated dimensions are not allowed in permute")
-
-        # Check dimension values are valid
-        if not all(0 <= d < self.data.ndim for d in dims):
-            raise ValueError(
-                f"Dimension values must be between 0 and {self.data.ndim-1}"
-            )
-
-        # Create inverse permutation for backward pass
-        inverse_dims = [0] * len(dims)
-        for i, d in enumerate(dims):
-            inverse_dims[d] = i
-
-        # Create a new tensor with permuted data
-        result = Tensor(
-            data=np.transpose(self.data, dims),
-            prev={self} if self.requires_grad else set(),
-            requires_grad=self.requires_grad,
-        )
-
-        def _backward():
-            if result.grad is not None:
-                grad_data = (
-                    result.grad.data if isinstance(result.grad, Tensor) else result.grad
-                )
-                self.grad = Tensor(
-                    np.transpose(grad_data, inverse_dims), requires_grad=False
-                )
-
-        result._backward = _backward
-        return result
 
     ##### Wrappers #####
     def __radd__(self, other):
