@@ -50,28 +50,35 @@ class Tensor:
 
     def _make_view(self, view_forward_fn, view_backward_fn) -> Self:
         """Create a view of the tensor"""
-
         view = Tensor(
             data=view_forward_fn(self.data),
             prev={self} if self.requires_grad else set(),
             requires_grad=self.requires_grad,
         )
 
-        def composed_backward_fn(x):
-            grad_data = x.data if isinstance(x, Tensor) else np.asarray(x)
-            return view_backward_fn(self._view_backward_fn(grad_data))
-
+        # Store the forward and backward functions
         view._view_forward_fn = lambda x: view_forward_fn(self._view_forward_fn(x))
-        view._view_backward_fn = composed_backward_fn
+        view._view_backward_fn = lambda x: self._view_backward_fn(view_backward_fn(x))
 
         def _backward_view():
             if view.grad is not None:
-                # Simplified gradient handling
-                backward_grad = view._view_backward_fn(view.grad)
-                self.grad = backward_grad
+                # Transform the gradient using the composed backward function
+                grad_data = (
+                    view.grad.data if isinstance(view.grad, Tensor) else view.grad
+                )
+                transformed_grad = view._view_backward_fn(grad_data)
+
+                if self._grad is None:
+                    self._grad = Tensor(transformed_grad, requires_grad=False)
+                else:
+                    # Ensure shapes match before accumulation
+                    if self._grad.data.shape != transformed_grad.shape:
+                        raise ValueError(
+                            f"Gradient shapes don't match: existing {self._grad.data.shape} vs new {transformed_grad.shape}"
+                        )
+                    self._grad.data += transformed_grad
 
         view._backward = _backward_view
-
         return view
 
     def view(self, *shape) -> Self:
@@ -84,6 +91,22 @@ class Tensor:
                 shape = tuple(shape[0])
             else:
                 shape = shape  # Keep single-dimension shape as is
+
+        # Handle -1 in shape
+        if -1 in shape:
+            # Can only have one -1 in shape
+            if shape.count(-1) > 1:
+                raise ValueError("Only one -1 dimension is allowed in shape")
+
+            # Calculate the size of the -1 dimension
+            neg_idx = shape.index(-1)
+            known_size = np.prod(
+                [d for i, d in enumerate(shape) if i != neg_idx and d != -1]
+            )
+            # Compute the missing dimension
+            inferred_size = int(self.data.size // known_size)
+            # Replace -1 with inferred size
+            shape = tuple(inferred_size if d == -1 else d for d in shape)
 
         if self.data.size != np.prod(shape):
             raise ValueError(
@@ -488,7 +511,6 @@ class Tensor:
             def _backward():
                 # Call original backward first if it exists
                 original_backward()
-
                 if value.requires_grad:
                     # Get the gradient at the assigned location
                     if np.isscalar(value.data):
@@ -899,6 +921,63 @@ class Tensor:
                 "T property is only defined for 2D tensors. Use transpose() for higher dimensions."
             )
         return self.transpose(1, 0)
+
+    def permute(self, *dims) -> Self:
+        """
+        Permute the dimensions of the tensor.
+
+        Args:
+            *dims: The desired ordering of dimensions
+
+        Returns:
+            Tensor: A view of the tensor with the dimensions permuted.
+
+        Raises:
+            ValueError: If the number of dimensions doesn't match or if dimensions are repeated
+        """
+        # Convert dims to tuple if it's a single argument
+        if len(dims) == 1 and isinstance(dims[0], (tuple, list)):
+            dims = tuple(dims[0])
+
+        # Validate dimensions
+        if len(dims) != self.data.ndim:
+            raise ValueError(
+                f"Number of dims ({len(dims)}) must match tensor dimensions ({self.data.ndim})"
+            )
+
+        # Check for repeated dimensions
+        if len(set(dims)) != len(dims):
+            raise ValueError("Repeated dimensions are not allowed in permute")
+
+        # Check dimension values are valid
+        if not all(0 <= d < self.data.ndim for d in dims):
+            raise ValueError(
+                f"Dimension values must be between 0 and {self.data.ndim-1}"
+            )
+
+        # Create inverse permutation for backward pass
+        inverse_dims = [0] * len(dims)
+        for i, d in enumerate(dims):
+            inverse_dims[d] = i
+
+        # Create a new tensor with permuted data
+        result = Tensor(
+            data=np.transpose(self.data, dims),
+            prev={self} if self.requires_grad else set(),
+            requires_grad=self.requires_grad,
+        )
+
+        def _backward():
+            if result.grad is not None:
+                grad_data = (
+                    result.grad.data if isinstance(result.grad, Tensor) else result.grad
+                )
+                self.grad = Tensor(
+                    np.transpose(grad_data, inverse_dims), requires_grad=False
+                )
+
+        result._backward = _backward
+        return result
 
     ##### Wrappers #####
     def __radd__(self, other):

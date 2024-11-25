@@ -851,3 +851,95 @@ class TestTensorView(TestTensor):
         # Compare gradients
         np.testing.assert_array_equal(x.grad.data, x_torch.grad.numpy())
         np.testing.assert_array_equal(y.grad.data, y_torch.grad.numpy())
+
+
+class TestTensorPermute(TestTensor):
+    def setUp(self):
+        self.x_nchw = Tensor(np.random.randn(2, 3, 4, 5))  # NCHW
+        self.x_nhwc = Tensor(np.random.randn(1, 3, 32, 32))  # NCHW
+
+    def test_basic_permute(self):
+        # Test basic permutation
+        y = self.x_nchw.permute(0, 2, 3, 1)  # NHWC
+
+        assert y.shape == (2, 4, 5, 3)
+        assert np.allclose(y.data, np.transpose(self.x_nchw.data, (0, 2, 3, 1)))
+
+        # Test gradient
+        loss = y.sum()
+        loss.backward()
+
+        # Gradient should be ones permuted back
+        expected_grad = np.ones_like(self.x_nchw.data)
+        assert np.allclose(self.x_nchw.grad.data, expected_grad)
+
+    def test_permute_chain(self):
+        # Create same input in both frameworks
+        np_data = np.random.randn(2, 3, 4, 5)
+        x_torch = torch.tensor(np_data, requires_grad=True)
+        x_ours = Tensor(np_data)
+
+        # Forward pass
+        y_torch = x_torch.permute(0, 2, 3, 1)
+        y_ours = x_ours.permute(0, 2, 3, 1)
+
+        # Compare shapes
+        assert (
+            y_torch.shape == y_ours.shape
+        ), f"Shape mismatch: {y_torch.shape} vs {y_ours.shape}"
+
+        z_torch = y_torch.permute(0, 3, 1, 2)
+        z_ours = y_ours.permute(0, 3, 1, 2)
+
+        # Compare shapes
+        assert (
+            z_torch.shape == z_ours.shape
+        ), f"Shape mismatch: {z_torch.shape} vs {z_ours.shape}"
+
+        # Backward pass
+        loss_torch = z_torch.sum()
+        loss_ours = z_ours.sum()
+
+        loss_torch.backward()
+        loss_ours.backward()
+
+        # Compare gradient shapes
+        assert (
+            x_torch.grad.shape == x_ours.grad.shape
+        ), f"Gradient shape mismatch: {x_torch.grad.shape} vs {x_ours.grad.shape}"
+
+    def test_invalid_permute(self):
+        x = Tensor(np.random.randn(2, 3, 4, 5))
+
+        # Test wrong number of dimensions
+        try:
+            x.permute(0, 1, 2)
+            assert False, "Should have raised ValueError"
+        except ValueError:
+            pass
+
+        # Test invalid permutation
+        try:
+            x.permute(0, 1, 1, 2)
+            assert False, "Should have raised ValueError"
+        except ValueError:
+            pass
+
+    def test_conv2d_permute(self):
+        # Test permute in Conv2d context
+        x_nhwc = self.x_nhwc.permute(0, 2, 3, 1)  # NHWC
+        assert x_nhwc.shape == (1, 32, 32, 3)
+
+        # Simulate some computation
+        y_nhwc = x_nhwc * 2
+
+        # Back to NCHW
+        y = y_nhwc.permute(0, 3, 1, 2)
+        assert y.shape == (1, 3, 32, 32)
+
+        # Test gradient
+        loss = y.sum()
+        loss.backward()
+
+        expected_grad = np.ones_like(self.x_nhwc.data) * 2
+        assert np.allclose(self.x_nhwc.grad.data, expected_grad)
