@@ -50,28 +50,34 @@ class Tensor:
 
     def _make_view(self, view_forward_fn, view_backward_fn) -> Self:
         """Create a view of the tensor"""
-
         view = Tensor(
             data=view_forward_fn(self.data),
             prev={self} if self.requires_grad else set(),
             requires_grad=self.requires_grad,
         )
 
-        def composed_backward_fn(x):
-            grad_data = x.data if isinstance(x, Tensor) else np.asarray(x)
-            return view_backward_fn(self._view_backward_fn(grad_data))
-
-        view._view_forward_fn = lambda x: view_forward_fn(self._view_forward_fn(x))
-        view._view_backward_fn = composed_backward_fn
+        # Store the view functions
+        view._view_forward_fn = lambda x: view_forward_fn(x)
+        view._view_backward_fn = lambda x: view_backward_fn(x)
 
         def _backward_view():
             if view.grad is not None:
-                # Simplified gradient handling
-                backward_grad = view._view_backward_fn(view.grad)
-                self.grad = backward_grad
+                # Transform gradient to original shape
+                grad_data = (
+                    view.grad.data if isinstance(view.grad, Tensor) else view.grad
+                )
+                transformed_grad = view_backward_fn(grad_data)
+
+                # Initialize or accumulate gradient in original tensor
+                if self.grad is None:
+                    self.grad = transformed_grad
+                else:
+                    if isinstance(self.grad, Tensor):
+                        self.grad.data += transformed_grad
+                    else:
+                        self.grad += transformed_grad
 
         view._backward = _backward_view
-
         return view
 
     def view(self, *shape) -> Self:
@@ -79,14 +85,29 @@ class Tensor:
         Create a view of the tensor with the same data but with the specified shape
         A view function is a callable that transforms the original tensor data into a new shape or representation without copying the underlying data.
         """
-        if len(shape) == 1:
-            if isinstance(shape[0], (tuple, list)):
-                shape = tuple(shape[0])
-            else:
-                shape = shape  # Keep single-dimension shape as is
+        if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
+            shape = shape[0]
+
+        # Handle -1 in shape
+        if -1 in shape:
+            # Can only have one -1 in shape
+            if shape.count(-1) > 1:
+                raise ValueError("Only one -1 dimension is allowed in shape")
+
+            # Calculate the size of the -1 dimension
+            neg_idx = shape.index(-1)
+            known_size = np.prod(
+                [d for i, d in enumerate(shape) if i != neg_idx and d != -1]
+            )
+            # Compute the missing dimension
+            inferred_size = int(self.data.size // known_size)
+            # Replace -1 with inferred size
+            shape = tuple(inferred_size if d == -1 else d for d in shape)
 
         if self.data.size != np.prod(shape):
-            raise ValueError("Size of new view must match size of original tensor")
+            raise ValueError(
+                f"Size of new view must match size of original tensor: {self.data.size} != {np.prod(shape)}"
+            )
         return self._make_view(
             lambda x: x.reshape(shape), lambda x: x.reshape(self.data.shape)
         )
@@ -291,6 +312,8 @@ class Tensor:
                    result.grad = (num_samples, num_classes)
                    x.T * result.grad = (num_features, num_classes)  # same shape as y
             """
+            grad_data = result.grad.data
+
             # Handle vector @ vector case separately (1D @ 1D)
             if self.data.ndim == 1 and other.data.ndim == 1:
                 if self.requires_grad:
@@ -316,11 +339,15 @@ class Tensor:
             # other.T:      (p, m) --> T operation is equivalent to swapaxes(-1, -2)
             # matmul(result.grad, other.T) = (n, p) @ (p, m) = (n, m) = self.grad
             if self.requires_grad:
-                # Compute gradient using matrix multiplication rules
-                grad_self = np.matmul(result.grad.data, other.data.swapaxes(-1, -2))
-
-                # Ensure gradient matches the original tensor's shape before view
-                self.grad = grad_self.reshape(self.data.shape)
+                if grad_data.ndim == self.data.ndim == 2:
+                    # Simple matrix multiplication case
+                    self_grad = np.matmul(grad_data, other.data.T)
+                else:
+                    # Batched case: handle each batch independently
+                    self_grad = np.matmul(
+                        grad_data, other.data.T
+                    )  # Broadcasting handles batches
+                self.grad = self_grad
 
             # Compute gradient of loss w.r.t. other.data
             # d(loss) / d(other.data) = d(loss) / d(result) * d(result) / d(other.data)
@@ -330,11 +357,15 @@ class Tensor:
             # self.T:       (m, n) --> T operation is equivalent to swapaxes(-1, -2)
             # matmul(self.T, result.grad) = (m, n) @ (n, p) = (m, p) = other.grad
             if other.requires_grad:
-                # Compute gradient using matrix multiplication rules
-                grad_other = np.matmul(self.data.swapaxes(-1, -2), result.grad.data)
-
-                # Ensure gradient matches the original tensor's shape before view
-                other.grad = grad_other.reshape(other.data.shape)
+                if grad_data.ndim == 2:
+                    # Simple matrix multiplication case
+                    other_grad = np.matmul(self.data.T, grad_data)
+                else:
+                    # Batched case: sum gradients over batch dimension
+                    other_grad = np.sum(
+                        np.matmul(self.data.transpose(0, 2, 1), grad_data), axis=0
+                    )
+                other.grad = other_grad
 
         result._backward = _backward
         return result
@@ -480,6 +511,20 @@ class Tensor:
         if self.requires_grad or value.requires_grad:
             self.requires_grad = True
             self.prev.add(value)
+
+            original_backward = self._backward
+
+            def _backward():
+                # Call original backward first if it exists
+                original_backward()
+                if value.requires_grad:
+                    # Get the gradient at the assigned location
+                    if np.isscalar(value.data):
+                        value.grad = self.grad.data[idx].sum()
+                    else:
+                        value.grad = self.grad.data[idx]
+
+            self._backward = _backward
 
     def sum(self, axis=None, keepdims=False):
         """
@@ -723,13 +768,15 @@ class Tensor:
                 pad_width = ((0, 0), (pad_width, pad_width), (pad_width, pad_width))
             elif len(self.data.shape) == 4:
                 pad_width = (
-                    (0, 0),
-                    (0, 0),
-                    (pad_width, pad_width),
-                    (pad_width, pad_width),
+                    (0, 0),  # batch
+                    (0, 0),  # channels
+                    (pad_width, pad_width),  # height
+                    (pad_width, pad_width),  # width
                 )
             else:
-                raise ValueError("Unsupported number of dimensions")
+                raise ValueError(
+                    f"Unsupported number of dimensions: {len(self.data.shape)}"
+                )
 
         # Convert PyTorch-style padding to numpy-style padding
         elif isinstance(pad_width, tuple):
@@ -841,6 +888,11 @@ class Tensor:
         for tensor in reversed(topological_sorted_tensors):
             tensor._backward()
 
+        # Clear computational graph (safely)
+        visited.clear()  # Clear the set we used for topo sort
+        for node in topological_sorted_tensors:
+            node.prev.clear()  # Clear references but don't recurse
+
     @property
     def shape(self):
         """
@@ -854,7 +906,31 @@ class Tensor:
         return self.data.shape
 
     def reshape(self, *shape):
-        return self.view(*shape)
+        """Reshape tensor while maintaining gradient information."""
+        if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
+            shape = shape[0]
+
+        view = Tensor(
+            self.data.reshape(shape),
+            requires_grad=self.requires_grad,
+            prev={self} if self.requires_grad else None,
+        )
+
+        if self.requires_grad:
+
+            def _backward():
+                if view.grad is not None:
+                    grad_data = (
+                        view.grad.data if isinstance(view.grad, Tensor) else view.grad
+                    )
+                    if self.grad is None:
+                        self.grad = Tensor(grad_data.reshape(self.data.shape))
+                    else:
+                        self.grad.data += grad_data.reshape(self.data.shape)
+
+            view._backward = _backward
+
+        return view
 
     def detach(self) -> Self:
         """
@@ -880,6 +956,63 @@ class Tensor:
                 "T property is only defined for 2D tensors. Use transpose() for higher dimensions."
             )
         return self.transpose(1, 0)
+
+    def permute(self, *dims) -> Self:
+        """
+        Permute the dimensions of the tensor.
+
+        Args:
+            *dims: The desired ordering of dimensions
+
+        Returns:
+            Tensor: A view of the tensor with the dimensions permuted.
+
+        Raises:
+            ValueError: If the number of dimensions doesn't match or if dimensions are repeated
+        """
+        # Convert dims to tuple if it's a single argument
+        if len(dims) == 1 and isinstance(dims[0], (tuple, list)):
+            dims = tuple(dims[0])
+
+        # Validate dimensions
+        if len(dims) != self.data.ndim:
+            raise ValueError(
+                f"Number of dims ({len(dims)}) must match tensor dimensions ({self.data.ndim})"
+            )
+
+        # Check for repeated dimensions
+        if len(set(dims)) != len(dims):
+            raise ValueError("Repeated dimensions are not allowed in permute")
+
+        # Check dimension values are valid
+        if not all(0 <= d < self.data.ndim for d in dims):
+            raise ValueError(
+                f"Dimension values must be between 0 and {self.data.ndim-1}"
+            )
+
+        # Create inverse permutation for backward pass
+        inverse_dims = [0] * len(dims)
+        for i, d in enumerate(dims):
+            inverse_dims[d] = i
+
+        # Create a new tensor with permuted data
+        result = Tensor(
+            data=np.transpose(self.data, dims),
+            prev={self} if self.requires_grad else set(),
+            requires_grad=self.requires_grad,
+        )
+
+        def _backward():
+            if result.grad is not None:
+                grad_data = (
+                    result.grad.data if isinstance(result.grad, Tensor) else result.grad
+                )
+                self.grad = Tensor(
+                    np.transpose(grad_data, inverse_dims), requires_grad=False
+                )
+
+        result._backward = _backward
+        return result
 
     ##### Wrappers #####
     def __radd__(self, other):

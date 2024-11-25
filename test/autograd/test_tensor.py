@@ -147,6 +147,82 @@ class TestTensorOps(TestTensor):
         )
         assert np.array_equal(z.grad.data, np.array([[1, 1], [1, 1]]))
 
+    def test_backward_batch_matmul(self):
+        # Similar shapes to our Conv2d windows case
+        batch_size, windows, features = 3, 784, 144
+        out_channels = 32
+
+        x = Tensor(np.random.randn(batch_size, windows, features))
+        w = Tensor(np.random.randn(out_channels, features))
+
+        # Forward: (3, 784, 144) @ (32, 144).T -> (3, 784, 32)
+        z = x @ w.T
+
+        # Backward
+        grad = np.ones_like(z.data)
+        z.backward(grad)
+
+        # Verify gradient shapes
+        assert x.grad.shape == (batch_size, windows, features)
+        assert w.grad.shape == (out_channels, features)
+
+        # Compare with PyTorch
+        x_torch = torch.tensor(x.data, requires_grad=True)
+        w_torch = torch.tensor(w.data, requires_grad=True)
+
+        z_torch = x_torch @ w_torch.T
+        z_torch.backward(torch.ones_like(z_torch))
+
+        # Use allclose instead of array_equal for floating point comparison
+        np.testing.assert_allclose(x.grad.data, x_torch.grad.numpy(), rtol=1e-10)
+        np.testing.assert_allclose(w.grad.data, w_torch.grad.numpy(), rtol=1e-10)
+
+    def test_batched_matmul_gradient_computation(self):
+        # Create small batch example with explicit float dtype
+        batch_size = 2
+        x = Tensor(
+            np.array(
+                [  # (2, 2, 2)
+                    [[1.0, 1.0], [1.0, 1.0]],
+                    [[1.0, 1.0], [1.0, 1.0]],
+                ],
+                dtype=np.float64,
+            )
+        )
+        w = Tensor(
+            np.array(
+                [  # (2, 2)
+                    [1.0, 1.0],
+                    [1.0, 1.0],
+                ],
+                dtype=np.float64,
+            )
+        )
+
+        # Manual batch-wise computation
+        manual_x_grad = np.zeros_like(x.data)  # (2, 2, 2)
+        manual_w_grad = np.zeros_like(w.data)  # (2, 2)
+
+        for b in range(batch_size):
+            # Compute gradient for each batch separately
+            batch_grad = np.ones((2, 2), dtype=np.float64)  # gradient for this batch
+
+            # Gradient for x[b]
+            manual_x_grad[b] = np.matmul(batch_grad, w.data)  # (2,2) @ (2,2)
+
+            # Accumulate gradient for w
+            manual_w_grad += np.matmul(x.data[b].T, batch_grad)  # (2,2).T @ (2,2)
+
+        # Compare with PyTorch
+        x_torch = torch.tensor(x.data, requires_grad=True)
+        w_torch = torch.tensor(w.data, requires_grad=True)
+        z_torch = x_torch @ w_torch.T
+        z_torch.backward(torch.ones_like(z_torch))
+
+        # Verify our manual computation matches PyTorch
+        np.testing.assert_array_equal(manual_x_grad, x_torch.grad.numpy())
+        np.testing.assert_array_equal(manual_w_grad, w_torch.grad.numpy())
+
     def test_shift_invariance(self):
         x_data = np.array([[1.0, 2.0], [4.0, 5.0], [7.0, 8.0]], dtype=np.float32)
         x = Tensor(x_data)
@@ -851,3 +927,95 @@ class TestTensorView(TestTensor):
         # Compare gradients
         np.testing.assert_array_equal(x.grad.data, x_torch.grad.numpy())
         np.testing.assert_array_equal(y.grad.data, y_torch.grad.numpy())
+
+
+class TestTensorPermute(TestTensor):
+    def setUp(self):
+        self.x_nchw = Tensor(np.random.randn(2, 3, 4, 5))  # NCHW
+        self.x_nhwc = Tensor(np.random.randn(1, 3, 32, 32))  # NCHW
+
+    def test_basic_permute(self):
+        # Test basic permutation
+        y = self.x_nchw.permute(0, 2, 3, 1)  # NHWC
+
+        assert y.shape == (2, 4, 5, 3)
+        assert np.allclose(y.data, np.transpose(self.x_nchw.data, (0, 2, 3, 1)))
+
+        # Test gradient
+        loss = y.sum()
+        loss.backward()
+
+        # Gradient should be ones permuted back
+        expected_grad = np.ones_like(self.x_nchw.data)
+        assert np.allclose(self.x_nchw.grad.data, expected_grad)
+
+    def test_permute_chain(self):
+        # Create same input in both frameworks
+        np_data = np.random.randn(2, 3, 4, 5)
+        x_torch = torch.tensor(np_data, requires_grad=True)
+        x_ours = Tensor(np_data)
+
+        # Forward pass
+        y_torch = x_torch.permute(0, 2, 3, 1)
+        y_ours = x_ours.permute(0, 2, 3, 1)
+
+        # Compare shapes
+        assert (
+            y_torch.shape == y_ours.shape
+        ), f"Shape mismatch: {y_torch.shape} vs {y_ours.shape}"
+
+        z_torch = y_torch.permute(0, 3, 1, 2)
+        z_ours = y_ours.permute(0, 3, 1, 2)
+
+        # Compare shapes
+        assert (
+            z_torch.shape == z_ours.shape
+        ), f"Shape mismatch: {z_torch.shape} vs {z_ours.shape}"
+
+        # Backward pass
+        loss_torch = z_torch.sum()
+        loss_ours = z_ours.sum()
+
+        loss_torch.backward()
+        loss_ours.backward()
+
+        # Compare gradient shapes
+        assert (
+            x_torch.grad.shape == x_ours.grad.shape
+        ), f"Gradient shape mismatch: {x_torch.grad.shape} vs {x_ours.grad.shape}"
+
+    def test_invalid_permute(self):
+        x = Tensor(np.random.randn(2, 3, 4, 5))
+
+        # Test wrong number of dimensions
+        try:
+            x.permute(0, 1, 2)
+            assert False, "Should have raised ValueError"
+        except ValueError:
+            pass
+
+        # Test invalid permutation
+        try:
+            x.permute(0, 1, 1, 2)
+            assert False, "Should have raised ValueError"
+        except ValueError:
+            pass
+
+    def test_conv2d_permute(self):
+        # Test permute in Conv2d context
+        x_nhwc = self.x_nhwc.permute(0, 2, 3, 1)  # NHWC
+        assert x_nhwc.shape == (1, 32, 32, 3)
+
+        # Simulate some computation
+        y_nhwc = x_nhwc * 2
+
+        # Back to NCHW
+        y = y_nhwc.permute(0, 3, 1, 2)
+        assert y.shape == (1, 3, 32, 32)
+
+        # Test gradient
+        loss = y.sum()
+        loss.backward()
+
+        expected_grad = np.ones_like(self.x_nhwc.data) * 2
+        assert np.allclose(self.x_nhwc.grad.data, expected_grad)

@@ -85,6 +85,115 @@ class Linear(Module):
         return x @ self._parameters["weight"] + self._parameters["bias"]
 
 
+class Conv2d(Module):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size,
+        stride=1,
+        padding_mode="valid",
+        **kwargs,
+    ):
+        """
+        Applies a 2D convolution over an input tensor.
+        The shape convention is the same as PyTorch:
+            input_shape = (N, in_channels, H, W)
+            output_shape = (N, out_channels, H', W')
+
+        where:
+        - N is the batch size
+        - in_channels is the number of input channels
+        - out_channels is the number of kernels, where each kernel is convolved with the input tensor in all input channels
+
+        Args:
+            in_channels (int): Number of input channels.
+            out_channels (int): Number of output channels.
+            kernel_size (int): Size of the convolutional kernel.
+            stride (int, optional): Stride of the convolution. Defaults to 1.
+            padding_mode (str, optional): The amount of padding_mode to add to the input. Defaults to 'valid'.
+            - "valid" means no padding.
+            - "same" means padding such that the output shape is the same as the input shape.
+        """
+        super().__init__(**kwargs)
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding_mode = padding_mode
+
+        # The layer contains N number of kernels, which is equivalent to the out_channels
+        # Each kernel is of shape (in_channels, H, W)
+        # Each kernel needs to be convolved with the input tensor
+        # The resulting tensor will have the shape (out_channels, H', W')
+        self._parameters["weight"] = Tensor(
+            np.random.rand(
+                self.out_channels, self.in_channels, self.kernel_size, self.kernel_size
+            )
+        )
+        self._parameters["bias"] = Tensor(
+            np.random.rand(self.out_channels)
+        )  # one bias per kernel
+
+    def forward(self, x):
+        if not isinstance(x, Tensor):
+            x = Tensor(x)
+
+        batch_size, in_channels, H, W = x.data.shape
+
+        if self.padding_mode == "same":
+            pad_h = (self.kernel_size - 1) // 2
+            pad_w = (self.kernel_size - 1) // 2
+            H_out = H
+            W_out = W
+            x_padded = x.pad(
+                pad_width=((0, 0), (0, 0), (pad_h, pad_h), (pad_w, pad_w)),
+                mode="constant",
+                constant_values=0,
+            )
+        elif self.padding_mode == "valid":
+            x_padded = x
+            H_out = (H - self.kernel_size) // self.stride + 1
+            W_out = (W - self.kernel_size) // self.stride + 1
+        else:
+            raise ValueError(f"Invalid padding mode: {self.padding_mode}")
+
+        # Extract windows while maintaining computational graph
+        windows = self._extract_windows(x_padded)
+
+        # Reshape kernel for matrix multiplication
+        kernel_flat = self._parameters["weight"].reshape(self.out_channels, -1)
+
+        # Compute convolution using matrix multiplication
+        output = windows @ kernel_flat.T
+
+        # Reshape output to (N, out_channels, H_out, W_out)
+        output = output.reshape(batch_size, H_out, W_out, self.out_channels)
+        output = output.permute(0, 3, 1, 2)
+
+        # Add bias
+        for c in range(self.out_channels):
+            output[:, c] = output[:, c] + self._parameters["bias"][c]
+        return output
+
+    def _extract_windows(self, x_padded):
+        """Extract all windows using Tensor operations to maintain the computational graph"""
+        batch_size, in_channels, H, W = x_padded.shape
+        windows_list = []
+
+        for i in range(0, H - self.kernel_size + 1, self.stride):
+            for j in range(0, W - self.kernel_size + 1, self.stride):
+                window = x_padded[
+                    :, :, i : i + self.kernel_size, j : j + self.kernel_size
+                ]
+                # Reshape window to (batch_size, in_channels * kernel_size * kernel_size)
+                window_flat = window.reshape(batch_size, -1)
+                windows_list.append(window_flat)
+
+        windows = Tensor.stack(windows_list, axis=1)
+        return windows
+
+
 class BatchNorm(Module):
     """
     Batch Normalization: Accelerating Deep Network Training by Reducing Internal Covariate Shift
