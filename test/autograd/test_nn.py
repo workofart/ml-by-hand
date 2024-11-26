@@ -1,5 +1,5 @@
 from unittest import TestCase
-from autograd.nn import Linear, BatchNorm, Dropout, Conv2d
+from autograd.nn import Linear, BatchNorm, Dropout, Conv2d, MaxPool2d
 from autograd.tensor import Tensor
 import random
 import numpy as np
@@ -226,6 +226,10 @@ class TestConv2d(TestCase):
             in_channels=3, out_channels=2, kernel_size=3, stride=1, padding=0
         )
 
+        # Single channel input
+        self.x_single = Tensor(np.random.randn(2, 1, 16, 16))
+        self.x_single_torch = torch.tensor(self.x_single.data, requires_grad=True)
+
         # Copy our weights to PyTorch conv layer
         with torch.no_grad():
             self.torch_conv2d.weight.data = torch.from_numpy(
@@ -305,3 +309,225 @@ class TestConv2d(TestCase):
         print("Input grad:", x.grad)
         print("Weight grad:", conv._parameters["weight"].grad)
         print("Bias grad:", conv._parameters["bias"].grad)
+
+
+class TestMaxPool2d(TestConv2d):
+    def test_forward(self):
+        maxpool = MaxPool2d(kernel_size=2, stride=2)
+        out = maxpool(self.x)
+
+        torch_maxpool = torch.nn.MaxPool2d(kernel_size=2, stride=2)
+        out_torch = torch_maxpool(self.x_torch)
+
+        assert np.allclose(out.data, out_torch.detach().numpy(), atol=1e-5)
+
+    def test_different_kernel_stride(self):
+        # Test 3x3 kernel with stride 2
+        maxpool = MaxPool2d(kernel_size=3, stride=2)
+        out = maxpool(self.x)
+
+        torch_maxpool = torch.nn.MaxPool2d(kernel_size=3, stride=2)
+        out_torch = torch_maxpool(self.x_torch)
+
+        assert np.allclose(out.data, out_torch.detach().numpy(), atol=1e-5)
+
+    def test_same_padding(self):
+        # Test with 'same' padding
+        maxpool = MaxPool2d(kernel_size=2, stride=2, padding_mode="same")
+        out = maxpool(self.x)
+
+        # PyTorch uses explicit padding, so we need to pad first
+        pad = torch.nn.ZeroPad2d(1)
+        torch_maxpool = torch.nn.MaxPool2d(kernel_size=2, stride=2)
+        out_torch = torch_maxpool(pad(self.x_torch))
+
+        assert np.allclose(out.data, out_torch.detach().numpy(), atol=1e-5)
+
+    def test_single_channel(self):
+        # Test with single channel input
+        maxpool = MaxPool2d(kernel_size=2, stride=2)
+        out = maxpool(self.x_single)
+
+        torch_maxpool = torch.nn.MaxPool2d(kernel_size=2, stride=2)
+        out_torch = torch_maxpool(self.x_single_torch)
+
+        assert np.allclose(out.data, out_torch.detach().numpy(), atol=1e-5)
+
+    def test_kernel_equals_input(self):
+        # Test when kernel size equals input size
+        x = Tensor(np.random.randn(1, 1, 3, 3))
+        x_torch = torch.tensor(x.data, requires_grad=True)
+
+        maxpool = MaxPool2d(kernel_size=3, stride=1)
+        out = maxpool(x)
+
+        torch_maxpool = torch.nn.MaxPool2d(kernel_size=3, stride=1)
+        out_torch = torch_maxpool(x_torch)
+
+        assert np.allclose(out.data, out_torch.detach().numpy(), atol=1e-5)
+
+    def test_conv2d_gradient_sign(self):
+        # Create small input with positive and negative values
+        x = Tensor(np.array([[[[1.0, -1.0], [-1.0, 1.0]]]]))
+        x_torch = torch.tensor(
+            x.data, dtype=torch.float32, requires_grad=True
+        )  # Specify float32
+
+        conv = Conv2d(in_channels=1, out_channels=1, kernel_size=2)
+        conv_torch = torch.nn.Conv2d(1, 1, 2)
+
+        # Set same weights
+        weight_data = np.array(
+            [[[[1.0, -1.0], [-1.0, 1.0]]]], dtype=np.float32
+        )  # Specify float32
+        conv._parameters["weight"].data = weight_data
+        with torch.no_grad():
+            conv_torch.weight.data = torch.from_numpy(weight_data)
+            conv_torch.bias.data = torch.zeros(
+                1, dtype=torch.float32
+            )  # Set bias to float32
+
+        # Forward and backward
+        out = conv(x)
+        out_torch = conv_torch(x_torch)
+
+        out.sum().backward()
+        out_torch.sum().backward()
+
+        # Compare gradients
+        assert np.allclose(
+            conv._parameters["weight"].grad.data, conv_torch.weight.grad.numpy()
+        ), "Weight gradients do not match!"
+
+    def test_conv_pool_chain(self):
+        # Test 1: Simple 2x2 input
+        x1 = Tensor(np.array([[[[1.0, -1.0], [-1.0, 1.0]]]]))
+        x1_torch = torch.tensor(x1.data, dtype=torch.float32)
+
+        # Test 2: Slightly larger 4x4 input
+        x2 = Tensor(
+            np.array(
+                [
+                    [
+                        [
+                            [1.0, -1.0, 1.0, -1.0],
+                            [-1.0, 1.0, -1.0, 1.0],
+                            [1.0, -1.0, 1.0, -1.0],
+                            [-1.0, 1.0, -1.0, 1.0],
+                        ]
+                    ]
+                ]
+            )
+        )
+        x2_torch = torch.tensor(x2.data, dtype=torch.float32)
+
+        # Create layers
+        conv = Conv2d(in_channels=1, out_channels=1, kernel_size=2, bias=False)
+        conv_torch = torch.nn.Conv2d(1, 1, 2, bias=False)
+
+        pool = MaxPool2d(kernel_size=2, stride=2)
+        pool_torch = torch.nn.MaxPool2d(2)
+
+        # Set weights
+        weight_data = np.array([[[[1.0, -1.0], [-1.0, 1.0]]]], dtype=np.float32)
+        conv._parameters["weight"].data = weight_data
+        with torch.no_grad():
+            conv_torch.weight.data = torch.from_numpy(weight_data)
+
+        # Test 1: 2x2 input
+        print("Test 1: 2x2 input")
+        out1 = conv(x1)
+        out1_torch = conv_torch(x1_torch)
+        print("Conv output:")
+        print("Ours:", out1.data)
+        print("PyTorch:", out1_torch.detach().numpy())
+
+        # Compare outputs
+        assert np.allclose(
+            out1.data, out1_torch.detach().numpy()
+        ), "Conv outputs do not match!"
+
+        # Test 2: 4x4 input
+        print("\nTest 2: 4x4 input")
+        out2 = conv(x2)
+        out2_torch = conv_torch(x2_torch)
+        print("Conv output:")
+        print("Ours:", out2.data)
+        print("PyTorch:", out2_torch.detach().numpy())
+
+        # Compare outputs
+        assert np.allclose(
+            out2.data, out2_torch.detach().numpy()
+        ), "Conv outputs do not match!"
+
+        # Add pooling
+        pool2 = pool(out2)
+        pool2_torch = pool_torch(out2_torch)
+        print("\nPool output:")
+        print("Ours:", pool2.data)
+        print("PyTorch:", pool2_torch.detach().numpy())
+
+        # Compare pooling outputs
+        assert np.allclose(
+            pool2.data, pool2_torch.detach().numpy()
+        ), "Pooling outputs do not match!"
+
+    def test_conv_pool_chain_with_grads(self):
+        # Setup same as before
+        x2 = Tensor(
+            np.array(
+                [
+                    [
+                        [
+                            [1.0, -1.0, 1.0, -1.0],
+                            [-1.0, 1.0, -1.0, 1.0],
+                            [1.0, -1.0, 1.0, -1.0],
+                            [-1.0, 1.0, -1.0, 1.0],
+                        ]
+                    ]
+                ]
+            )
+        )
+        x2_torch = torch.tensor(x2.data, dtype=torch.float32, requires_grad=True)
+
+        conv = Conv2d(in_channels=1, out_channels=1, kernel_size=2, bias=False)
+        conv_torch = torch.nn.Conv2d(1, 1, 2, bias=False)
+
+        pool = MaxPool2d(kernel_size=2, stride=2)
+        pool_torch = torch.nn.MaxPool2d(2)
+
+        # Set weights
+        weight_data = np.array([[[[1.0, -1.0], [-1.0, 1.0]]]], dtype=np.float32)
+        conv._parameters["weight"].data = weight_data
+        with torch.no_grad():
+            conv_torch.weight.data = torch.from_numpy(weight_data)
+
+        # Forward pass
+        conv_out = conv(x2)
+        conv_out_torch = conv_torch(x2_torch)
+        conv_out_torch.retain_grad()  # Add this line to retain intermediate gradients
+
+        pool_out = pool(conv_out)
+        pool_out_torch = pool_torch(conv_out_torch)
+
+        # Backward pass
+        pool_out.sum().backward()
+        pool_out_torch.sum().backward()
+
+        # Compare gradients
+        assert np.allclose(
+            conv_out.grad.data
+            if conv_out.grad is not None
+            else np.zeros_like(conv_out.data),
+            conv_out_torch.grad.numpy()
+            if conv_out_torch.grad is not None
+            else np.zeros_like(conv_out_torch.data),
+        ), "Conv output gradients do not match!"
+
+        assert np.allclose(
+            x2.grad.data, x2_torch.grad.numpy()
+        ), "Input gradients do not match!"
+
+        assert np.allclose(
+            conv._parameters["weight"].grad.data, conv_torch.weight.grad.numpy()
+        ), "Weight gradients do not match!"

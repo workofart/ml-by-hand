@@ -561,22 +561,21 @@ class Tensor:
             d(loss) / d(max(x)) = result.grad
             d(max(x)) / dx = 1 if x == max(x), 0 otherwise
             """
-            # Create mask of max elements
-            if axis is None:
-                mask = self.data == np.max(self.data)
-                grad = result.grad.expand(self.shape) if keepdims else result.grad
-                self.grad = grad.data * mask
-            else:
-                # Expand gradient to match original shape
-                grad = result.grad.expand(self.shape)
+            grad = result.grad.expand(self.shape)
+            max_vals = np.max(self.data, axis=axis, keepdims=True)
+            mask = self.data == max_vals
 
-                # Create mask for max elements along specified axes
-                max_vals = np.max(self.data, axis=axis, keepdims=True)
-                mask = self.data == max_vals
-
-                # Distribute gradient to max elements
-                count = np.sum(mask, axis=axis, keepdims=True)
+            # Treat multiple axes or None as global max
+            if axis is None or (isinstance(axis, tuple) and len(axis) > 1):
+                # Global max: distribute equally
+                count = np.sum(mask)
                 self.grad = grad.data * mask / count
+            else:
+                # Single axis: use first occurrence
+                ax = axis[0] if isinstance(axis, tuple) else axis
+                cumsum = np.cumsum(mask, axis=ax)
+                first_occur = cumsum == 1
+                self.grad = grad.data * (mask * first_occur)
 
         result._backward = _backward
         return result
