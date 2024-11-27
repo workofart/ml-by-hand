@@ -129,9 +129,30 @@ class Conv2d(Module):
         # Each kernel is of shape (in_channels, H, W)
         # Each kernel needs to be convolved with the input tensor
         # The resulting tensor will have the shape (out_channels, H', W')
+        # Xavier Normal Initialization
+        # https://proceedings.mlr.press/v9/glorot10a/glorot10a.pdf
         self._parameters["weight"] = Tensor(
-            np.random.rand(
-                self.out_channels, self.in_channels, self.kernel_size, self.kernel_size
+            np.random.uniform(
+                low=-np.sqrt(
+                    6.0
+                    / (
+                        self.in_channels * self.kernel_size * self.kernel_size
+                        + self.out_channels
+                    )
+                ),
+                high=np.sqrt(
+                    6.0
+                    / (
+                        self.in_channels * self.kernel_size * self.kernel_size
+                        + self.out_channels
+                    )
+                ),
+                size=(
+                    self.out_channels,
+                    self.in_channels,
+                    self.kernel_size,
+                    self.kernel_size,
+                ),
             )
         )
         if bias:

@@ -30,6 +30,46 @@ class MnistMultiClassClassifier(nn.Module):
         return functional.softmax(x)
 
 
+class MnistConvolutionalClassifier(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # First conv layer: 28x28 -> 28x28 (same padding)
+        self.conv1 = nn.Conv2d(
+            in_channels=1, out_channels=8, kernel_size=3, padding_mode="same"
+        )
+        self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        # Second conv layer: 28x28 -> 28x28 (same padding)
+        self.conv2 = nn.Conv2d(
+            in_channels=8, out_channels=16, kernel_size=3, padding_mode="same"
+        )
+        self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)
+        # Now we have 16 channels of 14x14 features
+        self.fc1 = nn.Linear(16 * 7 * 7, 32)
+        self.fc2 = nn.Linear(32, 10)
+
+    def forward(self, x):
+        batch_size = x.shape[0]
+
+        # Input reshape: (batch_size, 784) -> (batch_size, 1, 28, 28)
+        x = x.reshape(batch_size, 1, 28, 28)
+
+        # First conv block
+        x = functional.relu(self.conv1(x))
+        x = self.pool1(x)  # (batch_size, 8, 14, 14)
+
+        # Second conv block
+        x = functional.relu(self.conv2(x))
+        x = self.pool2(x)  # (batch_size, 6, 7, 7)
+
+        # Flatten: (batch_size, 6, 7, 7) -> (batch_size, 6*7*7)
+        x = x.view(batch_size, -1)
+
+        # Dense layers
+        x = functional.relu(self.fc1(x))
+        return functional.softmax(self.fc2(x))
+
+
 class MnistOneVsRestBinaryClassifier(nn.Module):
     def __init__(self, with_logits=True):
         super().__init__()
@@ -133,6 +173,7 @@ def train_mnist_multiclass_model(
         loss_fn=loss_fn,
         optimizer=optimizer,
         epochs=30,
+        # batch_size=3,
     )
 
     model.eval()
@@ -153,7 +194,22 @@ if __name__ == "__main__":
     )
     X /= 255.0  # normalize to [0, 1] to speed up convergence
 
+    logger.info(f"X shape: {X.shape}")
+    logger.info(f"y shape: {y.shape}")
+
     X_train, X_test, y_train, y_test = utils.train_test_split(X, y, test_size=0.1)
+
+    model = MnistConvolutionalClassifier()
+    train_mnist_multiclass_model(
+        X_train,
+        y_train,
+        X_test,
+        y_test,
+        optimizer=optim.Adam(model.parameters, lr=1e-3),
+        model=model,
+        loss_fn=functional.sparse_cross_entropy,
+        msg="(with batch norm, Adam optimizer)",
+    )
 
     model = MnistMultiClassClassifier(batch_norm=False)
     train_mnist_multiclass_model(
