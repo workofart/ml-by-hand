@@ -122,14 +122,14 @@ class TestTensorOps(TestTensor):
 
         # Call backward and check the gradients
         z.backward()
-        assert z.grad.data == 1.0
-        assert self.y_scalar.grad.data == 2.0  # dz/dy = d(y*x)/dy = x = 2.0
-        assert self.x_scalar.grad.data == 3.0  # dz/dx = d(y*x)/dx = y = 3.0
+        assert np.allclose(z.grad.data, 1.0)
+        assert np.allclose(self.y_scalar.grad.data, 2.0)  # dz/dy = d(y*x)/dy = x = 2.0
+        assert np.allclose(self.x_scalar.grad.data, 3.0)  # dz/dx = d(y*x)/dx = y = 3.0
 
     def test_backward_division(self):
         z = self.x_scalar / self.y_scalar
         z.backward()
-        assert z.grad.data == 1.0
+        assert np.allclose(z.grad.data, 1.0)
         assert np.isclose(
             self.x_scalar.grad.data, 1.0 / 3.0, atol=1e-5
         )  # dz/dx = d(x/y)/dx = 1/y = 1/3

@@ -17,8 +17,11 @@ def relu(x: Tensor) -> Tensor:
     out = x.maximum(0)
 
     def _backward():
+        if out.grad is None:
+            return
+
         # dL/dx = dL/dy * dy/dx
-        x.grad = out.grad * (x.data > 0)
+        x._accumulate_grad(out.grad * (x.data > 0))
 
     out._backward = _backward
     return out
@@ -32,12 +35,15 @@ def sigmoid(x: Tensor) -> Tensor:
     out = Tensor(1 / (1 + np.exp(np.clip(-x.data, -709, 709))), prev={x})
 
     def _backward():
+        if out.grad is None:
+            return
+
+        # d(sigmoid(x))/dx = sigmoid(x) * (1 - sigmoid(x))
+        x._accumulate_grad(out.grad * out.data * (1 - out.data))
         logger.debug("Sigmoid backward shapes:")
         logger.debug(f"out.grad shape: {out.grad.shape}")
         logger.debug(f"out.data shape: {out.data.shape}")
         logger.debug(f"x.grad shape: {x.grad.shape}")
-        # d(sigmoid(x))/dx = sigmoid(x) * (1 - sigmoid(x))
-        x.grad = out.grad * out.data * (1 - out.data)
         logger.debug(f"After backward x.grad shape: {x.grad.shape}")
 
     out._backward = _backward
@@ -55,6 +61,8 @@ def softmax(x: Tensor) -> Tensor:
     out = Tensor(probs, prev={x})
 
     def _backward():
+        if out.grad is None:
+            return
         # There are two cases for this gradient because each element in the matrix affects
         # every other elements' gradient due to the fact of sum(e^x) in the denominator.
         # Let's denote i, j as the ith and jth elements in the matrix.
@@ -62,16 +70,18 @@ def softmax(x: Tensor) -> Tensor:
         # d(softmax(x))/dx_i = softmax(x)_i * (1[i==j] - softmax(x)_i)
         # Case 2: i != j
         # d(softmax(x))/dx_i = -softmax(x)_i * softmax(x)_j
-        # We first create the identify matrix to represent 1[i==j]
-        identity_matrix = np.eye(x.data.shape[1])  # number of classes as shape
 
-        # For each sample in batch
-        for sample_idx in range(x.data.shape[0]):
-            # Compute grad using broadcasting
-            grad = probs[sample_idx][:, None] * (
-                identity_matrix - probs[sample_idx][None, :]
-            )
-            x.grad[sample_idx] = out.grad[sample_idx] @ grad
+        # Vectorized computation using broadcasting
+        S = probs[..., None, :]  # Add dimension for broadcasting
+        # We create the identify matrix to represent 1[i==j]
+        grad = S * (np.eye(x.data.shape[-1]) - S.transpose(0, 2, 1))
+        # We use einsum to compute the gradient
+        # Accumulate the gradient for the input tensor x by using the Einstein summation convention.
+        # The einsum function computes the gradient of the softmax function with respect to its input.
+        # 'bi' refers to the batch index (b) and the output index (i) of the gradient (out.grad.data).
+        # 'bij' refers to the batch index (b), the output index (i), and the input index (j) of the Jacobian matrix (grad).
+        # The result is a tensor of shape (batch_size, j) which represents the accumulated gradient for each input.
+        x._accumulate_grad(np.einsum("bi,bij->bj", out.grad.data, grad))
 
     out._backward = _backward
     return out
@@ -111,11 +121,15 @@ def binary_cross_entropy(y_pred: Tensor, y_true: Union[Tensor, np.ndarray]) -> T
     )
 
     def _backward():
+        if out.grad is None:
+            return
+
         # dL/dpred = -(y/p - (1-y)/(1-p))
         logger.debug(f"y_true shape: {y_true.shape}")
         logger.debug(f"y_pred shape: {y_pred.data.shape}")
-        y_pred.grad = -(y_true / y_pred_prob - (1 - y_true) / (1 - y_pred_prob)) / len(
-            y_pred_prob
+        y_pred._accumulate_grad(
+            -(y_true / y_pred_prob - (1 - y_true) / (1 - y_pred_prob))
+            / len(y_pred_prob)
         )
         logger.debug(f"y_pred.grad shape after: {y_pred.grad.shape}")
 
@@ -161,9 +175,15 @@ def sparse_cross_entropy(y_pred: Tensor, y_true: Union[Tensor, np.ndarray]) -> T
     out = Tensor(data=loss, prev=(y_pred,))
 
     def _backward():
+        if out.grad is None:
+            return
+
+        # Vectorized gradient computation
         grad = np.zeros_like(y_pred_prob)
-        grad[range(n_samples), y_true] = -1.0 / selected_probs
-        y_pred.grad = grad / n_samples
+        grad[range(n_samples), y_true] = -1.0 / (selected_probs * n_samples)
+        y_pred._accumulate_grad(
+            grad * out.grad.data[..., None]
+        )  # Add dimension for broadcasting
 
     out._backward = _backward
     return out
@@ -212,6 +232,8 @@ def hinge_loss(
         )
 
     def _backward():
+        if loss.grad is None:
+            return
         """
         d (1/2||w||^2)/dw = w (we multiple 1/2 because it makes the gradient calculation easier)
         d(C * sum(max(0, 1 - y_true * y_pred)))/dw = C * max(0, 1 - y_true * y_pred)
@@ -222,7 +244,7 @@ def hinge_loss(
         grad = -y_true.data * margin_violated
         if reduction == "mean":
             grad = grad / len(grad)
-        y_pred.grad = loss.grad * grad
+        y_pred._accumulate_grad(loss.grad * grad)
 
     loss._backward = _backward
     return loss
