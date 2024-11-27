@@ -1,4 +1,5 @@
 numpy
+psutil
 scikit-learn
 pre-commit
 tqdm
