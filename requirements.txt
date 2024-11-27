@@ -70,6 +70,8 @@ pluggy==1.5.0
     # via pytest
 pre-commit==4.0.1
     # via -r requirements.in
+psutil==6.1.0
+    # via -r requirements.in
 pyarrow==18.0.0
     # via openml
 pycparser==2.22
