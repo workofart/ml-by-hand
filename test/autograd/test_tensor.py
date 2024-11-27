@@ -545,6 +545,50 @@ class TestTensorMax(TestTensor):
         assert z.data.shape == (2, 1)  # (2,3) -> (2,1)
         assert np.array_equal(z.data, [[2.0], [4.0]])
 
+    def test_max_multiple_axes(self):
+        # Create 2D tensor with multiple equal maxima
+        x = Tensor(np.array([[4.0, 4.0, 2.0], [4.0, 4.0, 3.0], [2.0, 1.0, 4.0]]))
+
+        # Test max over both axes (-2, -1)
+        y = x.max(axis=(-2, -1))
+        y.backward()
+
+        print("Input:\n", x.data)
+        print("Gradient:\n", x.grad.data)
+
+        # Compare with PyTorch
+        x_torch = torch.tensor(x.data, requires_grad=True)
+        y_torch = x_torch.max()  # PyTorch handles multiple axes by flattening
+        y_torch.backward()
+
+        print("PyTorch gradient:\n", x_torch.grad.numpy())
+
+        # Compare gradients
+        assert np.allclose(x.grad.data, x_torch.grad.numpy()), "Gradients do not match!"
+
+    def test_max_first_occurrence(self):
+        # Create tensor with multiple equal maxima
+        x = Tensor(np.array([[4.0, 4.0, 2.0, 4.0]]))
+
+        # Forward pass
+        y = x.max(axis=-1)
+
+        # Backward pass
+        y.backward()
+
+        print("Input:", x.data)
+        print("Gradient:", x.grad.data)
+
+        # Compare with PyTorch
+        x_torch = torch.tensor([[4.0, 4.0, 2.0, 4.0]], requires_grad=True)
+        y_torch = x_torch.max(dim=-1)[0]
+        y_torch.backward()
+
+        print("PyTorch gradient:", x_torch.grad.numpy())
+
+        # Compare gradients
+        assert np.allclose(x.grad.data, x_torch.grad.numpy()), "Gradients do not match!"
+
 
 class TestTensorTranspose(TestTensor):
     def test_transpose_2d(self):

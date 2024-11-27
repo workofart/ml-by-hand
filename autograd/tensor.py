@@ -58,8 +58,8 @@ class Tensor:
         )
 
         # Store the view functions
-        view._view_forward_fn = lambda x: view_forward_fn(x)
-        view._view_backward_fn = lambda x: view_backward_fn(x)
+        view._view_forward_fn = view_forward_fn
+        view._view_backward_fn = view_backward_fn
 
         def _backward_view():
             if view.grad is not None:
@@ -440,12 +440,7 @@ class Tensor:
             value = Tensor(value, requires_grad=False)  # this is important
 
         # Update the indexed view with the value
-        if np.isscalar(value.data):
-            self.data[idx] = (
-                value.data if np.isscalar(value.data) else value.data.item()
-            )
-        else:
-            self.data[idx] = value.data
+        self.data[idx] = value.data
 
         # update gradient tracking
         if self.requires_grad or value.requires_grad:
@@ -561,22 +556,21 @@ class Tensor:
             d(loss) / d(max(x)) = result.grad
             d(max(x)) / dx = 1 if x == max(x), 0 otherwise
             """
-            # Create mask of max elements
-            if axis is None:
-                mask = self.data == np.max(self.data)
-                grad = result.grad.expand(self.shape) if keepdims else result.grad
-                self.grad = grad.data * mask
-            else:
-                # Expand gradient to match original shape
-                grad = result.grad.expand(self.shape)
+            grad = result.grad.expand(self.shape)
+            max_vals = np.max(self.data, axis=axis, keepdims=True)
+            mask = self.data == max_vals
 
-                # Create mask for max elements along specified axes
-                max_vals = np.max(self.data, axis=axis, keepdims=True)
-                mask = self.data == max_vals
-
-                # Distribute gradient to max elements
-                count = np.sum(mask, axis=axis, keepdims=True)
+            # Treat multiple axes or None as global max
+            if axis is None or (isinstance(axis, tuple) and len(axis) > 1):
+                # Global max: distribute equally
+                count = np.sum(mask)
                 self.grad = grad.data * mask / count
+            else:
+                # Single axis: use first occurrence
+                ax = axis[0] if isinstance(axis, tuple) else axis
+                cumsum = np.cumsum(mask, axis=ax)
+                first_occur = cumsum == 1
+                self.grad = grad.data * (mask * first_occur)
 
         result._backward = _backward
         return result
@@ -677,14 +671,7 @@ class Tensor:
         # TODO: Refactor to disallow scalar gradients to follow the same matmul assumption as Pytorch.
 
         # Initialize gradient if none provided
-        # Handle scalar case first
-        if grad is None:
-            if np.isscalar(self.data) or (
-                isinstance(self.data, np.ndarray) and self.data.ndim == 0
-            ):
-                grad = np.array(1.0)
-            else:
-                grad = np.ones_like(self.data)
+        grad = np.ones_like(self.data) if grad is None else np.asarray(grad)
         self.grad = grad
 
         # Build computational graph in reverse order
@@ -725,7 +712,7 @@ class Tensor:
         For vectors, returns a tuple with one element (n,).
         For matrices, returns a tuple with two elements (m,n).
         """
-        if np.isscalar(self.data):
+        if isinstance(self.data, (int, float)) or not hasattr(self.data, "shape"):
             return ()
         return self.data.shape
 
@@ -772,8 +759,9 @@ class Tensor:
 
     def permute(self, *dims) -> "Tensor":
         """Movement op: reorder dimensions"""
-        if len(dims) == 1 and isinstance(dims[0], (tuple, list)):
-            dims = dims[0]
+        dims = (
+            dims[0] if len(dims) == 1 and isinstance(dims[0], (tuple, list)) else dims
+        )
 
         return self._make_view(
             lambda x: np.transpose(x, dims),

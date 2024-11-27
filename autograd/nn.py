@@ -93,6 +93,7 @@ class Conv2d(Module):
         kernel_size,
         stride=1,
         padding_mode="valid",
+        bias=True,
         **kwargs,
     ):
         """
@@ -111,6 +112,7 @@ class Conv2d(Module):
             out_channels (int): Number of output channels.
             kernel_size (int): Size of the convolutional kernel.
             stride (int, optional): Stride of the convolution. Defaults to 1.
+            bias (bool, optional): Whether to add a bias term. Defaults to True.
             padding_mode (str, optional): The amount of padding_mode to add to the input. Defaults to 'valid'.
             - "valid" means no padding.
             - "same" means padding such that the output shape is the same as the input shape.
@@ -121,19 +123,42 @@ class Conv2d(Module):
         self.kernel_size = kernel_size
         self.stride = stride
         self.padding_mode = padding_mode
+        self.bias = bias
 
         # The layer contains N number of kernels, which is equivalent to the out_channels
         # Each kernel is of shape (in_channels, H, W)
         # Each kernel needs to be convolved with the input tensor
         # The resulting tensor will have the shape (out_channels, H', W')
+        # Xavier Normal Initialization
+        # https://proceedings.mlr.press/v9/glorot10a/glorot10a.pdf
         self._parameters["weight"] = Tensor(
-            np.random.rand(
-                self.out_channels, self.in_channels, self.kernel_size, self.kernel_size
+            np.random.uniform(
+                low=-np.sqrt(
+                    6.0
+                    / (
+                        self.in_channels * self.kernel_size * self.kernel_size
+                        + self.out_channels
+                    )
+                ),
+                high=np.sqrt(
+                    6.0
+                    / (
+                        self.in_channels * self.kernel_size * self.kernel_size
+                        + self.out_channels
+                    )
+                ),
+                size=(
+                    self.out_channels,
+                    self.in_channels,
+                    self.kernel_size,
+                    self.kernel_size,
+                ),
             )
         )
-        self._parameters["bias"] = Tensor(
-            np.random.rand(self.out_channels)
-        )  # one bias per kernel
+        if bias:
+            self._parameters["bias"] = Tensor(
+                np.random.rand(self.out_channels)
+            )  # one bias per kernel
 
     def forward(self, x):
         if not isinstance(x, Tensor):
@@ -141,25 +166,16 @@ class Conv2d(Module):
 
         batch_size, in_channels, H, W = x.data.shape
 
-        if self.padding_mode == "same":
-            pad_h = (self.kernel_size - 1) // 2
-            pad_w = (self.kernel_size - 1) // 2
-            H_out = H
-            W_out = W
-            x_padded = x.pad(
-                pad_width=((0, 0), (0, 0), (pad_h, pad_h), (pad_w, pad_w)),
-                mode="constant",
-                constant_values=0,
-            )
-        elif self.padding_mode == "valid":
-            x_padded = x
-            H_out = (H - self.kernel_size) // self.stride + 1
-            W_out = (W - self.kernel_size) // self.stride + 1
-        else:
-            raise ValueError(f"Invalid padding mode: {self.padding_mode}")
-
         # Extract windows while maintaining computational graph
-        windows = self._extract_windows(x_padded)
+        windows, (H_out, W_out) = extract_windows(
+            x, self.kernel_size, self.stride, self.padding_mode
+        )
+
+        # Reshape windows for matrix multiplication
+        num_windows = windows.shape[0]
+        windows = windows.reshape(
+            num_windows * batch_size, in_channels * self.kernel_size * self.kernel_size
+        )
 
         # Reshape kernel for matrix multiplication
         kernel_flat = self._parameters["weight"].reshape(self.out_channels, -1)
@@ -167,31 +183,55 @@ class Conv2d(Module):
         # Compute convolution using matrix multiplication
         output = windows @ kernel_flat.T
 
-        # Reshape output to (N, out_channels, H_out, W_out)
+        # Reshape output to (batch_size, H_out, W_out, out_channels)
         output = output.reshape(batch_size, H_out, W_out, self.out_channels)
-        output = output.permute(0, 3, 1, 2)
+        output = output.permute(0, 3, 1, 2)  # (N, out_channels, H_out, W_out)
 
         # Add bias
-        for c in range(self.out_channels):
-            output[:, c] = output[:, c] + self._parameters["bias"][c]
+        if self.bias:
+            for c in range(self.out_channels):
+                output[:, c] = output[:, c] + self._parameters["bias"][c]
         return output
 
-    def _extract_windows(self, x_padded):
-        """Extract all windows using Tensor operations to maintain the computational graph"""
-        batch_size, in_channels, H, W = x_padded.shape
-        windows_list = []
 
-        for i in range(0, H - self.kernel_size + 1, self.stride):
-            for j in range(0, W - self.kernel_size + 1, self.stride):
-                window = x_padded[
-                    :, :, i : i + self.kernel_size, j : j + self.kernel_size
-                ]
-                # Reshape window to (batch_size, in_channels * kernel_size * kernel_size)
-                window_flat = window.reshape(batch_size, -1)
-                windows_list.append(window_flat)
+class MaxPool2d(Module):
+    def __init__(self, kernel_size, stride=None, padding_mode="valid", **kwargs):
+        """
+        2D Max Pooling Layer
 
-        windows = Tensor.stack(windows_list, axis=1)
-        return windows
+        Args:
+            kernel_size (int): Size of pooling window (2 means 2x2 window)
+            stride (int, optional): How many pixels to move the window each time. Defaults to kernel_size.
+            padding_mode (str, optional): The type of padding_mode to add to the input. Defaults to 'valid'.
+            - "valid" means no padding.
+            - "same" means padding such that the output shape is the same as the input shape.
+        """
+        super().__init__(**kwargs)
+        self.kernel_size = kernel_size
+        self.stride = (
+            stride if stride is not None else kernel_size
+        )  # Default to kernel_size
+        self.padding_mode = padding_mode
+
+    def forward(self, x):
+        if not isinstance(x, Tensor):
+            x = Tensor(x)
+
+        windows, (H_out, W_out) = extract_windows(
+            x, self.kernel_size, self.stride, self.padding_mode
+        )
+
+        num_windows, batch_size, in_channels, H_kernel, W_kernel = windows.shape
+
+        # Reshape windows to match spatial layout
+        windows = windows.reshape(H_out, W_out, batch_size, in_channels, -1)
+        # Reorder axes to (batch_size, in_channels, H_out, W_out, kH * kW)
+        windows = windows.permute(2, 3, 0, 1, 4)
+
+        pooled = windows.max(axis=-1, keepdims=True).reshape(
+            batch_size, in_channels, H_out, W_out
+        )
+        return pooled
 
 
 class BatchNorm(Module):
@@ -283,3 +323,61 @@ class Dropout(Module):
                 else x * 0  # when p=1, drop everything by multiplying by 0
             )
         return x
+
+
+########### Utility Functions ###########
+def extract_windows(x, kernel_size, stride, padding_mode="valid"):
+    """
+    Shared utility function to extract windows from input tensor while maintaining computational graph
+
+    Args:
+        x (Tensor): Input tensor of shape (batch_size, channels, height, width)
+        kernel_size (int): Size of the sliding window
+        stride (int): Step size between windows
+        padding_mode (str): Type of padding - "valid" or "same"
+
+    Returns:
+        tuple: (windows, output_shape)
+            - windows: Stacked tensor of shape (num_windows, batch_size, channels, kernel_size, kernel_size)
+            - output_shape: (H_out, W_out) tuple for reshaping
+    """
+    if not isinstance(x, Tensor):
+        x = Tensor(x)
+
+    batch_size, in_channels, H, W = x.data.shape
+
+    # Calculate output dimensions first
+    if padding_mode == "same":
+        # For MaxPool2d with kernel_size=2 and stride=2, PyTorch adds 1 pixel padding first
+        pad_h = pad_w = 1
+        x_padded = x.pad(
+            pad_width=((0, 0), (0, 0), (pad_h, pad_h), (pad_w, pad_w)),
+            mode="constant",
+            constant_values=0,
+        )
+        # Output size calculation after padding
+        H_padded = H + 2 * pad_h
+        W_padded = W + 2 * pad_w
+        H_out = (H_padded - kernel_size) // stride + 1
+        W_out = (W_padded - kernel_size) // stride + 1
+    elif padding_mode == "valid":
+        x_padded = x
+        H_out = (H - kernel_size) // stride + 1
+        W_out = (W - kernel_size) // stride + 1
+    else:
+        raise ValueError(f"Invalid padding mode: {padding_mode}")
+
+    windows_list = []
+
+    # Extract windows
+    for i in range(0, x_padded.shape[2] - kernel_size + 1, stride):
+        for j in range(0, x_padded.shape[3] - kernel_size + 1, stride):
+            window = x_padded[:, :, i : i + kernel_size, j : j + kernel_size]
+            windows_list.append(window)
+
+    # Verify we got the expected number of windows
+    assert (
+        len(windows_list) == H_out * W_out
+    ), f"Expected {H_out * W_out} windows, got {len(windows_list)}"
+
+    return Tensor.stack(windows_list, axis=0), (H_out, W_out)
