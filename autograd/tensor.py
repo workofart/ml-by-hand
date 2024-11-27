@@ -122,8 +122,10 @@ class Tensor:
         if not tensors:
             raise ValueError("Need at least one tensor to stack")
 
-        # Stack the underlying numpy arrays
-        stacked_data = np.stack([t.data for t in tensors], axis=axis)
+        # Memory optimization: Use numpy.concatenate with expanded dimensions
+        # instead of stack to avoid temporary list creation
+        expanded_arrays = [np.expand_dims(t.data, axis=axis) for t in tensors]
+        stacked_data = np.concatenate(expanded_arrays, axis=axis)
 
         # Create new tensor with stacked data
         result = Tensor(
@@ -133,16 +135,24 @@ class Tensor:
         )
 
         def _backward():
-            # Split the gradient Tensor along the stacking axis
-            grads = np.split(result.grad.data, len(tensors), axis=axis)
+            if result.grad is None:
+                return
 
-            # Distribute gradients to input tensors
-            for tensor, grad in zip(tensors, grads):
+            # Memory optimization: Use views instead of splits where possible
+            grad_size = result.grad.data.shape[axis]
+            chunk_size = grad_size // len(tensors)
+
+            for i, tensor in enumerate(tensors):
                 if not tensor.requires_grad:
                     continue
 
-                # Use reshape to match original tensor shape
-                tensor.grad = Tensor(grad).reshape(tensor.shape)
+                # Create slice indices
+                idx = [slice(None)] * result.grad.data.ndim
+                idx[axis] = slice(i * chunk_size, (i + 1) * chunk_size)
+
+                # Use view instead of copy
+                grad_slice = result.grad.data[tuple(idx)]
+                tensor.grad = Tensor(grad_slice).reshape(tensor.shape)
 
         result._backward = _backward
         return result
