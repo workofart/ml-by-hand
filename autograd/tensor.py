@@ -58,8 +58,8 @@ class Tensor:
         )
 
         # Store the view functions
-        view._view_forward_fn = lambda x: view_forward_fn(x)
-        view._view_backward_fn = lambda x: view_backward_fn(x)
+        view._view_forward_fn = view_forward_fn
+        view._view_backward_fn = view_backward_fn
 
         def _backward_view():
             if view.grad is not None:
@@ -440,12 +440,7 @@ class Tensor:
             value = Tensor(value, requires_grad=False)  # this is important
 
         # Update the indexed view with the value
-        if np.isscalar(value.data):
-            self.data[idx] = (
-                value.data if np.isscalar(value.data) else value.data.item()
-            )
-        else:
-            self.data[idx] = value.data
+        self.data[idx] = value.data
 
         # update gradient tracking
         if self.requires_grad or value.requires_grad:
@@ -676,14 +671,7 @@ class Tensor:
         # TODO: Refactor to disallow scalar gradients to follow the same matmul assumption as Pytorch.
 
         # Initialize gradient if none provided
-        # Handle scalar case first
-        if grad is None:
-            if np.isscalar(self.data) or (
-                isinstance(self.data, np.ndarray) and self.data.ndim == 0
-            ):
-                grad = np.array(1.0)
-            else:
-                grad = np.ones_like(self.data)
+        grad = np.ones_like(self.data) if grad is None else np.asarray(grad)
         self.grad = grad
 
         # Build computational graph in reverse order
@@ -724,7 +712,7 @@ class Tensor:
         For vectors, returns a tuple with one element (n,).
         For matrices, returns a tuple with two elements (m,n).
         """
-        if np.isscalar(self.data):
+        if isinstance(self.data, (int, float)) or not hasattr(self.data, "shape"):
             return ()
         return self.data.shape
 
@@ -771,8 +759,9 @@ class Tensor:
 
     def permute(self, *dims) -> "Tensor":
         """Movement op: reorder dimensions"""
-        if len(dims) == 1 and isinstance(dims[0], (tuple, list)):
-            dims = dims[0]
+        dims = (
+            dims[0] if len(dims) == 1 and isinstance(dims[0], (tuple, list)) else dims
+        )
 
         return self._make_view(
             lambda x: np.transpose(x, dims),
