@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 # np.random.seed(1337) # need to comment out for dropout to work
 
 
-# Best so far: 45% accuracy on CIFAR-10
+# Best so far: 59% accuracy on CIFAR-10
 class CifarMulticlassClassifier(nn.Module):
     def __init__(self, num_classes: int):
         super().__init__()
