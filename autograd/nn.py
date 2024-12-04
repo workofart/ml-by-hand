@@ -189,8 +189,7 @@ class Conv2d(Module):
 
         # Add bias
         if self.bias:
-            for c in range(self.out_channels):
-                output[:, c] = output[:, c] + self._parameters["bias"][c]
+            output += self._parameters["bias"].reshape(-1, 1, 1)
         return output
 
 
@@ -371,11 +370,16 @@ def extract_windows(x, kernel_size, stride, padding_mode="valid"):
 
     windows_list = []
 
-    # Extract windows
-    for i in range(0, x_padded.shape[2] - kernel_size + 1, stride):
-        for j in range(0, x_padded.shape[3] - kernel_size + 1, stride):
-            window = x_padded[:, :, i : i + kernel_size, j : j + kernel_size]
-            windows_list.append(window)
+    # Extract windows using numpy's advanced indexing
+    i_indices = np.arange(0, x_padded.shape[2] - kernel_size + 1, stride)
+    j_indices = np.arange(0, x_padded.shape[3] - kernel_size + 1, stride)
+
+    # Use numpy's advanced indexing to extract all windows at once
+    windows_list = [
+        x_padded[:, :, i : i + kernel_size, j : j + kernel_size]
+        for i in i_indices
+        for j in j_indices
+    ]
 
     # Verify we got the expected number of windows
     assert (
