@@ -47,12 +47,17 @@ class SGD(Optimizer):
         super(SGD, self).__init__(model_parameters, lr, **kwargs)
 
     def step(self):
-        logger.debug(
-            f"Gradient norm {sum([np.linalg.norm(v.grad.data) for k, module in self.model_parameters.items() for _, v in module.items() ])}"
-        )
         for k, module in self.model_parameters.items():
-            for param_name, param in module.items():
-                param.data -= self.lr * param.grad.data
+            if isinstance(
+                module, dict
+            ):  # Check if there are modules within model_parameters, sometimes we can define a single layer
+                for param_name, param in module.items():
+                    logger.debug(
+                        f"Updating {k}.{param_name}, {param.data.shape=}, {param.grad.data.shape=}"
+                    )
+                    param.data -= self.lr * param.grad.data
+            else:  # Directly update the weights if there are no second modules
+                module.data -= self.lr * module.grad.data
 
 
 class Adam(Optimizer):
@@ -81,27 +86,32 @@ class Adam(Optimizer):
     def step(self):
         self.timestep += 1
         for k, module in self.model_parameters.items():
-            for param_name, param in module.items():
-                if param.grad is None:
-                    continue
+            if isinstance(
+                module, dict
+            ):  # Check if there are modules within model_parameters, sometimes we can define a single layer
+                for param_name, param in module.items():
+                    if param.grad is None:
+                        continue
 
-                param_id = id(
-                    param
-                )  # to avoid cases where the same parameter name is shared across different modules
-                grad = param.grad.data
+                    param_id = id(
+                        param
+                    )  # to avoid cases where the same parameter name is shared across different modules
+                    grad = param.grad.data
 
-                # update first order momentum
-                self.m[param_id] = (
-                    self.beta1 * self.m[param_id] + (1 - self.beta1) * grad
-                )
-                # update second order momentum
-                self.v[param_id] = self.beta2 * self.v[param_id] + (1 - self.beta2) * (
-                    grad**2
-                )
+                    # update first order momentum
+                    self.m[param_id] = (
+                        self.beta1 * self.m[param_id] + (1 - self.beta1) * grad
+                    )
+                    # update second order momentum
+                    self.v[param_id] = self.beta2 * self.v[param_id] + (
+                        1 - self.beta2
+                    ) * (grad**2)
 
-                # bias correction
-                m_hat = self.m[param_id] / (1 - self.beta1**self.timestep)
-                v_hat = self.v[param_id] / (1 - self.beta2**self.timestep)
+                    # bias correction
+                    m_hat = self.m[param_id] / (1 - self.beta1**self.timestep)
+                    v_hat = self.v[param_id] / (1 - self.beta2**self.timestep)
 
-                # update parameters
-                param.data -= self.lr * m_hat / (np.sqrt(v_hat) + self.epsilon)
+                    # update parameters
+                    param.data -= self.lr * m_hat / (np.sqrt(v_hat) + self.epsilon)
+            else:  # Directly update the weights if there are no second modules
+                module.data -= self.lr * module.grad.data

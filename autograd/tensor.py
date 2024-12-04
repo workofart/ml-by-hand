@@ -22,6 +22,9 @@ class Tensor:
 
     @property
     def grad(self):
+        # Always return a Tensor
+        if isinstance(self._grad, np.ndarray):
+            return Tensor(self._grad, requires_grad=False)
         return self._grad
 
     @grad.setter
@@ -67,16 +70,7 @@ class Tensor:
                 grad_data = (
                     view.grad.data if isinstance(view.grad, Tensor) else view.grad
                 )
-                transformed_grad = view_backward_fn(grad_data)
-
-                # Initialize or accumulate gradient in original tensor
-                if self.grad is None:
-                    self.grad = transformed_grad
-                else:
-                    if isinstance(self.grad, Tensor):
-                        self.grad.data += transformed_grad
-                    else:
-                        self.grad += transformed_grad
+                self._accumulate_grad(view_backward_fn(grad_data))
 
         view._backward = _backward_view
         return view
@@ -128,8 +122,10 @@ class Tensor:
         if not tensors:
             raise ValueError("Need at least one tensor to stack")
 
-        # Stack the underlying numpy arrays
-        stacked_data = np.stack([t.data for t in tensors], axis=axis)
+        # Memory optimization: Use numpy.concatenate with expanded dimensions
+        # instead of stack to avoid temporary list creation
+        expanded_arrays = [np.expand_dims(t.data, axis=axis) for t in tensors]
+        stacked_data = np.concatenate(expanded_arrays, axis=axis)
 
         # Create new tensor with stacked data
         result = Tensor(
@@ -139,16 +135,24 @@ class Tensor:
         )
 
         def _backward():
-            # Split the gradient Tensor along the stacking axis
-            grads = np.split(result.grad.data, len(tensors), axis=axis)
+            if result.grad is None:
+                return
 
-            # Distribute gradients to input tensors
-            for tensor, grad in zip(tensors, grads):
+            # Memory optimization: Use views instead of splits where possible
+            grad_size = result.grad.data.shape[axis]
+            chunk_size = grad_size // len(tensors)
+
+            for i, tensor in enumerate(tensors):
                 if not tensor.requires_grad:
                     continue
 
-                # Use reshape to match original tensor shape
-                tensor.grad = Tensor(grad).reshape(tensor.shape)
+                # Create slice indices
+                idx = [slice(None)] * result.grad.data.ndim
+                idx[axis] = slice(i * chunk_size, (i + 1) * chunk_size)
+
+                # Use view instead of copy
+                grad_slice = result.grad.data[tuple(idx)]
+                tensor.grad = Tensor(grad_slice).reshape(tensor.shape)
 
         result._backward = _backward
         return result
@@ -210,11 +214,14 @@ class Tensor:
 
         # 4. Backward pass just focuses on gradient computation
         def _backward():
-            if self.requires_grad and result.grad is not None:
-                self.grad = result.grad
+            if result.grad is None:
+                return
 
-            if other.requires_grad and result.grad is not None:
-                other.grad = result.grad
+            if self.requires_grad:
+                self._accumulate_grad(x._view_backward_fn(result.grad.data))
+
+            if other.requires_grad:
+                other._accumulate_grad(y._view_backward_fn(result.grad.data))
 
         result._backward = _backward
         return result
@@ -240,11 +247,14 @@ class Tensor:
 
         # 4. Backward pass
         def _backward():
-            if self.requires_grad and result.grad is not None:
-                self.grad = other * result.grad
+            if result.grad is None:
+                return
 
-            if other.requires_grad and result.grad is not None:
-                other.grad = self * result.grad
+            if self.requires_grad:
+                self._accumulate_grad(other * result.grad)
+
+            if other.requires_grad:
+                other._accumulate_grad(self * result.grad)
 
         result._backward = _backward
         return result
@@ -262,10 +272,10 @@ class Tensor:
             )
 
             def _backward():
-                if self.requires_grad and result.grad is not None:
-                    self.grad = result.grad.data * other.data
-                if other.requires_grad and result.grad is not None:
-                    other.grad = result.grad.data * self.data
+                if self.requires_grad:
+                    self._accumulate_grad(result.grad.data * other.data)
+                if other.requires_grad:
+                    other._accumulate_grad(result.grad.data * self.data)
 
             result._backward = _backward
             return result
@@ -370,8 +380,7 @@ class Tensor:
             y is other
             """
             if self.requires_grad:
-                grad = y * (x ** (y - 1)) * result.grad
-                self.grad = grad
+                self._accumulate_grad(y * (x ** (y - 1)) * result.grad)
 
             if other.requires_grad:
                 valid_base = x.data > 0
@@ -402,11 +411,9 @@ class Tensor:
 
         def _backward():
             original_backward()
-            if other.requires_grad and self.grad is not None:
+            if other.requires_grad:
                 # Use expand to handle broadcasting in gradient
-                other.grad = self.grad.expand(broadcast_shape)._view_backward_fn(
-                    self.grad.data
-                )
+                other._accumulate_grad(expanded_other._view_backward_fn(self.grad.data))
 
         self._backward = _backward
         return self
@@ -455,9 +462,9 @@ class Tensor:
                 if value.requires_grad:
                     # Get the gradient at the assigned location
                     if np.isscalar(value.data):
-                        value.grad = self.grad.data[idx].sum()
+                        value._accumulate_grad(self.grad.data[idx].sum())
                     else:
-                        value.grad = self.grad.data[idx]
+                        value._accumulate_grad(self.grad.data[idx])
 
             self._backward = _backward
 
@@ -491,7 +498,7 @@ class Tensor:
         def _backward():
             # Use expand to handle gradient broadcasting
             grad_shape = self.data.shape if keepdims else self.data.shape
-            self.grad = result.grad.expand(grad_shape)
+            self._accumulate_grad(result.grad.expand(grad_shape))
 
         result._backward = _backward
         return result
@@ -529,7 +536,7 @@ class Tensor:
                 if axis is not None
                 else self.data.size
             )
-            self.grad = grad.data / num_elements
+            self._accumulate_grad(grad.data / num_elements)
 
         result._backward = _backward
         return result
@@ -564,13 +571,13 @@ class Tensor:
             if axis is None or (isinstance(axis, tuple) and len(axis) > 1):
                 # Global max: distribute equally
                 count = np.sum(mask)
-                self.grad = grad.data * mask / count
+                self._accumulate_grad(grad.data * mask / count)
             else:
                 # Single axis: use first occurrence
                 ax = axis[0] if isinstance(axis, tuple) else axis
                 cumsum = np.cumsum(mask, axis=ax)
                 first_occur = cumsum == 1
-                self.grad = grad.data * (mask * first_occur)
+                self._accumulate_grad(grad.data * (mask * first_occur))
 
         result._backward = _backward
         return result
@@ -601,11 +608,11 @@ class Tensor:
 
             if self.requires_grad:
                 grad = upstream_grad * (x_matches * (1.0 - 0.5 * y_matches))
-                self.grad = x._view_backward_fn(grad)
+                self._accumulate_grad(x._view_backward_fn(grad))
 
             if other.requires_grad:
                 grad = upstream_grad * (y_matches * (1.0 - 0.5 * x_matches))
-                other.grad = y._view_backward_fn(grad)
+                other._accumulate_grad(y._view_backward_fn(grad))
 
         result._backward = _backward
         return result
@@ -656,7 +663,7 @@ class Tensor:
             slices = tuple(
                 slice(p[0], s - p[1]) for s, p in zip(result.data.shape, pad_width)
             )
-            self.grad = result.grad.data[slices]
+            self._accumulate_grad(result.grad.data[slices])
 
         result._backward = _backward
         return result
@@ -671,8 +678,7 @@ class Tensor:
         # TODO: Refactor to disallow scalar gradients to follow the same matmul assumption as Pytorch.
 
         # Initialize gradient if none provided
-        grad = np.ones_like(self.data) if grad is None else np.asarray(grad)
-        self.grad = grad
+        self._grad = np.ones_like(self.data) if grad is None else np.asarray(grad)
 
         # Build computational graph in reverse order
         topological_sorted_tensors = []
@@ -683,10 +689,6 @@ class Tensor:
                 visited.add(node)
                 for prev in node.prev:
                     if prev.requires_grad:
-                        # Initialize the intermediate gradients, the initialization above is
-                        # only for the leaf (last) node in which we call backward().
-                        if prev.grad is None:
-                            prev.grad = np.zeros_like(prev.data, dtype=np.float64)
                         dfs(prev)
                 # the order in which we append to the list is in reverse order
                 # because we always move backwards looking at the previous nodes
@@ -815,6 +817,36 @@ class Tensor:
                 "T property is only defined for 2D tensors. Use transpose() for higher dimensions."
             )
         return self.transpose(1, 0)
+
+    def _accumulate_grad(self, grad, idx=None):
+        """
+        Helper method to lazily initialize and accumulate gradients
+        Args:
+            grad: gradient to accumulate
+            idx: optional index for accumulating at specific locations
+        """
+        if grad is None:
+            return
+
+        # Convert numpy array or scalar to Tensor
+        if not isinstance(grad, Tensor):
+            grad = Tensor(grad, requires_grad=False)
+
+        # Initialize or accumulate gradient
+        if self._grad is None:
+            if idx is not None:
+                # Initialize with zeros
+                self._grad = Tensor(np.zeros_like(self.data), requires_grad=False)
+                # Accumulate at index without reshaping
+                self._grad.data[idx] = grad.data
+            else:
+                self._grad = grad
+        else:
+            if idx is not None:
+                # Accumulate at index without reshaping
+                self._grad.data[idx] += grad.data
+            else:
+                self._grad = self._grad + grad
 
     ##### Wrappers #####
     def __radd__(self, other):

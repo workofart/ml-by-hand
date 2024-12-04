@@ -292,7 +292,9 @@ class BatchNorm(Module):
             )
 
         # Scale and shift
-        return normalized * self._parameters["weight"] + self._parameters["bias"]
+        return normalized * self._parameters["weight"].expand(
+            x.data.shape
+        ) + self._parameters["bias"].expand(x.data.shape)
 
 
 class Dropout(Module):
