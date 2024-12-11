@@ -1,5 +1,5 @@
 import logging
-from autograd import nn
+from autograd import nn, utils
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -56,6 +56,7 @@ def train(
 
     for epoch in range(epochs):
         total_loss = 0.0
+        grad_norms = []
 
         if shuffle_each_epoch:
             # Create random permutation for shuffling
@@ -85,9 +86,28 @@ def train(
 
             # Backward pass and optimize
             loss.backward()
+
+            # Monitor gradient norms - handle nested parameters
+            def get_grad_norm(params):
+                grad_norm_sq = 0.0
+                for param in params:
+                    if isinstance(param, dict):
+                        grad_norm_sq += get_grad_norm(param.values())
+                    elif hasattr(param, "grad") and param.grad is not None:
+                        grad_norm_sq += np.sum(param.grad.data**2)
+                return grad_norm_sq
+
+            grad_norm = np.sqrt(get_grad_norm(model.parameters.values()))
+            grad_norms.append(grad_norm)
+
             optimizer.step()
 
         # Calculate average loss for the epoch
         avg_loss = total_loss / n_samples
-        if epoch in range(0, epochs, max(1, epochs // 10)) or epoch == epochs - 1:
-            logger.info(f"Epoch: {epoch}, Average Loss: {avg_loss:.4f}")
+        avg_grad_norm = np.mean(grad_norms)
+        logger.info(
+            f"Epoch: {epoch}, Loss: {avg_loss:.4f}, Grad norm: {avg_grad_norm:.4f}"
+        )
+        logger.info(
+            f"Accuracy: {utils.accuracy(y_pred.data.argmax(axis=1), batch_y.astype(int))}"
+        )
