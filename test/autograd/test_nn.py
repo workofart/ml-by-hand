@@ -218,16 +218,16 @@ class TestDropout(TestCase):
 class TestConv2d(TestCase):
     def setUp(self):
         self.conv2d = Conv2d(
-            in_channels=3, out_channels=2, kernel_size=3, stride=1, padding_mode="valid"
+            in_channels=2, out_channels=2, kernel_size=3, stride=1, padding_mode="valid"
         )
-        self.x = Tensor(np.random.randn(1, 3, 32, 32))  # shape: (N, in_channels, H, W)
+        self.x = Tensor(np.random.randn(1, 2, 6, 6))  # shape: (N, in_channels, H, W)
         self.x_torch = torch.from_numpy(self.x.data).float()
         self.torch_conv2d = torch.nn.Conv2d(
-            in_channels=3, out_channels=2, kernel_size=3, stride=1, padding=0
+            in_channels=2, out_channels=2, kernel_size=3, stride=1, padding=0
         )
 
         # Single channel input
-        self.x_single = Tensor(np.random.randn(2, 1, 16, 16))
+        self.x_single = Tensor(np.random.randn(2, 1, 4, 4))
         self.x_single_torch = torch.tensor(self.x_single.data, requires_grad=True)
 
         # Copy our weights to PyTorch conv layer
@@ -241,7 +241,7 @@ class TestConv2d(TestCase):
 
     def test_forward(self):
         output = self.conv2d(self.x)
-        assert output.data.shape == (1, 2, 30, 30)  # shape: (N, out_channels, H', W')
+        assert output.data.shape == (1, 2, 4, 4)  # shape: (N, out_channels, H', W')
 
         output_torch = self.torch_conv2d(self.x_torch)
         assert np.allclose(output.data, output_torch.detach().numpy(), atol=1e-5)

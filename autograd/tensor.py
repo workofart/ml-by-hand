@@ -793,6 +793,55 @@ class Tensor:
         # Create new view
         return self._make_view(forward_fn, backward_fn)
 
+    def strided_windows(self, kernel_size: int, stride: int) -> "Tensor":
+        """Movement op: create strided windows view of the tensor"""
+        batch_size, channels, height, width = self.shape
+        H_out = (height - kernel_size) // stride + 1
+        W_out = (width - kernel_size) // stride + 1
+
+        def forward_fn(x):
+            # Create windows using stride_tricks
+            windows = np.lib.stride_tricks.as_strided(
+                x,
+                shape=(batch_size, channels, H_out, W_out, kernel_size, kernel_size),
+                strides=(
+                    x.strides[0],  # batch stride
+                    x.strides[1],  # channel stride
+                    x.strides[2] * stride,  # vertical stride between windows
+                    x.strides[3] * stride,  # horizontal stride between windows
+                    x.strides[2],  # vertical stride within window
+                    x.strides[3],  # horizontal stride within window
+                ),
+                writeable=False,
+            )
+            # Reshape to (out_height * out_width, batch_size, channels, kernel_size, kernel_size)
+            # This ensures row-major order matching PyTorch
+            windows = windows.transpose(2, 3, 0, 1, 4, 5)
+            return windows.reshape(
+                H_out * W_out, batch_size, channels, kernel_size, kernel_size
+            )
+
+        def backward_fn(grad):
+            # Reshape grad back to original window format
+            grad = grad.reshape(
+                H_out, W_out, batch_size, channels, kernel_size, kernel_size
+            )
+            grad = grad.transpose(2, 3, 0, 1, 4, 5)
+            grad_padded = np.zeros_like(self.data)
+
+            for i in range(kernel_size):
+                for j in range(kernel_size):
+                    grad_padded[
+                        :,
+                        :,
+                        i : i + H_out * stride : stride,
+                        j : j + W_out * stride : stride,
+                    ] += grad[:, :, :, :, i, j]
+
+            return grad_padded
+
+        return self._make_view(forward_fn, backward_fn)
+
     def detach(self) -> Self:
         """
         Detach the tensor from the computational graph.
