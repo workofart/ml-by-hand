@@ -1,4 +1,5 @@
 import logging
+import time
 from autograd import nn, utils
 import numpy as np
 
@@ -57,6 +58,7 @@ def train(
     for epoch in range(epochs):
         total_loss = 0.0
         grad_norms = []
+        start_time = time.time()
 
         if shuffle_each_epoch:
             # Create random permutation for shuffling
@@ -105,9 +107,12 @@ def train(
         # Calculate average loss for the epoch
         avg_loss = total_loss / n_samples
         avg_grad_norm = np.mean(grad_norms)
+        epoch_time = time.time() - start_time
+        epochs_per_second = n_batches / epoch_time
         logger.info(
-            f"Epoch: {epoch}, Loss: {avg_loss:.4f}, Grad norm: {avg_grad_norm:.4f}"
-        )
-        logger.info(
-            f"Accuracy: {utils.accuracy(y_pred.data.argmax(axis=1), batch_y.astype(int))}"
+            f"\nEpoch: {epoch}"
+            f"\n\tLoss: {avg_loss:.4f}"
+            f"\n\tGrad Norm: {avg_grad_norm:.4f}"
+            f"\n\tEpochs/sec: {epochs_per_second:.2f}"
+            f"\n\tAccuracy: {utils.accuracy(y_pred.data.argmax(axis=1), batch_y.astype(int)):.2f}"
         )
