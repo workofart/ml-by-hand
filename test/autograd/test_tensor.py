@@ -1164,3 +1164,54 @@ class TestTensorPermute(TestTensor):
 
         expected_grad = np.ones_like(self.x_nhwc.data) * 2
         assert np.allclose(self.x_nhwc.grad.data, expected_grad)
+
+
+class TestTensorStridedWindows(TestTensor):
+    def test_custom_strided_windows(self):
+        # Define a simple input tensor
+        x = np.array(
+            [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]]
+        ).reshape(1, 1, 4, 4)
+
+        tensor = Tensor(x)
+
+        # Define expected output for 2x2 kernel with stride 1
+        expected_2x2 = np.array(
+            [
+                [[1, 2], [5, 6]],
+                [[2, 3], [6, 7]],
+                [[3, 4], [7, 8]],
+                [[5, 6], [9, 10]],
+                [[6, 7], [10, 11]],
+                [[7, 8], [11, 12]],
+                [[9, 10], [13, 14]],
+                [[10, 11], [14, 15]],
+                [[11, 12], [15, 16]],
+            ]
+        ).reshape(9, 1, 1, 2, 2)  # Updated shape
+
+        # Get the output from strided_windows
+        windows_2x2 = tensor.strided_windows(kernel_size=2, stride=1)
+
+        # Compare with expected output
+        assert np.array_equal(
+            windows_2x2.data, expected_2x2
+        ), "2x2 windows do not match expected output"
+
+        # Define expected output for 3x3 kernel with stride 1
+        expected_3x3 = np.array(
+            [
+                [[1, 2, 3], [5, 6, 7], [9, 10, 11]],
+                [[2, 3, 4], [6, 7, 8], [10, 11, 12]],
+                [[5, 6, 7], [9, 10, 11], [13, 14, 15]],
+                [[6, 7, 8], [10, 11, 12], [14, 15, 16]],
+            ]
+        ).reshape(4, 1, 1, 3, 3)  # Updated shape
+
+        # Get the output from strided_windows
+        windows_3x3 = tensor.strided_windows(kernel_size=3, stride=1)
+
+        # Compare with expected output
+        assert np.array_equal(
+            windows_3x3.data, expected_3x3
+        ), "3x3 windows do not match expected output"

@@ -33,20 +33,33 @@ class MnistMultiClassClassifier(nn.Module):
 class MnistConvolutionalClassifier(nn.Module):
     def __init__(self):
         super().__init__()
-        # First conv layer: 28x28 -> 28x28 (same padding)
+        # First conv layer:
+        # Input: 28x28x1
+        # Conv2d(kernel=3, padding='same'): maintains 28x28 spatial dimensions
+        # Channels: 1 -> 16
+        # Output: 28x28x16
         self.conv1 = nn.Conv2d(
-            in_channels=1, out_channels=8, kernel_size=3, padding_mode="same"
+            in_channels=1, out_channels=16, kernel_size=3, padding_mode="same"
         )
+        # MaxPool2d(kernel=2, stride=2):
+        # Reduces spatial dimensions from 28x28 to 14x14
+        # (28 - 2) / 2 + 1 = 14
+        # Output: 14x14x16
         self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)
 
-        # Second conv layer: 28x28 -> 28x28 (same padding)
+        # Second conv layer:
+        # Input: 14x14x16
+        # Conv2d(kernel=3, padding='same'): maintains 14x14 spatial dimensions
+        # Channels: 16 -> 32
+        # Output: 14x14x32
         self.conv2 = nn.Conv2d(
-            in_channels=8, out_channels=16, kernel_size=3, padding_mode="same"
+            in_channels=16, out_channels=32, kernel_size=3, padding_mode="same"
         )
-        self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)
-        # Now we have 16 channels of 14x14 features
-        self.fc1 = nn.Linear(16 * 7 * 7, 32)
-        self.fc2 = nn.Linear(32, 10)
+
+        # Flattened input to fully connected layer:
+        # 14x14x32 = 32 * 14 * 14 = 12544 features
+        self.fc1 = nn.Linear(32 * 14 * 14, 64)
+        self.fc2 = nn.Linear(64, 10)
 
     def forward(self, x):
         batch_size = x.shape[0]
@@ -56,13 +69,12 @@ class MnistConvolutionalClassifier(nn.Module):
 
         # First conv block
         x = functional.relu(self.conv1(x))
-        x = self.pool1(x)  # (batch_size, 8, 14, 14)
+        x = self.pool1(x)  # Reduces to ~13x13
 
         # Second conv block
         x = functional.relu(self.conv2(x))
-        x = self.pool2(x)  # (batch_size, 6, 7, 7)
 
-        # Flatten: (batch_size, 6, 7, 7) -> (batch_size, 6*7*7)
+        # Flatten
         x = x.view(batch_size, -1)
 
         # Dense layers
@@ -172,8 +184,8 @@ def train_mnist_multiclass_model(
         y=y_train.astype(int),
         loss_fn=loss_fn,
         optimizer=optimizer,
-        epochs=30,
-        # batch_size=3,
+        epochs=15,
+        batch_size=256,
     )
 
     model.eval()
@@ -211,42 +223,42 @@ if __name__ == "__main__":
         msg="(with batch norm, Adam optimizer)",
     )
 
-    model = MnistMultiClassClassifier(batch_norm=False)
-    train_mnist_multiclass_model(
-        X_train,
-        y_train,
-        X_test,
-        y_test,
-        optimizer=optim.SGD(model.parameters, lr=1e-3),
-        model=model,
-        loss_fn=functional.sparse_cross_entropy,
-        msg="(without batch norm, SGD optimizer)",
-    )
+    # model = MnistMultiClassClassifier(batch_norm=False)
+    # train_mnist_multiclass_model(
+    #     X_train,
+    #     y_train,
+    #     X_test,
+    #     y_test,
+    #     optimizer=optim.SGD(model.parameters, lr=1e-3),
+    #     model=model,
+    #     loss_fn=functional.sparse_cross_entropy,
+    #     msg="(without batch norm, SGD optimizer)",
+    # )
 
-    model = MnistMultiClassClassifier(batch_norm=True)
-    train_mnist_multiclass_model(
-        X_train,
-        y_train,
-        X_test,
-        y_test,
-        optimizer=optim.SGD(model.parameters, lr=1e-3),
-        model=model,
-        loss_fn=functional.sparse_cross_entropy,
-        msg="(with batch norm, SGD optimizer)",
-    )
+    # model = MnistMultiClassClassifier(batch_norm=True)
+    # train_mnist_multiclass_model(
+    #     X_train,
+    #     y_train,
+    #     X_test,
+    #     y_test,
+    #     optimizer=optim.SGD(model.parameters, lr=1e-3),
+    #     model=model,
+    #     loss_fn=functional.sparse_cross_entropy,
+    #     msg="(with batch norm, SGD optimizer)",
+    # )
 
-    model = MnistMultiClassClassifier(batch_norm=True)
-    train_mnist_multiclass_model(
-        X_train,
-        y_train,
-        X_test,
-        y_test,
-        optimizer=optim.Adam(model.parameters, lr=1e-3),
-        model=model,
-        loss_fn=functional.sparse_cross_entropy,
-        msg="(with batch norm, Adam optimizer)",
-    )
+    # model = MnistMultiClassClassifier(batch_norm=True)
+    # train_mnist_multiclass_model(
+    #     X_train,
+    #     y_train,
+    #     X_test,
+    #     y_test,
+    #     optimizer=optim.Adam(model.parameters, lr=1e-3),
+    #     model=model,
+    #     loss_fn=functional.sparse_cross_entropy,
+    #     msg="(with batch norm, Adam optimizer)",
+    # )
 
-    train_mnist_one_vs_rest_model(X_train, y_train, X_test, y_test)
+    # train_mnist_one_vs_rest_model(X_train, y_train, X_test, y_test)
 
-    train_mnist_with_hinge_loss(X_train, y_train, X_test, y_test)
+    # train_mnist_with_hinge_loss(X_train, y_train, X_test, y_test)
