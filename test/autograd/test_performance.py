@@ -6,7 +6,7 @@ import logging
 from autograd import nn, optim, functional
 from autograd.tensor import Tensor
 from unittest import TestCase
-from sklearn.datasets import load_breast_cancer
+from sklearn.datasets import load_breast_cancer, load_digits
 import tracemalloc
 
 logger = logging.getLogger(__name__)
@@ -14,55 +14,16 @@ logger = logging.getLogger(__name__)
 
 class CIPipelinePerformanceTest(TestCase):
     def setUp(self):
-        # Start memory tracking
         tracemalloc.start()
         self.process = psutil.Process(os.getpid())
 
     def tearDown(self):
-        # Stop memory tracking
         tracemalloc.stop()
 
-    def test_resource_usage_metrics(self):
-        """
-        Measure computational efficiency with memory and CPU usage metrics
-
-        Key goals:
-        1. Track memory usage per forward/backward pass
-        2. Measure CPU utilization
-        3. Provide consistent, reproducible metrics
-        """
-        # Consistent random seed for reproducibility
-        np.random.seed(42)
-
-        # Lightweight model configuration
-        batch_size = 128
-        input_size = 30
-        hidden_size = 64
-        total_epochs = 1000
-
-        class SimpleModel(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.h1 = nn.Linear(input_size, hidden_size)
-                self.bn1 = nn.BatchNorm(hidden_size)  # BatchNorm after first layer
-                self.h2 = nn.Linear(hidden_size, hidden_size)
-                self.bn2 = nn.BatchNorm(hidden_size)  # BatchNorm after second layer
-                self.h3 = nn.Linear(
-                    hidden_size, 1
-                )  # Change to 1 output for binary classification
-
-            def forward(self, x):
-                x = functional.relu(self.bn1(self.h1(x)))  # Apply BatchNorm
-                x = functional.relu(self.bn2(self.h2(x)))  # Apply BatchNorm
-                return functional.sigmoid(
-                    self.h3(x)
-                )  # Use sigmoid for binary classification
-
-        model = SimpleModel()
-
-        optimizer = optim.SGD(model.parameters, lr=0.01)
-
-        # Performance tracking
+    def _measure_model_performance(
+        self, model, x, y_true, optimizer, total_epochs, loss_fn
+    ):
+        """Helper method to measure performance metrics for any model"""
         performance_metrics = {
             "forward_memory": [],
             "backward_memory": [],
@@ -72,87 +33,72 @@ class CIPipelinePerformanceTest(TestCase):
             "backward_times": [],
         }
 
-        # Load the breast cancer dataset
-        X, y = load_breast_cancer(return_X_y=True)
-        x = Tensor(X[:batch_size])  # Use the first 'batch_size' samples
-        y_true = Tensor(
-            y[:batch_size].astype(np.float32)
-        )  # Convert labels to float for binary classification
-
         # Warm-up iteration
         _ = model(x)
 
         # Performance measurement
         for _ in range(total_epochs):
-            # Reset tracemalloc for precise memory tracking
+            # Reset memory tracking at the start of each iteration
             tracemalloc.reset_peak()
+            start_memory = tracemalloc.get_traced_memory()[0]
 
-            # Measure forward pass
+            # Forward pass measurements
             start_cpu = self.process.cpu_percent()
             start_time = time.perf_counter()
-
-            # Capture memory before forward pass
-            mem_before_forward = tracemalloc.get_traced_memory()[0]
 
             y_pred = model(x)
 
-            # Capture memory after forward pass
-            mem_after_forward = tracemalloc.get_traced_memory()[0]
+            # Capture forward pass memory
+            end_memory = tracemalloc.get_traced_memory()[0]
+            forward_memory = max(0, end_memory - start_memory)  # Ensure non-negative
             forward_time = time.perf_counter() - start_time
-            forward_cpu = self.process.cpu_percent() - start_cpu
+            forward_cpu = max(0, self.process.cpu_percent() - start_cpu)
 
-            # Store forward pass metrics
-            performance_metrics["forward_memory"].append(
-                mem_after_forward - mem_before_forward
-            )
+            performance_metrics["forward_memory"].append(forward_memory)
             performance_metrics["forward_times"].append(forward_time)
             performance_metrics["forward_cpu"].append(forward_cpu)
 
-            # Reset tracemalloc for backward pass
+            # Backward pass measurements
             tracemalloc.reset_peak()
-
-            # Measure backward pass
+            start_memory = tracemalloc.get_traced_memory()[0]
             start_cpu = self.process.cpu_percent()
             start_time = time.perf_counter()
 
-            # Capture memory before backward pass
-            mem_before_backward = tracemalloc.get_traced_memory()[0]
-
-            loss = functional.binary_cross_entropy(y_pred, y_true)
+            loss = loss_fn(y_pred, y_true)
             loss.backward()
 
-            # Capture memory after backward pass
-            mem_after_backward = tracemalloc.get_traced_memory()[0]
+            # Capture backward pass memory
+            end_memory = tracemalloc.get_traced_memory()[0]
+            backward_memory = max(0, end_memory - start_memory)  # Ensure non-negative
             backward_time = time.perf_counter() - start_time
-            backward_cpu = self.process.cpu_percent() - start_cpu
+            backward_cpu = max(0, self.process.cpu_percent() - start_cpu)
 
-            # Store backward pass metrics
-            performance_metrics["backward_memory"].append(
-                mem_after_backward - mem_before_backward
-            )
+            performance_metrics["backward_memory"].append(backward_memory)
             performance_metrics["backward_times"].append(backward_time)
             performance_metrics["backward_cpu"].append(backward_cpu)
 
-            # Optimizer step
             optimizer.step()
             optimizer.zero_grad()
 
-        # Compute performance statistics
-        def compute_stats(metrics):
+        return performance_metrics
+
+    def _log_performance_metrics(self, metrics, model_name):
+        """Helper method to log performance metrics"""
+
+        def compute_stats(metrics_list):
             return {
-                "mean": np.mean(metrics),
-                "std": np.std(metrics),
-                "min": np.min(metrics),
-                "max": np.max(metrics),
+                "mean": np.mean(metrics_list),
+                "std": np.std(metrics_list),
+                "min": np.min(metrics_list),
+                "max": np.max(metrics_list),
             }
 
-        # Logging and detailed metrics
-        logger.info("\nPerformance Metrics:")
+        logger.info(f"\nPerformance Metrics for {model_name}:")
 
         # Memory Usage
         logger.info("\nMemory Usage (megabytes):")
-        forward_mem = compute_stats(performance_metrics["forward_memory"])
-        backward_mem = compute_stats(performance_metrics["backward_memory"])
+        forward_mem = compute_stats(metrics["forward_memory"])
+        backward_mem = compute_stats(metrics["backward_memory"])
 
         logger.info("Forward Pass Memory:")
         logger.info(
@@ -165,8 +111,8 @@ class CIPipelinePerformanceTest(TestCase):
 
         # CPU Usage
         logger.info("\nCPU Usage (%):")
-        forward_cpu = compute_stats(performance_metrics["forward_cpu"])
-        backward_cpu = compute_stats(performance_metrics["backward_cpu"])
+        forward_cpu = compute_stats(metrics["forward_cpu"])
+        backward_cpu = compute_stats(metrics["backward_cpu"])
 
         logger.info("Forward Pass CPU:")
         logger.info(f"  Mean: {forward_cpu['mean']:.2f}% ± {forward_cpu['std']:.2f}%")
@@ -175,8 +121,8 @@ class CIPipelinePerformanceTest(TestCase):
 
         # Timing
         logger.info("\nTiming (seconds):")
-        forward_time = compute_stats(performance_metrics["forward_times"])
-        backward_time = compute_stats(performance_metrics["backward_times"])
+        forward_time = compute_stats(metrics["forward_times"])
+        backward_time = compute_stats(metrics["backward_times"])
 
         logger.info("Forward Pass:")
         logger.info(
@@ -186,3 +132,127 @@ class CIPipelinePerformanceTest(TestCase):
         logger.info(
             f"  Mean: {backward_time['mean']:.6f} ± {backward_time['std']:.6f} seconds"
         )
+
+    def test_resource_usage_metrics(self):
+        """
+        Measure computational efficiency with memory and CPU usage metrics for both
+        a simple neural network and a CNN
+        """
+        np.random.seed(42)
+
+        # Test 1: Simple Neural Network on Binary Classification
+        batch_size_mlp = 128
+        input_size = 30
+        hidden_size = 64
+        total_epochs = 100
+
+        class SimpleModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.h1 = nn.Linear(input_size, hidden_size)
+                self.bn1 = nn.BatchNorm(hidden_size)
+                self.h2 = nn.Linear(hidden_size, hidden_size)
+                self.bn2 = nn.BatchNorm(hidden_size)
+                self.h3 = nn.Linear(hidden_size, 1)
+
+            def forward(self, x):
+                x = functional.relu(self.bn1(self.h1(x)))
+                x = functional.relu(self.bn2(self.h2(x)))
+                return functional.sigmoid(self.h3(x))
+
+        # Load binary classification dataset
+        X, y = load_breast_cancer(return_X_y=True)
+        x_mlp = Tensor(X[:batch_size_mlp])
+        y_mlp = Tensor(y[:batch_size_mlp].astype(np.float32))
+
+        mlp_model = SimpleModel()
+        mlp_optimizer = optim.SGD(mlp_model.parameters, lr=0.01)
+
+        # Measure MLP performance
+        mlp_metrics = self._measure_model_performance(
+            mlp_model,
+            x_mlp,
+            y_mlp,
+            mlp_optimizer,
+            total_epochs,
+            lambda y_pred, y_true: functional.binary_cross_entropy(y_pred, y_true),
+        )
+        self._log_performance_metrics(mlp_metrics, "Simple Neural Network")
+
+        # Test 2: CNN on Digit Classification
+        batch_size_cnn = 32
+        input_channels = 1
+        num_classes = 10
+
+        class CNNModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                # First conv block
+                self.conv1 = nn.Conv2d(
+                    input_channels, 16, kernel_size=3, padding_mode="same"
+                )
+                self.bn1 = nn.BatchNorm(
+                    16 * 8 * 8
+                )  # Adjust BatchNorm for flattened conv output
+                self.pool1 = nn.MaxPool2d(kernel_size=2)
+
+                # Second conv block
+                self.conv2 = nn.Conv2d(16, 32, kernel_size=3, padding_mode="same")
+                self.bn2 = nn.BatchNorm(
+                    32 * 4 * 4
+                )  # Adjust BatchNorm for flattened conv output
+                self.pool2 = nn.MaxPool2d(kernel_size=2)
+
+                self.fc1 = nn.Linear(32 * 2 * 2, 64)
+                self.fc2 = nn.Linear(64, num_classes)
+
+            def forward(self, x):
+                # First conv block
+                x = self.conv1(x)
+                batch_size = x.shape[0]
+                x = x.reshape(batch_size, -1)  # Flatten for BatchNorm
+                x = self.bn1(x)
+                x = x.reshape(batch_size, 16, 8, 8)  # Reshape back to 4D
+                x = functional.relu(x)
+                x = self.pool1(x)
+
+                # Second conv block
+                x = self.conv2(x)
+                batch_size = x.shape[0]
+                x = x.reshape(batch_size, -1)  # Flatten for BatchNorm
+                x = self.bn2(x)
+                x = x.reshape(batch_size, 32, 4, 4)  # Reshape back to 4D
+                x = functional.relu(x)
+                x = self.pool2(x)
+
+                # Fully connected layers
+                x = x.reshape(batch_size, -1)
+                x = functional.relu(self.fc1(x))
+                x = self.fc2(x)
+                return functional.softmax(x)
+
+        # Load and preprocess digits dataset
+        digits = load_digits()
+        X_digits = (
+            digits.images.reshape(-1, 1, 8, 8) / 16.0
+        )  # Normalize to [0,1] and add channel dimension
+        y_digits = digits.target  # Use integer labels
+
+        x_cnn = Tensor(X_digits[:batch_size_cnn])
+        y_cnn = np.array(
+            y_digits[:batch_size_cnn], dtype=np.int64
+        )  # Ensure numpy integer array
+
+        cnn_model = CNNModel()
+        cnn_optimizer = optim.SGD(cnn_model.parameters, lr=0.01)
+
+        # Measure CNN performance
+        cnn_metrics = self._measure_model_performance(
+            cnn_model,
+            x_cnn,
+            y_cnn,
+            cnn_optimizer,
+            total_epochs,
+            lambda y_pred, y_true: functional.sparse_cross_entropy(y_pred, y_true),
+        )
+        self._log_performance_metrics(cnn_metrics, "CNN Model")
