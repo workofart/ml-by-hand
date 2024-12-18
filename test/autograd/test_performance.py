@@ -6,7 +6,6 @@ import logging
 from autograd import nn, optim, functional
 from autograd.tensor import Tensor
 from unittest import TestCase
-from sklearn.datasets import load_breast_cancer, load_digits
 import tracemalloc
 
 logger = logging.getLogger(__name__)
@@ -135,124 +134,154 @@ class CIPipelinePerformanceTest(TestCase):
 
     def test_resource_usage_metrics(self):
         """
-        Measure computational efficiency with memory and CPU usage metrics for both
-        a simple neural network and a CNN
+        Test with significantly more complex models and larger inputs to better highlight
+        performance differences from code optimizations.
         """
+
         np.random.seed(42)
 
-        # Test 1: Simple Neural Network on Binary Classification
-        batch_size_mlp = 128
-        input_size = 30
-        hidden_size = 64
-        total_epochs = 100
+        total_epochs = 10  # Still large, but not too large to be impractical
+        logger.info(f"Running {total_epochs} epochs for performance measurement...")
 
-        class SimpleModel(nn.Module):
+        ####### Test 1: Complex MLP #######
+        # Simulate a higher-dimensional input (e.g., 1024 features)
+        # Use larger hidden layers and multiple layers to increase complexity
+        input_size = 1024
+        hidden_size = 512
+        num_layers = 4  # More layers
+        output_size = 10
+        batch_size_mlp = 1024  # Large batch size
+
+        # Synthetic dataset
+        X_mlp = np.random.randn(batch_size_mlp, input_size).astype(np.float32)
+        y_mlp = np.random.randint(0, output_size, size=(batch_size_mlp,)).astype(
+            np.int64
+        )
+
+        class ComplexMLP(nn.Module):
             def __init__(self):
                 super().__init__()
-                self.h1 = nn.Linear(input_size, hidden_size)
-                self.bn1 = nn.BatchNorm(hidden_size)
-                self.h2 = nn.Linear(hidden_size, hidden_size)
-                self.bn2 = nn.BatchNorm(hidden_size)
-                self.h3 = nn.Linear(hidden_size, 1)
+                self.layers = []
+                in_size = input_size
+                for _ in range(num_layers):
+                    linear = nn.Linear(in_size, hidden_size)
+                    bn = nn.BatchNorm(hidden_size)
+                    self.layers.append((linear, bn))
+                    in_size = hidden_size
+                # Final layer
+                self.final = nn.Linear(hidden_size, output_size)
 
             def forward(self, x):
-                x = functional.relu(self.bn1(self.h1(x)))
-                x = functional.relu(self.bn2(self.h2(x)))
-                return functional.sigmoid(self.h3(x))
+                for linear, bn in self.layers:
+                    x = linear(x)
+                    x = bn(x)
+                    x = functional.relu(x)
+                x = self.final(x)
+                return functional.softmax(x)
 
-        # Load binary classification dataset
-        X, y = load_breast_cancer(return_X_y=True)
-        x_mlp = Tensor(X[:batch_size_mlp])
-        y_mlp = Tensor(y[:batch_size_mlp].astype(np.float32))
-
-        mlp_model = SimpleModel()
+        mlp_model = ComplexMLP()
         mlp_optimizer = optim.SGD(mlp_model.parameters, lr=0.01)
 
-        # Measure MLP performance
+        x_mlp_t = Tensor(X_mlp)
+        y_mlp_t = Tensor(y_mlp)
+
         mlp_metrics = self._measure_model_performance(
             mlp_model,
-            x_mlp,
-            y_mlp,
+            x_mlp_t,
+            y_mlp_t,
             mlp_optimizer,
             total_epochs,
-            lambda y_pred, y_true: functional.binary_cross_entropy(y_pred, y_true),
+            functional.binary_cross_entropy,
         )
-        self._log_performance_metrics(mlp_metrics, "Simple Neural Network")
+        self._log_performance_metrics(mlp_metrics, "Complex MLP Model")
 
-        # Test 2: CNN on Digit Classification
-        batch_size_cnn = 32
-        input_channels = 1
-        num_classes = 10
+        ####### Test 2: Larger CNN #######
+        # Increase image size and depth. For example, 64x64 images, 3 channels (like RGB)
+        # More layers and channels in CNN to increase complexity.
 
-        class CNNModel(nn.Module):
+        input_channels = 3
+        image_size = 24
+        num_classes = 20
+        batch_size_cnn = 256  # Larger batch
+        # Synthetic dataset: (batch, channels, height, width)
+        X_cnn = np.random.randn(
+            batch_size_cnn, input_channels, image_size, image_size
+        ).astype(np.float32)
+        y_cnn = np.random.randint(0, num_classes, size=(batch_size_cnn,)).astype(
+            np.int64
+        )
+
+        class DeepCNN(nn.Module):
             def __init__(self):
                 super().__init__()
                 # First conv block
                 self.conv1 = nn.Conv2d(
-                    input_channels, 16, kernel_size=3, padding_mode="same"
+                    input_channels, 32, kernel_size=3, padding_mode="same"
                 )
-                self.bn1 = nn.BatchNorm(
-                    16 * 8 * 8
-                )  # Adjust BatchNorm for flattened conv output
+                self.bn1 = nn.BatchNorm(32 * image_size * image_size)
                 self.pool1 = nn.MaxPool2d(kernel_size=2)
 
                 # Second conv block
-                self.conv2 = nn.Conv2d(16, 32, kernel_size=3, padding_mode="same")
-                self.bn2 = nn.BatchNorm(
-                    32 * 4 * 4
-                )  # Adjust BatchNorm for flattened conv output
+                self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding_mode="same")
+                self.bn2 = nn.BatchNorm(64 * (image_size // 2) * (image_size // 2))
                 self.pool2 = nn.MaxPool2d(kernel_size=2)
 
-                self.fc1 = nn.Linear(32 * 2 * 2, 64)
-                self.fc2 = nn.Linear(64, num_classes)
+                # Third conv block
+                self.conv3 = nn.Conv2d(64, 128, kernel_size=3, padding_mode="same")
+                self.bn3 = nn.BatchNorm(128 * (image_size // 4) * (image_size // 4))
+                self.pool3 = nn.MaxPool2d(kernel_size=2)
+
+                # Fully connected layers
+                fc_input = 128 * (image_size // 8) * (image_size // 8)
+                self.fc1 = nn.Linear(fc_input, 512)
+                self.fc2 = nn.Linear(512, num_classes)
 
             def forward(self, x):
-                # First conv block
+                # Conv block 1
                 x = self.conv1(x)
                 batch_size = x.shape[0]
-                x = x.reshape(batch_size, -1)  # Flatten for BatchNorm
+                x = x.reshape(batch_size, -1)  # Flatten for BN
                 x = self.bn1(x)
-                x = x.reshape(batch_size, 16, 8, 8)  # Reshape back to 4D
+                x = x.reshape(batch_size, 32, image_size, image_size)
                 x = functional.relu(x)
                 x = self.pool1(x)
 
-                # Second conv block
+                # Conv block 2
                 x = self.conv2(x)
                 batch_size = x.shape[0]
-                x = x.reshape(batch_size, -1)  # Flatten for BatchNorm
+                x = x.reshape(batch_size, -1)
                 x = self.bn2(x)
-                x = x.reshape(batch_size, 32, 4, 4)  # Reshape back to 4D
+                x = x.reshape(batch_size, 64, image_size // 2, image_size // 2)
                 x = functional.relu(x)
                 x = self.pool2(x)
 
-                # Fully connected layers
+                # Conv block 3
+                x = self.conv3(x)
+                batch_size = x.shape[0]
+                x = x.reshape(batch_size, -1)
+                x = self.bn3(x)
+                x = x.reshape(batch_size, 128, image_size // 4, image_size // 4)
+                x = functional.relu(x)
+                x = self.pool3(x)
+
+                # FC layers
                 x = x.reshape(batch_size, -1)
                 x = functional.relu(self.fc1(x))
                 x = self.fc2(x)
                 return functional.softmax(x)
 
-        # Load and preprocess digits dataset
-        digits = load_digits()
-        X_digits = (
-            digits.images.reshape(-1, 1, 8, 8) / 16.0
-        )  # Normalize to [0,1] and add channel dimension
-        y_digits = digits.target  # Use integer labels
-
-        x_cnn = Tensor(X_digits[:batch_size_cnn])
-        y_cnn = np.array(
-            y_digits[:batch_size_cnn], dtype=np.int64
-        )  # Ensure numpy integer array
-
-        cnn_model = CNNModel()
+        cnn_model = DeepCNN()
         cnn_optimizer = optim.SGD(cnn_model.parameters, lr=0.01)
 
-        # Measure CNN performance
+        x_cnn_t = Tensor(X_cnn)
+        y_cnn_t = y_cnn  # already int64
+
         cnn_metrics = self._measure_model_performance(
             cnn_model,
-            x_cnn,
-            y_cnn,
+            x_cnn_t,
+            y_cnn_t,
             cnn_optimizer,
             total_epochs,
-            lambda y_pred, y_true: functional.sparse_cross_entropy(y_pred, y_true),
+            functional.binary_cross_entropy,
         )
-        self._log_performance_metrics(cnn_metrics, "CNN Model")
+        self._log_performance_metrics(cnn_metrics, "Deep CNN Model")
