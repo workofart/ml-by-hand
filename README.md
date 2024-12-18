@@ -61,6 +61,15 @@ Comprehensive unit tests and integration tests available in `test/autograd`
 
 Run `python -m pytest`
 
+## Performance Testing
+
+`memray` is used to track memory usage.
+
+Run:
+```
+rm -rf memray_output.bin && memray run -o memray_output.bin -m pytest test/autograd/performance_test.py && memray tree memray_output.bin
+```
+
 ## Future Work
 Potential use autograd engine to create and train state-of-the-art neural network architectures, prioritizing educational value over training efficiency.
 
