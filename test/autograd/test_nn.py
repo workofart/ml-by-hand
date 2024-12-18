@@ -142,16 +142,8 @@ class TestBatchNorm(TestCase):
         output_torch = self.torch_bn(x_torch)
 
         # Debug: Print normalization details
-        print("Normalized output:")
-        print("Our implementation:", output.data)
-        print("PyTorch implementation:", output_torch.detach().numpy())
 
         # Debug: Print running stats
-        print("\nRunning Stats:")
-        print("Our running mean:", self.bn.running_mean)
-        print("PyTorch running mean:", self.torch_bn.running_mean.numpy())
-        print("Our running var:", self.bn.running_var)
-        print("PyTorch running var:", self.torch_bn.running_var.numpy())
 
         # Create a simple loss = sum of all elements
         loss = output.sum()
@@ -161,9 +153,6 @@ class TestBatchNorm(TestCase):
         loss_torch.backward()
 
         # Debug: Print gradients
-        print("\nGradients:")
-        print("Our input gradient:", x.grad)
-        print("PyTorch input gradient:", x_torch.grad)
 
         assert np.allclose(x.grad.data, x_torch.grad.numpy(), atol=1e-5)
 
@@ -173,28 +162,19 @@ class TestBatchNorm(TestCase):
 
         # 1. Test mean calculation
         mean = x.mean(axis=0)
-        print("Mean:", mean.data)
 
         # 2. Test centering (x - mean)
         centered = x - mean
-        print("Centered:", centered.data)
-        print("Centered sum:", centered.data.sum(axis=0))  # Should be ~0
 
         # 3. Test variance calculation
         var = (centered**2).sum(axis=0) / x.data.shape[0]
-        print("Variance:", var.data)
 
         # 4. Test normalization
         std = (var + 1e-5) ** 0.5
         normalized = centered / std
-        print("Normalized:", normalized.data)
-        print("Normalized mean:", normalized.data.mean(axis=0))  # Should be ~0
-        print("Normalized std:", normalized.data.std(axis=0))  # Should be ~1
 
         # 5. Test gradients
         normalized.sum().backward()
-        print("Input gradients:", x.grad.data)
-        print("Gradient sum per feature:", x.grad.data.sum(axis=0))  # Should be ~0
 
 
 class TestDropout(TestCase):
@@ -296,19 +276,10 @@ class TestConv2d(TestCase):
 
         # Forward pass
         output = conv(x)
-        print("\nSimple Conv2d test:")
-        print("Input:", x.data)
-        print("Output:", output.data)
-        print("Number of dependencies:", len(output.prev))
 
         # Backward pass
         loss = output.sum(keepdims=True)
         loss.backward()
-
-        print("\nGradients:")
-        print("Input grad:", x.grad)
-        print("Weight grad:", conv._parameters["weight"].grad)
-        print("Bias grad:", conv._parameters["bias"].grad)
 
 
 class TestMaxPool2d(TestConv2d):
@@ -435,12 +406,8 @@ class TestMaxPool2d(TestConv2d):
             conv_torch.weight.data = torch.from_numpy(weight_data)
 
         # Test 1: 2x2 input
-        print("Test 1: 2x2 input")
         out1 = conv(x1)
         out1_torch = conv_torch(x1_torch)
-        print("Conv output:")
-        print("Ours:", out1.data)
-        print("PyTorch:", out1_torch.detach().numpy())
 
         # Compare outputs
         assert np.allclose(
@@ -448,12 +415,8 @@ class TestMaxPool2d(TestConv2d):
         ), "Conv outputs do not match!"
 
         # Test 2: 4x4 input
-        print("\nTest 2: 4x4 input")
         out2 = conv(x2)
         out2_torch = conv_torch(x2_torch)
-        print("Conv output:")
-        print("Ours:", out2.data)
-        print("PyTorch:", out2_torch.detach().numpy())
 
         # Compare outputs
         assert np.allclose(
@@ -463,9 +426,6 @@ class TestMaxPool2d(TestConv2d):
         # Add pooling
         pool2 = pool(out2)
         pool2_torch = pool_torch(out2_torch)
-        print("\nPool output:")
-        print("Ours:", pool2.data)
-        print("PyTorch:", pool2_torch.detach().numpy())
 
         # Compare pooling outputs
         assert np.allclose(
@@ -473,31 +433,102 @@ class TestMaxPool2d(TestConv2d):
         ), "Pooling outputs do not match!"
 
     def test_conv_pool_chain_with_grads(self):
-        # Setup same as before
+        # Setup with more complex input tensor (3 channels, 6x6)
         x2 = Tensor(
             np.array(
                 [
                     [
                         [
-                            [1.0, -1.0, 1.0, -1.0],
-                            [-1.0, 1.0, -1.0, 1.0],
-                            [1.0, -1.0, 1.0, -1.0],
-                            [-1.0, 1.0, -1.0, 1.0],
-                        ]
+                            [1.0, -1.0, 1.0, -1.0, 1.0, -1.0],
+                            [-1.0, 1.0, -1.0, 1.0, -1.0, 1.0],
+                            [1.0, -1.0, 1.0, -1.0, 1.0, -1.0],
+                            [-1.0, 1.0, -1.0, 1.0, -1.0, 1.0],
+                            [1.0, -1.0, 1.0, -1.0, 1.0, -1.0],
+                            [-1.0, 1.0, -1.0, 1.0, -1.0, 1.0],
+                        ],
+                        [
+                            [0.5, -0.5, 0.5, -0.5, 0.5, -0.5],
+                            [-0.5, 0.5, -0.5, 0.5, -0.5, 0.5],
+                            [0.5, -0.5, 0.5, -0.5, 0.5, -0.5],
+                            [-0.5, 0.5, -0.5, 0.5, -0.5, 0.5],
+                            [0.5, -0.5, 0.5, -0.5, 0.5, -0.5],
+                            [-0.5, 0.5, -0.5, 0.5, -0.5, 0.5],
+                        ],
+                        [
+                            [0.3, -0.3, 0.3, -0.3, 0.3, -0.3],
+                            [-0.3, 0.3, -0.3, 0.3, -0.3, 0.3],
+                            [0.3, -0.3, 0.3, -0.3, 0.3, -0.3],
+                            [-0.3, 0.3, -0.3, 0.3, -0.3, 0.3],
+                            [0.3, -0.3, 0.3, -0.3, 0.3, -0.3],
+                            [-0.3, 0.3, -0.3, 0.3, -0.3, 0.3],
+                        ],
                     ]
                 ]
             )
         )
         x2_torch = torch.tensor(x2.data, dtype=torch.float32, requires_grad=True)
 
-        conv = Conv2d(in_channels=1, out_channels=1, kernel_size=2, bias=False)
-        conv_torch = torch.nn.Conv2d(1, 1, 2, bias=False)
+        conv = Conv2d(in_channels=3, out_channels=2, kernel_size=4, bias=False)
+        conv_torch = torch.nn.Conv2d(3, 2, 4, bias=False)
 
         pool = MaxPool2d(kernel_size=2, stride=2)
         pool_torch = torch.nn.MaxPool2d(2)
 
-        # Set weights
-        weight_data = np.array([[[[1.0, -1.0], [-1.0, 1.0]]]], dtype=np.float32)
+        # Set weights - now 4x4 kernel with 3 input channels and 2 output channels
+        weight_data = np.array(
+            [
+                # First output channel
+                [
+                    # First input channel
+                    [
+                        [1.0, -1.0, 0.5, -0.5],
+                        [-1.0, 1.0, -0.5, 0.5],
+                        [0.5, -0.5, 1.0, -1.0],
+                        [-0.5, 0.5, -1.0, 1.0],
+                    ],
+                    # Second input channel
+                    [
+                        [0.5, -0.5, 1.0, -1.0],
+                        [-0.5, 0.5, -1.0, 1.0],
+                        [1.0, -1.0, 0.5, -0.5],
+                        [-1.0, 1.0, -0.5, 0.5],
+                    ],
+                    # Third input channel
+                    [
+                        [0.3, -0.3, 0.6, -0.6],
+                        [-0.3, 0.3, -0.6, 0.6],
+                        [0.6, -0.6, 0.3, -0.3],
+                        [-0.6, 0.6, -0.3, 0.3],
+                    ],
+                ],
+                # Second output channel
+                [
+                    # First input channel
+                    [
+                        [-1.0, 1.0, -0.5, 0.5],
+                        [1.0, -1.0, 0.5, -0.5],
+                        [-0.5, 0.5, -1.0, 1.0],
+                        [0.5, -0.5, 1.0, -1.0],
+                    ],
+                    # Second input channel
+                    [
+                        [-0.5, 0.5, -1.0, 1.0],
+                        [0.5, -0.5, 1.0, -1.0],
+                        [-1.0, 1.0, -0.5, 0.5],
+                        [1.0, -1.0, 0.5, -0.5],
+                    ],
+                    # Third input channel
+                    [
+                        [-0.3, 0.3, -0.6, 0.6],
+                        [0.3, -0.3, 0.6, -0.6],
+                        [-0.6, 0.6, -0.3, 0.3],
+                        [0.6, -0.6, 0.3, -0.3],
+                    ],
+                ],
+            ],
+            dtype=np.float32,
+        )
+
         conv._parameters["weight"].data = weight_data
         with torch.no_grad():
             conv_torch.weight.data = torch.from_numpy(weight_data)
