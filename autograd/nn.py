@@ -165,35 +165,36 @@ class Conv2d(Module):
             x = Tensor(x)
 
         batch_size, in_channels, H, W = x.data.shape
-
-        # Extract windows while maintaining computational graph
         windows, (H_out, W_out) = extract_windows(
             x, self.kernel_size, self.stride, self.padding_mode
         )
+        # now windows: (b, c, H_out, W_out, kH, kW)
 
-        # Reshape windows for matrix multiplication
-        num_windows = windows.shape[0]
+        # Flatten to (b*H_out*W_out, c*kH*kW)
         windows = windows.reshape(
-            num_windows * batch_size, in_channels * self.kernel_size * self.kernel_size
+            batch_size * H_out * W_out,
+            in_channels * self.kernel_size * self.kernel_size,
         )
 
-        # Reshape kernel for matrix multiplication
+        # Prepare kernels: (c*kH*kW, out_channels)
         kernel_flat = (
             self._parameters["weight"]
             .permute(1, 2, 3, 0)
             .reshape(-1, self.out_channels)
         )
 
-        # Compute convolution using matrix multiplication
+        # Matrix multiply: (b*H_out*W_out, out_channels)
         output = windows @ kernel_flat
 
-        # Reshape output to (batch_size, H_out, W_out, out_channels)
-        output = output.reshape(batch_size, H_out, W_out, self.out_channels)
-        output = output.permute(0, 3, 1, 2)  # (N, out_channels, H_out, W_out)
+        # Reshape and permute to (b, out_channels, H_out, W_out)
+        output = output.reshape(batch_size, H_out, W_out, self.out_channels).permute(
+            0, 3, 1, 2
+        )
 
-        # Add bias
+        # Add bias if present
         if self.bias:
             output += self._parameters["bias"].reshape(-1, 1, 1)
+
         return output
 
 
@@ -224,12 +225,12 @@ class MaxPool2d(Module):
             x, self.kernel_size, self.stride, self.padding_mode
         )
 
-        num_windows, batch_size, in_channels, H_kernel, W_kernel = windows.shape
+        H_out, W_out, batch_size, in_channels, H_kernel, W_kernel = windows.shape
 
         # Reshape windows to match spatial layout
-        windows = windows.reshape(H_out, W_out, batch_size, in_channels, -1)
+        windows = windows.permute(2, 3, 0, 1, 4, 5)
         # Reorder axes to (batch_size, in_channels, H_out, W_out, kH * kW)
-        windows = windows.permute(2, 3, 0, 1, 4)
+        windows = windows.reshape(batch_size, in_channels, H_out, W_out, -1)
 
         pooled = windows.max(axis=-1, keepdims=True).reshape(
             batch_size, in_channels, H_out, W_out

@@ -800,26 +800,22 @@ class Tensor:
         W_out = (width - kernel_size) // stride + 1
 
         def forward_fn(x):
-            # Create windows using stride_tricks
+            # Directly produce (batch_size, channels, H_out, W_out, kernel_size, kernel_size)
             windows = np.lib.stride_tricks.as_strided(
                 x,
-                shape=(batch_size, channels, H_out, W_out, kernel_size, kernel_size),
+                shape=(H_out, W_out, batch_size, channels, kernel_size, kernel_size),
                 strides=(
-                    x.strides[0],  # batch stride
-                    x.strides[1],  # channel stride
-                    x.strides[2] * stride,  # vertical stride between windows
-                    x.strides[3] * stride,  # horizontal stride between windows
-                    x.strides[2],  # vertical stride within window
-                    x.strides[3],  # horizontal stride within window
+                    x.strides[2] * stride,  # steps in the height dimension
+                    x.strides[3] * stride,  # steps in the width dimension
+                    x.strides[0],  # batch dimension stride
+                    x.strides[1],  # channels dimension stride
+                    x.strides[2],  # inside window vertical steps
+                    x.strides[3],  # inside window horizontal steps
                 ),
                 writeable=False,
             )
-            # Reshape to (out_height * out_width, batch_size, channels, kernel_size, kernel_size)
-            # This ensures row-major order matching PyTorch
-            windows = windows.transpose(2, 3, 0, 1, 4, 5)
-            return windows.reshape(
-                H_out * W_out, batch_size, channels, kernel_size, kernel_size
-            )
+            # return np.transpose(windows, (2, 3, 0, 1, 4, 5))
+            return windows
 
         def backward_fn(grad):
             # Reshape grad back to original window format
