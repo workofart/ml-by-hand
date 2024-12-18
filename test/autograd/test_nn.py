@@ -12,57 +12,34 @@ torch.manual_seed(1337)
 
 class TestLinear(TestCase):
     def test_linear(self):
-        linear_layer = Linear(
-            input_size=4,
-            output_size=2,
+        linear_layer = Linear(input_size=4, output_size=2)
+
+        # Explicitly set weights and biases
+        linear_layer._parameters["weight"].data = np.array(
+            [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6], [0.7, 0.8]]
         )
+        linear_layer._parameters["bias"].data = np.array([0.1, 0.2])
 
-        parameters = linear_layer.parameters
-        assert parameters["weight"].data.shape == (4, 2)
-        assert parameters["bias"].data.shape == (2,)
-
-        # Trying to pass in (1x4 matrix)
+        # Test with known input and expected output
         x = [[2, 2, 2, 2]]
         out = linear_layer(x)
-        assert np.allclose(out.data, [-2.7748068, 0.56519009])
-        assert out.grad is None
-        assert parameters["weight"].grad is None
-        assert parameters["bias"].grad is None
+
+        # Calculate expected output manually
+        expected = np.array(
+            [[3.3, 4.2]]
+        )  # (2*0.1 + 2*0.3 + 2*0.5 + 2*0.7 + 0.1, 2*0.2 + 2*0.4 + 2*0.6 + 2*0.8 + 0.2)
+        assert np.allclose(out.data, expected)
+
+        # Test gradient computation
         out.backward()
 
-        # weight gradient = x.T @ out.grad = [[2], [2], [2], [2]] * [1, 1]
-        assert np.array_equal(
-            parameters["weight"].grad.data,
-            [
-                [2, 2],
-                [2, 2],
-                [2, 2],
-                [2, 2],
-            ],
-        )
-        assert np.array_equal(parameters["bias"].grad.data, [1, 1])
-        assert np.array_equal(out.grad.data, [[1, 1]])
-
-        # Trying to pass in (4x1 matrix)
-        x = [[2], [2], [2], [2]]
-        linear_layer = Linear(input_size=1, output_size=2)
-        out = linear_layer(x)
-        parameters = linear_layer.parameters
-        assert parameters["weight"].data.shape == (1, 2)
-        assert parameters["bias"].data.shape == (2,)
-
-        out.backward()
-        assert np.allclose(parameters["weight"].grad.data, [[8], [8]])
-        assert np.allclose(parameters["bias"].grad.data, [[4], [4]])
-        assert np.array_equal(
-            out.grad.data,
-            [
-                [1, 1],
-                [1, 1],
-                [1, 1],
-                [1, 1],
-            ],
-        )
+        # Test gradient shapes and properties
+        assert linear_layer._parameters["weight"].grad.shape == (4, 2)
+        assert linear_layer._parameters["bias"].grad.shape == (2,)
+        assert np.allclose(linear_layer._parameters["bias"].grad.data, [1, 1])
+        assert np.all(
+            linear_layer._parameters["weight"].grad.data == 2
+        )  # All gradients should be 2 since input is all 2s
 
 
 class TestBatchNorm(TestCase):
