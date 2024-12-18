@@ -71,17 +71,11 @@ def softmax(x: Tensor) -> Tensor:
         # Case 2: i != j
         # d(softmax(x))/dx_i = -softmax(x)_i * softmax(x)_j
 
-        # Vectorized computation using broadcasting
-        S = probs[..., None, :]  # Add dimension for broadcasting
-        # We create the identify matrix to represent 1[i==j]
-        grad = S * (np.eye(x.data.shape[-1]) - S.transpose(0, 2, 1))
-        # We use einsum to compute the gradient
-        # Accumulate the gradient for the input tensor x by using the Einstein summation convention.
-        # The einsum function computes the gradient of the softmax function with respect to its input.
-        # 'bi' refers to the batch index (b) and the output index (i) of the gradient (out.grad.data).
-        # 'bij' refers to the batch index (b), the output index (i), and the input index (j) of the Jacobian matrix (grad).
-        # The result is a tensor of shape (batch_size, j) which represents the accumulated gradient for each input.
-        x._accumulate_grad(np.einsum("bi,bij->bj", out.grad.data, grad))
+        dLdy = out.grad.data
+        # dL/dx = y * (dL/dy - sum(dL/dy * y, axis=-1, keepdims=True))
+        sum_term = np.sum(dLdy * out.data, axis=-1, keepdims=True)
+        dLdx = out.data * (dLdy - sum_term)
+        x._accumulate_grad(dLdx)
 
     out._backward = _backward
     return out
