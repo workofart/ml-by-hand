@@ -1178,14 +1178,15 @@ class TestTensorStridedWindows(TestTensor):
         # Test 3x3 kernel with stride 1
         windows = tensor.strided_windows(kernel_size=3, stride=1)
 
-        # Windows shape should be (4, 1, 1, 3, 3) for 4 positions
-        H_out = W_out = (4 - 3) // 1 + 1  # = 2
-        expected_shape = (H_out * W_out, 1, 1, 3, 3)
+        H_out = W_out = (4 - 3) // 1 + 1  # 2
+        # New expected shape: (H_out, W_out, batch_size, channels, kernel_size, kernel_size)
+        expected_shape = (H_out, W_out, 1, 1, 3, 3)
         assert windows.data.shape == expected_shape
 
         # Check first window content
-        expected_window = x[0, 0, 0:3, 0:3].reshape(3, 3)
-        assert np.array_equal(windows.data[0, 0, 0], expected_window)
+        # windows[0,0,0,0] -> (3,3) slice of the first window
+        expected_window = x[0, 0, 0:3, 0:3]
+        assert np.array_equal(windows.data[0, 0, 0, 0], expected_window)
 
     def test_gradient_contribution(self):
         x = (
@@ -1195,17 +1196,19 @@ class TestTensorStridedWindows(TestTensor):
         )
         tensor = Tensor(x, requires_grad=True)
 
-        # Create 3x3 windows
         windows = tensor.strided_windows(kernel_size=3, stride=1)
+        # windows shape: (2,2,1,1,3,3)
 
-        # Create gradient for the first window
         grad_data = np.zeros_like(windows.data)
-        grad_data[0, 0, 0] = np.ones((3, 3))  # Set gradient for first window
+        # To set gradient for the first window:
+        # Indexing: windows[H_out_idx, W_out_idx, batch_idx, channel_idx, :, :]
+        # The first window: (0,0,0,0) -> shape (3,3)
+        grad_data[0, 0, 0, 0] = np.ones((3, 3))
         windows.backward(grad_data)
 
-        # Check that gradient propagated to the correct positions
-        expected_grad = np.ones((3, 3))
-        assert np.array_equal(tensor.grad.data[0, 0, :3, :3], expected_grad)
+        # Check that gradient propagated correctly
+        # This should add ones to the top-left 3x3 region of tensor.grad
+        assert np.array_equal(tensor.grad.data[0, 0, :3, :3], np.ones((3, 3)))
 
     def test_weight_impact(self):
         x = (
@@ -1216,23 +1219,32 @@ class TestTensorStridedWindows(TestTensor):
         tensor = Tensor(x, requires_grad=True)
 
         windows = tensor.strided_windows(kernel_size=3, stride=1)
-        weights = np.arange(1, windows.shape[0] + 1, dtype=np.float32).reshape(
-            -1, 1, 1, 1, 1
+        # windows shape: (H_out=2, W_out=2, batch=1, channels=1, kH=3, kW=3)
+        H_out, W_out, b, c, kH, kW = windows.shape
+        num_windows = H_out * W_out
+
+        # Create weights matching the number of windows
+        weights = np.arange(1, num_windows + 1, dtype=np.float32).reshape(
+            H_out, W_out, 1, 1, 1, 1
         )
 
         # Print intermediate values
         print("Window shapes:", windows.shape)
         print("Weight shapes:", weights.shape)
-        print("First window containing (1,3):", windows.data[0, 0, 0, 1])
+        # To print something analogous to the original "First window containing (1,3)":
+        # Let's just print the second row of the first window
+        print("First window second row:", windows.data[0, 0, 0, 0, 1])  # shape (3,)
 
         loss = (windows * weights).sum()
         loss.backward()
 
-        print("Gradient at (1,3):", tensor.grad.data[0, 0, 1, 3])
+        # Just check a specific gradient value
+        # For instance, top-left element in the gradient:
+        print(
+            "Gradient at (1,3) - or let's choose (1,2):", tensor.grad.data[0, 0, 1, 2]
+        )
 
     def test_custom_strided_windows(self):
-        """Test strided_windows operation with gradient position validation"""
-        # Define a simple input tensor
         x = (
             np.array([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]])
             .reshape(1, 1, 4, 4)
@@ -1243,20 +1255,17 @@ class TestTensorStridedWindows(TestTensor):
 
         # Test 2x2 kernel with stride 1
         windows_2x2 = tensor.strided_windows(kernel_size=2, stride=1)
-
-        # Create a loss that depends on the windows
-        weights = np.arange(1, windows_2x2.shape[0] + 1, dtype=np.float32).reshape(
-            -1, 1, 1, 1, 1
+        H_out, W_out, b, c, kH, kW = windows_2x2.shape
+        num_windows = H_out * W_out
+        weights = np.arange(1, num_windows + 1, dtype=np.float32).reshape(
+            H_out, W_out, 1, 1, 1, 1
         )
         loss = (windows_2x2 * weights).sum()
-
-        # Compute gradient
         loss.backward()
 
-        # Validate gradient positions for 2x2 kernel
         grad = tensor.grad.data[0, 0]
-
-        # Expected gradient positions for 2x2 kernel with stride 1
+        # Positions that should receive gradient contributions for a 2x2 kernel with stride=1
+        # After applying weights and sum, essentially all positions covered by the sliding windows should get gradient
         expected_grad_positions = [
             (0, 0),
             (0, 1),
@@ -1276,29 +1285,21 @@ class TestTensorStridedWindows(TestTensor):
             (3, 3),
         ]
 
-        # Check that gradient is non-zero at expected positions
         for pos in expected_grad_positions:
             assert grad[pos] != 0, f"Gradient should be non-zero at position {pos}"
 
         # Reset for 3x3 kernel
         tensor = Tensor(x, requires_grad=True)
-
-        # Test 3x3 kernel with stride 1
         windows_3x3 = tensor.strided_windows(kernel_size=3, stride=1)
-
-        # Create a loss that depends on the windows
-        weights_3x3 = np.arange(1, windows_3x3.shape[0] + 1, dtype=np.float32).reshape(
-            -1, 1, 1, 1, 1
+        H_out, W_out, b, c, kH, kW = windows_3x3.shape
+        num_windows = H_out * W_out
+        weights_3x3 = np.arange(1, num_windows + 1, dtype=np.float32).reshape(
+            H_out, W_out, 1, 1, 1, 1
         )
         loss_3x3 = (windows_3x3 * weights_3x3).sum()
-
-        # Compute gradient
         loss_3x3.backward()
 
-        # Validate gradient positions for 3x3 kernel
         grad_3x3 = tensor.grad.data[0, 0]
-
-        # Expected gradient positions for 3x3 kernel with stride 1
         expected_grad_positions_3x3 = [
             (0, 0),
             (0, 1),
@@ -1318,25 +1319,20 @@ class TestTensorStridedWindows(TestTensor):
             (3, 3),
         ]
 
-        # Check that gradient is non-zero at expected positions
         for pos in expected_grad_positions_3x3:
             assert grad_3x3[pos] != 0, f"Gradient should be non-zero at position {pos}"
 
         # Test with stride 2
         tensor = Tensor(x, requires_grad=True)
         windows_stride2 = tensor.strided_windows(kernel_size=2, stride=2)
-
-        # Create a loss that depends on the windows
+        # windows_stride2 shape: H_out = (4 - 2)//2 + 1 = 2, W_out = 2
         loss_stride2 = windows_stride2.sum()
         loss_stride2.backward()
 
-        # Validate gradient positions for stride 2
         grad_stride2 = tensor.grad.data[0, 0]
-
-        # Expected gradient positions for 2x2 kernel with stride 2
+        # With stride 2 and 2x2 kernel, the windows will cover top-left, top-right, bottom-left, bottom-right
         expected_grad_positions_stride2 = [(0, 0), (0, 2), (2, 0), (2, 2)]
 
-        # Check that gradient is non-zero at expected positions
         for pos in expected_grad_positions_stride2:
             assert (
                 grad_stride2[pos] != 0
@@ -1350,19 +1346,14 @@ class TestTensorStridedWindows(TestTensor):
         )
 
         tensor = Tensor(x, requires_grad=True)
-
-        # Test 2x2 kernel with stride 1
         windows = tensor.strided_windows(kernel_size=2, stride=1)
+        H_out, W_out, b, c, kH, kW = windows.shape
+        grad_window = np.zeros_like(windows.data)
+        # Set a corner-like gradient pattern in the top-left window (0,0)
+        grad_window[0, 0, 0, 0] = np.array([[1, -1], [-1, 1]], dtype=np.float32)
+        windows.backward(grad_window)
 
-        # Create gradient matching the windows shape
-        H_out = W_out = (4 - 2) // 1 + 1  # = 3
-        window_grad = np.zeros((H_out * W_out, 1, 1, 2, 2), dtype=np.float32)
-        # Set corner detector pattern for first window
-        window_grad[0, 0, 0] = np.array([[1, -1], [-1, 1]])
-
-        # Apply gradient
-        windows.backward(window_grad)
-
-        # Check that gradient propagated correctly
+        # Check a specific gradient value after backprop
+        # For instance, top-left element of tensor should have been incremented by 1
         assert tensor.grad is not None
-        assert tensor.grad.data[0, 0, 0, 0] == 1  # Top-left corner
+        assert tensor.grad.data[0, 0, 0, 0] == 1
