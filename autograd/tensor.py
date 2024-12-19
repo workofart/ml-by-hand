@@ -30,16 +30,12 @@ class Function:
 
 class Tensor:
     def __init__(self, data, creator=None, requires_grad=True):
-        self.data = np.asarray(data)
+        self.data = np.asarray(data, dtype=np.float32)
         self._grad = None  # lazy initialize, we will only initialize if needed in the backward pass
         self.creator = creator
 
         self._backward = lambda: None
         self.requires_grad = requires_grad
-
-        # View tracking
-        self._view_forward_fn = lambda x: x
-        self._view_backward_fn = lambda x: x
 
     @property
     def grad(self):
@@ -64,7 +60,7 @@ class Tensor:
         if self._grad is None:
             self._grad = Tensor(value_data, requires_grad=False)
         else:
-            value_data = self.expand(value_data.shape)._view_backward_fn(value_data)
+            value_data = self.expand(value_data.shape)
             # IMPORTANT: this is not the same as self.data + value_data
             # We need to do in-place addition here to preserve any views or references
             # to the original gradient. For example, multiple operations
@@ -92,6 +88,8 @@ class Tensor:
         """Compute op: addition with explicit movement"""
         if not isinstance(other, Tensor):
             other = Tensor(other, requires_grad=False)
+        if self.shape == other.shape:
+            return Add.apply(self, other)
 
         # # 1. Calculate broadcast shape
         broadcast_shape = np.broadcast_shapes(self.shape, other.shape)
@@ -107,6 +105,9 @@ class Tensor:
         """Multiply two tensors element-wise"""
         if not isinstance(other, Tensor):
             other = Tensor(other, requires_grad=False)
+
+        if self.shape == other.shape:
+            return Mul.apply(self, other)
 
         # 1. Calculate broadcast shape
         broadcast_shape = np.broadcast_shapes(self.shape, other.shape)
@@ -127,6 +128,9 @@ class Tensor:
     def __pow__(self, other):
         if not isinstance(other, Tensor):
             other = Tensor(other, requires_grad=False)
+
+        if self.shape == other.shape:
+            return Pow.apply(self, other)
 
         # Use expand for broadcasting
         broadcast_shape = np.broadcast_shapes(self.shape, other.shape)

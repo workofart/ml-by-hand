@@ -6,6 +6,9 @@ from unittest import TestCase
 
 class TestTensor(TestCase):
     def setUp(self) -> None:
+        torch.manual_seed(42)
+        np.random.seed(42)
+
         self.x_scalar = Tensor(2.0, requires_grad=True)
         self.y_scalar = Tensor(3.0, requires_grad=True)
         self.x_vector = Tensor([1.0, 2.0], requires_grad=True)
@@ -235,8 +238,8 @@ class TestTensorOps(TestTensor):
         z_torch.backward(torch.ones_like(z_torch))
 
         # Use allclose instead of array_equal for floating point comparison
-        np.testing.assert_allclose(x.grad.data, x_torch.grad.numpy(), rtol=1e-10)
-        np.testing.assert_allclose(w.grad.data, w_torch.grad.numpy(), rtol=1e-10)
+        np.testing.assert_allclose(x.grad.data, x_torch.grad.numpy(), rtol=1e-4)
+        np.testing.assert_allclose(w.grad.data, w_torch.grad.numpy(), rtol=1e-4)
 
     def test_batched_matmul_gradient_computation(self):
         # Create small batch example with explicit float dtype

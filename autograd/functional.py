@@ -83,9 +83,7 @@ class BinaryCrossEntropy(Function):
     """
 
     def forward(self, y_pred, y_true):
-        y_true = np.asarray(y_true)  # Ensure y_true is np array
-        if y_pred.min() < 0 or y_pred.max() > 1:
-            raise ValueError("y_pred must contain probabilities between 0 and 1")
+        y_true = np.asarray(y_true, dtype=np.float32)
 
         if y_true.ndim == 1 and y_pred.ndim == 1:
             pass
@@ -125,7 +123,9 @@ class SparseCrossEntropy(Function):
         # y_true: either np.ndarray or Tensor. Convert to np if Tensor.
         if isinstance(y_true, Tensor):
             y_true = y_true.data
-        y_true = np.asarray(y_true)
+        # Convert y_true to integer type and ensure it's the right shape
+        y_true = np.asarray(y_true, dtype=np.int64)
+
         if y_pred.min() < 0 or y_pred.max() > 1:
             raise ValueError("y_pred must contain probabilities between 0 and 1")
 
@@ -135,6 +135,7 @@ class SparseCrossEntropy(Function):
         y_pred_prob = np.clip(y_pred, 1e-15, 1 - 1e-15)
         self.y_pred_prob = y_pred_prob
 
+        # Now y_true is guaranteed to be integer type
         selected_probs = y_pred_prob[np.arange(self.n_samples), y_true]
         loss = -np.mean(np.log(selected_probs))
         return loss
@@ -150,11 +151,6 @@ class SparseCrossEntropy(Function):
         grad_out[np.arange(n_samples), y_true] = -1.0 / (selected_probs * n_samples)
         # Return grad for y_pred, None for y_true
         return grad_out, None
-        # # Vectorized gradient computation
-        # grad = np.zeros_like(self.y_pred_prob)
-        # grad[range(self.n_samples), self.y_true] = -1.0 / (self.selected_probs * self.n_samples)
-
-        # return grad * grad[..., None] # Add dimension for broadcasting
 
 
 class HingeLoss(Function):
