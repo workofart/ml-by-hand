@@ -78,11 +78,17 @@ class TestTensorOps(TestTensor):
 
     def test_tensor_addition(self):
         assert (self.x_scalar + self.y_scalar).data == 5.0
-        assert (self.x_scalar + self.y_scalar).prev == {self.x_scalar, self.y_scalar}
+        assert np.array_equal(
+            list((self.x_scalar + self.y_scalar).creator.tensors),
+            [self.x_scalar, self.y_scalar],
+        )
 
     def test_tensor_multiplication(self):
         assert (self.x_scalar * self.y_scalar).data == 6.0
-        assert (self.x_scalar * self.y_scalar).prev == {self.x_scalar, self.y_scalar}
+        assert np.array_equal(
+            list((self.x_scalar * self.y_scalar).creator.tensors),
+            [self.x_scalar, self.y_scalar],
+        )
 
     def test_tensor_subtraction(self):
         assert (self.x_scalar - self.y_scalar).data == -1.0
@@ -96,11 +102,11 @@ class TestTensorOps(TestTensor):
         assert (self.x_scalar**self.y_scalar).data == 8.0
         assert (self.y_scalar**self.x_scalar).data == 9.0
 
-    def test_tensor_gradients(self):
+    def test_tensor_init_gradients(self):
         assert self.x_scalar.grad is None  # lazy init until backward is called
         assert self.y_scalar.grad is None  # lazy init until backward is called
         assert self.x_scalar.requires_grad
-        assert len(self.y_scalar.prev) == 0
+        assert self.y_scalar.creator is None
 
     def test_tensor_matrix_multiplication(self):
         z = self.x_vector @ self.y_vector
@@ -117,7 +123,10 @@ class TestTensorOps(TestTensor):
         z = self.x_scalar * self.y_scalar
 
         assert z.data == 6.0
-        assert z.prev == {self.x_scalar, self.y_scalar}
+        assert np.array_equal(
+            list((self.x_scalar * self.y_scalar).creator.tensors),
+            [self.x_scalar, self.y_scalar],
+        )
         assert z.grad is None
 
         # Call backward and check the gradients
@@ -342,7 +351,7 @@ class TestTensorSum(TestTensor):
     def test_1d_tensor_sum_global(self):
         s = self.x_vector.sum()
         assert s.data == 3.0
-        assert s.prev == {self.x_vector}
+        assert np.array_equal(s.creator.tensors[0].data, self.x_vector.data)
 
     def test_1d_tensor_sum_axis(self):
         s = self.x_vector.sum(axis=0)
@@ -388,7 +397,7 @@ class TestTensorMean(TestTensor):
     def test_1d_tensor_mean_global(self):
         m = self.x_vector.mean()
         assert m.data == 1.5
-        assert m.prev == {self.x_vector}
+        assert np.array_equal(m.creator.tensors[0].data, self.x_vector.data)
 
     def test_1d_tensor_mean_axis(self):
         m = self.x_vector.mean(axis=0)
@@ -522,7 +531,7 @@ class TestTensorMax(TestTensor):
     def test_max_1d(self):
         z = self.x_vector.max()
         assert z.data == 2.0
-        assert z.prev == {self.x_vector}
+        assert np.array_equal(z.creator.tensors[0].data, self.x_vector.data)
 
         z.backward()
         assert np.array_equal(self.x_vector.grad.data, [0.0, 1.0])
@@ -664,7 +673,6 @@ class TestTensorTranspose(TestTensor):
         x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=False)
         y = x.transpose()
         assert not y.requires_grad
-        assert len(y.prev) == 0
 
         # PyTorch comparison
         x_torch = torch.tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=False)
@@ -964,114 +972,6 @@ class TestTensorView(TestTensor):
         y_torch.backward(torch.ones_like(y_torch))
 
         assert np.array_equal(self.x_matrix.grad.data, self.x_matrix_torch.grad.numpy())
-
-    def test_make_view_against_pytorch(self):
-        # Create tensors in both frameworks
-        data = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
-        x = Tensor(data, requires_grad=True)
-        x_torch = torch.tensor(data, requires_grad=True)
-
-        # Define view functions
-        def view_forward(x):
-            return x.reshape(3, 2)
-
-        def view_backward(grad):
-            return grad.reshape(2, 3)
-
-        # Create views
-        view = x._make_view(view_forward, view_backward)
-        view_torch = x_torch.view(3, 2)
-
-        # Test forward pass
-        np.testing.assert_array_equal(view.data, view_torch.detach().numpy())
-
-        # Test backward pass with same gradient
-        grad_data = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
-        view.backward(grad_data)
-        view_torch.backward(torch.tensor(grad_data))
-
-        # Compare gradients
-        np.testing.assert_array_equal(x.grad.data, x_torch.grad.numpy())
-
-    def test_view_chain_operations_against_pytorch(self):
-        # Create tensors
-        data = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
-        x = Tensor(data, requires_grad=True)
-        x_torch = torch.tensor(data, requires_grad=True)
-
-        # Create views and perform operations
-        view = x._make_view(lambda x: x.reshape(3, 2), lambda g: g.reshape(2, 3))
-        view_torch = x_torch.view(3, 2)
-
-        # Perform some operations on the views
-        result = (view * 2 + 1).sum()
-        result_torch = (view_torch * 2 + 1).sum()
-
-        # Test forward pass
-        self.assertAlmostEqual(result.data, result_torch.item())
-
-        # Test backward pass
-        result.backward()
-        result_torch.backward()
-
-        # Compare gradients
-        np.testing.assert_array_equal(x.grad.data, x_torch.grad.numpy())
-
-    def test_view_multiple_uses_against_pytorch(self):
-        # Create tensors
-        data = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
-        x = Tensor(data, requires_grad=True)
-        x_torch = torch.tensor(data, requires_grad=True)
-
-        # Create views
-        view1 = x._make_view(lambda x: x.reshape(3, 2), lambda g: g.reshape(2, 3))
-        view2 = x._make_view(lambda x: x.reshape(6), lambda g: g.reshape(2, 3))
-
-        view1_torch = x_torch.view(3, 2)
-        view2_torch = x_torch.view(6)
-
-        # Use both views in computation
-        result = view1.sum() + view2.sum()
-        result_torch = view1_torch.sum() + view2_torch.sum()
-
-        # Test forward pass
-        self.assertAlmostEqual(result.data, result_torch.item())
-
-        # Test backward pass
-        result.backward()
-        result_torch.backward()
-
-        # Compare gradients
-        np.testing.assert_array_equal(x.grad.data, x_torch.grad.numpy())
-
-    def test_view_with_broadcasting_against_pytorch(self):
-        # Create tensors
-        data = np.array([[1.0, 2.0], [3.0, 4.0]])
-        x = Tensor(data, requires_grad=True)
-        x_torch = torch.tensor(data, requires_grad=True)
-
-        # Create views that will be broadcast
-        view = x._make_view(lambda x: x.reshape(4), lambda g: g.reshape(2, 2))
-        view_torch = x_torch.view(4)
-
-        # Create another tensor for broadcasting
-        y = Tensor(np.array([1.0, 2.0, 3.0, 4.0]), requires_grad=True)
-        y_torch = torch.tensor([1.0, 2.0, 3.0, 4.0], requires_grad=True)
-
-        # Perform broadcasting operation
-        result = view * y
-        result_torch = view_torch * y_torch
-
-        # Test forward pass
-        np.testing.assert_array_equal(result.data, result_torch.detach().numpy())
-
-        # Test backward pass
-        result.backward(np.ones_like(result.data))
-        result_torch.backward(torch.ones_like(result_torch))
-
-        # Compare gradients
-        np.testing.assert_array_equal(x.grad.data, x_torch.grad.numpy())
-        np.testing.assert_array_equal(y.grad.data, y_torch.grad.numpy())
 
 
 class TestTensorPermute(TestTensor):
