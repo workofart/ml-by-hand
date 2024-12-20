@@ -38,27 +38,27 @@ class MnistConvolutionalClassifier(nn.Module):
     def __init__(self):
         super().__init__()
         self.conv1 = nn.Conv2d(
-            in_channels=1, out_channels=32, kernel_size=5, padding_mode="same"
-        )  # (N, 32, 28, 28) maintain the same spatial dimensions because of "same" padding
+            in_channels=1, out_channels=8, kernel_size=3, padding_mode="same"
+        )  # (N, 8, 28, 28) maintain the same spatial dimensions because of "same" padding
         self.conv2 = nn.Conv2d(
-            in_channels=32, out_channels=32, kernel_size=5, padding_mode="same"
-        )  # (N, 32, 28, 28) maintain the same spatial dimensions because of "same" padding
+            in_channels=8, out_channels=8, kernel_size=3, padding_mode="same"
+        )  # (N, 8, 28, 28) maintain the same spatial dimensions because of "same" padding
         self.pool1 = nn.MaxPool2d(
-            kernel_size=5, stride=2
-        )  # (N, 32, 12, 12), where (28 - 5) / 2 + 1 = 12
+            kernel_size=3, stride=2
+        )  # (N, 32, 12, 12), where (28 - 3) / 2 + 1 = 13
 
         self.conv3 = nn.Conv2d(
-            in_channels=32, out_channels=64, kernel_size=3, padding_mode="same"
-        )  # (N, 64, 12, 12) maintain the same spatial dimensions because of "same" padding
+            in_channels=8, out_channels=16, kernel_size=3, padding_mode="same"
+        )  # (N, 16, 13, 13) maintain the same spatial dimensions because of "same" padding
 
         self.conv4 = nn.Conv2d(
-            in_channels=64, out_channels=64, kernel_size=3, padding_mode="same"
-        )  # (N, 64, 12, 12) maintain the same spatial dimensions because of "same" padding
+            in_channels=16, out_channels=16, kernel_size=3, padding_mode="same"
+        )  # (N, 16, 13, 13) maintain the same spatial dimensions because of "same" padding
         self.pool2 = nn.MaxPool2d(
             kernel_size=3, stride=2
-        )  # (N, 64, 5, 5), where (12 - 3) / 2 + 1 = 5
+        )  # (N, 16, 6, 6), where (13 - 3) / 2 + 1 = 6
 
-        self.fc1 = nn.Linear(64 * 5 * 5, 10)
+        self.fc1 = nn.Linear(16 * 6 * 6, 10)
 
     def forward(self, x):
         batch_size = x.shape[0]
@@ -181,7 +181,7 @@ def train_mnist_multiclass_model(
         loss_fn=loss_fn,
         optimizer=optimizer,
         epochs=epochs,
-        batch_size=512,
+        batch_size=256,
         output_type="softmax",
     )
     trainer.fit(X_train, y_train.astype(int))
@@ -203,26 +203,24 @@ if __name__ == "__main__":
     )
     X /= 255.0  # normalize to [0, 1] to speed up convergence
 
-    X = X[:3000]
-    y = y[:3000]
-
     logger.info(f"X shape: {X.shape}")
     logger.info(f"y shape: {y.shape}")
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.1)
 
-    # model = MnistConvolutionalClassifier()
-    # train_mnist_multiclass_model(
-    #     X_train,
-    #     y_train,
-    #     X_test,
-    #     y_test,
-    #     optimizer=optim.Adam(model.parameters, lr=1e-3),
-    #     model=model,
-    #     loss_fn=functional.sparse_cross_entropy,
-    #     epochs=10,
-    #     msg="Convolutional Neural Network (with batch norm, Adam optimizer)",
-    # )
+    model = MnistConvolutionalClassifier()
+    logger.info(f"Number of parameters: {model.num_parameters()}")
+    train_mnist_multiclass_model(
+        X_train,
+        y_train,
+        X_test,
+        y_test,
+        optimizer=optim.Adam(model.parameters, lr=1e-3),
+        model=model,
+        loss_fn=functional.sparse_cross_entropy,
+        epochs=3,
+        msg="Convolutional Neural Network (with batch norm, Adam optimizer)",
+    )
 
     model = MnistMultiClassClassifier(batch_norm=False)
     train_mnist_multiclass_model(
