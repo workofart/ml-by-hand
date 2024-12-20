@@ -84,6 +84,7 @@ class BinaryCrossEntropy(Function):
 
     def forward(self, y_pred, y_true):
         y_true = np.asarray(y_true, dtype=np.float32)
+        y_pred = np.asarray(y_pred, dtype=np.float32)
 
         if y_true.ndim == 1 and y_pred.ndim == 1:
             pass
@@ -96,8 +97,8 @@ class BinaryCrossEntropy(Function):
         self.y_true = y_true
         self.y_pred_prob = np.clip(y_pred, 1e-15, 1 - 1e-15)
         loss = -np.mean(
-            y_true * np.log(self.y_pred_prob)
-            + (1 - y_true) * np.log(1 - self.y_pred_prob)
+            y_true * np.log(np.clip(self.y_pred_prob, 1e-15, None))
+            + (1 - y_true) * np.log(np.clip(1 - self.y_pred_prob, 1e-15, None))
         )
         return loss
 
@@ -105,10 +106,12 @@ class BinaryCrossEntropy(Function):
         # dL/dpred = -(y/p - (1-y)/(1-p))
         y_true = self.y_true
         y_pred_prob = self.y_pred_prob
-        # grad_y_pred
-        grad_y_pred = -(y_true / y_pred_prob - (1 - y_true) / (1 - y_pred_prob)) / len(
-            y_pred_prob
-        )
+
+        grad_y_pred = -((y_true / y_pred_prob) - ((1 - y_true) / (1 - y_pred_prob)))
+        grad_y_pred /= len(y_pred_prob)
+        # Incorporate the upstream gradient
+        grad_y_pred *= grad.data
+
         return grad_y_pred, None  # y_true doesn't need gradient
 
 
@@ -172,24 +175,28 @@ class HingeLoss(Function):
     def forward(self, y_pred, y_true, reduction="none"):
         if isinstance(y_true, Tensor):
             y_true = y_true.data
-        y_true = np.asarray(y_true)
+        y_true = np.asarray(y_true, dtype=np.float32)
+
+        # Reshape y_true to match y_pred if needed
+        if y_pred.shape != y_true.shape:
+            y_true = y_true.reshape(y_pred.shape)
 
         self.y_true = y_true
         self.y_pred = y_pred
         self.reduction = reduction
 
         # hinge loss = max(0, 1 - y_true * y_pred)
-        margin = 1 - y_true * y_pred
-        self.margin_violated = margin > 0
-        loss_data = np.maximum(0, margin)
+        self.margins = 1 - y_true * y_pred
+        loss_data = np.maximum(0, self.margins)
 
         if reduction == "mean":
             loss_data = np.mean(loss_data)
         elif reduction == "sum":
             loss_data = np.sum(loss_data)
-        elif reduction != "none":
-            raise ValueError("Invalid reduction option.")
-
+        elif reduction == "none":
+            pass
+        else:
+            raise ValueError(f"Invalid reduction: {reduction}")
         return loss_data
 
     def backward(self, grad):
@@ -199,21 +206,24 @@ class HingeLoss(Function):
         = 1 - y_true * y_pred (if y_true * y_pred < 1)
         = 0 (if y_true * y_pred >= 1)
         """
-        # Convert grad to numpy if it's a Tensor
-        grad_data = grad.data if isinstance(grad, Tensor) else grad
+        grad = grad.data if isinstance(grad, Tensor) else grad
+        # Initialize gradient array with same shape as predictions
+        grad_y_pred = np.zeros_like(self.y_pred)
 
-        # grad is upstream gradient (usually 1 for scalar)
-        margin_violated = self.margin_violated
-        y_true = self.y_true
-        # dL/dy_pred
-        # If margin violated: grad = -y_true, else 0
-        grad_y_pred = -y_true * margin_violated
+        # Where margin > 0, gradient is -y_true
+        margin_violated = self.margins > 0
+        grad_y_pred = np.where(margin_violated, -self.y_true, 0)
+
         if self.reduction == "mean":
-            grad_y_pred /= len(y_true)
+            grad_y_pred /= self.y_pred.size
 
-        # Multiply by upstream grad if needed
-        grad_y_pred = grad_y_pred * grad_data
-        # No grad for y_true
+        # Handle scalar gradient (from mean/sum reduction)
+        if np.isscalar(grad) or grad.size == 1:
+            grad_y_pred *= grad
+        else:
+            # For elementwise gradient
+            grad_y_pred *= grad.reshape(grad_y_pred.shape)
+
         return grad_y_pred, None
 
 

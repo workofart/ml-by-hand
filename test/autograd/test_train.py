@@ -40,7 +40,7 @@ class TestTrain(TestCase):
 
         loss_fn = functional.binary_cross_entropy
         optimizer = optim.SGD(model.parameters, lr=1e-3)
-        utils.train(model, X, y, loss_fn, optimizer, epochs=1000)
+        utils.train(model, X, y, loss_fn, optimizer, epochs=1000, output_type="sigmoid")
 
         y_pred = model(X).data
 

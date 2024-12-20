@@ -1,6 +1,6 @@
 import logging
 import time
-from autograd import nn, utils
+from autograd import nn, utils, functional
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -50,14 +50,15 @@ def train(
     epochs=100,
     batch_size=256,
     shuffle_each_epoch=False,
+    output_type=None,
 ):
-    model.train()
     n_samples = len(X)
     n_batches = (n_samples + batch_size - 1) // batch_size  # ceil division
+    model.train()
 
     for epoch in range(epochs):
         total_loss = 0.0
-        grad_norms = []
+        # grad_norms = []
         start_time = time.time()
 
         if shuffle_each_epoch:
@@ -84,35 +85,60 @@ def train(
             # Forward pass
             y_pred = model(batch_X)
             loss = loss_fn(y_pred, batch_y)
-            total_loss += loss.data * (end_idx - start_idx)  # weight by batch size
+            total_loss += loss.detach().data * (
+                end_idx - start_idx
+            )  # weight by batch size
 
             # Backward pass and optimize
             loss.backward()
 
-            # Monitor gradient norms - handle nested parameters
-            def get_grad_norm(params):
-                grad_norm_sq = 0.0
-                for param in params:
-                    if isinstance(param, dict):
-                        grad_norm_sq += get_grad_norm(param.values())
-                    elif hasattr(param, "grad") and param.grad is not None:
-                        grad_norm_sq += np.sum(param.grad.data**2)
-                return grad_norm_sq
+            # # Monitor gradient norms - handle nested parameters
+            # def get_grad_norm(params):
+            #     grad_norm_sq = 0.0
+            #     for param in params:
+            #         if isinstance(param, dict):
+            #             grad_norm_sq += get_grad_norm(param.values())
+            #         elif hasattr(param, "grad") and param.grad is not None:
+            #             grad_norm_sq += np.sum(param.grad.data**2)
+            #     return grad_norm_sq
 
-            grad_norm = np.sqrt(get_grad_norm(model.parameters.values()))
-            grad_norms.append(grad_norm)
+            # grad_norm = np.sqrt(get_grad_norm(model.parameters.values()))
+            # grad_norms.append(grad_norm)
 
             optimizer.step()
 
-        # Calculate average loss for the epoch
-        avg_loss = total_loss / n_samples
-        avg_grad_norm = np.mean(grad_norms)
-        epoch_time = time.time() - start_time
-        epochs_per_second = n_batches / epoch_time
-        logger.info(
-            f"\nEpoch: {epoch}"
-            f"\n\tLoss: {avg_loss:.4f}"
-            f"\n\tGrad Norm: {avg_grad_norm:.4f}"
-            f"\n\tEpochs/sec: {epochs_per_second:.2f}"
-            f"\n\tAccuracy: {utils.accuracy(y_pred.data.argmax(axis=1), batch_y.astype(int)):.2f}"
-        )
+        if epoch % (epochs // 10) == 0:
+            # Make predictions on the entire dataset to calculate accuracy
+            model.eval()
+            y_pred = model(X_shuffled)
+
+            # convert y_true from {-1, 1} to {0, 1} if hinge loss is used
+            if y_shuffled.min() == -1 and y_shuffled.max() == 1:
+                y_shuffled = (y_shuffled + 1) // 2
+
+            # Calculate average loss for the epoch
+            avg_loss = total_loss / n_samples
+            # avg_grad_norm = np.mean(grad_norms)
+            epoch_time = time.time() - start_time
+            epochs_per_second = n_batches / epoch_time
+            if output_type == "logits":
+                y_pred = functional.sigmoid(y_pred).data
+                y_pred = (
+                    (y_pred >= 0.5).astype(int).squeeze()
+                )  # Convert probabilities to binary predictions
+            elif output_type == "sigmoid":
+                y_pred = (
+                    (y_pred >= 0.5).astype(int).squeeze()
+                )  # Convert probabilities to binary predictions
+            elif output_type == "softmax":
+                y_pred = y_pred.data.argmax(axis=1).squeeze()
+
+            logger.info(
+                f"\nEpoch: {epoch}"
+                f"\n\tLoss: {avg_loss:.4f}"
+                # f"\n\tGrad Norm: {avg_grad_norm:.4f}"
+                f"\n\tEpochs/sec: {epochs_per_second:.2f}"
+                f"\n\tAccuracy: {utils.accuracy(y_pred, y_shuffled.astype(int)):.2f}"
+            )
+
+        model.train()
