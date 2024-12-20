@@ -1,5 +1,5 @@
 from unittest import TestCase
-from autograd import utils
+from autograd.tools import utils
 import numpy as np
 
 

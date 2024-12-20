@@ -1,8 +1,10 @@
 import numpy as np
-from autograd import nn, optim, functional, utils
+from autograd import nn, optim, functional
 from sklearn.datasets import load_breast_cancer
 from unittest import TestCase
 import logging
+
+from autograd.tools import utils
 
 logger = logging.getLogger(__name__)
 
