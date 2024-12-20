@@ -1,5 +1,7 @@
 from autograd import nn, functional, optim
-from autograd import utils
+from autograd.tools.trainer import Trainer
+from autograd.tools.metrics import accuracy, precision
+from autograd.tools.data import train_test_split
 from openml.datasets import get_dataset
 import logging
 
@@ -35,23 +37,23 @@ def train_cifar_multiclass_model(model: nn.Module, X_train, y_train, X_test, y_t
     logger.info("Starting to train Multi-class CIFAR model")
     logger.info("=" * 66)
 
-    utils.train(
+    trainer = Trainer(
         model=model,
-        X=X_train,
-        y=y_train.astype(int),
         loss_fn=functional.sparse_cross_entropy,
         optimizer=optim.Adam(model.parameters, lr=1e-3),
         epochs=100,
         batch_size=512,
+        output_type="softmax",
     )
+    trainer.fit(X_train, y_train.astype(int))
+
+    # Evaluation mode
     model.eval()
     y_pred = model(X_test).data
 
+    logger.info(f"Test Accuracy: {accuracy(y_pred.argmax(axis=1), y_test.astype(int))}")
     logger.info(
-        f"Test Accuracy: {utils.accuracy(y_pred.argmax(axis=1), y_test.astype(int))}"
-    )
-    logger.info(
-        f"Test Precision: {utils.precision(y_pred.argmax(axis=1), y_test.astype(int))}"
+        f"Test Precision: {precision(y_pred.argmax(axis=1), y_test.astype(int))}"
     )
 
 
@@ -63,7 +65,7 @@ if __name__ == "__main__":
     X = X / 255.0  # normalize to [0, 1] to speed up convergence
     X = (X - X.mean(axis=0)) / X.std(axis=0)  # center the data
 
-    X_train, X_test, y_train, y_test = utils.train_test_split(X, y, test_size=0.1)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.1)
     cifar10_model = CifarMulticlassClassifier(num_classes=10)
     train_cifar_multiclass_model(cifar10_model, X_train, y_train, X_test, y_test)
 
@@ -74,6 +76,6 @@ if __name__ == "__main__":
     X = X / 255.0  # normalize to [0, 1] to speed up convergence
     X = (X - X.mean(axis=0)) / X.std(axis=0)  # center the data
 
-    X_train, X_test, y_train, y_test = utils.train_test_split(X, y, test_size=0.1)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.1)
     cifar100_model = CifarMulticlassClassifier(num_classes=100)
     train_cifar_multiclass_model(cifar100_model, X_train, y_train, X_test, y_test)

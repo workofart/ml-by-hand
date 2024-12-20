@@ -1,8 +1,10 @@
 import numpy as np
-from autograd import nn, optim, functional, utils
+from autograd import nn, optim, functional
 from sklearn.datasets import load_breast_cancer
 from unittest import TestCase
 import logging
+
+from autograd.tools.trainer import Trainer
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +42,14 @@ class TestTrain(TestCase):
 
         loss_fn = functional.binary_cross_entropy
         optimizer = optim.SGD(model.parameters, lr=1e-3)
-        utils.train(model, X, y, loss_fn, optimizer, epochs=1000)
+        trainer = Trainer(
+            model,
+            loss_fn,
+            optimizer,
+            epochs=1000,
+            output_type="sigmoid",
+        )
+        trainer.fit(X, y)
 
         y_pred = model(X).data
 

@@ -68,7 +68,7 @@ class Linear(Module):
                 low=-np.sqrt(6.0 / (input_size + output_size)),
                 high=np.sqrt(6.0 / (input_size + output_size)),
                 size=(input_size, output_size),
-            )
+            ).astype(np.float32)
         )
 
         # bias is always 1-dimensional
@@ -139,14 +139,14 @@ class Conv2d(Module):
                         self.in_channels * self.kernel_size * self.kernel_size
                         + self.out_channels
                     )
-                ),
+                ).astype(np.float32),
                 high=np.sqrt(
                     6.0
                     / (
                         self.in_channels * self.kernel_size * self.kernel_size
                         + self.out_channels
                     )
-                ),
+                ).astype(np.float32),
                 size=(
                     self.out_channels,
                     self.in_channels,
@@ -262,8 +262,8 @@ class BatchNorm(Module):
         # beta is responsible for shifting the normalized input
         # self._parameters["weight"] = Tensor(np.ones((1, input_size)))
         # self._parameters["bias"] = Tensor(np.zeros((1, input_size)))
-        self._parameters["weight"] = Tensor(np.ones(input_size))
-        self._parameters["bias"] = Tensor(np.zeros(input_size))
+        self._parameters["weight"] = Tensor(np.ones(input_size, dtype=np.float32))
+        self._parameters["bias"] = Tensor(np.zeros(input_size, dtype=np.float32))
 
     def forward(self, x: Tensor) -> Tensor:
         """

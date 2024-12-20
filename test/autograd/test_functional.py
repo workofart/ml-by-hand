@@ -46,7 +46,7 @@ class TestBinaryCrossEntropy(TestCase):
     def test_binary_cross_entropy_with_probs(self):
         bce_loss = functional.binary_cross_entropy(self.y_pred_probs, self.y_true)
         torch_bce_loss = torch.nn.functional.binary_cross_entropy(
-            self.y_pred_probs_torch, torch.tensor(self.y_true)
+            self.y_pred_probs_torch, torch.tensor(self.y_true, dtype=torch.float32)
         )
         assert np.allclose(
             bce_loss.data,
