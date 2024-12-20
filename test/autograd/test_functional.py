@@ -207,3 +207,29 @@ class TestHingeLoss(TestCase):
     def test_hinge_loss_invalid_reduction(self):
         with self.assertRaises(ValueError):
             functional.hinge_loss(self.y_pred, self.y_true, reduction="invalid")
+
+
+class TestMeanSquaredLoss(TestCase):
+    def setUp(self):
+        # Explicitly use float32 dtype
+        self.y_pred = Tensor(
+            data=np.array([1.0, 2.0, 3.0], dtype=np.float32), requires_grad=True
+        )
+        self.y_true = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+        self.y_pred_torch = torch.tensor(
+            self.y_pred.data, dtype=torch.float32, requires_grad=True
+        )
+        self.y_true_torch = torch.tensor(self.y_true, dtype=torch.float32)
+
+    def test_mean_squared_loss(self):
+        mse_loss = functional.mean_squared_loss(self.y_pred, self.y_true)
+        mse_loss_torch = torch.nn.functional.mse_loss(
+            self.y_pred_torch, self.y_true_torch
+        )
+        assert np.allclose(mse_loss.data, mse_loss_torch.detach().numpy())
+
+        mse_loss.backward()
+        mse_loss_torch.backward()
+        assert np.allclose(
+            self.y_pred.grad.data, self.y_pred_torch.grad.detach().numpy()
+        )

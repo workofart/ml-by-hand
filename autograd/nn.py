@@ -45,6 +45,19 @@ class Module:
 
         return params
 
+    def num_parameters(self):
+        """
+        Returns the total number of parameters in the module and its submodules.
+        """
+        # Count parameters in current module
+        total = sum(p.data.size for p in self._parameters.values())
+
+        # Recursively count parameters in submodules
+        for module in self._modules.values():
+            total += module.num_parameters()
+
+        return total
+
     def train(self):
         for module in self._modules.values():
             module.train()
@@ -168,25 +181,38 @@ class Conv2d(Module):
         windows, (H_out, W_out) = extract_windows(
             x, self.kernel_size, self.stride, self.padding_mode
         )
-        # now windows: (b, c, H_out, W_out, kH, kW)
+        # windows: (H_out, W_out, N, C, H, W)
 
-        # Flatten to (b*H_out*W_out, c*kH*kW)
+        # Permute windows to (N, C, H, W, H_out, W_out)
+        windows = windows.permute(2, 3, 4, 5, 0, 1)
+        # Now shape is (N, C, H, W, H_out, W_out)
+
+        # Reshape to (N, C * H * W, H_out*W_out)
         windows = windows.reshape(
+            batch_size, in_channels * self.kernel_size * self.kernel_size, H_out * W_out
+        )
+
+        # Transpose to (N, H_out*W_out, C*H*W) if needed, or directly reshape:
+        # Actually, PyTorch uses (N, C*H*W, H_out*W_out) and then it flattens differently.
+        # We can directly flatten to (N*H_out*W_out, C*H*W) for multiplication:
+        windows = windows.transpose(1, 2).reshape(
             batch_size * H_out * W_out,
             in_channels * self.kernel_size * self.kernel_size,
         )
 
-        # Prepare kernels: (c*kH*kW, out_channels)
+        # Prepare kernels: (out_channels, in_channels*H*W) then transpose to (C*H*W, out_channels)
         kernel_flat = (
             self._parameters["weight"]
-            .permute(1, 2, 3, 0)
-            .reshape(-1, self.out_channels)
+            .reshape(
+                self.out_channels, in_channels * self.kernel_size * self.kernel_size
+            )
+            .transpose(1, 0)
         )
 
-        # Matrix multiply: (b*H_out*W_out, out_channels)
+        # Matrix multiply: (N*H_out*W_out, out_channels)
         output = windows @ kernel_flat
 
-        # Reshape and permute to (b, out_channels, H_out, W_out)
+        # Reshape and permute to (N, out_channels, H_out, W_out)
         output = output.reshape(batch_size, H_out, W_out, self.out_channels).permute(
             0, 3, 1, 2
         )
@@ -344,7 +370,7 @@ def extract_windows(x, kernel_size, stride, padding_mode="valid"):
 
     Returns:
         tuple: (windows, output_shape)
-            - windows: Stacked tensor of shape (num_windows, batch_size, channels, kernel_size, kernel_size)
+            - windows: Stacked tensor of shape (H_out, W_out, batch_size, channels, kernel_size, kernel_size)
             - output_shape: (H_out, W_out) tuple for reshaping
     """
     if not isinstance(x, Tensor):

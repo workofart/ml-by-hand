@@ -23,10 +23,19 @@ We are creating an autograd engine from scratch and use it to build/train more c
 
 ## Demo/Examples
 
-`examples/` contains various examples of neural networks built using the library that tackle some classical problems
-- MNIST classifier: [`examples/mnist.py`](https://github.com/workofart/ml-by-hand/blob/main/examples/mnist.py)
-- CIFAR-10/CIFAR-100 classifier: [`examples/cifar.py`](https://github.com/workofart/ml-by-hand/blob/main/examples/cifar.py)
-- End-to-end training implementation for a binary classifier on the [breast cancer dataset](https://scikit-learn.org/stable/modules/generated/sklearn.datasets.load_breast_cancer.html) can be found in [`tests/autograd/test_train.py`](https://github.com/workofart/ml-by-hand/blob/c1156ee0c7a252484df1cd5234316a299e008b8b/test/autograd/test_train.py#L7-L66).
+[`examples/`](https://github.com/workofart/ml-by-hand/tree/main/examples) contains various examples of neural networks built using the library that tackle some classical problems
+
+- [x] Regression using Deep Neural Network
+  - [White Wine](https://github.com/workofart/ml-by-hand/blob/a2d55fdd9dc969f3848e0b15c3ac01a47736e655/test/autograd/test_train.py#L30)
+- [x] Binary Classification using Deep Logistic Regression
+  - [MNIST (One vs Rest)](https://github.com/workofart/ml-by-hand/blob/f4d3ab9e7903e2e675bdcd781695ab3e23908472/examples/mnist.py#L82)
+  - [Breast Cancer](https://github.com/workofart/ml-by-hand/blob/f4d3ab9e7903e2e675bdcd781695ab3e23908472/test/autograd/test_train.py#L12)
+- [x] Multi-class Classification using Deep Logistic Regression
+  - [MNIST](https://github.com/workofart/ml-by-hand/blob/f4d3ab9e7903e2e675bdcd781695ab3e23908472/examples/mnist.py#L14)
+  - [CIFAR-10/CIFAR-100](https://github.com/workofart/ml-by-hand/blob/f4d3ab9e7903e2e675bdcd781695ab3e23908472/examples/cifar.py#L13)
+- [x] Convolutional Neural Network
+  - [MNIST](https://github.com/workofart/ml-by-hand/blob/a2d55fdd9dc969f3848e0b15c3ac01a47736e655/examples/mnist.py#L37)
+  - [CIFAR-10/CIFAR-100](https://github.com/workofart/ml-by-hand/blob/f8dbe2454fa2b04fe2fe2a9bca02c584c9c7b54a/examples/cifar.py#L35)
 
 ## Technical Overview
 - `tensor` (base class)
@@ -37,6 +46,8 @@ We are creating an autograd engine from scratch and use it to build/train more c
   - Module (base class)
   - Linear (basic building block for a perceptron/hidden layer)
   - BatchNorm (batch normalization)
+  - Conv2d (convolutional layer)
+  - MaxPool2d (max pooling layer)
   - Dropout (regularization)
 - `functional` (including backprop derivation defined in `backward()`)
   - Activation functions: relu, sigmoid, softmax
@@ -45,6 +56,10 @@ We are creating an autograd engine from scratch and use it to build/train more c
   - Optimizer (base class)
   - SGD (stochastic gradient descent)
   - Adam
+- `tools`
+  - `trainer.py` (end-to-end training runner to train a model on a given dataset)
+  - `data.py` (data loading, splitting, etc.)
+  - `metrics.py` (accuracy etc.)
 - `test/`
   - All the unit tests for the above functionality
   - End-to-end training run by combining all the components on a real dataset
@@ -54,7 +69,7 @@ We are creating an autograd engine from scratch and use it to build/train more c
 
 Then you can activate the installed virtual environment by `source .venv/bin/activate`
 
-`numpy` is the main dependencies. `pytorch` is only used for validating gradient calculation correctness in the tests.
+`numpy` is the main dependency. `pytorch` is only used for validating gradient calculation correctness in the tests.
 
 ## Tests
 Comprehensive unit tests and integration tests available in `test/autograd`
