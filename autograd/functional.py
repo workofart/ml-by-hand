@@ -227,6 +227,19 @@ class HingeLoss(Function):
         return grad_y_pred, None
 
 
+class MeanSquaredLoss(Function):
+    def forward(self, y_pred, y_true):
+        self.y_pred = y_pred
+        self.y_true = y_true
+        return np.mean((y_pred - y_true) ** 2)
+
+    def backward(self, grad):
+        """
+        dL/dx = 2 * (x - y)
+        """
+        return 2 * (self.y_pred - self.y_true) * grad.data
+
+
 def binary_cross_entropy(y_pred: Tensor, y_true: Union[Tensor, np.ndarray]) -> Tensor:
     if not isinstance(y_true, Tensor):
         y_true = Tensor(y_true, requires_grad=False)
@@ -271,3 +284,9 @@ def hinge_loss(
     if not isinstance(y_true, Tensor):
         y_true = Tensor(y_true, requires_grad=False)
     return HingeLoss.apply(y_pred, y_true, reduction=reduction)
+
+
+def mean_squared_loss(y_pred: Tensor, y_true: Union[Tensor, np.ndarray]) -> Tensor:
+    if not isinstance(y_true, Tensor):
+        y_true = Tensor(y_true, requires_grad=False)
+    return MeanSquaredLoss.apply(y_pred, y_true)

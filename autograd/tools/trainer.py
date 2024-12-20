@@ -2,7 +2,7 @@ import logging
 import time
 import numpy as np
 from autograd import functional
-from autograd.tools.metrics import accuracy  # lazy import to avoid circular deps
+from autograd.tools.metrics import accuracy, mean_squared_error
 
 logger = logging.getLogger(__name__)
 
@@ -25,24 +25,11 @@ class Trainer:
         self.batch_size = batch_size
         self.shuffle_each_epoch = shuffle_each_epoch
         self.output_type = output_type
-
-    def _post_process_predictions(self, y_pred):
-        """
-        Post-processing predictions based on output type.
-        """
-        if self.output_type == "logits":
-            # Convert logits to binary predictions
-            y_prob = functional.sigmoid(y_pred).data
-            return (y_prob >= 0.5).astype(int).squeeze()
-        elif self.output_type == "sigmoid":
-            # Already probabilities, just threshold
-            return (y_pred >= 0.5).astype(int).squeeze()
-        elif self.output_type == "softmax":
-            # Multi-class
-            return y_pred.data.argmax(axis=1).squeeze()
-        else:
-            # No transformation
-            return y_pred
+        self.problem_type = (
+            "classification"
+            if output_type in ["logits", "sigmoid", "softmax"]
+            else "regression"
+        )
 
     def fit(self, X, y):
         n_samples = len(X)
@@ -100,14 +87,45 @@ class Trainer:
             avg_loss = total_loss / n_samples
             epoch_time = time.time() - start_time
             epochs_per_second = (n_samples / self.batch_size) / epoch_time
+            additional_metrics = []
 
             # Post-process predictions
-            y_pred_processed = self._post_process_predictions(y_pred)
+            if self.problem_type == "classification":
+                y_pred_processed = self.post_process_classification(y_pred)
+                additional_metrics.append(
+                    f"\n\tAccuracy: {accuracy(y_pred_processed, y_shuffled.astype(int)):.2f}"
+                )
+            elif self.problem_type == "regression":
+                additional_metrics.append(
+                    f"\n\tMean Squared Error: {mean_squared_error(y_pred.data, y_shuffled):.2f}"
+                )
+            else:
+                y_pred_processed = y_pred
 
             logger.info(
                 f"\nEpoch: {epoch}"
                 f"\n\tLoss: {avg_loss:.4f}"
                 f"\n\tEpochs/sec: {epochs_per_second:.2f}"
-                f"\n\tAccuracy: {accuracy(y_pred_processed, y_shuffled.astype(int)):.2f}"
+                f"\n\tAdditional Metrics: {"\n".join(additional_metrics)}"
+                if additional_metrics
+                else ""
             )
         self.model.train()
+
+    def post_process_classification(self, y_pred):
+        """
+        Post-processing predictions based on output type.
+        """
+        if self.output_type == "logits":
+            # Convert logits to binary predictions
+            y_prob = functional.sigmoid(y_pred).data
+            return (y_prob >= 0.5).astype(int).squeeze()
+        elif self.output_type == "sigmoid":
+            # Already probabilities, just threshold
+            return (y_pred >= 0.5).astype(int).squeeze()
+        elif self.output_type == "softmax":
+            # Multi-class
+            return y_pred.data.argmax(axis=1).squeeze()
+        else:
+            # No transformation
+            return y_pred
