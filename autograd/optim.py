@@ -23,13 +23,28 @@ class Optimizer:
         self.model_parameters = model_parameters
         self.lr = lr
 
+    def _recursive_param_op(self, params, update_fn):
+        # 1) If params is a dict
+        if isinstance(params, dict):
+            for _, v in params.items():
+                self._recursive_param_op(v, update_fn)
+
+        # 2) If params is a list or tuple
+        elif isinstance(params, (list, tuple)):
+            for p in params:
+                self._recursive_param_op(p, update_fn)
+
+        # 3) If params is a single parameter with a .grad
+        elif hasattr(params, "grad"):
+            update_fn(params)
+
     def zero_grad(self):
-        """
-        Set the gradients of all optimized tensors to zero.
-        """
-        for k, module in self.model_parameters.items():
-            for param_name, param in module.items():
-                param.grad = None
+        """Set the gradients of all optimized tensors to zero."""
+
+        def update_fn(x):
+            x.grad = None
+
+        self._recursive_param_op(self.model_parameters, update_fn)
 
     def step(self):
         """
@@ -47,17 +62,10 @@ class SGD(Optimizer):
         super(SGD, self).__init__(model_parameters, lr, **kwargs)
 
     def step(self):
-        for k, module in self.model_parameters.items():
-            if isinstance(
-                module, dict
-            ):  # Check if there are modules within model_parameters, sometimes we can define a single layer
-                for param_name, param in module.items():
-                    logger.debug(
-                        f"Updating {k}.{param_name}, {param.data.shape=}, {param.grad.data.shape=}"
-                    )
-                    param.data -= self.lr * param.grad.data
-            else:  # Directly update the weights if there are no second modules
-                module.data -= self.lr * module.grad.data
+        def update_fn(param):
+            param.data -= self.lr * param.grad.data
+
+        self._recursive_param_op(self.model_parameters, update_fn)
 
 
 class Adam(Optimizer):
@@ -85,33 +93,27 @@ class Adam(Optimizer):
 
     def step(self):
         self.timestep += 1
-        for k, module in self.model_parameters.items():
-            if isinstance(
-                module, dict
-            ):  # Check if there are modules within model_parameters, sometimes we can define a single layer
-                for param_name, param in module.items():
-                    if param.grad is None:
-                        continue
 
-                    param_id = id(
-                        param
-                    )  # to avoid cases where the same parameter name is shared across different modules
-                    grad = param.grad.data
+        def update_fn(param):
+            if param.grad is None:
+                return
+            param_id = id(
+                param
+            )  # to avoid cases where the same parameter name is shared across different modules
+            grad = param.grad.data
 
-                    # update first order momentum
-                    self.m[param_id] = (
-                        self.beta1 * self.m[param_id] + (1 - self.beta1) * grad
-                    )
-                    # update second order momentum
-                    self.v[param_id] = self.beta2 * self.v[param_id] + (
-                        1 - self.beta2
-                    ) * (grad**2)
+            # update first order momentum
+            self.m[param_id] = self.beta1 * self.m[param_id] + (1 - self.beta1) * grad
+            # update second order momentum
+            self.v[param_id] = self.beta2 * self.v[param_id] + (1 - self.beta2) * (
+                grad**2
+            )
 
-                    # bias correction
-                    m_hat = self.m[param_id] / (1 - self.beta1**self.timestep)
-                    v_hat = self.v[param_id] / (1 - self.beta2**self.timestep)
+            # bias correction
+            m_hat = self.m[param_id] / (1 - self.beta1**self.timestep)
+            v_hat = self.v[param_id] / (1 - self.beta2**self.timestep)
 
-                    # update parameters
-                    param.data -= self.lr * m_hat / (np.sqrt(v_hat) + self.epsilon)
-            else:  # Directly update the weights if there are no second modules
-                module.data -= self.lr * module.grad.data
+            # Update parameters
+            param.data -= self.lr * m_hat / (np.sqrt(v_hat) + self.epsilon)
+
+        self._recursive_param_op(self.model_parameters, update_fn)

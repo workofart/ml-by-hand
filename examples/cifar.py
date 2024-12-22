@@ -1,4 +1,5 @@
 from autograd import nn, functional, optim
+from examples.models.resnet import ResidualBlock
 from autograd.tools.trainer import Trainer
 from autograd.tools.metrics import accuracy, precision
 from autograd.tools.data import train_test_split
@@ -30,6 +31,24 @@ class CifarMulticlassClassifier(nn.Module):
         x = functional.relu(self.h3(x))
         x = self.dropout(x)
         return functional.softmax(self.h4(x))
+
+
+class CifarResNet(nn.Module):
+    def __init__(self, num_classes: int):
+        super().__init__()
+        self.res_block1 = ResidualBlock(3, 16)
+        self.res_block2 = ResidualBlock(16, 16)
+        self.fc1 = nn.Linear(
+            16 * 32 * 32, num_classes
+        )  # 32*32 is the output size of the last maxpool layer
+
+    def forward(self, x):
+        batch_size = x.shape[0]
+        x = x.reshape(batch_size, 3, 32, 32)  # (N, in_channels, H, W)
+        x = self.res_block1(x)
+        x = self.res_block2(x)
+        x = x.reshape(batch_size, -1)
+        return functional.softmax(self.fc1(x))
 
 
 class CifarConvolutionalClassifier(nn.Module):
@@ -113,6 +132,11 @@ if __name__ == "__main__":
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.1)
 
+    logger.info("Training ResNet CIFAR-10 model")
+    cifar10_model = CifarResNet(num_classes=10)
+    logger.info(f"There are {cifar10_model.num_parameters()} parameters in the model")
+    train_cifar_multiclass_model(cifar10_model, X_train, y_train, X_test, y_test)
+
     logger.info("Training Convolutional CIFAR-10 model")
     cifar10_model = CifarConvolutionalClassifier(num_classes=10)
     logger.info(f"There are {cifar10_model.num_parameters()} parameters in the model")
@@ -133,6 +157,11 @@ if __name__ == "__main__":
     logger.info(f"{X.shape=}, {y.shape=}")
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.1)
+
+    logger.info("Training ResNet CIFAR-100 model")
+    cifar100_model = CifarResNet(num_classes=100)
+    logger.info(f"There are {cifar100_model.num_parameters()} parameters in the model")
+    train_cifar_multiclass_model(cifar100_model, X_train, y_train, X_test, y_test)
 
     logger.info("Training Convolutional CIFAR-100 model")
     cifar100_model = CifarConvolutionalClassifier(num_classes=100)
