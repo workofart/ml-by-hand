@@ -36,6 +36,9 @@ We are creating an autograd engine from scratch and use it to build/train more c
 - [x] Convolutional Neural Network
   - [MNIST](https://github.com/workofart/ml-by-hand/blob/a2d55fdd9dc969f3848e0b15c3ac01a47736e655/examples/mnist.py#L37)
   - [CIFAR-10/CIFAR-100](https://github.com/workofart/ml-by-hand/blob/f8dbe2454fa2b04fe2fe2a9bca02c584c9c7b54a/examples/cifar.py#L35)
+- [x] Residual Neural Network
+  - [MNIST](https://github.com/workofart/ml-by-hand/blob/09c680f9864c842f5e4d543f4cc837fd15dd5269/examples/mnist.py#L15)
+  - [CIFAR-10/CIFAR-100](https://github.com/workofart/ml-by-hand/blob/09c680f9864c842f5e4d543f4cc837fd15dd5269/examples/cifar.py#L36)
 
 ## Technical Overview
 - `tensor` (base class)
