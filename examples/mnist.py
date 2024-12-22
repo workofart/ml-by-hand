@@ -1,4 +1,5 @@
 from autograd import nn, optim, functional
+from examples.models.resnet import ResidualBlock
 from openml.datasets import get_dataset
 import logging
 import numpy as np
@@ -9,6 +10,24 @@ from autograd.tools.metrics import accuracy, precision
 
 logger = logging.getLogger(__name__)
 np.random.seed(1337)
+
+
+class MnistResNet(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.res_block1 = ResidualBlock(1, 16)
+        self.res_block2 = ResidualBlock(16, 16)
+        self.fc1 = nn.Linear(
+            16 * 28 * 28, 10
+        )  # 28*28 is the output size of the last maxpool layer
+
+    def forward(self, x):
+        batch_size = x.shape[0]
+        x = x.reshape(batch_size, 1, 28, 28)  # (N, in_channels, H, W)
+        x = self.res_block1(x)
+        x = self.res_block2(x)
+        x = x.reshape(batch_size, -1)
+        return functional.softmax(self.fc1(x))
 
 
 class MnistMultiClassClassifier(nn.Module):
@@ -203,12 +222,15 @@ if __name__ == "__main__":
     )
     X /= 255.0  # normalize to [0, 1] to speed up convergence
 
+    X = X[:3000]
+    y = y[:3000]
     logger.info(f"X shape: {X.shape}")
     logger.info(f"y shape: {y.shape}")
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.1)
 
-    model = MnistConvolutionalClassifier()
+    # model = MnistConvolutionalClassifier()
+    model = MnistResNet()
     logger.info(f"Number of parameters: {model.num_parameters()}")
     train_mnist_multiclass_model(
         X_train,
@@ -218,7 +240,7 @@ if __name__ == "__main__":
         optimizer=optim.Adam(model.parameters, lr=1e-3),
         model=model,
         loss_fn=functional.sparse_cross_entropy,
-        epochs=3,
+        epochs=10,
         msg="Convolutional Neural Network (with batch norm, Adam optimizer)",
     )
 
