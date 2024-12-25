@@ -294,6 +294,8 @@ class RecurrentBlock(Module):
             input_size (int): The size of the input
             hidden_size (int): The size of the hidden state
             output_size (int, optional): The size of the output. Defaults to None.
+            If specified, the output will be a linear combination of final hidden state
+            and output layer weights.
 
         W_xh: transforms the input into "hidden embedding"
         W_hh: transforms the hidden state into the next hidden state
@@ -364,6 +366,8 @@ class LongShortTermMemoryBlock(Module):
             input_size (int): The size of the input
             hidden_size (int): The size of the hidden state
             output_size (int, optional): The size of the output. Defaults to None.
+            If specified, the output will be a linear combination of final hidden state
+            and output layer weights.
 
         States:
             - Cell state: Internal memory of LSTM. It flows down the chain (time steps)
@@ -371,10 +375,11 @@ class LongShortTermMemoryBlock(Module):
             unless the gates decide to do so.
             - Hidden state: The output of the LSTM block at time t
 
-        W_f: weights for the forget gate
-        W_i: weights for the input gate
-        W_c: weights for the cell gate
-        W_o: weights for the output gate
+        W_f/bias_f: weights for the forget gate
+        W_i/bias_i: weights for the input gate
+        W_c/bias_c: weights for the cell gate
+        W_o/bias_o: weights for the output gate
+        W_hy/bias_y: weights for the final output (if output_size is specified)
         """
         super().__init__()
         self.input_size = input_size
@@ -408,7 +413,7 @@ class LongShortTermMemoryBlock(Module):
 
     def forward(self, x):
         """
-        Forward pass of the RNN
+        Forward pass of the LSTM
 
         Args:
             x (Tensor): The input tensor of shape (batch_size, sequence_length, input_size)

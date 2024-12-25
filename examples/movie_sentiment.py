@@ -89,6 +89,44 @@ class RNN(nn.Module):
         return functional.sigmoid(x)
 
 
+class LSTM(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size):
+        super().__init__()
+        self.rnn = nn.LongShortTermMemoryBlock(input_size, hidden_size)
+        self.dropout = nn.Dropout(0.5)
+        self.batchnorm = nn.BatchNorm(hidden_size)
+        self.fc = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        x = self.rnn(x)
+        x = self.dropout(x)
+        x = self.batchnorm(x)
+        x = self.fc(x)
+        return functional.sigmoid(x)
+
+
+def main(model: nn.Module):
+    trainer = Trainer(
+        model,
+        loss_fn=functional.binary_cross_entropy,
+        optimizer=optim.Adam(model.parameters, lr=0.001),
+        epochs=10,
+        output_type="sigmoid",
+    )
+
+    print(
+        f"Training {model.__class__.__name__} Neural Network for movie sentiment analysis..."
+    )
+    trainer.fit(X_train, y_train)
+
+    print("Evaluating model...")
+    model.eval()
+    y_pred = model(X_test).data
+    # convert sigmoid to binary
+    y_pred = (y_pred > 0.5).astype(int).squeeze()
+    print(f"Test Accuracy: {accuracy(y_pred, y_test)}")
+
+
 if __name__ == "__main__":
     # Check if data exist
     if not os.path.exists("examples/IMDB Dataset.csv"):
@@ -102,21 +140,7 @@ if __name__ == "__main__":
     X_train, X_test, y_train, y_test, vocab = dl.process_data()
 
     model = RNN(input_size=len(vocab), hidden_size=32, output_size=1)
+    main(model)
 
-    trainer = Trainer(
-        model,
-        loss_fn=functional.binary_cross_entropy,
-        optimizer=optim.Adam(model.parameters, lr=0.001),
-        epochs=10,
-        output_type="sigmoid",
-    )
-
-    print("Training Recurrent Neural Network for movie sentiment analysis...")
-    trainer.fit(X_train, y_train)
-
-    print("Evaluating model...")
-    model.eval()
-    y_pred = model(X_test).data
-    # convert sigmoid to binary
-    y_pred = (y_pred > 0.5).astype(int).squeeze()
-    print(f"Test Accuracy: {accuracy(y_pred, y_test)}")
+    model = LSTM(input_size=len(vocab), hidden_size=32, output_size=1)
+    main(model)
