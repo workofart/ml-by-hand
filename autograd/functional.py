@@ -19,6 +19,10 @@ def softmax(x: Tensor) -> Tensor:
     return Softmax.apply(x)
 
 
+def tanh(x: Tensor) -> Tensor:
+    return Tanh.apply(x)
+
+
 class Relu(Function):
     """
     Retified Linear Unit (ReLU) activation function.
@@ -74,6 +78,27 @@ class Softmax(Function):
         return dLdx
 
 
+class Tanh(Function):
+    """
+    Tanh activation function
+    tanh(x) = (e^x - e^-x) / (e^x + e^-x)
+    """
+
+    def forward(self, x):
+        # For numerical stability, use the fact that tanh(x) = 2*sigmoid(2x) - 1
+        # This avoids computing large exponentials directly
+        x = 2 * x
+        # Clip x to avoid overflow in exp(-x)
+        x = np.clip(x, -88.72, 88.72)  # ln(max float32) ≈ 88.72
+        sigmoid_2x = 1 / (1 + np.exp(-x))
+        self.out = 2 * sigmoid_2x - 1
+        return self.out
+
+    def backward(self, grad):
+        # d(tanh(x))/dx = 1 - tanh(x)^2
+        return grad * (1 - self.out**2)
+
+
 ###################### Loss Functions #####################
 class BinaryCrossEntropy(Function):
     """
@@ -107,6 +132,8 @@ class BinaryCrossEntropy(Function):
         y_true = self.y_true
         y_pred_prob = self.y_pred_prob
 
+        # Avoid division by zero by clipping probabilities away from 0 and 1
+        y_pred_prob = np.clip(y_pred_prob, 1e-7, 1 - 1e-7)
         grad_y_pred = -((y_true / y_pred_prob) - ((1 - y_true) / (1 - y_pred_prob)))
         grad_y_pred /= len(y_pred_prob)
         # Incorporate the upstream gradient

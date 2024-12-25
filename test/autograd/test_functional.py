@@ -30,6 +30,12 @@ class TestActivationFunctions(TestCase):
             atol=1e-6,
         )
 
+    def test_tanh(self):
+        assert np.allclose(
+            functional.tanh(self.X).data,
+            torch.nn.functional.tanh(torch.Tensor(self.X.data)).detach().numpy(),
+        )
+
 
 class TestBinaryCrossEntropy(TestCase):
     def setUp(self) -> None:
