@@ -1,6 +1,8 @@
 import numpy as np
 from .tensor import Tensor
 import logging
+from .init import xavier_uniform
+from .functional import tanh
 
 logger = logging.getLogger(__name__)
 
@@ -74,14 +76,8 @@ class Linear(Module):
         super().__init__(**kwargs)
 
         # weight is a matrix of shape (input_size, output_size)
-        # Xavier Normal Initialization
-        # https://proceedings.mlr.press/v9/glorot10a/glorot10a.pdf
-        self._parameters["weight"] = Tensor(
-            np.random.uniform(
-                low=-np.sqrt(6.0 / (input_size + output_size)),
-                high=np.sqrt(6.0 / (input_size + output_size)),
-                size=(input_size, output_size),
-            ).astype(np.float32)
+        self._parameters["weight"] = xavier_uniform(
+            Tensor(np.zeros((input_size, output_size)))
         )
 
         # bias is always 1-dimensional
@@ -142,30 +138,16 @@ class Conv2d(Module):
         # Each kernel is of shape (in_channels, H, W)
         # Each kernel needs to be convolved with the input tensor
         # The resulting tensor will have the shape (out_channels, H', W')
-        # Xavier Normal Initialization
-        # https://proceedings.mlr.press/v9/glorot10a/glorot10a.pdf
-        self._parameters["weight"] = Tensor(
-            np.random.uniform(
-                low=-np.sqrt(
-                    6.0
-                    / (
-                        self.in_channels * self.kernel_size * self.kernel_size
-                        + self.out_channels
+        self._parameters["weight"] = xavier_uniform(
+            Tensor(
+                np.zeros(
+                    (
+                        self.out_channels,
+                        self.in_channels,
+                        self.kernel_size,
+                        self.kernel_size,
                     )
-                ).astype(np.float32),
-                high=np.sqrt(
-                    6.0
-                    / (
-                        self.in_channels * self.kernel_size * self.kernel_size
-                        + self.out_channels
-                    )
-                ).astype(np.float32),
-                size=(
-                    self.out_channels,
-                    self.in_channels,
-                    self.kernel_size,
-                    self.kernel_size,
-                ),
+                )
             )
         )
         if bias:
@@ -262,6 +244,74 @@ class MaxPool2d(Module):
             batch_size, in_channels, H_out, W_out
         )
         return pooled
+
+
+class RecurrentNetwork(Module):
+    def __init__(self, input_size, hidden_size, output_size=None):
+        """
+        Recurrent Neural Network (RNN)
+        Paper: https://arxiv.org/abs/1308.0850
+
+        Args:
+            input_size (int): The size of the input
+            hidden_size (int): The size of the hidden state
+            output_size (int, optional): The size of the output. Defaults to None.
+
+        W_xh: transforms the input into "hidden embedding"
+        W_hh: transforms the hidden state into the next hidden state
+        W_hy: transforms the hidden state into the output
+        """
+        super().__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.output_size = output_size
+
+        self._parameters["W_xh"] = xavier_uniform(
+            Tensor(np.zeros((input_size, hidden_size)))
+        )
+        self._parameters["W_hh"] = xavier_uniform(
+            Tensor(np.zeros((hidden_size, hidden_size)))
+        )
+        self._parameters["bias"] = Tensor(np.zeros((hidden_size,)))
+
+        if output_size:
+            self._parameters["W_hy"] = xavier_uniform(
+                Tensor(np.zeros((hidden_size, output_size)))
+            )
+            self._parameters["bias_y"] = Tensor(np.zeros((output_size,)))
+        else:
+            self._parameters["W_hy"] = None
+            self._parameters["bias_y"] = None
+
+    def forward(self, x):
+        """
+        Forward pass of the RNN
+
+        Args:
+            x (Tensor): The input tensor of shape (batch_size, input_size)
+        """
+        batch_size = x.shape[0]
+        seq_length = x.shape[1]
+        hidden_state = Tensor(np.zeros((batch_size, self.hidden_size)))
+
+        # Iterate through the sequence (or time dimension)
+        for t in range(seq_length):
+            x_t = x[:, t, :]  # shape: (batch_size, input_size)
+
+            # Update the hidden state
+            hidden_state = tanh(
+                x_t @ self._parameters["W_xh"]  # (batch_size, hidden_size)
+                + hidden_state @ self._parameters["W_hh"]  # (batch_size, hidden_size)
+                + self._parameters["bias"]
+            )
+
+        # If we defined the output size, we will compute the final output
+        if self._parameters["W_hy"] is not None:
+            # We will only use the final hidden state in the output calculation
+            return hidden_state @ self._parameters["W_hy"] + self._parameters["bias_y"]
+        # If there is no output size, we return the final hidden state
+        else:
+            return hidden_state
 
 
 class BatchNorm(Module):

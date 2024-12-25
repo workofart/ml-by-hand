@@ -1,5 +1,5 @@
 from unittest import TestCase
-from autograd.nn import Linear, BatchNorm, Dropout, Conv2d, MaxPool2d
+from autograd.nn import Linear, BatchNorm, Dropout, Conv2d, MaxPool2d, RecurrentNetwork
 from autograd.tensor import Tensor
 import random
 import numpy as np
@@ -539,3 +539,210 @@ class TestMaxPool2d(TestConv2d):
         assert np.allclose(
             conv._parameters["weight"].grad.data, conv_torch.weight.grad.numpy()
         ), "Weight gradients do not match!"
+
+
+class TestRecurrentNetwork(TestCase):
+    def setUp(self):
+        self.input_size = 3
+        self.hidden_size = 4
+        self.output_size = 2
+        self.batch_size = 5
+        self.seq_length = 10
+
+        # Create RNN with output layer
+        self.rnn = RecurrentNetwork(
+            input_size=self.input_size,
+            hidden_size=self.hidden_size,
+            output_size=self.output_size,
+        )
+
+        # Create RNN without output layer
+        self.rnn_no_output = RecurrentNetwork(
+            input_size=self.input_size, hidden_size=self.hidden_size
+        )
+
+    def test_initialization(self):
+        # Test parameter shapes
+        assert self.rnn._parameters["W_xh"].data.shape == (
+            self.input_size,
+            self.hidden_size,
+        )
+        assert self.rnn._parameters["W_hh"].data.shape == (
+            self.hidden_size,
+            self.hidden_size,
+        )
+        assert self.rnn._parameters["W_hy"].data.shape == (
+            self.hidden_size,
+            self.output_size,
+        )
+        assert self.rnn._parameters["bias"].data.shape == (self.hidden_size,)
+        assert self.rnn._parameters["bias_y"].data.shape == (self.output_size,)
+
+        # Test no output layer case
+        assert self.rnn_no_output._parameters["W_hy"] is None
+        assert self.rnn_no_output._parameters["bias_y"] is None
+
+    def test_forward(self):
+        np.random.seed(42)
+        torch.manual_seed(42)
+
+        # Use smaller dimensions for easier debugging
+        x_data = np.random.randn(2, 3, self.input_size)  # batch=2, seq=3
+        x = Tensor(x_data)
+        x_torch = torch.FloatTensor(x_data)
+
+        torch_rnn = torch.nn.RNN(
+            input_size=self.input_size,
+            hidden_size=self.hidden_size,
+            batch_first=True,
+            nonlinearity="tanh",
+        )
+        torch_linear = torch.nn.Linear(self.hidden_size, self.output_size)
+
+        # Copy weights and print them to verify
+        with torch.no_grad():
+            torch_rnn.weight_ih_l0.data = torch.FloatTensor(
+                self.rnn._parameters["W_xh"].data.T
+            )
+            torch_rnn.weight_hh_l0.data = torch.FloatTensor(
+                self.rnn._parameters["W_hh"].data.T
+            )
+            torch_rnn.bias_ih_l0.data = torch.FloatTensor(
+                self.rnn._parameters["bias"].data
+            )
+            torch_rnn.bias_hh_l0.data = torch.zeros_like(torch_rnn.bias_hh_l0)
+
+            torch_linear.weight.data = torch.FloatTensor(
+                self.rnn._parameters["W_hy"].data.T
+            )
+            torch_linear.bias.data = torch.FloatTensor(
+                self.rnn._parameters["bias_y"].data
+            )
+
+        # Get PyTorch's hidden states
+        torch_output, _ = torch_rnn(x_torch)
+
+        # Final output comparison
+        output = self.rnn(x)
+        torch_output = torch_linear(torch_output[:, -1, :])
+
+        assert np.allclose(
+            output.data, torch_output.detach().numpy(), rtol=1e-4, atol=1e-4
+        ), "RNN output doesn't match PyTorch's output"
+
+    def test_backward(self):
+        np.random.seed(42)
+        torch.manual_seed(42)
+
+        # Create small input for easier gradient checking
+        x_data = np.random.randn(2, 3, self.input_size)
+        x = Tensor(x_data)
+        x_torch = torch.FloatTensor(x_data).requires_grad_(True)
+
+        # Create PyTorch RNN
+        torch_rnn = torch.nn.RNN(
+            input_size=self.input_size, hidden_size=self.hidden_size, batch_first=True
+        )
+        torch_linear = torch.nn.Linear(self.hidden_size, self.output_size)
+
+        # Copy weights to PyTorch RNN
+        with torch.no_grad():
+            torch_rnn.weight_ih_l0.data = torch.FloatTensor(
+                self.rnn._parameters["W_xh"].data.T
+            )
+            torch_rnn.weight_hh_l0.data = torch.FloatTensor(
+                self.rnn._parameters["W_hh"].data.T
+            )
+            torch_rnn.bias_ih_l0.data = torch.FloatTensor(
+                self.rnn._parameters["bias"].data
+            )
+            torch_rnn.bias_hh_l0.data = torch.zeros_like(torch_rnn.bias_hh_l0)
+
+            torch_linear.weight.data = torch.FloatTensor(
+                self.rnn._parameters["W_hy"].data.T
+            )
+            torch_linear.bias.data = torch.FloatTensor(
+                self.rnn._parameters["bias_y"].data
+            )
+
+        # Forward pass
+        output = self.rnn(x)
+        torch_output, _ = torch_rnn(x_torch)
+        torch_output = torch_linear(torch_output[:, -1, :])
+
+        # Create simple loss and backward
+        loss = output.sum()
+        loss_torch = torch_output.sum()
+
+        loss.backward()
+        loss_torch.backward()
+
+        # Compare gradients
+        # Input gradients
+        assert np.allclose(
+            x.grad.data, x_torch.grad.numpy(), rtol=1e-4, atol=1e-4
+        ), "Input gradients don't match"
+
+        # Weight gradients - need to transpose PyTorch gradients to match our format
+        assert np.allclose(
+            self.rnn._parameters["W_xh"].grad.data,
+            torch_rnn.weight_ih_l0.grad.numpy().T,
+            rtol=1e-4,
+            atol=1e-4,
+        ), "W_xh gradients don't match"
+
+        assert np.allclose(
+            self.rnn._parameters["W_hh"].grad.data,
+            torch_rnn.weight_hh_l0.grad.numpy().T,
+            rtol=1e-4,
+            atol=1e-4,
+        ), "W_hh gradients don't match"
+
+        assert np.allclose(
+            self.rnn._parameters["W_hy"].grad.data,
+            torch_linear.weight.grad.numpy().T,
+            rtol=1e-4,
+            atol=1e-4,
+        ), "W_hy gradients don't match"
+
+        # Bias gradients
+        assert np.allclose(
+            self.rnn._parameters["bias"].grad.data,
+            torch_rnn.bias_ih_l0.grad.numpy(),
+            rtol=1e-4,
+            atol=1e-4,
+        ), "RNN bias gradients don't match"
+
+        assert np.allclose(
+            self.rnn._parameters["bias_y"].grad.data,
+            torch_linear.bias.grad.numpy(),
+            rtol=1e-4,
+            atol=1e-4,
+        ), "Output bias gradients don't match"
+
+    def test_simple_sequence(self):
+        # Test with a simple sequence where we can manually verify the results
+        self.rnn = RecurrentNetwork(input_size=2, hidden_size=2, output_size=1)
+
+        # Set weights manually for predictable output
+        self.rnn._parameters["W_xh"].data = np.array([[0.5, 0.0], [0.0, 0.5]])
+        self.rnn._parameters["W_hh"].data = np.array([[0.1, 0.0], [0.0, 0.1]])
+        self.rnn._parameters["W_hy"].data = np.array([[1.0], [1.0]])
+        self.rnn._parameters["bias"].data = np.zeros(2)
+        self.rnn._parameters["bias_y"].data = np.zeros(1)
+
+        # Simple input sequence
+        x = Tensor(
+            np.array([[[1.0, 0.0], [0.0, 1.0]]])
+        )  # batch_size=1, seq_length=2, input_size=2
+
+        output = self.rnn(x)
+        # Verify output shape
+        assert output.shape == (1, 1)
+
+    def test_sequence_length_one(self):
+        # Test with sequence length of 1 (edge case)
+        x = Tensor(np.random.randn(self.batch_size, 1, self.input_size))
+
+        output = self.rnn(x)
+        assert output.shape == (self.batch_size, self.output_size)
