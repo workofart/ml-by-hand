@@ -19,6 +19,10 @@ def softmax(x: Tensor) -> Tensor:
     return Softmax.apply(x)
 
 
+def tanh(x: Tensor) -> Tensor:
+    return Tanh.apply(x)
+
+
 class Relu(Function):
     """
     Retified Linear Unit (ReLU) activation function.
@@ -72,6 +76,21 @@ class Softmax(Function):
         sum_term = np.sum(grad * self.probs, axis=-1, keepdims=True)
         dLdx = self.probs * (grad - sum_term)
         return dLdx
+
+
+class Tanh(Function):
+    """
+    Tanh activation function
+    tanh(x) = (e^x - e^-x) / (e^x + e^-x)
+    """
+
+    def forward(self, x):
+        self.out = (np.exp(x) - np.exp(-x)) / (np.exp(x) + np.exp(-x))
+        return self.out
+
+    def backward(self, grad):
+        # d(tanh(x))/dx = 1 - tanh(x)^2
+        return grad * (1 - self.out**2)
 
 
 ###################### Loss Functions #####################
