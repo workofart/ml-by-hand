@@ -1,5 +1,13 @@
 from unittest import TestCase
-from autograd.nn import Linear, BatchNorm, Dropout, Conv2d, MaxPool2d, RecurrentBlock
+from autograd.nn import (
+    Linear,
+    BatchNorm,
+    Dropout,
+    Conv2d,
+    MaxPool2d,
+    RecurrentBlock,
+    LongShortTermMemoryBlock,
+)
 from autograd.tensor import Tensor
 import random
 import numpy as np
@@ -745,4 +753,217 @@ class TestRecurrentNetwork(TestCase):
         x = Tensor(np.random.randn(self.batch_size, 1, self.input_size))
 
         output = self.rnn(x)
+        assert output.shape == (self.batch_size, self.output_size)
+
+
+class TestLongShortTermMemoryBlock(TestCase):
+    def setUp(self):
+        self.input_size = 3
+        self.hidden_size = 4
+        self.output_size = 2
+        self.batch_size = 5
+        self.seq_length = 10
+
+        # Create LSTM with output layer
+        self.lstm = LongShortTermMemoryBlock(
+            input_size=self.input_size,
+            hidden_size=self.hidden_size,
+            output_size=self.output_size,
+        )
+
+        # Create LSTM without output layer
+        self.lstm_no_output = LongShortTermMemoryBlock(
+            input_size=self.input_size, hidden_size=self.hidden_size
+        )
+
+        # Create test data
+        np.random.seed(42)
+        torch.manual_seed(42)
+        self.x_data = np.random.randn(2, 3, self.input_size)  # batch=2, seq=3
+        self.x = Tensor(self.x_data)
+        self.x_torch = torch.FloatTensor(self.x_data)
+        self.x_torch.requires_grad = True
+
+        # Create PyTorch LSTM and output layer
+        self.torch_lstm = torch.nn.LSTM(
+            input_size=self.input_size, hidden_size=self.hidden_size, batch_first=True
+        )
+        self.torch_linear = torch.nn.Linear(self.hidden_size, self.output_size)
+
+        # Copy weights to PyTorch LSTM
+        with torch.no_grad():
+            # Copy gate weights
+            # PyTorch concatenates all gates into one matrix, so we need to split them
+            W_i_input = (
+                self.lstm._parameters["W_i"].data[: self.input_size].T
+            )  # (3,4) -> (4,3)
+            W_f_input = self.lstm._parameters["W_f"].data[: self.input_size].T
+            W_c_input = self.lstm._parameters["W_c"].data[: self.input_size].T
+            W_o_input = self.lstm._parameters["W_o"].data[: self.input_size].T
+
+            # Stack them vertically => shape (4+4+4+4, 3) = (16,3)
+            ih_weights = np.concatenate(
+                (W_i_input, W_f_input, W_c_input, W_o_input), axis=0
+            )
+            self.torch_lstm.weight_ih_l0.data = torch.FloatTensor(ih_weights)
+
+            W_i_hidden = self.lstm._parameters["W_i"].data[self.input_size :].T  # (4,4)
+            W_f_hidden = self.lstm._parameters["W_f"].data[self.input_size :].T
+            W_c_hidden = self.lstm._parameters["W_c"].data[self.input_size :].T
+            W_o_hidden = self.lstm._parameters["W_o"].data[self.input_size :].T
+
+            hh_weights = np.concatenate(
+                (W_i_hidden, W_f_hidden, W_c_hidden, W_o_hidden), axis=0
+            )  # (16,4)
+            self.torch_lstm.weight_hh_l0.data = torch.FloatTensor(hh_weights)
+
+            # Copy biases
+            ih_bias = np.concatenate(
+                [
+                    self.lstm._parameters["bias_i"].data,
+                    self.lstm._parameters["bias_f"].data,
+                    self.lstm._parameters["bias_c"].data,
+                    self.lstm._parameters["bias_o"].data,
+                ]
+            )
+            self.torch_lstm.bias_ih_l0.data = torch.FloatTensor(ih_bias)
+            self.torch_lstm.bias_hh_l0.data = torch.zeros_like(
+                self.torch_lstm.bias_hh_l0
+            )
+
+            # Copy output layer weights
+            self.torch_linear.weight.data = torch.FloatTensor(
+                self.lstm._parameters["W_hy"].data.T
+            )
+            self.torch_linear.bias.data = torch.FloatTensor(
+                self.lstm._parameters["bias_y"].data
+            )
+
+    def test_initialization(self):
+        # Test parameter shapes
+        input_hidden = self.input_size + self.hidden_size
+
+        # Test gate parameter shapes
+        assert self.lstm._parameters["W_f"].data.shape == (
+            input_hidden,
+            self.hidden_size,
+        )
+        assert self.lstm._parameters["W_i"].data.shape == (
+            input_hidden,
+            self.hidden_size,
+        )
+        assert self.lstm._parameters["W_c"].data.shape == (
+            input_hidden,
+            self.hidden_size,
+        )
+        assert self.lstm._parameters["W_o"].data.shape == (
+            input_hidden,
+            self.hidden_size,
+        )
+
+        # Test bias shapes
+        assert self.lstm._parameters["bias_f"].data.shape == (self.hidden_size,)
+        assert self.lstm._parameters["bias_i"].data.shape == (self.hidden_size,)
+        assert self.lstm._parameters["bias_c"].data.shape == (self.hidden_size,)
+        assert self.lstm._parameters["bias_o"].data.shape == (self.hidden_size,)
+
+        # Test output layer parameters
+        assert self.lstm._parameters["W_hy"].data.shape == (
+            self.hidden_size,
+            self.output_size,
+        )
+        assert self.lstm._parameters["bias_y"].data.shape == (self.output_size,)
+
+        # Test no output layer case
+        assert self.lstm_no_output._parameters["W_hy"] is None
+        assert self.lstm_no_output._parameters["bias_y"] is None
+
+    def test_forward(self):
+        # Forward pass
+        output = self.lstm(self.x)
+        torch_output, _ = self.torch_lstm(self.x_torch)
+        torch_output = self.torch_linear(torch_output[:, -1, :])
+
+        assert np.allclose(
+            output.data, torch_output.detach().numpy(), rtol=1e-4, atol=1e-4
+        ), "LSTM output doesn't match PyTorch's output"
+
+    def test_backward(self):
+        # Forward pass
+        output = self.lstm(self.x)
+        torch_output, _ = self.torch_lstm(self.x_torch)
+        torch_output = self.torch_linear(torch_output[:, -1, :])
+
+        # Create simple loss and backward
+        loss = output.sum()
+        loss_torch = torch_output.sum()
+
+        loss.backward()
+        loss_torch.backward()
+
+        # Compare gradients
+        assert np.allclose(
+            self.x.grad.data, self.x_torch.grad.numpy(), rtol=1e-4, atol=1e-4
+        ), "Input gradients don't match"
+
+        # Compare gate gradients
+        # We need to split PyTorch's concatenated gradients
+        ih_grad = self.torch_lstm.weight_ih_l0.grad.numpy()
+        hh_grad = self.torch_lstm.weight_hh_l0.grad.numpy()
+
+        gates = ["i", "f", "c", "o"]
+        for idx, gate in enumerate(gates):
+            # Input weights
+            start_idx = idx * self.hidden_size
+            end_idx = (idx + 1) * self.hidden_size
+            assert np.allclose(
+                self.lstm._parameters[f"W_{gate}"].grad.data[: self.input_size],
+                ih_grad[start_idx:end_idx].T,
+                rtol=1e-4,
+                atol=1e-4,
+            ), f"W_{gate} input gradients don't match"
+
+            # Hidden weights
+            assert np.allclose(
+                self.lstm._parameters[f"W_{gate}"].grad.data[self.input_size :],
+                hh_grad[start_idx:end_idx].T,
+                rtol=1e-4,
+                atol=1e-4,
+            ), f"W_{gate} hidden gradients don't match"
+
+        # Compare output layer gradients
+        assert np.allclose(
+            self.lstm._parameters["W_hy"].grad.data,
+            self.torch_linear.weight.grad.numpy().T,
+            rtol=1e-4,
+            atol=1e-4,
+        ), "W_hy gradients don't match"
+
+    def test_simple_sequence(self):
+        # Test with a simple sequence where we can manually verify the results
+        lstm = LongShortTermMemoryBlock(input_size=2, hidden_size=2, output_size=1)
+
+        # Set weights manually for predictable output
+        input_hidden = 4  # input_size + hidden_size
+        for gate in ["f", "i", "c", "o"]:
+            lstm._parameters[f"W_{gate}"].data = np.eye(input_hidden, 2) * 0.5
+            lstm._parameters[f"bias_{gate}"].data = np.zeros(2)
+
+        lstm._parameters["W_hy"].data = np.ones((2, 1))
+        lstm._parameters["bias_y"].data = np.zeros(1)
+
+        # Simple input sequence
+        x = Tensor(
+            np.array([[[1.0, 0.0], [0.0, 1.0]]])
+        )  # batch_size=1, seq_length=2, input_size=2
+
+        output = lstm(x)
+        # Verify output shape
+        assert output.shape == (1, 1)
+
+    def test_sequence_length_one(self):
+        # Test with sequence length of 1 (edge case)
+        x = Tensor(np.random.randn(self.batch_size, 1, self.input_size))
+
+        output = self.lstm(x)
         assert output.shape == (self.batch_size, self.output_size)
