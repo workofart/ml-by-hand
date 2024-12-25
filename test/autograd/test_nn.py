@@ -1,5 +1,5 @@
 from unittest import TestCase
-from autograd.nn import Linear, BatchNorm, Dropout, Conv2d, MaxPool2d, RecurrentNetwork
+from autograd.nn import Linear, BatchNorm, Dropout, Conv2d, MaxPool2d, RecurrentBlock
 from autograd.tensor import Tensor
 import random
 import numpy as np
@@ -550,14 +550,14 @@ class TestRecurrentNetwork(TestCase):
         self.seq_length = 10
 
         # Create RNN with output layer
-        self.rnn = RecurrentNetwork(
+        self.rnn = RecurrentBlock(
             input_size=self.input_size,
             hidden_size=self.hidden_size,
             output_size=self.output_size,
         )
 
         # Create RNN without output layer
-        self.rnn_no_output = RecurrentNetwork(
+        self.rnn_no_output = RecurrentBlock(
             input_size=self.input_size, hidden_size=self.hidden_size
         )
 
@@ -722,7 +722,7 @@ class TestRecurrentNetwork(TestCase):
 
     def test_simple_sequence(self):
         # Test with a simple sequence where we can manually verify the results
-        self.rnn = RecurrentNetwork(input_size=2, hidden_size=2, output_size=1)
+        self.rnn = RecurrentBlock(input_size=2, hidden_size=2, output_size=1)
 
         # Set weights manually for predictable output
         self.rnn._parameters["W_xh"].data = np.array([[0.5, 0.0], [0.0, 0.5]])
