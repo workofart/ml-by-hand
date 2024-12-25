@@ -1,5 +1,4 @@
 from autograd import nn, optim, functional
-from examples.models.resnet import ResidualBlock
 from openml.datasets import get_dataset
 import logging
 import numpy as np
@@ -15,8 +14,8 @@ np.random.seed(1337)
 class MnistResNet(nn.Module):
     def __init__(self):
         super().__init__()
-        self.res_block1 = ResidualBlock(1, 16)
-        self.res_block2 = ResidualBlock(16, 16)
+        self.res_block1 = nn.ResidualBlock(1, 16)
+        self.res_block2 = nn.ResidualBlock(16, 16)
         self.fc1 = nn.Linear(
             16 * 28 * 28, 10
         )  # 28*28 is the output size of the last maxpool layer

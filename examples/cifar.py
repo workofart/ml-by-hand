@@ -1,5 +1,4 @@
 from autograd import nn, functional, optim
-from examples.models.resnet import ResidualBlock
 from autograd.tools.trainer import Trainer
 from autograd.tools.metrics import accuracy, precision
 from autograd.tools.data import train_test_split
@@ -36,8 +35,8 @@ class CifarMulticlassClassifier(nn.Module):
 class CifarResNet(nn.Module):
     def __init__(self, num_classes: int):
         super().__init__()
-        self.res_block1 = ResidualBlock(3, 16)
-        self.res_block2 = ResidualBlock(16, 16)
+        self.res_block1 = nn.ResidualBlock(3, 16)
+        self.res_block2 = nn.ResidualBlock(16, 16)
         self.fc1 = nn.Linear(
             16 * 32 * 32, num_classes
         )  # 32*32 is the output size of the last maxpool layer
