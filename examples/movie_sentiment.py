@@ -93,8 +93,9 @@ if __name__ == "__main__":
     # Check if data exist
     if not os.path.exists("examples/IMDB Dataset.csv"):
         print("Downloading data...")
-        url = "https://www.kaggle.com/datasets/lakshmi25npathi/imdb-dataset-of-50k-movie-reviews"
-        os.system(f"kaggle datasets download -d {url} -p examples")
+        os.system(
+            "curl -L -o examples/imdb-dataset-of-50k-movie-reviews.zip https://www.kaggle.com/api/v1/datasets/download/lakshmi25npathi/imdb-dataset-of-50k-movie-reviews"
+        )
         os.system("unzip examples/imdb-dataset-of-50k-movie-reviews.zip -d examples")
 
     dl = DataLoader(max_features=4000, max_sequence_length=25)
