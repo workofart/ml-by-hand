@@ -2,7 +2,7 @@ import numpy as np
 from .tensor import Tensor
 import logging
 from .init import xavier_uniform
-from .functional import tanh
+from .functional import tanh, sigmoid, relu
 
 logger = logging.getLogger(__name__)
 
@@ -246,6 +246,44 @@ class MaxPool2d(Module):
         return pooled
 
 
+class ResidualBlock(Module):
+    """
+    Residual Block as described in Deep Residual Learning for Image Recognition
+    The residual block as a whole implements both F(x) and x (identity mapping)
+    The function that were trying to learn is H(x) = F(x) + x
+    F(x) is the convolutional layer with ReLU activation
+    x is the identity mapping
+
+    Paper: https://arxiv.org/abs/1512.03385
+    """
+
+    def __init__(self, in_channels, out_channels, stride=1):
+        super().__init__()
+        self.conv1 = Conv2d(
+            in_channels, out_channels, kernel_size=3, stride=stride, padding_mode="same"
+        )
+        self.conv2 = Conv2d(
+            out_channels,
+            out_channels,
+            kernel_size=3,
+            stride=stride,
+            padding_mode="same",
+        )
+
+        # Add projection shortcut when dimensions change
+        self.shortcut = Conv2d(
+            in_channels, out_channels, kernel_size=1, stride=stride, padding_mode="same"
+        )
+
+    def forward(self, x):
+        identity = self.shortcut(x)  # Match channels
+
+        out = self.conv1(x)
+        out = relu(out)
+        out = self.conv2(out)
+        return relu(out) + identity
+
+
 class RecurrentBlock(Module):
     def __init__(self, input_size, hidden_size, output_size=None):
         """
@@ -256,6 +294,8 @@ class RecurrentBlock(Module):
             input_size (int): The size of the input
             hidden_size (int): The size of the hidden state
             output_size (int, optional): The size of the output. Defaults to None.
+            If specified, the output will be a linear combination of final hidden state
+            and output layer weights.
 
         W_xh: transforms the input into "hidden embedding"
         W_hh: transforms the hidden state into the next hidden state
@@ -306,6 +346,128 @@ class RecurrentBlock(Module):
                 + hidden_state @ self._parameters["W_hh"]  # (batch_size, hidden_size)
                 + self._parameters["bias"]
             )
+
+        # If we defined the output size, we will compute the final output
+        if self._parameters["W_hy"] is not None:
+            # We will only use the final hidden state in the output calculation
+            return hidden_state @ self._parameters["W_hy"] + self._parameters["bias_y"]
+        # If there is no output size, we return the final hidden state
+        else:
+            return hidden_state
+
+
+class LongShortTermMemoryBlock(Module):
+    def __init__(self, input_size, hidden_size, output_size=None):
+        """
+        Long Short-Term Memory (LSTM) Neural Network
+        Paper: https://www.bioinf.jku.at/publications/older/2604.pdf
+
+        Args:
+            input_size (int): The size of the input
+            hidden_size (int): The size of the hidden state
+            output_size (int, optional): The size of the output. Defaults to None.
+            If specified, the output will be a linear combination of final hidden state
+            and output layer weights.
+
+        States:
+            - Cell state: Internal memory of LSTM. It flows down the chain (time steps)
+            in a way that can be modified but not completely overwritten each time
+            unless the gates decide to do so.
+            - Hidden state: The output of the LSTM block at time t
+
+        W_f/bias_f: weights for the forget gate
+        W_i/bias_i: weights for the input gate
+        W_c/bias_c: weights for the cell gate
+        W_o/bias_o: weights for the output gate
+        W_hy/bias_y: weights for the final output (if output_size is specified)
+        """
+        super().__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+
+        self._parameters["W_f"] = xavier_uniform(
+            Tensor(np.zeros((input_size + hidden_size, hidden_size)))
+        )
+        self._parameters["W_i"] = xavier_uniform(
+            Tensor(np.zeros((input_size + hidden_size, hidden_size)))
+        )
+        self._parameters["W_c"] = xavier_uniform(
+            Tensor(np.zeros((input_size + hidden_size, hidden_size)))
+        )
+        self._parameters["W_o"] = xavier_uniform(
+            Tensor(np.zeros((input_size + hidden_size, hidden_size)))
+        )
+        self._parameters["bias_f"] = Tensor(np.zeros((hidden_size,)))
+        self._parameters["bias_i"] = Tensor(np.zeros((hidden_size,)))
+        self._parameters["bias_c"] = Tensor(np.zeros((hidden_size,)))
+        self._parameters["bias_o"] = Tensor(np.zeros((hidden_size,)))
+
+        if output_size:
+            self._parameters["W_hy"] = xavier_uniform(
+                Tensor(np.zeros((hidden_size, output_size)))
+            )
+            self._parameters["bias_y"] = Tensor(np.zeros((output_size,)))
+        else:
+            self._parameters["W_hy"] = None
+            self._parameters["bias_y"] = None
+
+    def forward(self, x):
+        """
+        Forward pass of the LSTM
+
+        Args:
+            x (Tensor): The input tensor of shape (batch_size, sequence_length, input_size)
+        """
+        if not isinstance(x, Tensor):
+            x = Tensor(x)
+
+        batch_size = x.shape[0]
+        seq_length = x.shape[1]
+        hidden_state = Tensor(np.zeros((batch_size, self.hidden_size)))
+        C_t = Tensor(np.zeros((batch_size, self.hidden_size)))
+
+        # Iterate through the sequence (or time dimension)
+        for t in range(seq_length):
+            x_t = x[:, t, :]  # shape: (batch_size, input_size)
+            xh_stacked = Tensor.cat(
+                [x_t, hidden_state], axis=1
+            )  # (batch_size, input_size + hidden_size)
+
+            # Compute Forget Gate (how much previous cell state C_t to keep or forget)
+            forget_gate = sigmoid(
+                # (batch_size, hidden_size + input_size) @ (input_size + hidden_size, hidden_size)
+                # yields (batch_size, hidden_size)
+                xh_stacked @ self._parameters["W_f"] + self._parameters["bias_f"]
+            )
+
+            # Compute Input Gate (how much new info to add to cell state)
+            input_gate = sigmoid(
+                # (batch_size, hidden_size + input_size) @ (input_size + hidden_size, hidden_size)
+                # yields (batch_size, hidden_size)
+                xh_stacked @ self._parameters["W_i"] + self._parameters["bias_i"]
+            )
+
+            # Compute Cell Gate (new candidate values that could be added to cell state)
+            cell_gate = tanh(
+                # (batch_size, hidden_size + input_size) @ (input_size + hidden_size, hidden_size)
+                # yields (batch_size, hidden_size)
+                xh_stacked @ self._parameters["W_c"] + self._parameters["bias_c"]
+            )
+
+            # Update Cell State (all in batch_size x hidden_size shapes)
+            # Do element-wise multiplication
+            C_t = forget_gate * C_t + input_gate * cell_gate
+
+            # Compute Output Gate
+            output_gate = sigmoid(
+                # (batch_size, hidden_size + input_size) @ (input_size + hidden_size, hidden_size)
+                # yields (batch_size, hidden_size)
+                xh_stacked @ self._parameters["W_o"] + self._parameters["bias_o"]
+            )
+
+            # Update the hidden state
+            # (batch_size, hidden_size)
+            hidden_state = output_gate * tanh(C_t)
 
         # If we defined the output size, we will compute the final output
         if self._parameters["W_hy"] is not None:
