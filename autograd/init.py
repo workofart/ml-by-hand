@@ -16,7 +16,7 @@ def xavier_uniform(tensor: Tensor):
     limit = np.sqrt(6.0 / (fan_in + fan_out))
 
     tensor.data[...] = np.random.uniform(
-        low=-limit, high=limit, size=tensor.data.shape
+        low=-limit, high=limit, size=(fan_in, fan_out)
     ).astype(tensor.data.dtype)
     return tensor
 

@@ -246,7 +246,7 @@ class MaxPool2d(Module):
         return pooled
 
 
-class RecurrentNetwork(Module):
+class RecurrentBlock(Module):
     def __init__(self, input_size, hidden_size, output_size=None):
         """
         Recurrent Neural Network (RNN)
@@ -288,8 +288,11 @@ class RecurrentNetwork(Module):
         Forward pass of the RNN
 
         Args:
-            x (Tensor): The input tensor of shape (batch_size, input_size)
+            x (Tensor): The input tensor of shape (batch_size, sequence_length, input_size)
         """
+        if not isinstance(x, Tensor):
+            x = Tensor(x)
+
         batch_size = x.shape[0]
         seq_length = x.shape[1]
         hidden_state = Tensor(np.zeros((batch_size, self.hidden_size)))
@@ -297,7 +300,6 @@ class RecurrentNetwork(Module):
         # Iterate through the sequence (or time dimension)
         for t in range(seq_length):
             x_t = x[:, t, :]  # shape: (batch_size, input_size)
-
             # Update the hidden state
             hidden_state = tanh(
                 x_t @ self._parameters["W_xh"]  # (batch_size, hidden_size)
