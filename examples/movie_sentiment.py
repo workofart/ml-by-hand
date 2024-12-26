@@ -77,13 +77,11 @@ class RNN(nn.Module):
     def __init__(self, input_size, hidden_size, output_size):
         super().__init__()
         self.rnn = nn.RecurrentBlock(input_size, hidden_size)
-        self.dropout = nn.Dropout(0.5)
         self.batchnorm = nn.BatchNorm(hidden_size)
         self.fc = nn.Linear(hidden_size, output_size)
 
     def forward(self, x):
         x = self.rnn(x)
-        x = self.dropout(x)
         x = self.batchnorm(x)
         x = self.fc(x)
         return functional.sigmoid(x)
@@ -92,14 +90,14 @@ class RNN(nn.Module):
 class LSTM(nn.Module):
     def __init__(self, input_size, hidden_size, output_size):
         super().__init__()
-        self.rnn = nn.LongShortTermMemoryBlock(input_size, hidden_size)
-        self.dropout = nn.Dropout(0.5)
+        self.rnn = nn.LongShortTermMemoryBlock(
+            input_size, hidden_size, dropout_prob=0.5
+        )
         self.batchnorm = nn.BatchNorm(hidden_size)
         self.fc = nn.Linear(hidden_size, output_size)
 
     def forward(self, x):
         x = self.rnn(x)
-        x = self.dropout(x)
         x = self.batchnorm(x)
         x = self.fc(x)
         return functional.sigmoid(x)
@@ -110,7 +108,7 @@ def main(model: nn.Module):
         model,
         loss_fn=functional.binary_cross_entropy,
         optimizer=optim.Adam(model.parameters, lr=0.001),
-        epochs=10,
+        epochs=15,
         output_type="sigmoid",
     )
 
@@ -136,11 +134,11 @@ if __name__ == "__main__":
         )
         os.system("unzip examples/imdb-dataset-of-50k-movie-reviews.zip -d examples")
 
-    dl = DataLoader(max_features=4000, max_sequence_length=25)
+    dl = DataLoader(max_features=6000, max_sequence_length=25)
     X_train, X_test, y_train, y_test, vocab = dl.process_data()
 
     model = RNN(input_size=len(vocab), hidden_size=32, output_size=1)
     main(model)
 
-    model = LSTM(input_size=len(vocab), hidden_size=32, output_size=1)
+    model = LSTM(input_size=len(vocab), hidden_size=64, output_size=1)
     main(model)

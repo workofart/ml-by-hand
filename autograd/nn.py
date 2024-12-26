@@ -285,7 +285,7 @@ class ResidualBlock(Module):
 
 
 class RecurrentBlock(Module):
-    def __init__(self, input_size, hidden_size, output_size=None):
+    def __init__(self, input_size, hidden_size, output_size=None, dropout_prob=None):
         """
         Recurrent Neural Network (RNN)
         Paper: https://arxiv.org/abs/1308.0850
@@ -296,6 +296,7 @@ class RecurrentBlock(Module):
             output_size (int, optional): The size of the output. Defaults to None.
             If specified, the output will be a linear combination of final hidden state
             and output layer weights.
+            dropout_prob (float, optional): Whether to apply dropout to non-recurrent connections
 
         W_xh: transforms the input into "hidden embedding"
         W_hh: transforms the hidden state into the next hidden state
@@ -305,6 +306,9 @@ class RecurrentBlock(Module):
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.output_size = output_size
+        # Apply dropout only to non-recurrent connections
+        # Paper: https://arxiv.org/abs/1409.2329
+        self.dropout = Dropout(p=dropout_prob) if dropout_prob else None
 
         self._parameters["W_xh"] = xavier_uniform(
             Tensor(np.zeros((input_size, hidden_size)))
@@ -340,6 +344,11 @@ class RecurrentBlock(Module):
         # Iterate through the sequence (or time dimension)
         for t in range(seq_length):
             x_t = x[:, t, :]  # shape: (batch_size, input_size)
+
+            # Only apply dropout to the non-recurrent connections
+            if self.dropout:
+                x_t = self.dropout(x_t)
+
             # Update the hidden state
             hidden_state = tanh(
                 x_t @ self._parameters["W_xh"]  # (batch_size, hidden_size)
@@ -349,6 +358,10 @@ class RecurrentBlock(Module):
 
         # If we defined the output size, we will compute the final output
         if self._parameters["W_hy"] is not None:
+            # Only apply dropout to the non-recurrent connections
+            if self.dropout:
+                hidden_state = self.dropout(hidden_state)
+
             # We will only use the final hidden state in the output calculation
             return hidden_state @ self._parameters["W_hy"] + self._parameters["bias_y"]
         # If there is no output size, we return the final hidden state
@@ -357,7 +370,7 @@ class RecurrentBlock(Module):
 
 
 class LongShortTermMemoryBlock(Module):
-    def __init__(self, input_size, hidden_size, output_size=None):
+    def __init__(self, input_size, hidden_size, output_size=None, dropout_prob=None):
         """
         Long Short-Term Memory (LSTM) Neural Network
         Paper: https://www.bioinf.jku.at/publications/older/2604.pdf
@@ -368,6 +381,7 @@ class LongShortTermMemoryBlock(Module):
             output_size (int, optional): The size of the output. Defaults to None.
             If specified, the output will be a linear combination of final hidden state
             and output layer weights.
+            dropout_prob (float, optional): Whether to apply dropout to non-recurrent connections
 
         States:
             - Cell state: Internal memory of LSTM. It flows down the chain (time steps)
@@ -384,6 +398,9 @@ class LongShortTermMemoryBlock(Module):
         super().__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
+        # Apply dropout only to non-recurrent connections
+        # Paper: https://arxiv.org/abs/1409.2329
+        self.dropout = Dropout(p=dropout_prob) if dropout_prob else None
 
         self._parameters["W_f"] = xavier_uniform(
             Tensor(np.zeros((input_size + hidden_size, hidden_size)))
@@ -429,6 +446,11 @@ class LongShortTermMemoryBlock(Module):
         # Iterate through the sequence (or time dimension)
         for t in range(seq_length):
             x_t = x[:, t, :]  # shape: (batch_size, input_size)
+
+            # Only apply dropout to the non-recurrent connections
+            if self.dropout:
+                x_t = self.dropout(x_t)
+
             xh_stacked = Tensor.cat(
                 [x_t, hidden_state], axis=1
             )  # (batch_size, input_size + hidden_size)
@@ -471,6 +493,10 @@ class LongShortTermMemoryBlock(Module):
 
         # If we defined the output size, we will compute the final output
         if self._parameters["W_hy"] is not None:
+            # Only apply dropout to the non-recurrent connections
+            if self.dropout:
+                hidden_state = self.dropout(hidden_state)
+
             # We will only use the final hidden state in the output calculation
             return hidden_state @ self._parameters["W_hy"] + self._parameters["bias_y"]
         # If there is no output size, we return the final hidden state
