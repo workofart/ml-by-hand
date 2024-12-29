@@ -9,10 +9,10 @@ class Function:
     def __init__(self, *tensors: Iterable["Tensor"]):
         self.tensors = tensors
 
-    def forward(self, *args, **kwargs):
+    def forward(self, *args, **kwargs) -> "Tensor":
         raise NotImplementedError("Forward pass not implemented for this function")
 
-    def backward(self, *args, **kwargs):
+    def backward(self, *args, **kwargs) -> np.ndarray:
         raise NotImplementedError("Backward pass not implemented for this function")
 
     @classmethod
