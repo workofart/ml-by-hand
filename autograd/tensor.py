@@ -1,12 +1,12 @@
 import numpy as np
 import logging
-from typing import Union, Self, List, Tuple
+from typing import Union, Self, List, Tuple, Iterable
 
 logger = logging.getLogger(__name__)
 
 
 class Function:
-    def __init__(self, *tensors):
+    def __init__(self, *tensors: Iterable["Tensor"]):
         self.tensors = tensors
 
     def forward(self, *args, **kwargs):
@@ -173,6 +173,9 @@ class Tensor:
     def max(self, axis=None, keepdims=False):
         return Max.apply(self, axis=axis, keepdims=keepdims)
 
+    def sqrt(self):
+        return Sqrt.apply(self)
+
     def maximum(self, other: Union[Self, float, int]):
         if not isinstance(other, Tensor):
             other = Tensor(other, requires_grad=False)
@@ -239,6 +242,7 @@ class Tensor:
                         and g is not None
                     ):
                         input_tensor._accumulate_grad(g)
+                tensor.creator.tensors = None
 
         # Clear references if needed
         for node in topological_sorted_tensors:
@@ -277,6 +281,9 @@ class Tensor:
     def strided_windows(self, kernel_size: int, stride: int) -> "Tensor":
         return StridedWindows.apply(self, kernel_size=kernel_size, stride=stride)
 
+    def roll(self, shifts: int, dims: int):
+        return Roll.apply(self, shifts=shifts, dims=dims)
+
     def detach(self) -> Self:
         """
         Detach the tensor from the computational graph.
@@ -312,10 +319,6 @@ class Tensor:
         if grad is None:
             return
 
-        # Convert numpy array or scalar to Tensor
-        if not isinstance(grad, Tensor):
-            grad = Tensor(grad, requires_grad=False)
-
         # Initialize or accumulate gradient
         if self._grad is None:
             if idx is not None:
@@ -324,6 +327,8 @@ class Tensor:
                 # Accumulate at index without reshaping
                 self._grad.data[idx] = grad.data
             else:
+                if not isinstance(grad, Tensor):
+                    grad = Tensor(grad, requires_grad=False)
                 self._grad = grad
         else:
             if idx is not None:
@@ -382,9 +387,9 @@ class Add(Function):
     def forward(self, x, y):
         return x + y
 
-    def backward(self, grad):
-        grad_x = grad if self.tensors[0].requires_grad else None
-        grad_y = grad if self.tensors[1].requires_grad else None
+    def backward(self, grad: Tensor):
+        grad_x = grad.data if self.tensors[0].requires_grad else None
+        grad_y = grad.data if self.tensors[1].requires_grad else None
         return grad_x, grad_y
 
 
@@ -392,9 +397,13 @@ class Mul(Function):
     def forward(self, x, y):
         return x * y
 
-    def backward(self, grad):
-        grad_x = grad * self.tensors[1] if self.tensors[0].requires_grad else None
-        grad_y = grad * self.tensors[0] if self.tensors[1].requires_grad else None
+    def backward(self, grad: Tensor):
+        grad_x = (
+            grad.data * self.tensors[1].data if self.tensors[0].requires_grad else None
+        )
+        grad_y = (
+            grad.data * self.tensors[0].data if self.tensors[1].requires_grad else None
+        )
         return grad_x, grad_y
 
 
@@ -417,11 +426,11 @@ class Pow(Function):
         grad_y = None
 
         if x.requires_grad:
-            grad_x = y * (x ** (y - 1)) * grad
+            grad_x = y.data * (x.data ** (y.data - 1)) * grad.data
 
         if y.requires_grad:
             valid_base = x.data > 0
-            grad_y = (x**y) * np.log(np.abs(x.data)) * grad
+            grad_y = (x.data**y.data) * np.log(np.abs(x.data)) * grad.data
             grad_y = np.where(valid_base, grad_y, 0)
         return grad_x, grad_y
 
@@ -442,9 +451,9 @@ class Matmul(Function):
         # Handle vector @ vector case separately (1D @ 1D)
         if x.data.ndim == 1 and y.data.ndim == 1:
             if x.requires_grad:
-                grad_x = grad * y.data
+                grad_x = grad.data * y.data
             if y.requires_grad:
-                grad_y = grad * x.data
+                grad_y = grad.data * x.data
             return grad_x, grad_y
         # Matrix multiplication case
         else:
@@ -488,7 +497,9 @@ class Matmul(Function):
             # x.T:       (m, n) --> T operation is equivalent to swapaxes(-1, -2)
             # matmul(x.T, grad) = (m, n) @ (n, p) = (m, p) = y.grad
             if y.requires_grad and grad is not None:
-                x_transposed = x.transpose(1, 2) if x.data.ndim == 3 else x.transpose()
+                x_transposed = (
+                    x.transpose(1, 2) if x.data.ndim == 3 else x.data.transpose()
+                )
                 grad_y = (
                     np.sum(x_transposed.data @ grad.data, axis=0)
                     if x.data.ndim == 3
@@ -506,7 +517,7 @@ class IAdd(Function):
 
     def backward(self, grad):
         # Both inputs receive the same gradient (like Add)
-        return grad, grad
+        return grad.data, grad.data
 
 
 class GetItem(Function):
@@ -543,11 +554,24 @@ class SetItem(Function):
         return x
 
     def backward(self, grad):
-        grad = grad.data if isinstance(grad, Tensor) else grad
+        grad = grad.data
         if np.isscalar(grad):
             return grad[self.idx].sum()
         else:
             return grad[self.idx]
+
+
+class Sqrt(Function):
+    def forward(self, x):
+        # Store input for backward pass
+        self.x = x
+        return np.sqrt(x)
+
+    def backward(self, grad):
+        # d/dx(sqrt(x)) = 1/(2*sqrt(x))
+        # dL/dx = dL/dy * dy/dx = grad * 1/(2*sqrt(x))
+        # where dL/dy is the current gradient
+        return grad.data * 0.5 / np.sqrt(self.x.data)
 
 
 """
@@ -606,37 +630,20 @@ class Max(Function):
         """
         x = self.tensors[0]
 
-        # Ensure grad is a NumPy array
-        grad_arr = grad.data if isinstance(grad, Tensor) else grad
-
-        # Convert x to np array
-        x_arr = x.data
-
-        # Expand grad to match the original shape of x
-        # Note: x.shape is the original shape.
-        # If grad is a Tensor, grad.expand(...) returns a Tensor, so convert that too.
-        if isinstance(grad, Tensor):
-            expanded_grad = grad.expand(x_arr.shape)
-            grad_arr = expanded_grad.data
-        else:
-            # If grad is already a numpy array, ensure it matches shape (if needed)
-            # Typically grad should already be in the right shape.
-            pass
-
         # Compute max values along the specified axes
-        max_vals = np.max(x_arr, axis=self.axis, keepdims=True)
-        mask = x_arr == max_vals
+        max_vals = np.max(x.data, axis=self.axis, keepdims=True)
+        mask = x.data == max_vals
 
         if self.axis is None or (isinstance(self.axis, tuple) and len(self.axis) > 1):
             # Global max: distribute equally among all max occurrences
             count = np.sum(mask)
-            return grad_arr * mask / count
+            return grad.data * mask / count
         else:
             # Single axis: use first occurrence
             ax = self.axis[0] if isinstance(self.axis, tuple) else self.axis
             cumsum = np.cumsum(mask, axis=ax)
             first_occur = cumsum == 1
-            return grad_arr * (mask * first_occur)
+            return grad.data * (mask * first_occur)
 
 
 class Maximum(Function):
@@ -651,9 +658,6 @@ class Maximum(Function):
         return out
 
     def backward(self, grad):
-        # Convert grad to numpy if needed
-        grad_data = grad.data if isinstance(grad, Tensor) else grad
-
         x = self.tensors[0]
         y = self.tensors[1]
 
@@ -664,10 +668,10 @@ class Maximum(Function):
         y_matches = y.data == self.out_data
 
         if x.requires_grad:
-            grad_x = grad_data * (x_matches * (1.0 - 0.5 * y_matches))
+            grad_x = grad.data * (x_matches * (1.0 - 0.5 * y_matches))
 
         if y.requires_grad:
-            grad_y = grad_data * (y_matches * (1.0 - 0.5 * x_matches))
+            grad_y = grad.data * (y_matches * (1.0 - 0.5 * x_matches))
 
         return grad_x, grad_y
 
@@ -745,7 +749,7 @@ class View(Function):
 
     def backward(self, grad):
         # reshape grad to original shape
-        return grad.reshape(self.original_shape) if grad is not None else None
+        return grad.reshape(self.original_shape).data if grad is not None else None
 
 
 class Expand(Function):
@@ -793,7 +797,7 @@ class Reshape(Function):
         return np.reshape(x, shape)
 
     def backward(self, grad):
-        return grad.reshape(self.original_shape) if grad is not None else None
+        return grad.data.reshape(self.original_shape) if grad is not None else None
 
 
 class Transpose(Function):
@@ -815,9 +819,9 @@ class Transpose(Function):
         return np.transpose(x, axes)
 
     def backward(self, grad):
-        grad_data = grad.data if isinstance(grad, Tensor) else np.asarray(grad)
         transposed_grad = np.transpose(
-            grad_data, self._get_transpose_axes(self.tensors[0], self.dim0, self.dim1)
+            grad.data,
+            self._get_transpose_axes(self.tensors[0].data, self.dim0, self.dim1),
         )
         return transposed_grad
 
@@ -871,9 +875,6 @@ class Cat(Function):
         return np.concatenate([t.data for t in tensors], axis=axis)
 
     def backward(self, grad):
-        # Ensure grad is a NumPy array if it's a Tensor
-        grad_data = grad.data if isinstance(grad, Tensor) else grad
-
         grads = []
         start_idx = 0
         for t, shape in zip(self.tensors, self.original_shapes):
@@ -881,7 +882,7 @@ class Cat(Function):
                 slice_idx = [slice(None)] * len(shape)
                 slice_idx[self.axis] = slice(start_idx, start_idx + shape[self.axis])
                 # Extract the portion of grad corresponding to this input tensor
-                grad_slice = grad_data[tuple(slice_idx)]
+                grad_slice = grad.data[tuple(slice_idx)]
                 grads.append(grad_slice)
             else:
                 grads.append(None)
@@ -901,11 +902,9 @@ class Permute(Function):
         return np.transpose(x, dims)
 
     def backward(self, grad):
-        # grad might be a Tensor or a np array. If it's a Tensor, get its data
-        grad_data = grad.data if isinstance(grad, Tensor) else grad
         # Compute inverse permutation to get back to original ordering
         inv_dims = [self.dims.index(i) for i in range(len(self.dims))]
-        return np.transpose(grad_data, inv_dims)
+        return np.transpose(grad.data, inv_dims)
 
 
 class Stack(Function):
@@ -944,7 +943,7 @@ class Stack(Function):
             # Create slice indices
             idx = [slice(None)] * grad.ndim
             idx[self.axis] = slice(i * chunk_size, (i + 1) * chunk_size)
-            grad_slice = grad[tuple(idx)]
+            grad_slice = grad.data[tuple(idx)]
             grads.append(grad_slice.reshape(tensor.shape))
         return tuple(grads)
 
@@ -980,9 +979,8 @@ class StridedWindows(Function):
         )
 
     def backward(self, grad):
-        grad = grad.data if isinstance(grad, Tensor) else grad
         # Reshape grad back to original window format
-        grad = grad.reshape(
+        grad = grad.data.reshape(
             self.H_out,
             self.W_out,
             self.batch_size,
@@ -1003,3 +1001,36 @@ class StridedWindows(Function):
                 ] += grad[:, :, :, :, i, j]
 
         return grad_padded
+
+
+class Roll(Function):
+    def forward(self, x, shifts, dims=None):
+        """Roll tensor elements along a given dimension
+
+        Args:
+            x: Input tensor
+            shifts: Number of places by which elements are shifted
+            dims: Dimension along which elements are shifted. None means flatten first
+        """
+        self.shifts = shifts
+        self.dims = dims
+        self.input_shape = x.shape
+        return np.roll(x, shift=shifts, axis=dims)
+
+    def backward(self, grad):
+        """Backward pass for roll operation
+
+        The gradient is rolled in the opposite direction to undo the forward roll.
+        For example, if we rolled right by 2 in forward pass, we roll left by 2 here.
+
+        Args:
+            grad: Gradient of the loss with respect to output
+        """
+        grad = grad.data
+
+        # Handle scalar gradients by reshaping to original input shape
+        if grad.ndim == 0:
+            grad = np.full(self.input_shape, grad)
+
+        # Roll gradient in opposite direction by negating the shift
+        return np.roll(grad, shift=-self.shifts, axis=self.dims)
