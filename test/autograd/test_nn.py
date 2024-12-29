@@ -880,22 +880,22 @@ class TestLongShortTermMemoryBlock(TestCase):
 
     def test_forward(self):
         # Forward pass
-        output = self.lstm(self.x)
+        hidden_state, cell_output = self.lstm(self.x)
         torch_output, _ = self.torch_lstm(self.x_torch)
         torch_output = self.torch_linear(torch_output[:, -1, :])
 
         assert np.allclose(
-            output.data, torch_output.detach().numpy(), rtol=1e-4, atol=1e-4
+            hidden_state.data, torch_output.detach().numpy(), rtol=1e-4, atol=1e-4
         ), "LSTM output doesn't match PyTorch's output"
 
     def test_backward(self):
         # Forward pass
-        output = self.lstm(self.x)
+        hidden_state, cell_output = self.lstm(self.x)
         torch_output, _ = self.torch_lstm(self.x_torch)
         torch_output = self.torch_linear(torch_output[:, -1, :])
 
         # Create simple loss and backward
-        loss = output.sum()
+        loss = hidden_state.sum()
         loss_torch = torch_output.sum()
 
         loss.backward()
@@ -957,13 +957,13 @@ class TestLongShortTermMemoryBlock(TestCase):
             np.array([[[1.0, 0.0], [0.0, 1.0]]])
         )  # batch_size=1, seq_length=2, input_size=2
 
-        output = lstm(x)
+        hidden_state, cell_output = lstm(x)
         # Verify output shape
-        assert output.shape == (1, 1)
+        assert hidden_state.shape == (1, 1)
 
     def test_sequence_length_one(self):
         # Test with sequence length of 1 (edge case)
         x = Tensor(np.random.randn(self.batch_size, 1, self.input_size))
 
-        output = self.lstm(x)
-        assert output.shape == (self.batch_size, self.output_size)
+        hidden_state, cell_output = self.lstm(x)
+        assert hidden_state.shape == (self.batch_size, self.output_size)

@@ -345,6 +345,18 @@ class TestTensorOps(TestTensor):
         assert np.allclose(normalized.data, normalized_shifted.data)
 
 
+class TestTensorSqrt(TestTensor):
+    def test_sqrt(self):
+        x_sqrt = self.x_matrix.sqrt()
+        x_sqrt_torch = self.x_matrix_torch.sqrt()
+        assert np.allclose(x_sqrt.data, x_sqrt_torch.data)
+
+        x_sqrt.backward()
+        x_sqrt_torch.sum().backward()  # apply sum() as a no-op because when you do loss.backward(), it is a shortcut for loss.backward(torch.Tensor([1])). This in only valid if loss is a tensor containing a single element.
+
+        assert np.allclose(self.x_matrix.grad.data, self.x_matrix_torch.grad.data)
+
+
 class TestTensorSum(TestTensor):
     def test_x_scalar_sum(self):
         s = self.x_scalar.sum()
@@ -1260,3 +1272,18 @@ class TestTensorStridedWindows(TestTensor):
         # For instance, top-left element of tensor should have been incremented by 1
         assert tensor.grad is not None
         assert tensor.grad.data[0, 0, 0, 0] == 1
+
+
+class TestTensorRoll(TestTensor):
+    def test_tensor_roll(self):
+        x_rolled = self.x_matrix.roll(shifts=1, dims=1).roll(shifts=1, dims=0)
+        x_rolled_torch = self.x_matrix_torch.roll(shifts=1, dims=1).roll(
+            shifts=1, dims=0
+        )
+
+        assert np.allclose(x_rolled.data, x_rolled_torch.data)
+
+        x_rolled.backward()
+        x_rolled_torch.sum().backward()  # apply sum() as a no-op because when you do loss.backward(), it is a shortcut for loss.backward(torch.Tensor([1])). This in only valid if loss is a tensor containing a single element.
+
+        assert np.allclose(self.x_matrix.grad.data, self.x_matrix_torch.grad.data)

@@ -20,12 +20,12 @@ class Module:
     def forward(self, x):
         raise NotImplementedError
 
-    def __call__(self, x):
+    def __call__(self, *args, **kwargs):
         """
         Sometimes people like to call model = Module() then call model(x)
         as a forward pass. So this is an alias.
         """
-        return self.forward(x)
+        return self.forward(*args, **kwargs)
 
     def __setattr__(self, name, value):
         if isinstance(value, Module):
@@ -428,20 +428,33 @@ class LongShortTermMemoryBlock(Module):
             self._parameters["W_hy"] = None
             self._parameters["bias_y"] = None
 
-    def forward(self, x):
+    def forward(self, x, hidden_state=None, C_t=None):
         """
         Forward pass of the LSTM
 
         Args:
             x (Tensor): The input tensor of shape (batch_size, sequence_length, input_size)
+
+            The following are optional. If you are explicitly "unrolling" the recursive time series structure by calling forward() one time step at a time
+
+            hidden_state (Tensor): Starting hidden state
+            C_t (Tensor): The starting cell state
+
+            Returns:
+                1. output (if output_size was specified when initializing the LSTM block), otherwise, the last hidden state
+                2. Last cell state
         """
         if not isinstance(x, Tensor):
             x = Tensor(x)
 
         batch_size = x.shape[0]
         seq_length = x.shape[1]
-        hidden_state = Tensor(np.zeros((batch_size, self.hidden_size)))
-        C_t = Tensor(np.zeros((batch_size, self.hidden_size)))
+        hidden_state = (
+            hidden_state
+            if hidden_state
+            else Tensor(np.zeros((batch_size, self.hidden_size)))
+        )
+        C_t = C_t if C_t else Tensor(np.zeros((batch_size, self.hidden_size)))
 
         # Iterate through the sequence (or time dimension)
         for t in range(seq_length):
@@ -498,10 +511,12 @@ class LongShortTermMemoryBlock(Module):
                 hidden_state = self.dropout(hidden_state)
 
             # We will only use the final hidden state in the output calculation
-            return hidden_state @ self._parameters["W_hy"] + self._parameters["bias_y"]
+            return hidden_state @ self._parameters["W_hy"] + self._parameters[
+                "bias_y"
+            ], C_t
         # If there is no output size, we return the final hidden state
         else:
-            return hidden_state
+            return hidden_state, C_t
 
 
 class BatchNorm(Module):
