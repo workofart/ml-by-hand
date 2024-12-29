@@ -102,14 +102,17 @@ class Trainer:
             else:
                 y_pred_processed = y_pred
 
-            logger.info(
+            base_message = (
                 f"\nEpoch: {epoch}"
                 f"\n\tLoss: {avg_loss:.4f}"
                 f"\n\tEpochs/sec: {epochs_per_second:.2f}"
-                f"\n\tAdditional Metrics: {"\n".join(additional_metrics)}"
-                if additional_metrics
-                else ""
             )
+
+            if additional_metrics:
+                metrics_str = "\n\tAdditional Metrics:" + "\n".join(additional_metrics)
+                logger.info(base_message + metrics_str)
+            else:
+                logger.info(base_message)
         self.model.train()
 
     def post_process_classification(self, y_pred):
