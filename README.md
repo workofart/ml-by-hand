@@ -41,6 +41,7 @@ We are creating an autograd engine from scratch and use it to build/train more c
   - [CIFAR-10/CIFAR-100](https://github.com/workofart/ml-by-hand/blob/09c680f9864c842f5e4d543f4cc837fd15dd5269/examples/cifar.py#L36)
 - [x] Recurrent Neural Network (RNN) + Long Short-Term Memory Network (LSTM)
   - [Movie Sentiment Analysis](https://github.com/workofart/ml-by-hand/blob/cedd9ef72a0b7d2c04958e5a7819e530efc87916/examples/movie_sentiment.py#L76)
+- [x] [Neural Turing Machine (with LSTM controller)](https://github.com/workofart/ml-by-hand/blob/main/examples/neural_turing_machine.py)
 ## Technical Overview
 - `tensor` (base class)
   - support scalar, vector, N-dimensional matrices
