@@ -134,7 +134,7 @@ def train_mnist_with_hinge_loss(X_train, y_train, X_test, y_test):
             epochs=10,
             output_type="logits",
         )
-        trainer.fit(X_train, y_binary.astype(int))
+        trainer.fit(X_train, np.expand_dims(y_binary, axis=-1).astype(int))
         one_vs_rest_models.append(model)
 
     logger.info("Training complete")
@@ -163,8 +163,6 @@ def train_mnist_one_vs_rest_model(X_train, y_train, X_test, y_test):
         model = MnistOneVsRestBinaryClassifier(output_logits=False)
         trainer = Trainer(
             model=model,
-            X=X_train,
-            y=y_binary,
             loss_fn=functional.binary_cross_entropy,
             optimizer=optim.Adam(model.parameters, lr=1e-3),
             epochs=10,
@@ -202,16 +200,8 @@ def train_mnist_multiclass_model(
         batch_size=256,
         output_type="softmax",
     )
-    trainer.fit(X_train, y_train.astype(int))
-
-    # Evaluation mode
-    model.eval()
-    y_pred = model(X_test).data
-
-    logger.info(f"Test Accuracy: {accuracy(y_pred.argmax(axis=1), y_test.astype(int))}")
-    logger.info(
-        f"Test Precision: {precision(y_pred.argmax(axis=1), y_test.astype(int))}"
-    )
+    trainer.fit(X_train, y_train)
+    trainer.evaluate(X_test, y_test)
 
 
 if __name__ == "__main__":
@@ -228,7 +218,6 @@ if __name__ == "__main__":
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.1)
 
-    # model = MnistConvolutionalClassifier()
     model = MnistResNet()
     logger.info(f"Number of parameters: {model.num_parameters()}")
     train_mnist_multiclass_model(
@@ -252,7 +241,7 @@ if __name__ == "__main__":
         optimizer=optim.SGD(model.parameters, lr=1e-3),
         model=model,
         loss_fn=functional.sparse_cross_entropy,
-        epochs=1000,
+        epochs=100,
         msg="(without batch norm, SGD optimizer)",
     )
 
@@ -265,7 +254,7 @@ if __name__ == "__main__":
         optimizer=optim.SGD(model.parameters, lr=1e-3),
         model=model,
         loss_fn=functional.sparse_cross_entropy,
-        epochs=1000,
+        epochs=100,
         msg="(with batch norm, SGD optimizer)",
     )
 
@@ -278,7 +267,7 @@ if __name__ == "__main__":
         optimizer=optim.Adam(model.parameters, lr=1e-3),
         model=model,
         loss_fn=functional.sparse_cross_entropy,
-        epochs=1000,
+        epochs=100,
         msg="(with batch norm, Adam optimizer)",
     )
 
