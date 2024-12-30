@@ -1,8 +1,130 @@
+from copy import deepcopy
 from autograd.nn import Tensor
-from autograd.optim import SGD, Adam
+from autograd.optim import Optimizer, SGD, Adam
 from unittest import TestCase
 import numpy as np
 import torch  # for test validation
+
+
+class TestOptimizer(TestCase):
+    def setUp(self):
+        # Create a small set of mock parameters
+        self.params = {
+            "param1": Tensor([1.0, 2.0, 3.0]),
+            "param2": Tensor([4.0, 5.0, 6.0]),
+        }
+
+    def test_base_optimizer_state_dict(self):
+        """
+        This test checks that the base Optimizer can properly
+        save and load minimal state (hyperparams + _states).
+        """
+        # Instantiate the base Optimizer
+        optimizer = Optimizer(self.params, lr=0.01)
+
+        # If we want to store a custom "global" piece of data, let's put it in _hyperparams:
+        optimizer._hyperparams["some_state"] = {"extra_info": 123}
+
+        # Save state
+        saved_state = optimizer.state_dict()
+        # The new structure might look like:
+        # {
+        #   "hyperparams": { "lr": 0.01, "some_state": {"extra_info": 123} },
+        #   "states": {}  # No per-parameter states if we haven't done a step
+        # }
+
+        # Create a new instance and load state
+        new_optimizer = Optimizer(
+            self.params, lr=999.0
+        )  # use a different LR to confirm overwrite
+        new_optimizer.load_state_dict(saved_state)
+
+        # Check that LR was restored from hyperparams
+        self.assertEqual(new_optimizer._hyperparams["lr"], 0.01)
+
+        # Check that the custom "some_state" was also restored
+        self.assertIn("some_state", new_optimizer._hyperparams)
+        self.assertEqual(new_optimizer._hyperparams["some_state"]["extra_info"], 123)
+
+    def test_adam_state_dict(self):
+        """
+        This test checks that Adam's internal momentum buffers (m, v) and
+        hyperparams (timestep, etc.) are properly saved and loaded.
+        """
+        adam = Adam(self.params, lr=0.001, beta1=0.8, beta2=0.9, epsilon=1e-5)
+
+        # Simulate one step to populate internal momentum buffers
+        for p in self.params.values():
+            p.grad = Tensor([0.1, 0.2, 0.3]).data
+        adam.step()
+
+        # 1) Check that Adam's states have something in them
+        self.assertIn("m", adam._states)
+        self.assertIn("v", adam._states)
+        self.assertIn("timestep", adam._states)
+
+        # 2) Save the state
+        saved_state_dict = deepcopy(adam.state_dict())
+        # Should look like:
+        # {
+        #   "hyperparams": {"lr": 0.001, "beta1": 0.8, "beta2": 0.9, "epsilon": 1e-5, ...},
+        #   "states": {
+        #       "m": { param_id -> np.array(...) },
+        #       "v": { param_id -> np.array(...) },
+        #       "timestep": 1
+        #   }
+        # }
+
+        # 3) Create a new Adam instance with different hyperparams
+        new_adam = Adam(self.params, lr=0.999, beta1=0.5, beta2=0.5, epsilon=1e-1)
+
+        # 4) Load the saved state
+        new_adam.load_state_dict(saved_state_dict)
+
+        # 5) Verify hyperparameters are restored
+        self.assertAlmostEqual(new_adam._hyperparams["lr"], 0.001, places=7)
+        self.assertAlmostEqual(new_adam._hyperparams["beta1"], 0.8, places=7)
+        self.assertAlmostEqual(new_adam._hyperparams["beta2"], 0.9, places=7)
+        self.assertAlmostEqual(new_adam._hyperparams["epsilon"], 1e-5, places=9)
+
+        # 7) Verify the actual momentum buffers are the same
+        for pid in self.params:
+            np.testing.assert_allclose(
+                new_adam._states["m"][pid], adam._states["m"][pid]
+            )
+            np.testing.assert_allclose(
+                new_adam._states["v"][pid], adam._states["v"][pid]
+            )
+            np.testing.assert_allclose(
+                new_adam._states["timestep"][pid], adam._states["timestep"][pid]
+            )
+
+        # 8) Optionally, verify if the entire dict matches
+        old_sd = adam.state_dict()
+        new_sd = new_adam.state_dict()
+
+        # Check hyperparams match
+        self.assertEqual(old_sd["hyperparams"].keys(), new_sd["hyperparams"].keys())
+        for k in old_sd["hyperparams"]:
+            self.assertEqual(old_sd["hyperparams"][k], new_sd["hyperparams"][k])
+
+        # Check top-level states
+        self.assertEqual(old_sd["states"].keys(), new_sd["states"].keys())
+        # Check that the param_id keys match in m & v
+        self.assertEqual(old_sd["states"]["m"].keys(), new_sd["states"]["m"].keys())
+        self.assertEqual(old_sd["states"]["v"].keys(), new_sd["states"]["v"].keys())
+
+        # Finally check values inside m, v
+        for pid in old_sd["states"]["m"].keys():
+            np.testing.assert_allclose(
+                old_sd["states"]["m"][pid], new_sd["states"]["m"][pid]
+            )
+            np.testing.assert_allclose(
+                old_sd["states"]["v"][pid], new_sd["states"]["v"][pid]
+            )
+
+        # Check timestep
+        self.assertEqual(old_sd["states"]["timestep"], new_sd["states"]["timestep"])
 
 
 class TestSGD(TestCase):
@@ -60,7 +182,8 @@ class TestAdam(TestCase):
         # Init optimizers
         self.optim = Adam(
             model_parameters={
-                "sample_module": {"weight": self.param1, "bias": self.param2},
+                "sample_module.weight": self.param1,
+                "sample_module.bias": self.param2,
             },
             lr=0.01,
             beta1=0.9,

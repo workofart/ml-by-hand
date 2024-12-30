@@ -1,7 +1,8 @@
 import numpy as np
 import logging
+from autograd.tensor import Tensor
 from collections import defaultdict
-from typing import Any, Callable, Dict, Union
+from typing import Any, Callable, Dict
 
 logger = logging.getLogger(__name__)
 
@@ -20,9 +21,28 @@ class Optimizer:
         optimizer.step()
     """
 
-    def __init__(self, model_parameters: Any, lr: float, **kwargs: Any) -> None:
+    def __init__(
+        self, model_parameters: Dict[str, Tensor], lr: float, **kwargs: Any
+    ) -> None:
+        self._states: Dict[Any, Any] = defaultdict(dict)
+        self._hyperparams: Dict[str, Any] = {}
+
+        # We assume this is a flattened named parameter dict
+        # passed by calling Optimizer(model.parameters())
         self.model_parameters = model_parameters
-        self.lr = lr
+        self._hyperparams["lr"] = lr
+
+        # Store additional hyperparams from kwargs:
+        for k, v in kwargs.items():
+            self._hyperparams[k] = v
+
+    @property
+    def lr(self):
+        return self._hyperparams["lr"]
+
+    @lr.setter
+    def lr(self, value):
+        self._hyperparams["lr"] = value
 
     def _recursive_param_op(
         self, params: Any, update_fn: Callable[[Any], None]
@@ -49,6 +69,48 @@ class Optimizer:
 
         self._recursive_param_op(self.model_parameters, update_fn)
 
+    def state_dict(self) -> Dict[str, Any]:
+        """
+        Return a dict of the Optimizer's state, for checkpointing. For example:
+          {
+            'hyperparams': {
+                'lr': 0.01,
+                ... any other hyperparams ...
+            },
+            'states': {
+                123: {'m': ..., 'v': ..., ...},  # keyed by id(param)
+                456: {...},
+            }
+          }
+        """
+        return {
+            "hyperparams": dict(self._hyperparams),
+            "states": {
+                key: dict(value)  # shallow copy of each sub-dict
+                for key, value in self._states.items()
+            },
+        }
+
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        """
+        Load the optimizer state from a checkpoint.
+        """
+        # Restore hyperparams:
+        for k, v in state_dict["hyperparams"].items():
+            self._hyperparams[k] = v
+
+        # Now rebuild the internal _states dict
+        self._states.clear()
+        for state_key, name_dict in state_dict["states"].items():
+            for param_name, val in name_dict.items():
+                # Only load if param_name is still in our model
+                if param_name in self.model_parameters:
+                    self._states[state_key][param_name] = val
+                else:
+                    logger.warning(
+                        f"Skipping state for param {param_name} not found in current model"
+                    )
+
     def step(self) -> None:
         """
         Performs a single optimization step.
@@ -62,7 +124,7 @@ class SGD(Optimizer):
     """
 
     def __init__(self, model_parameters: Any, lr: float, **kwargs: Any) -> None:
-        super(SGD, self).__init__(model_parameters, lr, **kwargs)
+        super(SGD, self).__init__(model_parameters, lr=lr, **kwargs)
 
     def step(self) -> None:
         def update_fn(param: Any) -> None:
@@ -87,46 +149,43 @@ class Adam(Optimizer):
         epsilon: float = 1e-7,
         **kwargs: Any,
     ) -> None:
-        super(Adam, self).__init__(model_parameters, lr, **kwargs)
-        self.beta1 = beta1
-        self.beta2 = beta2
-        self.epsilon = epsilon  # for numeric stability
+        super(Adam, self).__init__(model_parameters, lr=lr, **kwargs)
+        self._hyperparams["beta1"] = beta1
+        self._hyperparams["beta2"] = beta2
+        self._hyperparams["epsilon"] = epsilon
 
-        # Note that we are creating new state attributes to store these
-        # These notations are based on the same notations in the paper linked above
-        self.m: Dict[int, Union[float, np.ndarray]] = defaultdict(
-            float
-        )  # first momentum estimate
-        self.v: Dict[int, Union[float, np.ndarray]] = defaultdict(
-            float
-        )  # second momentum estimate
-        self.timestep = (
-            0  # to keep track of the timestep, this will adapt our learning rate
-        )
+        self._states["m"] = defaultdict(float)
+        self._states["v"] = defaultdict(float)
+        self._states["timestep"] = defaultdict(int)
 
-    def step(self) -> None:
-        self.timestep += 1
+    def step(self):
+        beta1 = self._hyperparams["beta1"]
+        beta2 = self._hyperparams["beta2"]
+        epsilon = self._hyperparams["epsilon"]
 
-        def update_fn(param: Any) -> None:
+        # Iterate over all parameters in the model by *name*
+        for name, param in self.model_parameters.items():
             if param.grad is None:
-                return
-            param_id = id(
-                param
-            )  # to avoid cases where the same parameter name is shared across different modules
-            grad = param.grad.data
+                continue
 
-            # update first order momentum
-            self.m[param_id] = self.beta1 * self.m[param_id] + (1 - self.beta1) * grad
-            # update second order momentum
-            self.v[param_id] = self.beta2 * self.v[param_id] + (1 - self.beta2) * (
-                grad**2
-            )
+            # Access momentum from the sub-dicts
+            self._states["timestep"][name] += 1
+            t = self._states["timestep"][name]
+
+            m_old = self._states["m"][name]
+            v_old = self._states["v"][name]
+
+            grad = param.grad.data  # or param.grad if it's np array
+            new_m = beta1 * m_old + (1 - beta1) * grad
+            new_v = beta2 * v_old + (1 - beta2) * (grad**2)
+
+            # Store them back
+            self._states["m"][name] = new_m
+            self._states["v"][name] = new_v
 
             # bias correction
-            m_hat = self.m[param_id] / (1 - self.beta1**self.timestep)
-            v_hat = self.v[param_id] / (1 - self.beta2**self.timestep)
+            m_hat = new_m / (1 - beta1**t)
+            v_hat = new_v / (1 - beta2**t)
 
-            # Update parameters
-            param.data -= self.lr * m_hat / (np.sqrt(v_hat) + self.epsilon)
-
-        self._recursive_param_op(self.model_parameters, update_fn)
+            # Update param
+            param.data -= self.lr * m_hat / (np.sqrt(v_hat) + epsilon)

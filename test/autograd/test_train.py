@@ -48,14 +48,7 @@ class TestTrain(TestCase):
         X = (X - X.mean()) / X.std()
 
         model = Classifier(input_size=X.shape[-1], hidden_size=64, output_size=1)
-        total_params = sum(
-            [
-                np.prod(v.data.shape)
-                for k, module in model.parameters.items()
-                for _, v in module.items()
-            ]
-        )
-        logger.info(f"Number of parameters: {total_params}")
+        logger.info(f"Number of parameters: {model.num_parameters()}")
 
         loss_fn = functional.binary_cross_entropy
         optimizer = optim.SGD(model.parameters, lr=1e-3)

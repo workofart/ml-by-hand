@@ -2,6 +2,7 @@ import numpy as np
 from tqdm import tqdm
 
 from autograd.tools.data import load_data, DataLoader
+from autograd.tools.model import save_model, load_model
 from autograd.text import utils as text_utils, tokenizer
 from autograd.tensor import Tensor
 from autograd import nn, functional, optim
@@ -465,6 +466,9 @@ class MultiHeadAttention(nn.Module):
         return self.fc(att_score)
 
 
+# ------------------ Training Helper Functions --------------------------#
+
+
 def inference(
     model: nn.Module,
     bpe: tokenizer.BytePairEncoder,
@@ -546,15 +550,99 @@ def get_lr(step: int, model_dim: int, warmup_steps: int) -> float:
     return model_dim**-0.5 * min(step**-0.5, step * warmup_steps**-1.5)
 
 
+def evaluate(
+    model: nn.Module,
+    test_data_loader: DataLoader,
+    vocab: dict,
+    pad_idx: int,
+    bpe: tokenizer.BytePairEncoder,
+    epoch: int,
+    hyperparams: dict,
+):
+    model.eval()
+    test_data_loader.on_epoch_start()
+    test_loss = 0
+
+    for _ in tqdm(
+        range(hyperparams["eval_iters"]), desc="Test Evaluation", leave=False
+    ):
+        x, y, source_mask, target_mask = next(iter(test_data_loader))
+        y_inp = np.zeros_like(y)
+        y_inp[:, 0] = vocab[b"<SOS>"]  # prepend <SOS> for decoder input
+        y_inp[:, 1:] = y[:, :-1]
+
+        pred_prob = model(
+            x,
+            y_inp,
+            source_mask,
+            target_mask,
+        )
+        loss = functional.sparse_cross_entropy(
+            pred_prob, y, pad_idx=pad_idx, label_smoothing=0.0
+        )
+        test_loss += loss.detach().data
+
+    pred_tokens = inference(
+        model,
+        bpe,
+        start_tokens=["<SOS>"],
+        pad_idx=pad_idx,
+        max_length=100,
+        temperature=0.2,
+    )
+    model.train()
+
+    logger.warning(
+        f"\nEpoch {epoch} | Train Loss: {epoch_loss / len(train_data_loader):.2f} "
+        f"| Test Loss: {test_loss / hyperparams['eval_iters']:.2f}"
+    )
+    # Save checkpoint
+    checkpoint = {
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "hyperparams": hyperparams,
+        "step_count": step_count,  # for learning rate scheduler
+    }
+    save_model(
+        checkpoint,
+        json_path=f"checkpoints/transformer_{epoch}.json",
+        npz_path=f"checkpoints/transformer_{epoch}.npz",
+    )
+    logger.info(f"Saving checkpoint to checkpoints/transformer_{epoch}.json and .npz")
+
+    prediction_string = "\n".join(pred_tokens.split("<|endoftext|>"))
+    logger.info(f"Prediction:\n{prediction_string}")
+
+
+def initialize(hyperparams: dict, vocab: dict, pad_idx: int):
+    model = Transformer(
+        vocab_size=len(vocab),
+        hidden_size=hyperparams["d_model"],
+        num_attention_heads=hyperparams["num_attention_heads"],
+    )
+    optimizer = optim.Adam(model.parameters, lr=0)
+    train_data_loader = DataLoader(
+        train_data,
+        vocab,
+        hyperparams["batch_size"],
+        hyperparams["seq_len"],
+        shuffle=True,
+        pad_idx=pad_idx,
+    )
+    test_data_loader = DataLoader(
+        test_data,
+        vocab,
+        hyperparams["batch_size"] // 4,
+        hyperparams["seq_len"],
+        shuffle=True,
+        pad_idx=pad_idx,
+    )
+    return model, optimizer, train_data_loader, test_data_loader
+
+
 if __name__ == "__main__":
     logger = logging.getLogger(__name__)
-    NUM_EPOCHS = 100
-    seq_len = 96
-    batch_size = 32
-    warmup_steps = 1000
-    d_model = 128
-    num_attention_heads = 4
-    eval_iters = 20
 
     url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
     filename = "examples/tinyshakespeare.txt"
@@ -562,15 +650,13 @@ if __name__ == "__main__":
     data = load_data(url, filename)
     logger.info(f"Length of entire dataset: {len(data)}")
 
-    # Create the vocabulary first
+    # Create the vocabulary
     bpe = tokenizer.BytePairEncoder(num_merges=3000, vocab_file_path="vocab.pkl")
     vocab, idx2word = bpe.train_vocabulary(data, overwrite_saved_file=False)
 
-    # Now encode the subset of data
+    # Encode a subset of the data
     logger.info("Encoding the new data...")
-    data = data.split("\n\n")[:3000]
-    logger.info(f"Example data: {data[:5]}")
-
+    data = data.split("\n\n")[:5000]
     encoded_data = np.array(bpe.encode("<|endoftext|>".join(data)))
     pad_idx = vocab[b"<PAD>"]
     logger.info(
@@ -578,61 +664,63 @@ if __name__ == "__main__":
     )
     logger.info(f"Data: {data[:3]}, Encoded_Data: {encoded_data[:50]}")
 
-    # encoded_data is a list of integers without the concept of samples
+    # Split data into train and test sets
     n = int(len(encoded_data) * 0.9)
     train_data, test_data = encoded_data[:n], encoded_data[n:]
+    resume_epoch = None  # TODO: change this to CLI args later
 
-    model = Transformer(
-        vocab_size=len(vocab),
-        hidden_size=d_model,
-        num_attention_heads=num_attention_heads,
-    )
-    model.train()
+    if resume_epoch is not None:
+        ckpt_json = f"checkpoints/transformer_{resume_epoch}.json"
+        ckpt_npz = f"checkpoints/transformer_{resume_epoch}.npz"
+        loaded_ckpt = load_model(ckpt_json, ckpt_npz)
+        HYPERPARAMS = loaded_ckpt["hyperparams"]
+        model, optimizer, train_data_loader, test_data_loader = initialize(
+            HYPERPARAMS, vocab, pad_idx
+        )
 
-    optimizer = optim.Adam(model.parameters, lr=0)
-    train_data_loader = DataLoader(
-        train_data,
-        vocab,
-        batch_size,
-        seq_len,
-        shuffle=True,
-        pad_idx=pad_idx,
-    )
-    test_data_loader = DataLoader(
-        test_data,
-        vocab,
-        batch_size // 4,
-        seq_len,
-        shuffle=True,
-        pad_idx=pad_idx,
-    )
-    step_count = 0
+        model.load_state_dict(loaded_ckpt["model_state_dict"])
+        optimizer.load_state_dict(loaded_ckpt["optimizer_state_dict"])
+        step_count = loaded_ckpt["step_count"]
+        start_epoch = loaded_ckpt["epoch"] + 1
+        logger.info(
+            f"Loaded model from checkpoint, resuming at epoch {start_epoch}, step {step_count}"
+        )
+    else:
+        HYPERPARAMS = {
+            "NUM_EPOCHS": 100,
+            "seq_len": 80,
+            "batch_size": 32,
+            "warmup_steps": 1000,
+            "d_model": 128,
+            "num_attention_heads": 4,
+            "eval_iters": 20,
+        }
+        model, optimizer, train_data_loader, test_data_loader = initialize(
+            HYPERPARAMS, vocab, pad_idx
+        )
+        start_epoch = 0
+        step_count = 0
 
-    for epoch in range(NUM_EPOCHS):
+    for epoch in range(start_epoch, HYPERPARAMS["NUM_EPOCHS"]):
         epoch_loss = 0.0
         train_data_loader.on_epoch_start()
+        model.train()
 
         for x, y, source_mask, target_mask in tqdm(
             train_data_loader, desc="Step", leave=False
         ):
             step_count += 1
-            lr = get_lr(step_count, d_model, warmup_steps)
+            lr = get_lr(step_count, HYPERPARAMS["d_model"], HYPERPARAMS["warmup_steps"])
             optimizer.lr = lr
             optimizer.zero_grad()
 
-            # y has shape (batch_size, seq_len)
-            # Create decoder input by prepending <SOS> and dropping the last token
+            # Prepare decoder input
             y_inp = np.zeros_like(y)
             y_inp[:, 0] = vocab[b"<SOS>"]
             y_inp[:, 1:] = y[:, :-1]
 
-            # pred_probs is (batch_size, sequence_len, vocabulary_size)
-            pred_prob = model(
-                x,
-                y_inp,  # prepend <SOS> for decoder input
-                source_mask,
-                target_mask,
-            )
+            # Compute predictions and loss
+            pred_prob = model(x, y_inp, source_mask, target_mask)
             loss = functional.sparse_cross_entropy(
                 pred_prob, y, pad_idx=pad_idx, label_smoothing=0.1
             )
@@ -640,41 +728,5 @@ if __name__ == "__main__":
             optimizer.step()
             epoch_loss += loss.detach().data
 
-        if epoch % max(1, (NUM_EPOCHS // 10)) == 0:
-            model.eval()
-            test_data_loader.on_epoch_start()
-            test_loss = 0
-
-            for _ in tqdm(range(eval_iters), desc="Test Evaluation", leave=False):
-                x, y, source_mask, target_mask = next(iter(test_data_loader))
-                y_inp = np.zeros_like(y)
-                y_inp[:, 0] = vocab[b"<SOS>"]  # prepend <SOS> for decoder input
-                y_inp[:, 1:] = y[:, :-1]
-
-                pred_prob = model(
-                    x,
-                    y_inp,
-                    source_mask,
-                    target_mask,
-                )
-                loss = functional.sparse_cross_entropy(
-                    pred_prob, y, pad_idx=pad_idx, label_smoothing=0.0
-                )
-                test_loss += loss.detach().data
-
-            pred_tokens = inference(
-                model,
-                bpe,
-                start_tokens=["<SOS>"],
-                pad_idx=pad_idx,
-                max_length=100,
-                temperature=0.2,
-            )
-            model.train()
-
-            logger.warning(
-                f"\nEpoch {epoch} | Train Loss: {epoch_loss / len(train_data_loader):.2f} "
-                f"| Test Loss: {test_loss / eval_iters:.2f}"
-            )
-            prediction_string = "\n".join(pred_tokens.split("<|endoftext|>"))
-            logger.info(f"Prediction:\n{prediction_string}")
+        if epoch % max(1, (HYPERPARAMS["NUM_EPOCHS"] // 10)) == 0:
+            evaluate(model, test_data_loader, vocab, pad_idx, bpe, epoch, HYPERPARAMS)
