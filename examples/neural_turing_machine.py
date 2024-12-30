@@ -123,7 +123,9 @@ class NeuralTuringMachine(nn.Module):
         hidden_size,
         output_size,
     ):
-        super().__init__()
+        super().__init__(
+            input_size, memory_length, memory_dim, hidden_size, output_size
+        )
         self.memory = Memory(
             memory_length=memory_length,
             memory_dim=memory_dim,
@@ -367,26 +369,58 @@ def to_one_hot(sequence_batch, vocab_size):
     return one_hot
 
 
+class LSTM(nn.Module):
+    """
+    This is only used a comparison against Neural Turing Machine
+    """
+
+    def __init__(self, input_size, hidden_size, output_size):
+        super().__init__(input_size, hidden_size, output_size)
+        self.lstm = nn.LongShortTermMemoryBlock(input_size, hidden_size)
+        self.fc = nn.Linear(hidden_size, output_size)
+        self.hidden_size = hidden_size
+
+    def forward(self, x):
+        batch_size, seq_len, input_size = x.shape
+        outputs = []
+        h_t = Tensor(np.zeros((batch_size, self.hidden_size)))
+        cell_state = Tensor(np.zeros((batch_size, self.hidden_size)))
+
+        for t in range(seq_len):
+            x_t = Tensor(x[:, t, :])  # (batch_size, 1, input_size)
+            x_t = x_t.view((x_t.shape[0], 1, x_t.shape[1]))
+            h_t, cell_state = self.lstm(
+                x=x_t, hidden_state=h_t, C_t=cell_state
+            )  # hidden state, cell state for this timestep
+            out = self.fc(h_t)
+            outputs.append(out)
+        return Tensor.stack(outputs, axis=1)
+
+
 if __name__ == "__main__":
     # Suppose we have a batch of input sequences: (batch_size, seq_len, input_size)
-    batch_size = 32
-    seq_len = 16
-    input_size = 5
-    memory_length = 8
-    memory_dim = 5
+    batch_size = 2
+    seq_len = 40
+    input_size = 24
+    memory_length = 80
+    memory_dim = 80
     hidden_size = 10
-    output_size = 5  # keeping this the same as memory dim to store the output directly into the memory
+    output_size = 24  # one-hot dimension size
+    epochs = 100
 
     # Generate dummy data
-    X, y = generate_copy_data(n_samples=200, seq_len=seq_len, input_size=input_size)
+    X, y = generate_copy_data(n_samples=10, seq_len=seq_len, input_size=input_size)
     X = to_one_hot(X, input_size)
     y = to_one_hot(y, input_size)
+
+    # Generate a longer sequence to see if the model can generalize well
     X_val, y_val = generate_copy_data(
-        n_samples=20, seq_len=seq_len, input_size=input_size
+        n_samples=10, seq_len=seq_len * 5, input_size=input_size
     )
     X_val = to_one_hot(X_val, input_size)
     y_val = to_one_hot(y_val, input_size)
 
+    print("------------- Neural Turing Machine ---------------")
     ntm = NeuralTuringMachine(
         input_size=input_size,
         memory_length=memory_length,
@@ -394,16 +428,30 @@ if __name__ == "__main__":
         output_size=output_size,
         hidden_size=hidden_size,
     )
-
-    trainer = trainer.Trainer(
+    t = trainer.Trainer(
         model=ntm,
         loss_fn=functional.cross_entropy_with_logits,
         optimizer=optim.Adam(ntm.parameters, lr=1e-3),
-        epochs=40,
+        epochs=epochs,
+        batch_size=batch_size,
+        shuffle_each_epoch=True,
+        output_type="logits",
+    )
+    t.fit(X, y)
+    t.evaluate(X_val, y_val, num_samples_to_show=1)
+
+    print("------------- Long-Short Memory Network ---------------")
+    lstm = LSTM(input_size=input_size, hidden_size=hidden_size, output_size=output_size)
+
+    t = trainer.Trainer(
+        model=lstm,
+        loss_fn=functional.cross_entropy_with_logits,
+        optimizer=optim.Adam(lstm.parameters, lr=1e-3),
+        epochs=epochs,
         batch_size=batch_size,
         shuffle_each_epoch=True,
         output_type="logits",
     )
 
-    trainer.fit(X, y)
-    trainer.evaluate(X_val, y_val)
+    t.fit(X, y)
+    t.evaluate(X_val, y_val, num_samples_to_show=1)
