@@ -60,7 +60,8 @@ class Tensor:
         if self._grad is None:
             self._grad = Tensor(value_data, requires_grad=False)
         else:
-            value_data = self.expand(value_data.shape)
+            value_data = np.broadcast_to(value_data, value_data.shape)
+            value_data = value_data.copy()
             # IMPORTANT: this is not the same as self.data + value_data
             # We need to do in-place addition here to preserve any views or references
             # to the original gradient. For example, multiple operations
@@ -600,12 +601,38 @@ class Sum(Function):
         # Normalize axis
         self.axis = (axis,) if isinstance(axis, int) else axis
         self.keepdims = keepdims
+        self.x_shape = x.shape
         return np.sum(x, axis=self.axis, keepdims=self.keepdims)
 
     def backward(self, grad):
         # Use expand to handle gradient broadcasting
-        grad_shape = self.tensors[0].shape if self.keepdims else self.tensors[0].shape
-        return grad.expand(grad_shape).data if grad is not None else None
+
+        if grad is None:
+            return None
+
+        grad = grad.data
+
+        # Turn axis into a tuple
+        if isinstance(self.axis, int):
+            reduce_axes = (self.axis,)
+        else:
+            reduce_axes = self.axis
+
+        # If we never specified an axis, then reduce_axes=None means a global sum
+        if reduce_axes is None:
+            # Summed over all dims, so grad is scalar, shape=()
+            # Just broadcast to original shape:
+            return np.broadcast_to(grad, self.x_shape).copy()
+
+        if not self.keepdims:
+            # Re-insert those axes as size=1 so that broadcasting works
+            # Sort them or reverse them so that inserting doesn’t shift the later dims incorrectly
+            for ax in sorted(reduce_axes):
+                grad = np.expand_dims(grad, ax)
+
+        # Now grad has shape (2,8,1) if we did sum over axis=2
+        # broadcast to (2,8,5)
+        return np.broadcast_to(grad, self.x_shape).copy()
 
 
 class Max(Function):
@@ -755,7 +782,8 @@ class View(Function):
 class Expand(Function):
     def forward(self, x, shape=(1,)):
         self.original_shape = x.shape
-        return np.broadcast_to(x, shape)
+        expanded = np.broadcast_to(x, shape)
+        return expanded.copy()
 
     def backward(self, grad):
         # Ensure grad is a NumPy array
