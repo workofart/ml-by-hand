@@ -1,6 +1,5 @@
 from autograd import nn, functional, optim
 from autograd.tools.trainer import Trainer
-from autograd.tools.metrics import accuracy, precision
 from autograd.tools.data import train_test_split
 from openml.datasets import get_dataset
 import logging
@@ -106,15 +105,7 @@ def train_cifar_multiclass_model(model: nn.Module, X_train, y_train, X_test, y_t
         output_type="softmax",
     )
     trainer.fit(X_train, y_train.astype(int))
-
-    # Evaluation mode
-    model.eval()
-    y_pred = model(X_test).data
-
-    logger.info(f"Test Accuracy: {accuracy(y_pred.argmax(axis=1), y_test.astype(int))}")
-    logger.info(
-        f"Test Precision: {precision(y_pred.argmax(axis=1), y_test.astype(int))}"
-    )
+    trainer.evaluate(X_test, y_test)
 
 
 if __name__ == "__main__":
