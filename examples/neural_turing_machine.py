@@ -35,6 +35,10 @@ class Memory:
 
 
 class ReadHead(nn.Module):
+    """
+    "3.1 Reading" section in paper: https://arxiv.org/abs/1410.5401
+    """
+
     def __init__(self, memory: Memory):
         super().__init__()
         self.memory = memory
@@ -59,6 +63,10 @@ class ReadHead(nn.Module):
 
 
 class WriteHead(nn.Module):
+    """
+    "3.2 Writing" section in paper: https://arxiv.org/abs/1410.5401
+    """
+
     def __init__(self, memory: Memory):
         super().__init__()
         self.memory = memory
@@ -99,6 +107,14 @@ class WriteHead(nn.Module):
 
 
 class NeuralTuringMachine(nn.Module):
+    """
+    The main model that encasulates all the components to build the
+    Neural Turing Machine for any task.
+
+    Refer to Figure 2: Flow Diagram of the Addressing Mechanism
+    in paper: https://arxiv.org/abs/1410.5401
+    """
+
     def __init__(
         self,
         input_size,
@@ -141,10 +157,11 @@ class NeuralTuringMachine(nn.Module):
 
         For each time step:
             1. Read from memory
-            2. Combine (x_t + read_vector) and pass to controller
+            2. Combine (x_t + read_vector)
             3. Controller output shift logits and next token
             4. Convert shift logits to read/write weights
             5. Write the output to memory
+            6. Update weights
 
         Additional Paramters:
             shift_logits:      (batch_size, seq_len, 3)
@@ -172,7 +189,7 @@ class NeuralTuringMachine(nn.Module):
             # 1. Read from memory
             read_vector = self.read_head(read_weights)  # (batch_size, memory_dim)
 
-            # 2. Combine (x_t + read_vector) and pass to controller
+            # 2. Combine (x_t + read_vector)
             combined_input = Tensor.cat(
                 [Tensor(x[:, t, :]), read_vector], axis=1
             )  # (batch_size, 1, input_size + memory_dim)
@@ -180,8 +197,10 @@ class NeuralTuringMachine(nn.Module):
                 (combined_input.shape[0], 1, combined_input.shape[1])
             )
 
-            # 3. LSTM forward. Pass in the current hidden state and cell state
+            # 3. LSTM (controller) forward. Controller output shift logits and next token
+            # Pass in the current hidden state and cell state
             # Output new cell_state and next hidden layer after running for 1 time step
+            # 3.4 Controller Network in paper: https://arxiv.org/abs/1410.5401
             h_t, cell_state = self.lstm(
                 x=combined_input, hidden_state=h_t, C_t=cell_state
             )
@@ -194,7 +213,9 @@ class NeuralTuringMachine(nn.Module):
             erase_vector = self.erase_layer(h_t)
             add_vector = self.add_layer(h_t)
             output = self.output_layer(h_t)
+            outputs.append(output)
 
+            # 4. Convert shift logits to read/write weights
             new_weights = self._content_addressing(content_key, key_strength)
             new_weights = self._location_addressing(
                 content_weights=new_weights,
@@ -204,16 +225,25 @@ class NeuralTuringMachine(nn.Module):
                 shift_logits=location_shift,
             )
 
-            # Write to memory
+            # 5. Write to memory
             self.write_head(new_weights, erase_vector, add_vector)
 
-            # Update weights
+            # 6. Update weights
             read_weights = new_weights
-            outputs.append(output)
 
         return Tensor.stack(outputs, axis=1)  # (batch_size, seq_len, output_size)
 
     def _content_addressing(self, key: Tensor, key_strength: Tensor):
+        """
+        3.3.1 Focusing by Content in Paper: https://arxiv.org/abs/1410.5401
+
+        Args:
+            key (Tensor): What index to focus on
+            key_strength (Tensor): How much to focus on
+
+        Returns:
+            Tensor: Normalied weighting matrix based on content similarity
+        """
         memory = self.memory.read()
         key_strength = functional.relu(key_strength) + 1e-8
 
@@ -223,7 +253,6 @@ class NeuralTuringMachine(nn.Module):
         )  # (batch_size, memory_length)
 
         # norms
-        # 3.3.1 Focusing by Content in Paper: https://arxiv.org/abs/1410.5401
         # \frac{key \cdot memory}{key norm \cdot memory norm}
         key_norm = (key**2).sum(axis=1).sqrt()  # batch_size
         key_norm = key_norm.view(key_norm.shape[0], 1)
@@ -239,7 +268,20 @@ class NeuralTuringMachine(nn.Module):
         old_weights,
         shift_logits,
     ):
-        # 3.3.2 Focusing by Location in Paper: https://arxiv.org/abs/1410.5401
+        """
+        Location-based Addressing
+        3.3.2 Focusing by Location in Paper: https://arxiv.org/abs/1410.5401
+
+        Args:
+            content_weights (Tensor): The output of content-based addressing, determined what to focus on
+            sharpening_factor (Tensor): How much to sharpen the weights to combat shift weighting being not sharp
+            interpolation_gate (Tensor): In the range of (0, 1), used to blend the content weights produced by timestep (t - 1) and content weights at timestep t
+            old_weights (Tensor): Content weights read from memory produced by timestep (t-1)
+            shift_logits (Tensor): Normalized distribution over the allowed integer shifts
+
+        Returns:
+            Tensor: Sharpened weight matrix based on content similarity and order and sequence
+        """
         interpolated_weights = (
             interpolation_gate * content_weights
             + (1 - interpolation_gate) * old_weights
@@ -249,8 +291,18 @@ class NeuralTuringMachine(nn.Module):
         return read_weights
 
     def _shift_attention(self, old_weights, shift_logits):
-        # 3.3.2 Focusing by Location in Paper: https://arxiv.org/abs/1410.5401
-        # It's called "circular convolution" in the paper.
+        """
+        Take some information from the neighboring sequence and order
+        3.3.2 Focusing by Location in Paper: https://arxiv.org/abs/1410.5401
+        It's called "circular convolution" in the paper.
+
+        Args:
+            old_weights (Tensor): Content weights read from memory produced by timestep (t-1)
+            shift_logits (Tensor): Normalized distribution over the allowed integer shifts
+
+        Returns:
+            Tensor: New weights after considering neighboring memory locations
+        """
         shift_probs = functional.softmax(shift_logits)  # (batch_size, 3)
         # shift_probs[:, 0] => p(shift=-1)
         # shift_probs[:, 1] => p(shift=0)
