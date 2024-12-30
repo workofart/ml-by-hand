@@ -91,6 +91,83 @@ class TestBinaryCrossEntropy(TestCase):
         assert np.allclose(self.y_pred_logits.grad.data, self.y_pred_logits_torch.grad)
 
 
+class TestCrossEntropyWithLogits(TestCase):
+    def setUp(self):
+        # 2D case: (batch_size=3, num_classes=4)
+        self.logits_2d = Tensor(
+            data=np.array(
+                [[1.0, 2.0, 3.0, 4.0], [2.0, 1.0, 0.0, 3.0], [0.0, 3.0, 1.0, 2.0]],
+                dtype=np.float32,
+            ),
+            requires_grad=True,
+        )
+        self.targets_2d = np.array(
+            [[0.0, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+            dtype=np.float32,
+        )
+
+        # Create PyTorch tensors for comparison
+        self.logits_2d_torch = torch.tensor(self.logits_2d.data, requires_grad=True)
+        self.targets_2d_torch = torch.tensor(self.targets_2d)
+
+    def test_cross_entropy_with_logits_2d(self):
+        # Test our implementation
+        loss = functional.cross_entropy_with_logits(self.logits_2d, self.targets_2d)
+
+        # Test PyTorch implementation
+        loss_torch = torch.nn.functional.cross_entropy(
+            self.logits_2d_torch,
+            self.targets_2d_torch.argmax(dim=1),  # PyTorch expects class indices
+        )
+
+        # Compare forward pass
+        assert np.allclose(loss.data, loss_torch.detach().numpy(), atol=1e-5)
+
+        # Compare backward pass
+        loss.backward()
+        loss_torch.backward()
+
+        assert np.allclose(
+            self.logits_2d.grad.data,
+            self.logits_2d_torch.grad.detach().numpy(),
+            atol=1e-5,
+        )
+
+    def test_cross_entropy_with_logits_3d(self):
+        # 3D case: (batch_size=2, sequence_length=3, num_classes=4)
+        logits_3d = Tensor(
+            data=np.random.randn(2, 3, 4).astype(np.float32), requires_grad=True
+        )
+        targets_3d = np.zeros((2, 3, 4), dtype=np.float32)
+        # Set one class as target for each position
+        targets_3d[
+            np.arange(2)[:, None], np.arange(3), np.random.randint(0, 4, (2, 3))
+        ] = 1.0
+
+        logits_3d_torch = torch.tensor(logits_3d.data, requires_grad=True)
+        targets_3d_torch = torch.tensor(targets_3d)
+
+        # Test our implementation
+        loss = functional.cross_entropy_with_logits(logits_3d, targets_3d)
+
+        # Test PyTorch implementation
+        loss_torch = torch.nn.functional.cross_entropy(
+            logits_3d_torch.reshape(-1, 4),
+            targets_3d_torch.reshape(-1, 4).argmax(dim=1),
+        )
+
+        # Compare forward pass
+        assert np.allclose(loss.data, loss_torch.detach().numpy(), atol=1e-5)
+
+        # Compare backward pass
+        loss.backward()
+        loss_torch.backward()
+
+        assert np.allclose(
+            logits_3d.grad.data, logits_3d_torch.grad.detach().numpy(), atol=1e-5
+        )
+
+
 class TestSparseCrossEntropy(TestCase):
     def setUp(self) -> None:
         self.y_pred_logits = Tensor(

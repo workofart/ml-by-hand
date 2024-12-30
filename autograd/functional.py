@@ -183,6 +183,42 @@ class SparseCrossEntropy(Function):
         return grad_out, None
 
 
+class CrossEntropyWithLogits(Function):
+    """
+    Categorical Cross Entropy with Logits:
+    - For multi-class classification with *one-hot* targets
+    - Expects logits: shape (Batch Size, # of Classes) or (Batch Size, Sequence Length, # of Classes)
+    - Targets: same shape (Batch Size, # of Classes) or (Batch Size, Sequence Length, # of Classes), each row is one-hot
+    """
+
+    def forward(self, y_pred_probs, targets):
+        self.y_pred_probs = Softmax().forward(y_pred_probs)
+        # if isinstance(targets, Tensor):
+        #     self.targets = targets.data
+        # else:
+        self.targets = targets
+
+        # Cross-entropy = -sum( y * log(probs) ), average
+        log_p = np.log(self.y_pred_probs)
+        # sum over last dimension
+        numerator = -(self.targets * log_p).sum(axis=-1)
+        loss_value = numerator.mean()
+        return loss_value
+
+    def backward(self, grad):
+        """
+        dL/dlogits = (probs - y)
+        Then average over the batch/time dimension
+        """
+        # If there's a time dimension or more, we do a total_count = product of all but last dimension
+        total_count = int(np.prod(self.y_pred_probs.shape[:-1]))
+
+        # (probs - one_hot)
+        grad_logits = (self.y_pred_probs - self.targets) / total_count
+        grad_logits *= grad.data
+        return grad_logits, None
+
+
 class HingeLoss(Function):
     """
     Hinge Loss
@@ -303,6 +339,17 @@ def sparse_cross_entropy_with_logits(
     if not isinstance(y_true, Tensor):
         y_true = Tensor(y_true, requires_grad=False)
     return sparse_cross_entropy(softmax(y_pred), y_true)
+
+
+def cross_entropy_with_logits(
+    logits: Tensor, y_true: Union[Tensor, np.ndarray]
+) -> Tensor:
+    """
+    For multi-class classification with one-hot y_true
+    """
+    if not isinstance(y_true, Tensor):
+        y_true = Tensor(y_true, requires_grad=False)
+    return CrossEntropyWithLogits.apply(logits, y_true)
 
 
 def hinge_loss(
