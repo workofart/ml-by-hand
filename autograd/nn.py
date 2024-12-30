@@ -8,10 +8,11 @@ logger = logging.getLogger(__name__)
 
 
 class Module:
-    def __init__(self):
+    def __init__(self, *args, **kwargs):
         self._parameters = {}
         self._modules = {}
         self._is_training = None
+        self._constructor_args = (args, kwargs)
 
     def zero_grad(self):
         for p in self._parameters:
@@ -73,7 +74,7 @@ class Module:
 
 class Linear(Module):
     def __init__(self, input_size, output_size, **kwargs):
-        super().__init__(**kwargs)
+        super().__init__(input_size, output_size, **kwargs)
 
         # weight is a matrix of shape (input_size, output_size)
         self._parameters["weight"] = xavier_uniform(
@@ -126,7 +127,15 @@ class Conv2d(Module):
             - "valid" means no padding.
             - "same" means padding such that the output shape is the same as the input shape.
         """
-        super().__init__(**kwargs)
+        super().__init__(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride=stride,
+            padding_mode=padding_mode,
+            bias=bias,
+            **kwargs,
+        )
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.kernel_size = kernel_size
@@ -218,7 +227,7 @@ class MaxPool2d(Module):
             - "valid" means no padding.
             - "same" means padding such that the output shape is the same as the input shape.
         """
-        super().__init__(**kwargs)
+        super().__init__(kernel_size, **kwargs)
         self.kernel_size = kernel_size
         self.stride = (
             stride if stride is not None else kernel_size
@@ -258,7 +267,7 @@ class ResidualBlock(Module):
     """
 
     def __init__(self, in_channels, out_channels, stride=1):
-        super().__init__()
+        super().__init__(in_channels, out_channels, stride=stride)
         self.conv1 = Conv2d(
             in_channels, out_channels, kernel_size=3, stride=stride, padding_mode="same"
         )
@@ -302,7 +311,12 @@ class RecurrentBlock(Module):
         W_hh: transforms the hidden state into the next hidden state
         W_hy: transforms the hidden state into the output
         """
-        super().__init__()
+        super().__init__(
+            input_size,
+            hidden_size,
+            output_size=output_size,
+            dropout_prob=dropout_prob,
+        )
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.output_size = output_size
@@ -395,7 +409,9 @@ class LongShortTermMemoryBlock(Module):
         W_o/bias_o: weights for the output gate
         W_hy/bias_y: weights for the final output (if output_size is specified)
         """
-        super().__init__()
+        super().__init__(
+            input_size, hidden_size, output_size=output_size, dropout_prob=dropout_prob
+        )
         self.input_size = input_size
         self.hidden_size = hidden_size
         # Apply dropout only to non-recurrent connections
@@ -529,7 +545,7 @@ class BatchNorm(Module):
     """
 
     def __init__(self, input_size, momentum=0.1, epsilon=1e-5, **kwargs):
-        super().__init__(**kwargs)
+        super().__init__(input_size, momentum=momentum, epsilon=epsilon, **kwargs)
 
         self.momentum = momentum  # used in running mean and variance calculation
         self.epsilon = epsilon  # small constant for numeric stability
@@ -594,7 +610,7 @@ class Dropout(Module):
         Args:
             p (float, optional): Fraction of the input units to drop. Defaults to 0.5.
         """
-        super().__init__(**kwargs)
+        super().__init__(p=p, **kwargs)
         self.p = p
 
     def forward(self, x: Tensor) -> Tensor:
