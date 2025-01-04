@@ -217,19 +217,20 @@ class Tensor:
         topological_sorted_tensors = []
         visited = set()
 
-        def dfs(node: Tensor):
+        stack = [self]
+
+        while stack:
+            node = stack.pop()
             if node not in visited:
                 visited.add(node)
                 if node.creator is not None:
                     for input_tensor in node.creator.tensors:
                         if input_tensor.requires_grad:
-                            dfs(input_tensor)
+                            stack.append(input_tensor)
                 topological_sorted_tensors.append(node)
 
-        dfs(self)
-
         # Backward pass
-        for tensor in reversed(topological_sorted_tensors):
+        for tensor in topological_sorted_tensors:
             if tensor.creator is not None:
                 # Call function's backward to get gradients for inputs
                 grads = tensor.creator.backward(tensor.grad)
