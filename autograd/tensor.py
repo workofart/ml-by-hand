@@ -217,20 +217,27 @@ class Tensor:
         topological_sorted_tensors = []
         visited = set()
 
-        stack = [self]
+        stack = [(self, False)]  # node, whether all children are visited
 
+        # Post-order traversal
         while stack:
-            node = stack.pop()
+            node, visited_children = stack.pop()
             if node not in visited:
-                visited.add(node)
-                if node.creator is not None:
-                    for input_tensor in node.creator.tensors:
-                        if input_tensor.requires_grad:
-                            stack.append(input_tensor)
-                topological_sorted_tensors.append(node)
+                if not visited_children:
+                    # first time we see this node, push it again with visited_children=True
+                    stack.append((node, True))
+                    # then push its parents
+                    if node.creator is not None:
+                        for p in node.creator.tensors:
+                            if p.requires_grad:
+                                stack.append((p, False))
+                else:
+                    # second time we see this node, children are done
+                    visited.add(node)
+                    topological_sorted_tensors.append(node)
 
         # Backward pass
-        for tensor in topological_sorted_tensors:
+        for tensor in reversed(topological_sorted_tensors):
             if tensor.creator is not None:
                 # Call function's backward to get gradients for inputs
                 grads = tensor.creator.backward(tensor.grad)
