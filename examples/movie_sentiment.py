@@ -1,76 +1,24 @@
 import os
 import numpy as np
 import pandas as pd
-from collections import defaultdict
-from autograd.tools.data import train_test_split
+from autograd.tools.data import (
+    train_test_split,
+    create_vocabulary,
+    text_to_one_hot_and_sparse,
+)
 from autograd.tools.metrics import accuracy
 from autograd.tools.trainer import Trainer
 from autograd import nn, optim, functional
 
 
-class DataLoader:
-    def __init__(self, max_features: int, max_sequence_length: int) -> None:
-        self.max_features = max_features
-        self.max_sequence_length = max_sequence_length
+def process_data(data: np.ndarray):
+    vocab = create_vocabulary(data[:, 0], max_features=6000)
+    features, _ = text_to_one_hot_and_sparse(data[:, 0], vocab, max_sequence_length=25)
+    labels = np.array([1 if label == "positive" else 0 for label in data[:, 1]])
 
-    def create_vocabulary(self, texts):
-        """
-        Create a vocabulary (word->index) from given texts,
-        keeping up to self.max_features most common words.
-        """
-        word_freq = defaultdict(int)
-        for text in texts:
-            for word in text.lower().split():
-                word_freq[word] += 1
+    X_train, X_test, y_train, y_test = train_test_split(features, labels, test_size=0.1)
 
-        # Sort by frequency
-        sorted_words = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)
-        if self.max_features is not None:
-            sorted_words = sorted_words[: self.max_features]
-
-        # Create word->index mapping
-        vocab = {word: idx for idx, (word, _) in enumerate(sorted_words)}
-        return vocab
-
-    def create_feature_matrix(self, texts, vocabulary):
-        """
-        Convert list of texts into a sequential feature matrix using the vocabulary.
-        Shape: (batch_size, sequence_length, vocab_size)
-        """
-        # Initialize matrix with zeros
-        matrix = np.zeros((len(texts), self.max_sequence_length), dtype=np.int32)
-
-        for i, text in enumerate(texts):
-            # Split text into words and convert to indices
-            words = text.lower().split()
-            # Truncate or pad sequence to max_sequence_length
-            words = words[: self.max_sequence_length]  # Truncate if too long
-
-            for j, word in enumerate(words):
-                if word in vocabulary:
-                    matrix[i, j] = vocabulary[word]
-
-        # Convert to one-hot encoding
-        # Shape: (batch_size, sequence_length, vocab_size)
-        one_hot = np.zeros((len(texts), self.max_sequence_length, len(vocabulary)))
-        for i in range(len(texts)):
-            for j in range(self.max_sequence_length):
-                if matrix[i, j] > 0:
-                    one_hot[i, j, matrix[i, j]] = 1
-
-        return one_hot
-
-    def process_data(self):
-        data = pd.read_csv("examples/IMDB Dataset.csv").to_numpy()
-        vocab = self.create_vocabulary(data[:, 0])
-        features = self.create_feature_matrix(data[:, 0], vocab)
-        labels = np.array([1 if label == "positive" else 0 for label in data[:, 1]])
-
-        X_train, X_test, y_train, y_test = train_test_split(
-            features, labels, test_size=0.1
-        )
-
-        return X_train, X_test, y_train, y_test, vocab
+    return X_train, X_test, y_train, y_test, vocab
 
 
 class RNN(nn.Module):
@@ -134,8 +82,8 @@ if __name__ == "__main__":
         )
         os.system("unzip examples/imdb-dataset-of-50k-movie-reviews.zip -d examples")
 
-    dl = DataLoader(max_features=6000, max_sequence_length=25)
-    X_train, X_test, y_train, y_test, vocab = dl.process_data()
+    data = pd.read_csv("examples/IMDB Dataset.csv").to_numpy()
+    X_train, X_test, y_train, y_test, vocab = process_data(data)
 
     model = RNN(input_size=len(vocab), hidden_size=32, output_size=1)
     main(model)
