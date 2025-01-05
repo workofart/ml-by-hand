@@ -1,4 +1,4 @@
-from typing import Union
+from typing import Union, Optional
 from autograd.tensor import Tensor, Function
 import numpy as np
 import logging
@@ -107,7 +107,7 @@ class BinaryCrossEntropy(Function):
     -(x * log(y)) + (1 - x) * log(1 - y)
     """
 
-    def forward(self, y_pred, y_true):
+    def forward(self, y_pred, y_true, **kwargs):
         y_true = np.asarray(y_true, dtype=np.float32)
         y_pred = np.asarray(y_pred, dtype=np.float32)
 
@@ -149,7 +149,7 @@ class SparseCrossEntropy(Function):
     -y_true * log(y_pred)
     """
 
-    def forward(self, y_pred, y_true):
+    def forward(self, y_pred, y_true, **kwargs):
         # y_true: either np.ndarray or Tensor. Convert to np if Tensor.
         if isinstance(y_true, Tensor):
             y_true = y_true.data
@@ -188,20 +188,20 @@ class CrossEntropyWithLogits(Function):
     Categorical Cross Entropy with Logits:
     - For multi-class classification with *one-hot* targets
     - Expects logits: shape (Batch Size, # of Classes) or (Batch Size, Sequence Length, # of Classes)
+    - Weight (optional): shape (Batch Size, Sequence Length), useful for masking
     - Targets: same shape (Batch Size, # of Classes) or (Batch Size, Sequence Length, # of Classes), each row is one-hot
     """
 
-    def forward(self, y_pred_probs, targets):
+    def forward(self, y_pred_probs, targets, weight=None, **kwargs):
         self.y_pred_probs = Softmax().forward(y_pred_probs)
-        # if isinstance(targets, Tensor):
-        #     self.targets = targets.data
-        # else:
         self.targets = targets
 
         # Cross-entropy = -sum( y * log(probs) ), average
         log_p = np.log(self.y_pred_probs)
         # sum over last dimension
         numerator = -(self.targets * log_p).sum(axis=-1)
+        if weight is not None:
+            numerator *= weight
         loss_value = numerator.mean()
         return loss_value
 
@@ -235,7 +235,7 @@ class HingeLoss(Function):
     Paper: https://ieeexplore.ieee.org/document/708428
     """
 
-    def forward(self, y_pred, y_true, reduction="none"):
+    def forward(self, y_pred, y_true, reduction="none", **kwargs):
         if isinstance(y_true, Tensor):
             y_true = y_true.data
         y_true = np.asarray(y_true, dtype=np.float32)
@@ -291,7 +291,7 @@ class HingeLoss(Function):
 
 
 class MeanSquaredLoss(Function):
-    def forward(self, y_pred, y_true):
+    def forward(self, y_pred, y_true, **kwargs):
         self.y_pred = y_pred
         self.y_true = y_true
         return np.mean((y_pred - y_true) ** 2)
@@ -303,14 +303,16 @@ class MeanSquaredLoss(Function):
         return 2 * (self.y_pred - self.y_true) * grad.data
 
 
-def binary_cross_entropy(y_pred: Tensor, y_true: Union[Tensor, np.ndarray]) -> Tensor:
+def binary_cross_entropy(
+    y_pred: Tensor, y_true: Union[Tensor, np.ndarray], **kwargs
+) -> Tensor:
     if not isinstance(y_true, Tensor):
         y_true = Tensor(y_true, requires_grad=False)
-    return BinaryCrossEntropy.apply(y_pred, y_true)
+    return BinaryCrossEntropy.apply(y_pred, y_true, **kwargs)
 
 
 def binary_cross_entropy_with_logits(
-    y_pred: Tensor, y_true: Union[Tensor, np.ndarray]
+    y_pred: Tensor, y_true: Union[Tensor, np.ndarray], **kwargs
 ) -> Tensor:
     """
     Binary Cross Entropy Loss with logits input
@@ -319,17 +321,19 @@ def binary_cross_entropy_with_logits(
     """
     if not isinstance(y_true, Tensor):
         y_true = Tensor(y_true, requires_grad=False)
-    return binary_cross_entropy(sigmoid(y_pred), y_true)
+    return binary_cross_entropy(sigmoid(y_pred), y_true, **kwargs)
 
 
-def sparse_cross_entropy(y_pred: Tensor, y_true: Union[Tensor, np.ndarray]) -> Tensor:
+def sparse_cross_entropy(
+    y_pred: Tensor, y_true: Union[Tensor, np.ndarray], **kwargs
+) -> Tensor:
     if not isinstance(y_true, Tensor):
         y_true = Tensor(y_true, requires_grad=False)
-    return SparseCrossEntropy.apply(y_pred, y_true)
+    return SparseCrossEntropy.apply(y_pred, y_true, **kwargs)
 
 
 def sparse_cross_entropy_with_logits(
-    y_pred: Tensor, y_true: Union[Tensor, np.ndarray]
+    y_pred: Tensor, y_true: Union[Tensor, np.ndarray], **kwargs
 ) -> Tensor:
     """
     Sparse Cross Entropy with logits input
@@ -338,29 +342,34 @@ def sparse_cross_entropy_with_logits(
     """
     if not isinstance(y_true, Tensor):
         y_true = Tensor(y_true, requires_grad=False)
-    return sparse_cross_entropy(softmax(y_pred), y_true)
+    return sparse_cross_entropy(softmax(y_pred), y_true, **kwargs)
 
 
 def cross_entropy_with_logits(
-    logits: Tensor, y_true: Union[Tensor, np.ndarray]
+    logits: Tensor,
+    y_true: Union[Tensor, np.ndarray],
+    weight: Optional[np.ndarray] = None,
+    **kwargs,
 ) -> Tensor:
     """
     For multi-class classification with one-hot y_true
     """
     if not isinstance(y_true, Tensor):
         y_true = Tensor(y_true, requires_grad=False)
-    return CrossEntropyWithLogits.apply(logits, y_true)
+    return CrossEntropyWithLogits.apply(logits, y_true, weight=weight)
 
 
 def hinge_loss(
-    y_pred: Tensor, y_true: Union[Tensor, np.ndarray], reduction: str = "none"
+    y_pred: Tensor, y_true: Union[Tensor, np.ndarray], reduction: str = "none", **kwargs
 ) -> Tensor:
     if not isinstance(y_true, Tensor):
         y_true = Tensor(y_true, requires_grad=False)
-    return HingeLoss.apply(y_pred, y_true, reduction=reduction)
+    return HingeLoss.apply(y_pred, y_true, reduction=reduction, **kwargs)
 
 
-def mean_squared_loss(y_pred: Tensor, y_true: Union[Tensor, np.ndarray]) -> Tensor:
+def mean_squared_loss(
+    y_pred: Tensor, y_true: Union[Tensor, np.ndarray], **kwargs
+) -> Tensor:
     if not isinstance(y_true, Tensor):
         y_true = Tensor(y_true, requires_grad=False)
-    return MeanSquaredLoss.apply(y_pred, y_true)
+    return MeanSquaredLoss.apply(y_pred, y_true, **kwargs)
