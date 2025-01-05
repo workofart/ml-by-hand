@@ -32,7 +32,7 @@ class Trainer:
         else:
             self.problem_type = "regression"
 
-    def fit(self, X, y):
+    def fit(self, X, y, idx_to_vocab=None, weight=None):
         """
         X, y can each be:
           - (Batch Size, Sequence length) for a sequence classification (with to_one_hot inside the model)
@@ -53,22 +53,29 @@ class Trainer:
                 indices = np.random.permutation(n_samples)
                 X_shuffled = X[indices]
                 y_shuffled = y[indices]
+                weight_shuffled = weight[indices] if weight is not None else weight
             else:
                 X_shuffled = X
                 y_shuffled = y
+                weight_shuffled = weight
 
             for batch_idx in range(n_batches):
                 start_idx = batch_idx * self.batch_size
                 end_idx = min((batch_idx + 1) * self.batch_size, n_samples)
                 batch_X = X_shuffled[start_idx:end_idx]
                 batch_y = y_shuffled[start_idx:end_idx]
+                batch_weight = (
+                    weight_shuffled[start_idx:end_idx]
+                    if weight_shuffled is not None
+                    else weight_shuffled
+                )
 
                 # Reset gradients
                 self.optimizer.zero_grad()
 
                 # Forward pass
                 y_pred = self.model(batch_X)
-                loss = self.loss_fn(y_pred, batch_y)
+                loss = self.loss_fn(y_pred, batch_y, weight=batch_weight)
                 total_loss += loss.detach().data * (end_idx - start_idx)
 
                 # Backward pass
@@ -77,6 +84,15 @@ class Trainer:
 
             # Periodically log information
             if epoch % max(1, (self.epochs // 10)) == 0:
+                y_pred_processed, y_true_processed = self.post_process_classification(
+                    y_pred, y
+                )
+                if idx_to_vocab is not None:
+                    print("------- Ground Truth -------")
+                    print(" ".join([idx_to_vocab[i] for i in y_true_processed[0]]))
+                    print("-------- Prediction --------")
+                    print(" ".join([idx_to_vocab[i] for i in y_pred_processed[0]]))
+
                 self.log_epoch(
                     X_shuffled, y_shuffled, total_loss, n_samples, start_time, epoch
                 )
@@ -187,7 +203,9 @@ class Trainer:
                     # Actual label
                     true_sample = y_true_processed[idx]
 
-                    # pred_sample, true_sample = self.post_process_classification(pred_sample, true_sample)
+                    pred_sample, true_sample = self.post_process_classification(
+                        pred_sample, true_sample
+                    )
 
                     print(f"  Example #{i+1}:")
                     print(f"    Predicted: {pred_sample}")
