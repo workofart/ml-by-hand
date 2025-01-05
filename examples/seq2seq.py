@@ -19,27 +19,30 @@ Paper: https://arxiv.org/abs/1409.3215
 
 
 class Seq2Seq(nn.Module):
-    def __init__(self, input_size, hidden_size, vocab, max_output_len: int = 30):
+    def __init__(
+        self, input_size, word_embed_size, hidden_size, max_output_len: int = 30
+    ):
         super().__init__()
+        self.word_embedding = nn.Linear(
+            input_size=input_size, output_size=word_embed_size
+        )
         self.encoder = nn.LongShortTermMemoryBlock(
-            input_size=input_size, hidden_size=hidden_size, output_size=None
+            input_size=word_embed_size, hidden_size=hidden_size, output_size=None
         )  # compress to shape (batch_size, hidden_size)
         self.decoder = nn.LongShortTermMemoryBlock(
-            input_size=len(vocab), hidden_size=hidden_size, output_size=None
+            input_size=word_embed_size, hidden_size=hidden_size, output_size=None
         )  # decompress to shape (batch_size, hidden_size)
 
         # Final hidden layer to output a probability distribution over possible vocabulary tokens
-        self.fc = nn.Linear(hidden_size, output_size=len(vocab))
+        self.fc = nn.Linear(hidden_size, output_size=input_size)
 
-        self.vocab = vocab
-        self.vocab_indices = np.array(list(vocab.keys()))
         self.max_output_len = max_output_len
 
     def forward(self, x):
         x = tensor.Tensor(x)
 
         output = []
-
+        x = functional.relu(self.word_embedding(x))
         h_t, cell_t = self.encoder(x)
 
         for t in range(self.max_output_len):
@@ -55,8 +58,8 @@ class Seq2Seq(nn.Module):
 
             # TODO: If all the predicted tokens in the batch are <EOS>,
             # we can stop decoding the batch
-            # pred_token_indices = np.argmax(functional.softmax(logits), axis=1)
-            # if np.all(self.vocab_indices[pred_token_indices] == "<EOS>"):
+            # pred_token_indices = np.argmax(functional.softmax(logits).data, axis=1)
+            # if np.all(pred_token_indices == 0):
             #     break
 
         return tensor.Tensor.stack(output, axis=1)
@@ -67,7 +70,7 @@ def load_data(url, filename):
     if os.path.exists(filename):
         # Read the existing Parquet file into a numpy array
         table = pq.read_table(filename)
-        data = table.to_pandas().to_numpy()
+        data = table.to_pandas().to_numpy()[:512]
         return data
 
     # Download the file
@@ -113,28 +116,32 @@ def main():
     train_X, train_y = parse_data_into_xy(train_data)
     test_X, test_y = parse_data_into_xy(test_data)
 
-    vocab = create_vocabulary(train_X + train_y, max_features=6000)
+    vocab = create_vocabulary(train_X + train_y, max_features=10000)
     idx_to_vocab = np.array(list(vocab.keys()))
-    features, _ = text_to_one_hot_and_sparse(train_X, vocab, max_sequence_length=30)
-    labels, _ = text_to_one_hot_and_sparse(train_y, vocab, max_sequence_length=30)
+    features, features_vocab_idx = text_to_one_hot_and_sparse(
+        train_X, vocab, max_sequence_length=150
+    )
+    labels, labels_vocab_idx = text_to_one_hot_and_sparse(
+        train_y, vocab, max_sequence_length=80
+    )
 
     model = Seq2Seq(
         input_size=len(vocab),
-        hidden_size=1024,
-        vocab=vocab,
-        max_output_len=30,
+        word_embed_size=512,
+        hidden_size=256,
+        max_output_len=80,
     )
 
     trainer = Trainer(
         model,
         loss_fn=functional.cross_entropy_with_logits,
         optimizer=optim.Adam(model.parameters, lr=0.001),
-        epochs=1000,
+        epochs=100,
         batch_size=128,
         output_type="logits",
     )
 
-    trainer.fit(features, labels, idx_to_vocab)
+    trainer.fit(features, labels, idx_to_vocab, weight=labels_vocab_idx != 0)
 
 
 if __name__ == "__main__":
