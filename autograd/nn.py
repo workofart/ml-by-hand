@@ -519,6 +519,33 @@ class LongShortTermMemoryBlock(Module):
             return hidden_state, C_t
 
 
+class Embedding(Module):
+    """
+    Embedding layer that projects an arbitrary input_size down to embedding_size
+    """
+
+    def __init__(self, input_size, embedding_size):
+        super().__init__()
+
+        # weight.shape: (input_size, embedding_size)
+        self._parameters["weight"] = Tensor(
+            np.random.randn(input_size, embedding_size) * 0.01,
+            requires_grad=True,
+        )
+
+    def forward(self, x):
+        """
+        x: shape (batch_size, seq_len), each entry is an integer index in [0..vocab_size-1].
+        Returns: (batch_size, seq_len, embedding_size)
+        """
+        if not isinstance(x, Tensor):
+            x = Tensor(x)
+
+        # indices.shape: (batch_size, seq_len)
+        # result.shape: (batch_size, seq_len, embedding_size)
+        return self._parameters["weight"].gather(index=x.data.astype(np.int32))
+
+
 class LayerNorm(Module):
     """
     Layer Normalization

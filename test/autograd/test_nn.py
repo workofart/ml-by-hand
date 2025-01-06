@@ -1,6 +1,7 @@
 from unittest import TestCase
 from autograd.nn import (
     Linear,
+    Embedding,
     BatchNorm,
     LayerNorm,
     Dropout,
@@ -49,6 +50,136 @@ class TestLinear(TestCase):
         assert np.all(
             linear_layer._parameters["weight"].grad.data == 2
         )  # All gradients should be 2 since input is all 2s
+
+
+class TestEmbedding(TestCase):
+    def setUp(self):
+        self.vocab_size = 1000
+        self.embedding_size = 32
+        self.batch_size = 8
+        self.seq_length = 16
+
+        # Create our embedding layer
+        self.embedding = Embedding(self.vocab_size, self.embedding_size)
+
+        # Create PyTorch embedding for comparison
+        self.torch_embedding = torch.nn.Embedding(self.vocab_size, self.embedding_size)
+
+        # Copy our weights to PyTorch embedding
+        with torch.no_grad():
+            self.torch_embedding.weight.data = torch.FloatTensor(
+                self.embedding._parameters["weight"].data
+            )
+
+        # Create test data - random indices between 0 and vocab_size-1
+        np.random.seed(42)
+        torch.manual_seed(42)
+        self.x_data = np.random.randint(
+            0, self.vocab_size, (self.batch_size, self.seq_length)
+        )
+        self.x = Tensor(self.x_data)
+        self.x_torch = torch.LongTensor(self.x_data)
+
+    def test_initialization(self):
+        # Test parameter shapes
+        assert self.embedding._parameters["weight"].data.shape == (
+            self.vocab_size,
+            self.embedding_size,
+        )
+
+        # Test weight initialization scale
+        assert np.abs(self.embedding._parameters["weight"].data.mean()) < 0.1
+        assert 0.001 < self.embedding._parameters["weight"].data.std() < 0.1
+
+    def test_forward(self):
+        # Forward pass
+        output = self.embedding(self.x)
+        torch_output = self.torch_embedding(self.x_torch)
+
+        # Test output shape
+        assert output.shape == (self.batch_size, self.seq_length, self.embedding_size)
+
+        # Compare outputs
+        assert np.allclose(
+            output.data, torch_output.detach().numpy(), rtol=1e-5, atol=1e-5
+        ), "Embedding output doesn't match PyTorch's output"
+
+    def test_backward(self):
+        # Forward pass
+        output = self.embedding(self.x)
+        torch_output = self.torch_embedding(self.x_torch)
+
+        # Create simple loss and backward
+        loss = output.sum()
+        loss_torch = torch_output.sum()
+
+        loss.backward()
+        loss_torch.backward()
+
+        # Compare gradients
+        assert np.allclose(
+            self.embedding._parameters["weight"].grad.data,
+            self.torch_embedding.weight.grad.numpy(),
+            rtol=1e-5,
+            atol=1e-5,
+        ), "Weight gradients don't match"
+
+    def test_edge_cases(self):
+        # Test with batch size of 1
+        x_single = Tensor(np.random.randint(0, self.vocab_size, (1, self.seq_length)))
+        x_single_torch = torch.LongTensor(x_single.data)
+
+        output_single = self.embedding(x_single)
+        torch_output_single = self.torch_embedding(x_single_torch)
+
+        assert np.allclose(
+            output_single.data,
+            torch_output_single.detach().numpy(),
+            rtol=1e-5,
+            atol=1e-5,
+        )
+
+        # Test with sequence length of 1
+        x_short = Tensor(np.random.randint(0, self.vocab_size, (self.batch_size, 1)))
+        x_short_torch = torch.LongTensor(x_short.data)
+
+        output_short = self.embedding(x_short)
+        torch_output_short = self.torch_embedding(x_short_torch)
+
+        assert np.allclose(
+            output_short.data, torch_output_short.detach().numpy(), rtol=1e-5, atol=1e-5
+        )
+
+    def test_out_of_bounds_indices(self):
+        # Test with invalid indices
+        with self.assertRaises(IndexError):
+            x_invalid = Tensor(np.array([[self.vocab_size]]))  # Index too large
+            self.embedding(x_invalid)
+
+    def test_gradient_flow(self):
+        # Test if gradients flow correctly through frequently used indices
+        x_repeated = Tensor(
+            np.array([[0, 1], [1, 0]])
+        )  # Use indices 0 and 1 repeatedly
+        x_repeated_torch = torch.LongTensor(x_repeated.data)
+
+        output = self.embedding(x_repeated)
+        torch_output = self.torch_embedding(x_repeated_torch)
+
+        loss = output.sum()
+        loss_torch = torch_output.sum()
+
+        loss.backward()
+        loss_torch.backward()
+
+        # Check that gradients for indices 0 and 1 are non-zero and match PyTorch
+        assert np.all(self.embedding._parameters["weight"].grad.data[0:2] != 0)
+        assert np.allclose(
+            self.embedding._parameters["weight"].grad.data[0:2],
+            self.torch_embedding.weight.grad.numpy()[0:2],
+            rtol=1e-5,
+            atol=1e-5,
+        )
 
 
 class TestBatchNorm(TestCase):
