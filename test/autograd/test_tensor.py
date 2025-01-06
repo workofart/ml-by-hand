@@ -614,6 +614,123 @@ class TestTensorMax(TestTensor):
         assert np.allclose(x.grad.data, x_torch.grad.numpy()), "Gradients do not match!"
 
 
+class TestTensorGather(TestTensor):
+    def test_basic_gather(self):
+        # Create embedding matrix (V x E)
+        embeddings = Tensor(
+            np.array(
+                [
+                    [1.0, 2.0],  # id 0
+                    [3.0, 4.0],  # id 1
+                    [5.0, 6.0],  # id 2
+                ]
+            ),
+            requires_grad=True,
+        )
+
+        # Create indices tensor (B x S)
+        indices = np.array([[0, 2], [1, 0]])  # batch_size=2, seq_len=2
+
+        # Forward pass
+        gathered = embeddings.gather(indices)
+
+        # Compare with PyTorch
+        embeddings_torch = torch.tensor(embeddings.data, requires_grad=True)
+        gathered_torch = embeddings_torch[indices]
+
+        # Check forward pass
+        assert (
+            gathered.shape == gathered_torch.shape
+        ), f"Shape mismatch: {gathered.shape} vs {gathered_torch.shape}"
+        assert np.allclose(gathered.data, gathered_torch.detach().numpy())
+
+        # Backward pass
+        gathered.backward(np.ones_like(gathered.data))
+        gathered_torch.backward(torch.ones_like(gathered_torch))
+
+        # Check gradients
+        assert np.allclose(embeddings.grad.data, embeddings_torch.grad.numpy())
+
+    def test_gather_repeated_indices(self):
+        # Test case where same index is gathered multiple times
+        embeddings = Tensor(
+            np.array(
+                [
+                    [1.0, 2.0],
+                    [3.0, 4.0],
+                    [5.0, 6.0],
+                ]
+            ),
+            requires_grad=True,
+        )
+
+        # Repeat index 1 multiple times
+        indices = np.array([[1, 1], [1, 1]])
+
+        # Forward pass
+        gathered = embeddings.gather(indices)
+
+        # Compare with PyTorch
+        embeddings_torch = torch.tensor(embeddings.data, requires_grad=True)
+        gathered_torch = embeddings_torch[indices]
+
+        # Backward pass with gradient that varies by position
+        grad = np.array([[[1.0, 1.0], [2.0, 2.0]], [[3.0, 3.0], [4.0, 4.0]]])
+        gathered.backward(grad)
+        gathered_torch.backward(torch.tensor(grad))
+
+        # Check gradients - index 1 should accumulate all gradients
+        assert np.allclose(embeddings.grad.data, embeddings_torch.grad.numpy())
+        # Specifically check that index 1's gradient is sum of all gradients
+        assert np.allclose(embeddings.grad.data[1], np.array([10.0, 10.0]))
+
+    def test_gather_no_grad(self):
+        # Test gathering from tensor that doesn't require gradients
+        embeddings = Tensor(
+            np.array(
+                [
+                    [1.0, 2.0],
+                    [3.0, 4.0],
+                ]
+            ),
+            requires_grad=False,
+        )
+
+        indices = np.array([[0, 1]])
+        gathered = embeddings.gather(indices)
+
+        # Check that gathered tensor doesn't require gradients
+        assert not gathered.requires_grad
+
+        # Forward pass should still work
+        expected = np.array([[[1.0, 2.0], [3.0, 4.0]]])
+        assert np.allclose(gathered.data, expected)
+
+    def test_gather_empty_indices(self):
+        embeddings = Tensor(
+            np.array(
+                [
+                    [1.0, 2.0],
+                    [3.0, 4.0],
+                ]
+            ),
+            requires_grad=True,
+        )
+
+        # Empty indices tensor
+        indices = np.array([[]], dtype=np.int64)
+        gathered = embeddings.gather(indices)
+
+        # Check shape is correct (should be [1, 0, 2])
+        assert gathered.shape == (1, 0, 2)
+
+        # Compare with PyTorch
+        embeddings_torch = torch.tensor(embeddings.data, requires_grad=True)
+        gathered_torch = embeddings_torch[indices]
+
+        assert gathered.shape == tuple(gathered_torch.shape)
+
+
 class TestTensorTranspose(TestTensor):
     def test_transpose_2d(self):
         y = self.x_matrix.transpose()  # Default behavior should reverse dims
