@@ -2,6 +2,7 @@ from unittest import TestCase
 from autograd.nn import (
     Linear,
     BatchNorm,
+    LayerNorm,
     Dropout,
     Conv2d,
     MaxPool2d,
@@ -160,6 +161,132 @@ class TestBatchNorm(TestCase):
 
         # 5. Test gradients
         normalized.sum().backward()
+
+
+class TestLayerNorm(TestCase):
+    def setUp(self):
+        self.input_size = 4
+        self.batch_size = 2
+        self.seq_length = 3
+        self.epsilon = 1e-5
+
+        # Create our LayerNorm
+        self.layer_norm = LayerNorm(self.input_size, epsilon=self.epsilon)
+
+        # Create PyTorch LayerNorm
+        self.torch_layer_norm = torch.nn.LayerNorm(
+            self.input_size, eps=self.epsilon, elementwise_affine=True
+        )
+
+        # Copy parameters to PyTorch layer
+        with torch.no_grad():
+            self.torch_layer_norm.weight.data = torch.FloatTensor(
+                self.layer_norm._parameters["gain"].data
+            )
+            self.torch_layer_norm.bias.data = torch.FloatTensor(
+                self.layer_norm._parameters["bias"].data
+            )
+
+        # Create test data
+        np.random.seed(42)
+        torch.manual_seed(42)
+        self.x_data = np.random.randn(self.batch_size, self.seq_length, self.input_size)
+        self.x = Tensor(self.x_data)
+        self.x_torch = torch.FloatTensor(self.x_data)
+        self.x_torch.requires_grad = True
+
+    def test_initialization(self):
+        # Test parameter shapes
+        assert self.layer_norm._parameters["gain"].data.shape == (self.input_size,)
+        assert self.layer_norm._parameters["bias"].data.shape == (self.input_size,)
+
+        # Test initial values
+        assert np.allclose(
+            self.layer_norm._parameters["gain"].data, np.ones(self.input_size)
+        )
+        assert np.allclose(
+            self.layer_norm._parameters["bias"].data, np.zeros(self.input_size)
+        )
+
+    def test_forward(self):
+        # Forward pass
+        output = self.layer_norm(self.x)
+        torch_output = self.torch_layer_norm(self.x_torch)
+
+        # Compare outputs
+        assert np.allclose(
+            output.data, torch_output.detach().numpy(), rtol=1e-4, atol=1e-4
+        ), "LayerNorm output doesn't match PyTorch's output"
+
+    def test_backward(self):
+        # Forward pass
+        output = self.layer_norm(self.x)
+        torch_output = self.torch_layer_norm(self.x_torch)
+
+        # Create simple loss and backward
+        loss = output.sum()
+        loss_torch = torch_output.sum()
+
+        loss.backward()
+        loss_torch.backward()
+
+        # Compare input gradients
+        assert np.allclose(
+            self.x.grad.data, self.x_torch.grad.numpy(), rtol=1e-4, atol=1e-4
+        ), "Input gradients don't match"
+
+        # Compare parameter gradients
+        assert np.allclose(
+            self.layer_norm._parameters["gain"].grad.data,
+            self.torch_layer_norm.weight.grad.numpy(),
+            rtol=1e-4,
+            atol=1e-4,
+        ), "Gain/weight gradients don't match"
+
+        assert np.allclose(
+            self.layer_norm._parameters["bias"].grad.data,
+            self.torch_layer_norm.bias.grad.numpy(),
+            rtol=1e-4,
+            atol=1e-4,
+        ), "Bias gradients don't match"
+
+    def test_simple_input(self):
+        # Test with a simple input where we can manually verify the results
+        x_simple = np.array([[[1.0, 2.0, 3.0, 4.0]]])  # batch_size=1, seq_length=1
+        x = Tensor(x_simple)
+
+        output = self.layer_norm(x)
+
+        # Manual calculation
+        mean = np.mean(x_simple[0, 0])  # should be 2.5
+        var = np.var(x_simple[0, 0])  # should be 1.25
+        expected = (x_simple[0, 0] - mean) / np.sqrt(var + self.epsilon)
+
+        assert np.allclose(
+            output.data[0, 0], expected, rtol=1e-4, atol=1e-4
+        ), "Output doesn't match manual calculation"
+
+    def test_different_shapes(self):
+        # Test with different input shapes
+        shapes = [
+            (1, 1, self.input_size),  # Minimum shape
+            (5, 1, self.input_size),  # Single sequence step, multiple batches
+            (1, 10, self.input_size),  # Single batch, long sequence
+            (8, 15, self.input_size),  # Large batch and sequence
+        ]
+
+        for shape in shapes:
+            x_data = np.random.randn(*shape)
+            x = Tensor(x_data)
+            x_torch = torch.FloatTensor(x_data)
+
+            output = self.layer_norm(x)
+            torch_output = self.torch_layer_norm(x_torch)
+
+            assert output.shape == shape, f"Wrong output shape for input shape {shape}"
+            assert np.allclose(
+                output.data, torch_output.detach().numpy(), rtol=1e-4, atol=1e-4
+            ), f"Output mismatch for input shape {shape}"
 
 
 class TestDropout(TestCase):
