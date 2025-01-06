@@ -1,7 +1,9 @@
 from unittest import TestCase
 from autograd.nn import (
     Linear,
+    Embedding,
     BatchNorm,
+    LayerNorm,
     Dropout,
     Conv2d,
     MaxPool2d,
@@ -48,6 +50,136 @@ class TestLinear(TestCase):
         assert np.all(
             linear_layer._parameters["weight"].grad.data == 2
         )  # All gradients should be 2 since input is all 2s
+
+
+class TestEmbedding(TestCase):
+    def setUp(self):
+        self.vocab_size = 1000
+        self.embedding_size = 32
+        self.batch_size = 8
+        self.seq_length = 16
+
+        # Create our embedding layer
+        self.embedding = Embedding(self.vocab_size, self.embedding_size)
+
+        # Create PyTorch embedding for comparison
+        self.torch_embedding = torch.nn.Embedding(self.vocab_size, self.embedding_size)
+
+        # Copy our weights to PyTorch embedding
+        with torch.no_grad():
+            self.torch_embedding.weight.data = torch.FloatTensor(
+                self.embedding._parameters["weight"].data
+            )
+
+        # Create test data - random indices between 0 and vocab_size-1
+        np.random.seed(42)
+        torch.manual_seed(42)
+        self.x_data = np.random.randint(
+            0, self.vocab_size, (self.batch_size, self.seq_length)
+        )
+        self.x = Tensor(self.x_data)
+        self.x_torch = torch.LongTensor(self.x_data)
+
+    def test_initialization(self):
+        # Test parameter shapes
+        assert self.embedding._parameters["weight"].data.shape == (
+            self.vocab_size,
+            self.embedding_size,
+        )
+
+        # Test weight initialization scale
+        assert np.abs(self.embedding._parameters["weight"].data.mean()) < 0.1
+        assert 0.001 < self.embedding._parameters["weight"].data.std() < 0.1
+
+    def test_forward(self):
+        # Forward pass
+        output = self.embedding(self.x)
+        torch_output = self.torch_embedding(self.x_torch)
+
+        # Test output shape
+        assert output.shape == (self.batch_size, self.seq_length, self.embedding_size)
+
+        # Compare outputs
+        assert np.allclose(
+            output.data, torch_output.detach().numpy(), rtol=1e-5, atol=1e-5
+        ), "Embedding output doesn't match PyTorch's output"
+
+    def test_backward(self):
+        # Forward pass
+        output = self.embedding(self.x)
+        torch_output = self.torch_embedding(self.x_torch)
+
+        # Create simple loss and backward
+        loss = output.sum()
+        loss_torch = torch_output.sum()
+
+        loss.backward()
+        loss_torch.backward()
+
+        # Compare gradients
+        assert np.allclose(
+            self.embedding._parameters["weight"].grad.data,
+            self.torch_embedding.weight.grad.numpy(),
+            rtol=1e-5,
+            atol=1e-5,
+        ), "Weight gradients don't match"
+
+    def test_edge_cases(self):
+        # Test with batch size of 1
+        x_single = Tensor(np.random.randint(0, self.vocab_size, (1, self.seq_length)))
+        x_single_torch = torch.LongTensor(x_single.data)
+
+        output_single = self.embedding(x_single)
+        torch_output_single = self.torch_embedding(x_single_torch)
+
+        assert np.allclose(
+            output_single.data,
+            torch_output_single.detach().numpy(),
+            rtol=1e-5,
+            atol=1e-5,
+        )
+
+        # Test with sequence length of 1
+        x_short = Tensor(np.random.randint(0, self.vocab_size, (self.batch_size, 1)))
+        x_short_torch = torch.LongTensor(x_short.data)
+
+        output_short = self.embedding(x_short)
+        torch_output_short = self.torch_embedding(x_short_torch)
+
+        assert np.allclose(
+            output_short.data, torch_output_short.detach().numpy(), rtol=1e-5, atol=1e-5
+        )
+
+    def test_out_of_bounds_indices(self):
+        # Test with invalid indices
+        with self.assertRaises(IndexError):
+            x_invalid = Tensor(np.array([[self.vocab_size]]))  # Index too large
+            self.embedding(x_invalid)
+
+    def test_gradient_flow(self):
+        # Test if gradients flow correctly through frequently used indices
+        x_repeated = Tensor(
+            np.array([[0, 1], [1, 0]])
+        )  # Use indices 0 and 1 repeatedly
+        x_repeated_torch = torch.LongTensor(x_repeated.data)
+
+        output = self.embedding(x_repeated)
+        torch_output = self.torch_embedding(x_repeated_torch)
+
+        loss = output.sum()
+        loss_torch = torch_output.sum()
+
+        loss.backward()
+        loss_torch.backward()
+
+        # Check that gradients for indices 0 and 1 are non-zero and match PyTorch
+        assert np.all(self.embedding._parameters["weight"].grad.data[0:2] != 0)
+        assert np.allclose(
+            self.embedding._parameters["weight"].grad.data[0:2],
+            self.torch_embedding.weight.grad.numpy()[0:2],
+            rtol=1e-5,
+            atol=1e-5,
+        )
 
 
 class TestBatchNorm(TestCase):
@@ -160,6 +292,132 @@ class TestBatchNorm(TestCase):
 
         # 5. Test gradients
         normalized.sum().backward()
+
+
+class TestLayerNorm(TestCase):
+    def setUp(self):
+        self.input_size = 4
+        self.batch_size = 2
+        self.seq_length = 3
+        self.epsilon = 1e-5
+
+        # Create our LayerNorm
+        self.layer_norm = LayerNorm(self.input_size, epsilon=self.epsilon)
+
+        # Create PyTorch LayerNorm
+        self.torch_layer_norm = torch.nn.LayerNorm(
+            self.input_size, eps=self.epsilon, elementwise_affine=True
+        )
+
+        # Copy parameters to PyTorch layer
+        with torch.no_grad():
+            self.torch_layer_norm.weight.data = torch.FloatTensor(
+                self.layer_norm._parameters["gain"].data
+            )
+            self.torch_layer_norm.bias.data = torch.FloatTensor(
+                self.layer_norm._parameters["bias"].data
+            )
+
+        # Create test data
+        np.random.seed(42)
+        torch.manual_seed(42)
+        self.x_data = np.random.randn(self.batch_size, self.seq_length, self.input_size)
+        self.x = Tensor(self.x_data)
+        self.x_torch = torch.FloatTensor(self.x_data)
+        self.x_torch.requires_grad = True
+
+    def test_initialization(self):
+        # Test parameter shapes
+        assert self.layer_norm._parameters["gain"].data.shape == (self.input_size,)
+        assert self.layer_norm._parameters["bias"].data.shape == (self.input_size,)
+
+        # Test initial values
+        assert np.allclose(
+            self.layer_norm._parameters["gain"].data, np.ones(self.input_size)
+        )
+        assert np.allclose(
+            self.layer_norm._parameters["bias"].data, np.zeros(self.input_size)
+        )
+
+    def test_forward(self):
+        # Forward pass
+        output = self.layer_norm(self.x)
+        torch_output = self.torch_layer_norm(self.x_torch)
+
+        # Compare outputs
+        assert np.allclose(
+            output.data, torch_output.detach().numpy(), rtol=1e-4, atol=1e-4
+        ), "LayerNorm output doesn't match PyTorch's output"
+
+    def test_backward(self):
+        # Forward pass
+        output = self.layer_norm(self.x)
+        torch_output = self.torch_layer_norm(self.x_torch)
+
+        # Create simple loss and backward
+        loss = output.sum()
+        loss_torch = torch_output.sum()
+
+        loss.backward()
+        loss_torch.backward()
+
+        # Compare input gradients
+        assert np.allclose(
+            self.x.grad.data, self.x_torch.grad.numpy(), rtol=1e-4, atol=1e-4
+        ), "Input gradients don't match"
+
+        # Compare parameter gradients
+        assert np.allclose(
+            self.layer_norm._parameters["gain"].grad.data,
+            self.torch_layer_norm.weight.grad.numpy(),
+            rtol=1e-4,
+            atol=1e-4,
+        ), "Gain/weight gradients don't match"
+
+        assert np.allclose(
+            self.layer_norm._parameters["bias"].grad.data,
+            self.torch_layer_norm.bias.grad.numpy(),
+            rtol=1e-4,
+            atol=1e-4,
+        ), "Bias gradients don't match"
+
+    def test_simple_input(self):
+        # Test with a simple input where we can manually verify the results
+        x_simple = np.array([[[1.0, 2.0, 3.0, 4.0]]])  # batch_size=1, seq_length=1
+        x = Tensor(x_simple)
+
+        output = self.layer_norm(x)
+
+        # Manual calculation
+        mean = np.mean(x_simple[0, 0])  # should be 2.5
+        var = np.var(x_simple[0, 0])  # should be 1.25
+        expected = (x_simple[0, 0] - mean) / np.sqrt(var + self.epsilon)
+
+        assert np.allclose(
+            output.data[0, 0], expected, rtol=1e-4, atol=1e-4
+        ), "Output doesn't match manual calculation"
+
+    def test_different_shapes(self):
+        # Test with different input shapes
+        shapes = [
+            (1, 1, self.input_size),  # Minimum shape
+            (5, 1, self.input_size),  # Single sequence step, multiple batches
+            (1, 10, self.input_size),  # Single batch, long sequence
+            (8, 15, self.input_size),  # Large batch and sequence
+        ]
+
+        for shape in shapes:
+            x_data = np.random.randn(*shape)
+            x = Tensor(x_data)
+            x_torch = torch.FloatTensor(x_data)
+
+            output = self.layer_norm(x)
+            torch_output = self.torch_layer_norm(x_torch)
+
+            assert output.shape == shape, f"Wrong output shape for input shape {shape}"
+            assert np.allclose(
+                output.data, torch_output.detach().numpy(), rtol=1e-4, atol=1e-4
+            ), f"Output mismatch for input shape {shape}"
 
 
 class TestDropout(TestCase):

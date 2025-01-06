@@ -174,6 +174,9 @@ class Tensor:
     def max(self, axis=None, keepdims=False):
         return Max.apply(self, axis=axis, keepdims=keepdims)
 
+    def gather(self, index=0):
+        return Gather.apply(self, index=index)
+
     def sqrt(self):
         return Sqrt.apply(self)
 
@@ -446,16 +449,35 @@ class Pow(Function):
 
 class Matmul(Function):
     def forward(self, x, y):
-        if x.data.ndim == 1 and y.data.ndim == 1:
-            return np.dot(x.data, y.data)
-        else:
-            return np.matmul(x.data, y.data)
+        """
+        x, y = Tensors
+        x.data, y.data = NumPy arrays of shape:
+          - Possibly 1D for vector
+          - Possibly 2D for matrix
+          - Possibly 3D+ for batched matmul
+        We'll do np.matmul, which handles broadcasting/batching.
+        """
+        self.x_shape = x.data.shape
+        self.y_shape = y.data.shape
+
+        # Save references so backward() can know which Tensors to differentiate
+        out = np.matmul(x.data, y.data)
+        return out
 
     def backward(self, grad):
+        """
+        We'll compute grad_x and grad_y via the standard rules:
+          grad_x = grad @ y^T  (on the innermost 2 dims)
+          grad_y = x^T @ grad
+        If y is only 2D, but x is 3D (or more), we sum across batch dims in grad_y.
+
+        E.g. x: (B,n,m), y: (m,p) => out: (B,n,p)
+          -> grad_x: (B,n,p) @ (p,m) = (B,n,m)
+          -> grad_y: sum over B,n => shape (m,p)
+        """
         x = self.tensors[0]
         y = self.tensors[1]
-        grad_x = None
-        grad_y = None
+        grad_x = grad_y = None
 
         # Handle vector @ vector case separately (1D @ 1D)
         if x.data.ndim == 1 and y.data.ndim == 1:
@@ -464,56 +486,54 @@ class Matmul(Function):
             if y.requires_grad:
                 grad_y = grad.data * x.data
             return grad_x, grad_y
-        # Matrix multiplication case
-        else:
-            """
-            d(loss) / dx
-            = self.grad
-            = d(loss) / d(x·y) * d(x·y) / dx
-            = result.grad * d(x·y) / dx
-            = result.grad * y.T
 
-            d(loss) / dy
-            = other.grad
-            = d(loss) / d(x·y) * d(x·y) / dy
-            = result.grad * d(x·y) / dy
-            = x.T * result.grad
-            Note:
-                need to move x.T to the left because:
-                1) Each element in result is a dot product of a row from x with a column from y
-                2) When we backprop, we need x.T on the left to match dimensions:
-                x = (num_samples, num_features)
-                y = (num_features, num_classes)
-                x.T = (num_features, num_samples)
-                result.grad = (num_samples, num_classes)
-                x.T * result.grad = (num_features, num_classes)  # same shape as y
-            """
-            # Handle N-D tensor multiplication (2D and higher)
-            # Let's say we intially have a self.data of shape (n, m)
-            # and other.data of shape (m, p)
-            # Then result.data will be of shape (n, p)
-            # We need to compute the gradient of the loss w.r.t. self.data
-            # d(loss) / d(self.data) = d(loss) / d(result) * d(result) / d(self.data)
-            # d(result) / d(self.data) = other.data.T
-            if x.requires_grad and grad is not None:
-                grad_x = grad.data @ y.data.T
+        """
+        Otherwise do "batched" matmul logic
+        # If one operand doesn't have batch dims, we sum out the batch dims from the result.
 
-            # Compute gradient of loss w.r.t. y.data
-            # d(loss) / d(y.data) = d(loss) / d(result) * d(result) / d(y.data)
-            # d(result) / d(y.data) = x.data.T
-            # x.data:    (n, m)
-            # grad:  (n, p)
-            # x.T:       (m, n) --> T operation is equivalent to swapaxes(-1, -2)
-            # matmul(x.T, grad) = (m, n) @ (n, p) = (m, p) = y.grad
-            if y.requires_grad and grad is not None:
-                x_transposed = (
-                    x.transpose(1, 2) if x.data.ndim == 3 else x.data.transpose()
-                )
-                grad_y = (
-                    np.sum(x_transposed.data @ grad.data, axis=0)
-                    if x.data.ndim == 3
-                    else x_transposed.data @ grad.data
-                )
+        d(loss) / dx
+        = self.grad
+        = d(loss) / d(x·y) * d(x·y) / dx
+        = result.grad * d(x·y) / dx
+        = result.grad * y.T
+
+        d(loss) / dy
+        = other.grad
+        = d(loss) / d(x·y) * d(x·y) / dy
+        = result.grad * d(x·y) / dy
+        = x.T * result.grad
+        Note:
+            need to move x.T to the left because:
+            1) Each element in result is a dot product of a row from x with a column from y
+            2) When we backprop, we need x.T on the left to match dimensions:
+            x = (num_samples, num_features)
+            y = (num_features, num_classes)
+            x.T = (num_features, num_samples)
+            result.grad = (num_samples, num_classes)
+            x.T * result.grad = (num_features, num_classes)  # same shape as y
+        """
+
+        if x.requires_grad:
+            # We'll transpose y only in the last two dims.
+            # np.swapaxes(y, -1, -2) is effectively y^T for each batch.
+            y_t = np.swapaxes(y.data, -1, -2)  # shape changes the last two dims
+            grad_x = np.matmul(grad.data, y_t)
+            # shape of grad_x should match x.data.shape
+
+        if y.requires_grad:
+            # Similarly, x^T is swapaxes(-1, -2)
+            x_t = np.swapaxes(x.data, -1, -2)
+            raw_grad_y = np.matmul(x_t, grad.data)
+            # Now if y was 2D => shape (m, p), but raw_grad_y might be (B,m,p). We sum over batch dims.
+            # Let's figure out how many leading dims y has (besides the last 2).
+            if y.data.ndim == 2 and raw_grad_y.ndim > 2:
+                # sum over all batch/time dims => axis=0..(raw_grad_y.ndim-2)
+                # e.g. raw_grad_y is (B, m, p), we want (m, p)
+                axes_to_sum = tuple(range(raw_grad_y.ndim - 2))
+                grad_y = np.sum(raw_grad_y, axis=axes_to_sum)
+            else:
+                # If y had a batch dimension as well, raw_grad_y already has the right shape
+                grad_y = raw_grad_y
 
         return grad_x, grad_y
 
@@ -745,6 +765,24 @@ class Mean(Function):
             else self.tensors[0].size
         )
         return grad.data / num_elements
+
+
+class Gather(Function):
+    def forward(self, x, index: np.ndarray) -> Tensor:
+        out = x[index, :]
+
+        # Save references for backward
+        self.x = x
+        self.index = index
+        return out
+
+    def backward(self, grad: Tensor) -> np.ndarray:
+        dx = np.zeros_like(self.x.data)
+
+        flat_indices = self.index.ravel()
+        flat_grads = grad.data.reshape(-1, dx.shape[1])
+        np.add.at(dx, flat_indices, flat_grads)
+        return dx, None
 
 
 """

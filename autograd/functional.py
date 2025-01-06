@@ -145,41 +145,103 @@ class BinaryCrossEntropy(Function):
 class SparseCrossEntropy(Function):
     """
     Sparse Cross Entropy
-    Note: this assumes y_pred contains probabilities, not logits
+    Note: this assumes y_pred contains probabilities in [0,1].
+    If your model outputs logits, use sparse_cross_entropy_with_logits()
+    which calls softmax internally.
+
     -y_true * log(y_pred)
     """
 
     def forward(self, y_pred, y_true, **kwargs):
-        # y_true: either np.ndarray or Tensor. Convert to np if Tensor.
+        """
+        y_pred: (batch_size, feature_dim) or (batch_size, sequence_length, feature_dim) of probabilities
+        y_true: (batch_size,) or (batch_size, sequence_length) of integer labels
+        """
+        # Convert y_true to np array if it's a Tensor
         if isinstance(y_true, Tensor):
             y_true = y_true.data
-        # Convert y_true to integer type and ensure it's the right shape
         y_true = np.asarray(y_true, dtype=np.int64)
-
         if y_pred.min() < 0 or y_pred.max() > 1:
             raise ValueError("y_pred must contain probabilities between 0 and 1")
 
-        self.y_true = y_true
-        self.n_samples = len(y_true)
+        self.y_true_shape = y_true.shape
+        self.y_pred_shape = y_pred.shape
 
+        # We'll store clipped probabilities for backward
         y_pred_prob = np.clip(y_pred, 1e-15, 1 - 1e-15)
         self.y_pred_prob = y_pred_prob
 
-        # Now y_true is guaranteed to be integer type
-        selected_probs = y_pred_prob[np.arange(self.n_samples), y_true]
-        loss = -np.mean(np.log(selected_probs))
+        # 2D Case
+        # y_pred is (batch_size, feature_dim)
+        # y_true is (batch_size,)
+        if y_pred.ndim == 2:
+            batch_size, feature_dim = y_pred.shape
+            if y_true.shape != (batch_size,):
+                raise ValueError(
+                    f"For 2D y_pred, expect y_true of shape ({batch_size},), got {y_true.shape}"
+                )
+
+            # Gather the correct prob per sample
+            selected_probs = y_pred_prob[
+                np.arange(batch_size), y_true
+            ]  # shape (batch_size,)
+
+            loss = -np.mean(np.log(selected_probs))
+            self.gather_index = (np.arange(batch_size), y_true)  # store for backward
+
+        # 3D Case
+        # y_pred is (batch_size, sequence_length, feature_dim)
+        # y_true is (batch_size, sequence_length)
+        elif y_pred.ndim == 3:
+            batch_size, sequence_length, feature_dim = y_pred.shape
+            if y_true.shape != (batch_size, sequence_length):
+                raise ValueError(
+                    f"For 3D y_pred, expect y_true of shape ({batch_size},{sequence_length}), got {y_true.shape}"
+                )
+
+            batch_idx = np.arange(batch_size)[:, None]  # (batch_size,1)
+            time_idx = np.arange(sequence_length)[None, :]  # (1,sequence_length)
+            selected_probs = y_pred_prob[
+                batch_idx, time_idx, y_true
+            ]  # shape (batch_size, sequence_length)
+
+            loss = -np.mean(np.log(selected_probs))
+            self.gather_index = (batch_idx, time_idx, y_true)  # store for backward
+
+        else:
+            raise ValueError("SparseCrossEntropy only supports 2D or 3D y_pred")
+
         return loss
 
     def backward(self, grad):
-        # grad: dL/dOut
-        y_true = self.y_true
-        y_pred_prob = self.y_pred_prob
-        n_samples = self.n_samples
+        """
+        For 2D: grad_out[batch, label] = -1/(selected_probs * batch_size)
+        For 3D: grad_out[batch, time, label] = -1/(selected_probs * batch_size * sequence_len)
+        """
+        grad = grad.data if isinstance(grad, Tensor) else grad
 
-        grad_out = np.zeros_like(y_pred_prob)
-        selected_probs = y_pred_prob[np.arange(n_samples), y_true]
-        grad_out[np.arange(n_samples), y_true] = -1.0 / (selected_probs * n_samples)
-        # Return grad for y_pred, None for y_true
+        # Create grad array with same shape as y_pred
+        grad_out = np.zeros_like(self.y_pred_prob)
+        y_pred_prob = self.y_pred_prob
+
+        if len(self.y_pred_shape) == 2:
+            batch_size, sequence_length = self.y_pred_shape
+            # gather_index = (array([0,1,...,B-1]), array([...labels...]))
+            selected_probs = y_pred_prob[self.gather_index]
+            grad_values = -1.0 / (selected_probs * batch_size)  # average => divide by B
+            grad_out[self.gather_index] = grad_values * grad
+
+        elif len(self.y_pred_shape) == 3:
+            batch_size, sequence_length, feature_dim = self.y_pred_shape
+            # gather_index = (batch_idx, time_idx, labels)
+            batch_idx, time_idx, labels = self.gather_index
+            selected_probs = y_pred_prob[batch_idx, time_idx, labels]  # shape (B, T)
+            grad_values = -1.0 / (
+                selected_probs * batch_size * sequence_length
+            )  # average => divide by B*T
+            # Because gather_index are broadcast shapes, we can assign:
+            grad_out[batch_idx, time_idx, labels] = grad_values * grad
+
         return grad_out, None
 
 

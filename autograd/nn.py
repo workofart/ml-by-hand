@@ -519,6 +519,67 @@ class LongShortTermMemoryBlock(Module):
             return hidden_state, C_t
 
 
+class Embedding(Module):
+    """
+    Embedding layer that projects an arbitrary input_size down to embedding_size
+    """
+
+    def __init__(self, input_size, embedding_size):
+        super().__init__()
+
+        # weight.shape: (input_size, embedding_size)
+        self._parameters["weight"] = Tensor(
+            np.random.randn(input_size, embedding_size) * 0.01,
+            requires_grad=True,
+        )
+
+    def forward(self, x):
+        """
+        x: shape (batch_size, seq_len), each entry is an integer index in [0..vocab_size-1].
+        Returns: (batch_size, seq_len, embedding_size)
+        """
+        if not isinstance(x, Tensor):
+            x = Tensor(x)
+
+        # indices.shape: (batch_size, seq_len)
+        # result.shape: (batch_size, seq_len, embedding_size)
+        return self._parameters["weight"].gather(index=x.data.astype(np.int32))
+
+
+class LayerNorm(Module):
+    """
+    Layer Normalization
+
+    This layer computes mean and variance from all of the summed inputs to the neurons in a layer on a single training case
+
+    Paper: https://arxiv.org/abs/1607.06450
+    """
+
+    def __init__(self, input_size, epsilon=1e-5, **kwargs):
+        super().__init__(**kwargs)
+        self.epsilon = epsilon
+        self._parameters["gain"] = Tensor(np.ones((input_size,)))
+        self._parameters["bias"] = Tensor(np.zeros((input_size,)))
+
+    def forward(self, x: Tensor):
+        # Equation 4 in section 3.1 in the paper
+        mean = x.mean(
+            axis=-1, keepdims=True
+        )  # (batch_size, seq_len, 1), across "input_size" dimension
+        var = ((x - mean) ** 2).mean(
+            axis=-1, keepdims=True
+        )  # (batch_size, seq_len, 1), across "input_size" dimension
+        x_norm = (x - mean) / (
+            var + self.epsilon
+        ).sqrt()  # (batch_size, seq_len, input_size)
+
+        # scale and shift
+        output = x_norm * self._parameters["gain"].expand(
+            x_norm.shape
+        ) + self._parameters["bias"].expand(x_norm.shape)
+        return output
+
+
 class BatchNorm(Module):
     """
     Batch Normalization: Accelerating Deep Network Training by Reducing Internal Covariate Shift
