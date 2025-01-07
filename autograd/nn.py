@@ -14,8 +14,13 @@ class Module:
         self._is_training = None
 
     def zero_grad(self):
-        for p in self._parameters:
+        # Zero gradients for parameters in current module
+        for p in self._parameters.values():
             p.grad = 0
+
+        # Recursively zero gradients in submodules
+        for module in self._modules.values():
+            module.zero_grad()
 
     def forward(self, x):
         raise NotImplementedError
