@@ -5,8 +5,6 @@ from autograd.text import utils as text_utils
 from autograd.tensor import Tensor
 from autograd import nn, functional, optim
 
-np.random.seed(1337)
-
 
 class Transformer(nn.Module):
     """
@@ -14,24 +12,63 @@ class Transformer(nn.Module):
     Paper: https://arxiv.org/abs/1706.03762
 
     More specifically, it uses a encoder-decoder architecture with attention mechanisms embedded inside.
+
+    Overall Architecture:
+    - Encoder-decoder framework (Section 3.1)
+    - Encoder: 6 identical layers (Section 3.1)
+    - Decoder: 6 identical layers (Section 3.1)
+    - Each layer has self-attention or masked self-attention in the decoder (Section 3.2)
+      and feed-forward sub-layers
     """
 
     def __init__(self, vocab_size, hidden_size, num_attention_heads, **kwargs):
+        """
+        Args:
+            vocab_size (int): Vocabulary size for the embeddings
+            hidden_size (int): Dimension of model (d_model in the paper)
+            num_attention_heads (int): Number of attention heads (Section 3.2.2)
+        """
         super().__init__(**kwargs)
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
 
-        self.encoder = Encoder(vocab_size=vocab_size, embedding_size=hidden_size)
+        self.embedding = nn.Embedding(vocab_size, hidden_size)
+
+        # Encoder and dedcoder each have 6 layers
+        self.encoder = Encoder(
+            embedding_size=hidden_size, num_attention_heads=num_attention_heads
+        )
         self.decoder = Decoder(
             vocab_size=vocab_size,
-            sublayer_output_size=hidden_size,
+            hidden_size=hidden_size,
             num_attention_heads=num_attention_heads,
         )
 
-    def forward(self, source, target, source_mask=None, target_mask=None):
-        encoder_output = self.encoder(source, mask=source_mask)
+    def forward(
+        self,
+        source: Tensor,
+        target: Tensor,
+        source_mask: Tensor = None,
+        target_mask: Tensor = None,
+    ) -> Tensor:
+        """
+        Forward pass of the transformer
+
+        Args:
+            source (Tensor): Source sequence indices (batch_size, seq_len)
+            target (Tensor): Target sequence indices (batch_size, seq_len)
+            source_mask (Tensor, optional): Source mask to cover padding. Defaults to None.
+            target_mask (Tensor, optional): Target mask to cover padding + future tokens (causal mask). Defaults to None.
+
+        Returns:
+            Tensor: Probability distribution over entire vocabulary
+        """
+        encoder_output = self.encoder(
+            source, embedding_layer=self.embedding, mask=source_mask
+        )
         output = self.decoder(
             target,
+            embedding_layer=self.embedding,
             encoder_output=encoder_output,
             source_mask=source_mask,
             target_mask=target_mask,
@@ -40,9 +77,13 @@ class Transformer(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, vocab_size, embedding_size):
+    """
+    - Embeddings (Section 3.1) + Positional Encoding (Section 3.5)
+    - 6 identical EncoderSublayer (Section 3.1)
+    """
+
+    def __init__(self, embedding_size, num_attention_heads):
         super().__init__()
-        self.embedding = nn.Embedding(vocab_size, embedding_size)
         self.embedding_size = embedding_size
 
         self.positional_encoder = PositionalEncoding(hidden_size=embedding_size)
@@ -51,45 +92,75 @@ class Encoder(nn.Module):
             EncoderSublayer(
                 hidden_size=embedding_size,
                 ff_hidden_size=embedding_size * 4,
+                num_attention_heads=num_attention_heads,
             )
             for _ in range(6)
         ]
 
-    def forward(self, x, mask=None):
-        x = self.embedding(x) * Tensor(self.embedding_size).sqrt()
+    def forward(self, x, embedding_layer, mask=None):
+        # Section 3.4 (Embedding Scaling) embedding layer is shared between Encoder and Decoder
+        x = embedding_layer(x) * Tensor(self.embedding_size).sqrt()
+
+        # Section 3.5
         x = self.positional_encoder(x)
+
+        # Section 3.1
         for sublayer in self.sublayers:
             x = sublayer(x, mask)
         return x
 
 
 class Decoder(nn.Module):
-    def __init__(self, vocab_size, sublayer_output_size, num_attention_heads=2):
+    """
+    Decoder (Section 3.1)
+    - Embedding + PostionalEncoding (Section 3.5)
+    - 6 identical DecoderSublayer (Section 3.1)
+    - Linear + Softmax to produce probability distribution over entire vocabulary
+    """
+
+    def __init__(self, vocab_size, hidden_size, num_attention_heads=2):
         super().__init__()
-        self.embedding = nn.Embedding(vocab_size, sublayer_output_size)
-        self.positional_encoder = PositionalEncoding(hidden_size=sublayer_output_size)
+        self.positional_encoder = PositionalEncoding(hidden_size=hidden_size)
 
         self.sublayers = [
             DecoderSublayer(
-                hidden_size=sublayer_output_size,
-                ff_hidden_size=sublayer_output_size * 4,
+                hidden_size=hidden_size,
+                ff_hidden_size=hidden_size * 4,
                 num_attention_heads=num_attention_heads,
             )
             for _ in range(6)
         ]
-        self.linear = nn.Linear(sublayer_output_size, output_size=vocab_size)
+        self.linear = nn.Linear(hidden_size, output_size=vocab_size)
 
-    def forward(self, x, encoder_output, source_mask, target_mask):
-        x = self.embedding(x)
+    def forward(self, x, embedding_layer, encoder_output, source_mask, target_mask):
+        """
+        Args:
+            x (Tensor): Target sequence (decoder input)
+            embedding_layer (nn.Module): The shared embedding layer between Encoder and Decoder (Section 3.4)
+            encoder_output (Tensor): Output of encoder
+            source_mask (Tensor): Source (padding) mask
+            target_mask (Tensor): Target (causal + padding) mask
+        """
+        x = embedding_layer(x)
+
+        # Section 3.5
         x = self.positional_encoder(x)
+
+        # Section 3.1
         for sublayer in self.sublayers:
             x = sublayer(x, encoder_output, source_mask, target_mask)
+
         x = self.linear(x)
         output = functional.softmax(x)
         return output
 
 
-class AddAndNorm(nn.Module):
+class ResidualAddAndNorm(nn.Module):
+    """
+    Implements the residual connection + Layer Normalization
+    from Section 3.1 in the paper.
+    """
+
     def __init__(self, input_size, dropout_prob=0.1):
         super().__init__()
         self.layer_norm = nn.LayerNorm(input_size)
@@ -104,6 +175,14 @@ class AddAndNorm(nn.Module):
 
 
 class EncoderSublayer(nn.Module):
+    """
+    3.1 Encoder Stack in the paper.
+    - Multi-head self-attention (Section 3.2.2)
+    - Residual connection and layer normalization
+    - Position-wise feed-forward (Section 3.3)
+    - Residual connection and layer normalization
+    """
+
     def __init__(
         self,
         hidden_size=512,
@@ -114,13 +193,13 @@ class EncoderSublayer(nn.Module):
         super().__init__()
 
         # Multi-head self attention
-        self.add_and_norm1 = AddAndNorm(hidden_size)
+        self.add_and_norm1 = ResidualAddAndNorm(hidden_size)
         self.multi_head_attention = MultiHeadAttention(
             num_heads=num_attention_heads, hidden_size=hidden_size
         )
 
         # Position-wise feedforward
-        self.add_and_norm2 = AddAndNorm(hidden_size)
+        self.add_and_norm2 = ResidualAddAndNorm(hidden_size)
         self.feedforward = FeedForward(
             fc_input_size=hidden_size,
             hidden_size=ff_hidden_size,
@@ -128,17 +207,25 @@ class EncoderSublayer(nn.Module):
         )
 
     def forward(self, x, mask):
-        # Multi-head self attention
+        # (Section 3.2.2) Multi-head self attention
         x = self.add_and_norm1(
             x, lambda x_: self.multi_head_attention(x_, x_, x_, mask=mask)
         )
 
-        # Position-wise feedforward
+        # (Section 3.3) Position-wise feedforward
         x = self.add_and_norm2(x, self.feedforward)
         return x
 
 
 class DecoderSublayer(nn.Module):
+    """
+    3.1 Decoder Stack in the paper.
+    - Masked Multi-head self-attention (Section 3.2.3)
+    - Residual connection with layer normalization
+    - Encoder-Decoder multi-head attention (Section 3.2.3)
+    - Position-wise Feed-forward (Section 3.3)
+    """
+
     def __init__(
         self,
         hidden_size=512,
@@ -148,17 +235,20 @@ class DecoderSublayer(nn.Module):
     ):
         super().__init__()
 
-        self.add_and_norm1 = AddAndNorm(hidden_size)
+        # Section 3.2.3 Masked Multi-head self-attention
+        self.add_and_norm1 = ResidualAddAndNorm(hidden_size)
         self.masked_multi_head_attention = MultiHeadAttention(
             num_heads=num_attention_heads, hidden_size=hidden_size
         )
 
-        self.add_and_norm2 = AddAndNorm(hidden_size)
+        # Section 3.2.3 Encoder-Decoder Attention in the paper
+        self.add_and_norm2 = ResidualAddAndNorm(hidden_size)
         self.multi_head_attention = MultiHeadAttention(
             num_heads=num_attention_heads, hidden_size=hidden_size
         )
 
-        self.add_and_norm3 = AddAndNorm(hidden_size)
+        # Section 3.3 Position-wise Feed-forward
+        self.add_and_norm3 = ResidualAddAndNorm(hidden_size)
         self.feedforward = FeedForward(
             fc_input_size=hidden_size,
             hidden_size=ff_hidden_size,
@@ -182,7 +272,7 @@ class DecoderSublayer(nn.Module):
             ),
         )
 
-        # Final Position-wise Feedforward
+        # Section 3.3 Final Position-wise Feedforward
         x = self.add_and_norm3(x, self.feedforward)
         return x
 
@@ -230,6 +320,12 @@ class PositionalEncoding(nn.Module):
 
 
 class FeedForward(nn.Module):
+    """
+    Position-wise Feed-forward Network (Section 3.3)
+
+    FFN(x) = max(0, xW1 + b1)W2 + b2
+    """
+
     def __init__(self, fc_input_size, hidden_size, dropout_prob):
         super().__init__()
         self.fc1 = nn.Linear(fc_input_size, hidden_size)
@@ -245,6 +341,8 @@ class FeedForward(nn.Module):
 class ScaledDotProductAttention(nn.Module):
     """
     Implements the Scaled Dot-Product Attention in Section 3.2.1 in the paper.
+
+    Attention(Q,K,V) = softmax(Q transpose(K) / sqrt(key_dim)) V
     """
 
     def __init__(self):
@@ -269,6 +367,9 @@ class ScaledDotProductAttention(nn.Module):
 class MultiHeadAttention(nn.Module):
     """
     Implements the Multi-Head Attention in Section 3.2.2 in the paper.
+
+    Instead of performing a single attention with hidden_size keys, query, and values,
+    we project them "num_heads" times with different learned linear projects
     """
 
     def __init__(self, num_heads, hidden_size):
@@ -333,54 +434,44 @@ class MultiHeadAttention(nn.Module):
         return self.fc(att_score)
 
 
-def tokens_to_onehot(batch_tokens, word2idx):
-    # batch_tokens shape: (batch_size, seq_len)
-    # return shape: (batch_size, seq_len, vocab_size)
-    batch_size, seq_len = batch_tokens.shape
-    out = np.zeros((batch_size, seq_len, len(word2idx)), dtype=np.float32)
-    for b in range(batch_size):
-        for s in range(seq_len):
-            token = batch_tokens[b, s]
-            idx = word2idx.get(token, 0)
-            out[b, s, idx] = 1.0
-    return out
+def inference(model, start_tokens, max_length=50):
+    model.eval()
+    generated = list(start_tokens)
+    for _ in range(max_length):
+        seq_len = len(generated)
 
+        # Convert current tokens to indices & mask
+        cur_input = text_utils.token_batch_to_indices([generated], vocab)
 
-def onehot_to_tokens(onehot_vectors, idx2word):
-    # onehot_vectors shape: (batch_size, seq_len, vocab_size)
-    # return shape: (batch_size, seq_len)
-    batch_size, seq_len, vocab_size = onehot_vectors.shape
-    batches = []
-    for b in range(batch_size):
-        seq = ""
-        for s in range(seq_len):
-            idx = np.argmax(onehot_vectors[b, s])  # Get the index of the max value
-            seq += " " + idx2word.get(
-                idx, "<UNK>"
-            )  # Convert index to token, using <UNK> for unknown
-        batches.append(seq)
-    return batches
+        source_mask = Tensor(
+            text_utils.create_padding_mask(cur_input, pad_idx=0), requires_grad=False
+        )
+        pad_mask = text_utils.create_padding_mask(cur_input, pad_idx=0)
+        causal_mask = text_utils.create_causal_mask(seq_len, 1)
+        target_mask = Tensor(pad_mask + causal_mask, requires_grad=False)
 
-
-def token_batch_to_indices(token_batch, vocab):
-    X = []
-    for batch in token_batch:
-        seq = []
-        for token in batch:
-            seq.append(vocab.get(token, 0))
-        X.append(seq)
-    return np.array(X)
+        # Create causal + pad mask for this partial sequence
+        # Then run model(...) with encoder_output if necessary
+        probs = model(cur_input, cur_input, source_mask, target_mask)
+        # The last token’s distribution is probs[:, -1, :]
+        next_token_id = np.argmax(probs.data[0, -1])
+        generated.append(idx2word.get(next_token_id, "<UNK>"))
+        # Possibly break if next_token_id is <eos> or similar
+    return generated
 
 
 if __name__ == "__main__":
-    NUM_EPOCHS = 1000
+    NUM_EPOCHS = 30
+    seq_len = 80
+    batch_size = 16
     url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
     filename = "examples/tinyshakespeare.txt"
 
-    data = load_data(url, filename)[:3000]
+    data = load_data(url, filename)[:10000]
     data = text_utils.clean_and_tokenize(data)
-    vocab = text_utils.create_vocabulary(data, max_features=10000)
+    vocab = text_utils.create_vocabulary(data, max_features=60000)
     idx2word = {i: w for i, w in enumerate(vocab)}
+    sos_idx = vocab["<SOS>"]
     print(data.shape, data[:3], len(vocab))
 
     # one_hot, indices = text_to_one_hot_and_sparse(data, vocab, max_sequence_length=20)
@@ -394,47 +485,68 @@ if __name__ == "__main__":
     optimizer = optim.Adam(model.parameters, lr=1e-3)
 
     for epoch in range(NUM_EPOCHS):
-        train_X, train_y = text_utils.create_batches(
-            train_data, batch_size=64, seq_len=100
-        )
+        total_loss = 0.0
+        num_batches = len(train_data) // (batch_size * seq_len)
 
-        x = token_batch_to_indices(train_X, vocab)
-        y = token_batch_to_indices(train_y, vocab)
+        for step in range(num_batches):
+            train_X, train_y = text_utils.create_batches(
+                train_data,
+                batch_size=batch_size,
+                seq_len=seq_len,
+                sampling="sequential",
+            )
 
-        # Create masks
-        source_mask = Tensor(
-            text_utils.create_padding_mask(x, pad_idx=0), requires_grad=False
-        )
+            x = text_utils.token_batch_to_indices(train_X, vocab)
+            y = text_utils.token_batch_to_indices(train_y, vocab)
 
-        batch_size, seq_len = y.shape
-        pad_mask = text_utils.create_padding_mask(y, pad_idx=0)
-        causal_mask = text_utils.create_causal_mask(seq_len, batch_size)
-        target_mask = Tensor(pad_mask + causal_mask, requires_grad=False)
+            # Create masks
+            source_mask = Tensor(
+                text_utils.create_padding_mask(x, pad_idx=0), requires_grad=False
+            )
 
-        optimizer.zero_grad()
-        # pred_probs is (batch_size, sequence_len, vocabulary_size)
-        pred_prob = model(
-            x,
-            y,
-            source_mask,
-            target_mask,
-        )
-        loss = functional.sparse_cross_entropy(pred_prob, y)
-        print(f"Epoch {epoch} | Loss: {loss.detach().data}")
+            # batch_size, seq_len = y.shape
+            pad_mask = text_utils.create_padding_mask(y, pad_idx=0)
+            causal_mask = text_utils.create_causal_mask(seq_len, batch_size)
+            target_mask = Tensor(pad_mask + causal_mask, requires_grad=False)
 
-        loss.backward()
-        optimizer.step()
+            optimizer.zero_grad()
+
+            # y has shape (batch_size, seq_len)
+            sos_idx = vocab["<SOS>"]
+
+            # Create decoder input by prepending <SOS> and dropping the last token
+            y_inp = np.zeros_like(y)
+            y_inp[:, 0] = sos_idx
+            y_inp[:, 1:] = y[:, :-1]
+
+            # pred_probs is (batch_size, sequence_len, vocabulary_size)
+            pred_prob = model(
+                x,
+                y_inp,  # prepend <SOS> for decoder input
+                source_mask,
+                target_mask,
+            )
+            loss = functional.sparse_cross_entropy(pred_prob, y)
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.detach().data
+        print(f"Epoch {epoch} | Loss: {total_loss / num_batches}")
 
         if epoch % max(1, (NUM_EPOCHS // 10)) == 0:
             print("----- Evaluation -----")
             model.eval()
             test_X, test_y = text_utils.create_batches(
-                test_data, batch_size=1, seq_len=50
+                test_data, batch_size=1, seq_len=50, sampling="random"
             )
-            x = token_batch_to_indices(train_X, vocab)
-            y = token_batch_to_indices(train_y, vocab)
-            pred_prob = model(x, y)
-            pred_tokens = onehot_to_tokens(pred_prob.data, idx2word)
+
+            x = text_utils.token_batch_to_indices(test_X, vocab)
+            y = text_utils.token_batch_to_indices(test_y, vocab)
+
+            pred_tokens = inference(
+                model,
+                start_tokens=[vocab.get("<SOS>", 0)],
+                max_length=50,
+            )
             print(f"{' '.join(train_y[0][:15])=}")
-            print(f"{pred_tokens[0]=}")
+            print(f"{pred_tokens}")
             model.train()

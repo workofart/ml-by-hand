@@ -5,7 +5,10 @@ import re
 
 
 def create_vocabulary(
-    texts, max_features: int, custom_tokenizer=None, special_tokens=["<PAD>", "<UNK>"]
+    texts,
+    max_features: int,
+    custom_tokenizer=None,
+    special_tokens=["<PAD>", "<SOS>", "<UNK>"],
 ):
     """
     Create a vocabulary (word->index) from given texts,
@@ -234,3 +237,42 @@ def validate_batches(x, y):
         for seq_idx in range(seq_len):
             print("[X]: ", x[b, : seq_idx + 1])
             print("[y]: ", y[b, seq_idx])
+
+
+def tokens_to_onehot(batch_tokens, word2idx):
+    # batch_tokens shape: (batch_size, seq_len)
+    # return shape: (batch_size, seq_len, vocab_size)
+    batch_size, seq_len = batch_tokens.shape
+    out = np.zeros((batch_size, seq_len, len(word2idx)), dtype=np.float32)
+    for b in range(batch_size):
+        for s in range(seq_len):
+            token = batch_tokens[b, s]
+            idx = word2idx.get(token, 0)
+            out[b, s, idx] = 1.0
+    return out
+
+
+def onehot_to_tokens(onehot_vectors, idx2word):
+    # onehot_vectors shape: (batch_size, seq_len, vocab_size)
+    # return shape: (batch_size, seq_len)
+    batch_size, seq_len, vocab_size = onehot_vectors.shape
+    batches = []
+    for b in range(batch_size):
+        seq = ""
+        for s in range(seq_len):
+            idx = np.argmax(onehot_vectors[b, s])  # Get the index of the max value
+            seq += " " + idx2word.get(
+                idx, "<UNK>"
+            )  # Convert index to token, using <UNK> for unknown
+        batches.append(seq)
+    return batches
+
+
+def token_batch_to_indices(token_batch, vocab):
+    X = []
+    for batch in token_batch:
+        seq = []
+        for token in batch:
+            seq.append(vocab.get(token, 0))
+        X.append(seq)
+    return np.array(X)
