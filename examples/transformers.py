@@ -1,115 +1,11 @@
-import requests
-import os
 import numpy as np
-import re
 
-from autograd.tools.data import create_vocabulary
+from autograd.tools.data import load_data
+from autograd.text import utils as text_utils
 from autograd.tensor import Tensor
 from autograd import nn, functional, optim
 
 np.random.seed(1337)
-
-
-def load_data(url, filename) -> str:
-    # Check if file already exists
-    if os.path.exists(filename):
-        # Read the existing Parquet file into a numpy array
-        with open(filename, "r") as f:
-            data = f.read()
-            return data
-
-    # Download the file
-    response = requests.get(url)
-
-    # Save the file
-    with open(filename, "wb") as f:
-        f.write(response.content)
-
-    # Read the file into a numpy array
-    with open(filename, "r") as f:
-        data = f.read()
-        return data
-
-
-def clean_and_tokenize(text) -> list[str]:
-    """
-    Naive tokenizer split by words
-
-    Args:
-        text (str): The entire input text to be tokenized
-
-    Returns:
-        list of tokens (str)
-    """
-    # Split on new line and spaces, and retain punctuation
-    tokens = np.array(re.findall(r"\w+|[^\w\s]|[\n\s]", text))
-    tokens = tokens[(tokens != " ") & (tokens != "\n")]
-    return tokens
-
-
-def create_batches(
-    data: np.ndarray, batch_size: int, seq_len: int
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    We will create training batches for both X and y
-    for autoregressive (next token prediction) purposes.
-
-    Args:
-        data (np.ndarray): The tokenized data
-        batch_size (int): How many samples are in each batch
-        seq_len (int): How many tokens are in one sequence
-
-    Return:
-        The batched training features and labels
-        X (np.ndarray), y (np.ndarray)
-    """
-    n_samples = len(data)
-    sample_indices = np.random.randint(0, n_samples - seq_len, size=(batch_size,))
-    X = []
-    y = []
-
-    # for batch_idx in range(n_batches):
-    X = np.array([data[i : i + seq_len] for i in sample_indices])
-    y = np.array([data[i + 1 : i + seq_len + 1] for i in sample_indices])
-    return X, y
-
-
-def validate_batches(x, y):
-    batch_size, seq_len = x.shape
-    for b in range(min(4, batch_size)):
-        for seq_idx in range(seq_len):
-            print("[X]: ", x[b, : seq_idx + 1])
-            print("[y]: ", y[b, seq_idx])
-
-
-def create_padding_mask(token_indices, pad_idx=0):
-    """
-    onehot_tensor shape: (batch_size, seq_len, vocab_size)
-    Returns a mask of shape (batch_size, 1, 1, seq_len),
-    where '1.0' indicates a pad (to be masked out).
-    """
-    pad_positions = (token_indices == pad_idx).astype(np.float32)
-    # Expand dims so it can broadcast to attention shape
-    # shape => (batch_size, 1, 1, seq_len)
-    mask = pad_positions[:, np.newaxis, np.newaxis, :]
-    return mask
-
-
-def create_lookforward_mask(seq_len, batch_size):
-    """
-    Returns a (seq_len, seq_len) array where
-    positions above the main diagonal are 1.0 (masked).
-    """
-    # 1 on strictly upper-triangular positions
-    mask = np.triu(np.ones((seq_len, seq_len), dtype=np.float32), k=1)
-    # (seq_len, seq_len)
-    # Insert axes for (batch_size, 1, seq_len, seq_len)
-    # Start with (1, seq_len, seq_len), then repeat along batch dimension
-    mask = mask[np.newaxis, :, :]  # => (1, seq_len, seq_len)
-    mask = mask[:, np.newaxis, :, :]  # => (1, 1, seq_len, seq_len)
-    # Now tile for all batch items
-    mask = np.repeat(mask, batch_size, axis=0)  # => (batch_size, 1, seq_len, seq_len)
-    return mask
 
 
 class Transformer(nn.Module):
@@ -482,8 +378,8 @@ if __name__ == "__main__":
     filename = "examples/tinyshakespeare.txt"
 
     data = load_data(url, filename)[:3000]
-    data = clean_and_tokenize(data)
-    vocab = create_vocabulary(data, max_features=10000)
+    data = text_utils.clean_and_tokenize(data)
+    vocab = text_utils.create_vocabulary(data, max_features=10000)
     idx2word = {i: w for i, w in enumerate(vocab)}
     print(data.shape, data[:3], len(vocab))
 
@@ -498,18 +394,22 @@ if __name__ == "__main__":
     optimizer = optim.Adam(model.parameters, lr=1e-3)
 
     for epoch in range(NUM_EPOCHS):
-        train_X, train_y = create_batches(train_data, batch_size=64, seq_len=100)
+        train_X, train_y = text_utils.create_batches(
+            train_data, batch_size=64, seq_len=100
+        )
 
         x = token_batch_to_indices(train_X, vocab)
         y = token_batch_to_indices(train_y, vocab)
 
         # Create masks
-        source_mask = Tensor(create_padding_mask(x, pad_idx=0), requires_grad=False)
+        source_mask = Tensor(
+            text_utils.create_padding_mask(x, pad_idx=0), requires_grad=False
+        )
 
         batch_size, seq_len = y.shape
-        pad_mask = create_padding_mask(y, pad_idx=0)
-        lookforward_mask = create_lookforward_mask(seq_len, batch_size)
-        target_mask = Tensor(pad_mask + lookforward_mask, requires_grad=False)
+        pad_mask = text_utils.create_padding_mask(y, pad_idx=0)
+        causal_mask = text_utils.create_causal_mask(seq_len, batch_size)
+        target_mask = Tensor(pad_mask + causal_mask, requires_grad=False)
 
         optimizer.zero_grad()
         # pred_probs is (batch_size, sequence_len, vocabulary_size)
@@ -528,7 +428,9 @@ if __name__ == "__main__":
         if epoch % max(1, (NUM_EPOCHS // 10)) == 0:
             print("----- Evaluation -----")
             model.eval()
-            test_X, test_y = create_batches(test_data, batch_size=1, seq_len=50)
+            test_X, test_y = text_utils.create_batches(
+                test_data, batch_size=1, seq_len=50
+            )
             x = token_batch_to_indices(train_X, vocab)
             y = token_batch_to_indices(train_y, vocab)
             pred_prob = model(x, y)

@@ -1,11 +1,8 @@
 import numpy as np
 from autograd import nn, optim, functional, tensor
 from autograd.tools.trainer import Trainer
-from autograd.tools.data import text_to_one_hot_and_sparse, create_vocabulary
-import pyarrow.parquet as pq
-import requests
-import os
-
+from autograd.tools.data import load_data
+from autograd.text.utils import create_vocabulary, text_to_one_hot_and_sparse
 
 """
 Sequence-to-sequence model
@@ -65,28 +62,6 @@ class Seq2Seq(nn.Module):
         return tensor.Tensor.stack(output, axis=1)
 
 
-def load_data(url, filename):
-    # Check if file already exists
-    if os.path.exists(filename):
-        # Read the existing Parquet file into a numpy array
-        table = pq.read_table(filename)
-        data = table.to_pandas().to_numpy()[:512]
-        return data
-
-    # Download the file
-    response = requests.get(url)
-
-    # Save the file
-    with open(filename, "wb") as f:
-        f.write(response.content)
-
-    # Read the Parquet file into a numpy array
-    table = pq.read_table(filename)
-    data = table.to_pandas().to_numpy()
-
-    return data
-
-
 def parse_data_into_xy(data: np.ndarray):
     # Data format
     # url, title, summary, article, step headers
@@ -110,8 +85,8 @@ def main():
     train_filename = "examples/wikisum_train.parquet"
     test_filename = "examples/wikisum_test.parquet"
 
-    train_data = load_data(train_data_url, train_filename)
-    test_data = load_data(test_data_url, test_filename)
+    train_data = load_data(train_data_url, train_filename, max_rows=512)
+    test_data = load_data(test_data_url, test_filename, max_rows=512)
 
     train_X, train_y = parse_data_into_xy(train_data)
     test_X, test_y = parse_data_into_xy(test_data)
@@ -136,7 +111,7 @@ def main():
         model,
         loss_fn=functional.cross_entropy_with_logits,
         optimizer=optim.Adam(model.parameters, lr=0.001),
-        epochs=100,
+        epochs=1,
         batch_size=128,
         output_type="logits",
     )
