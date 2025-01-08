@@ -8,8 +8,6 @@ from autograd.text.utils import (
     create_padding_mask,
     create_causal_mask,
     clean_and_tokenize,
-    create_batches,
-    validate_batches,
 )
 
 
@@ -162,45 +160,3 @@ class TestTextUtils(TestCase):
         # punctuation like "," and "!" is included
         self.assertIn(",", tokens)
         self.assertIn("!", tokens)
-
-    def test_create_batches_random(self):
-        data = np.arange(1, 21)
-        batch_size = 2
-        seq_len = 5
-        X, y = create_batches(
-            data, batch_size, seq_len, sampling="random", return_dict=False
-        )
-
-        self.assertEqual(X.shape, (2, 5))
-        self.assertEqual(y.shape, (2, 5))
-        # Just check that each row of y is "one-step ahead" of X (in the original data indexing).
-        for i in range(batch_size):
-            for j in range(seq_len):
-                self.assertEqual(y[i, j], X[i, j] + 1)
-
-    def test_create_batches_sequential(self):
-        data = np.arange(10)
-        batch_size = 2
-        seq_len = 3
-        result = create_batches(
-            data, batch_size, seq_len, sampling="sequential", return_dict=True
-        )
-        X, y = result["inputs"], result["labels"]
-
-        self.assertEqual(X.shape, (2, 3))
-        self.assertEqual(y.shape, (2, 3))
-        # Because it's sequential, X and y are consecutive slices in data.
-        # We can't predict exact slices since start_idx is random, but we can at least check the step size.
-        # e.g. if start_idx=0 => X[0]=[0,1,2], y[0]=[1,2,3], X[1]=[3,4,5], y[1]=[4,5,6], etc.
-
-        for row in range(batch_size):
-            # Each row's y is X shifted by 1
-            for col in range(seq_len):
-                self.assertEqual(y[row, col], X[row, col] + 1)
-
-    def test_validate_batches(self):
-        # We'll just ensure it doesn't raise errors
-        data = np.arange(1, 10)
-        X, y = create_batches(data, batch_size=2, seq_len=3)
-        # Just call validate_batches; we won't check the printed output
-        validate_batches(X, y)

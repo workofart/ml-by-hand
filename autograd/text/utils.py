@@ -1,5 +1,4 @@
 from collections import defaultdict
-from typing import Union
 import numpy as np
 import re
 
@@ -178,59 +177,6 @@ def clean_and_tokenize(
     return tokens
 
 
-def create_batches(
-    data: np.ndarray,
-    batch_size: int,
-    seq_len: int,
-    sampling: str = "random",
-    return_dict: bool = False,
-) -> Union[tuple[np.ndarray, np.ndarray], dict[str, np.ndarray]]:
-    """
-    Create training batches for both X and y for autoregressive (next token prediction) purposes.
-
-    Args:
-        data (np.ndarray): The tokenized data
-        batch_size (int): How many samples are in each batch
-        seq_len (int): How many tokens are in one sequence
-        sampling (str): Sampling strategy - either "random" or "sequential"
-        E.g.
-            random = [2, 10]
-            X = [
-                data[2:7],   # [2, 3, 4, 5, 6]
-                data[10:15], # [10, 11, 12, 13, 14]
-            ]
-            sequential = [4, 9]  # Spaced by seq_len
-            X = [
-                data[4:9],   # [4, 5, 6, 7, 8]
-                data[9:14],  # [9, 10, 11, 12, 13]
-            ]
-        return_dict (bool): If True, returns dict with "inputs" and "labels" keys.
-                          If False, returns (X, y) tuple.
-
-    Returns:
-        If return_dict is True:
-            dict with keys "inputs" and "labels" containing batched data
-        If return_dict is False:
-            tuple of (X, y) containing batched training features and labels
-    """
-    n_samples = len(data)
-
-    if sampling == "random":
-        sample_indices = np.random.randint(0, n_samples - seq_len, size=(batch_size,))
-    elif sampling == "sequential":
-        start_idx = np.random.randint(0, n_samples - batch_size * seq_len)
-        sample_indices = np.arange(start_idx, start_idx + batch_size * seq_len, seq_len)
-    else:
-        raise ValueError("sampling must be either 'random' or 'sequential'")
-
-    X = np.array([data[i : i + seq_len] for i in sample_indices])
-    y = np.array([data[i + 1 : i + seq_len + 1] for i in sample_indices])
-
-    if return_dict:
-        return {"inputs": X, "labels": y}
-    return X, y
-
-
 def validate_batches(x, y):
     batch_size, seq_len = x.shape
     for b in range(min(4, batch_size)):
@@ -239,40 +185,11 @@ def validate_batches(x, y):
             print("[y]: ", y[b, seq_idx])
 
 
-def tokens_to_onehot(batch_tokens, word2idx):
-    # batch_tokens shape: (batch_size, seq_len)
-    # return shape: (batch_size, seq_len, vocab_size)
-    batch_size, seq_len = batch_tokens.shape
-    out = np.zeros((batch_size, seq_len, len(word2idx)), dtype=np.float32)
-    for b in range(batch_size):
-        for s in range(seq_len):
-            token = batch_tokens[b, s]
-            idx = word2idx.get(token, 0)
-            out[b, s, idx] = 1.0
-    return out
-
-
-def onehot_to_tokens(onehot_vectors, idx2word):
-    # onehot_vectors shape: (batch_size, seq_len, vocab_size)
-    # return shape: (batch_size, seq_len)
-    batch_size, seq_len, vocab_size = onehot_vectors.shape
-    batches = []
-    for b in range(batch_size):
-        seq = ""
-        for s in range(seq_len):
-            idx = np.argmax(onehot_vectors[b, s])  # Get the index of the max value
-            seq += " " + idx2word.get(
-                idx, "<UNK>"
-            )  # Convert index to token, using <UNK> for unknown
-        batches.append(seq)
-    return batches
-
-
 def token_batch_to_indices(token_batch, vocab):
     X = []
     for batch in token_batch:
         seq = []
         for token in batch:
-            seq.append(vocab.get(token, 0))
+            seq.append(vocab.get(token, vocab["<UNK>"]))
         X.append(seq)
     return np.array(X)
