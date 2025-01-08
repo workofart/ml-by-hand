@@ -144,103 +144,85 @@ class BinaryCrossEntropy(Function):
 
 class SparseCrossEntropy(Function):
     """
-    Sparse Cross Entropy
-    Note: this assumes y_pred contains probabilities in [0,1].
-    If your model outputs logits, use sparse_cross_entropy_with_logits()
-    which calls softmax internally.
-
-    -y_true * log(y_pred)
+    Sparse cross-entropy for 2D or 3D predictions with optional pad_idx ignoring.
     """
 
-    def forward(self, y_pred, y_true, **kwargs):
+    def forward(self, y_pred, y_true, pad_idx=0, **kwargs):
         """
-        y_pred: (batch_size, feature_dim) or (batch_size, sequence_length, feature_dim) of probabilities
-        y_true: (batch_size,) or (batch_size, sequence_length) of integer labels
+        Args:
+            - If y_pred is (batch_size, feature_dim), y_true is (batch_size,)
+            - If y_pred is (batch_size, seq_len, feature_dim), y_true is (batch_size, seq_len)
+            - y_pred must be probabilities in [0,1], not raw logits.
+            pad_idx (int, optional): The padding index, we will mask this in the loss calculation. Defaults to 0.
         """
-        # Convert y_true to np array if it's a Tensor
-        if isinstance(y_true, Tensor):
-            y_true = y_true.data
-        y_true = np.asarray(y_true, dtype=np.int64)
+        # Ensure y_pred is in [0,1]
         if y_pred.min() < 0 or y_pred.max() > 1:
             raise ValueError("y_pred must contain probabilities between 0 and 1")
 
-        self.y_true_shape = y_true.shape
-        self.y_pred_shape = y_pred.shape
+        # Convert y_true to NumPy if it's a Tensor
+        if isinstance(y_true, Tensor):
+            y_true = y_true.data
+        y_true = np.asarray(y_true, dtype=np.int64)
 
-        # We'll store clipped probabilities for backward
-        y_pred_prob = np.clip(y_pred, 1e-15, 1 - 1e-15)
-        self.y_pred_prob = y_pred_prob
+        # Clip to avoid log(0) or log(1)
+        y_pred = np.clip(y_pred, 1e-15, 1 - 1e-15)
 
-        # 2D Case
-        # y_pred is (batch_size, feature_dim)
-        # y_true is (batch_size,)
-        if y_pred.ndim == 2:
-            batch_size, feature_dim = y_pred.shape
-            if y_true.shape != (batch_size,):
-                raise ValueError(
-                    f"For 2D y_pred, expect y_true of shape ({batch_size},), got {y_true.shape}"
-                )
+        # Keep track of original shape (for backward reshaping)
+        self.original_shape = y_pred.shape
 
-            # Gather the correct prob per sample
-            selected_probs = y_pred_prob[
-                np.arange(batch_size), y_true
-            ]  # shape (batch_size,)
+        # Flatten if we have 3D predictions (B, T, F -> B*T, F)
+        if y_pred.ndim == 3:
+            B, T, F = y_pred.shape
+            y_pred = y_pred.reshape(B * T, F)
+            y_true = y_true.reshape(B * T)
+        elif y_pred.ndim != 2:
+            raise ValueError("SparseCrossEntropy supports only 2D or 3D y_pred.")
 
-            loss = -np.mean(np.log(selected_probs))
-            self.gather_index = (np.arange(batch_size), y_true)  # store for backward
+        # Gather the predicted probability of the true class
+        idx = np.arange(len(y_true))
+        selected_probs = y_pred[idx, y_true]
 
-        # 3D Case
-        # y_pred is (batch_size, sequence_length, feature_dim)
-        # y_true is (batch_size, sequence_length)
-        elif y_pred.ndim == 3:
-            batch_size, sequence_length, feature_dim = y_pred.shape
-            if y_true.shape != (batch_size, sequence_length):
-                raise ValueError(
-                    f"For 3D y_pred, expect y_true of shape ({batch_size},{sequence_length}), got {y_true.shape}"
-                )
+        # Create a mask for non-pad tokens
+        self.non_pad_mask = y_true != pad_idx
+        selected_probs_non_pad = selected_probs[self.non_pad_mask]
 
-            batch_idx = np.arange(batch_size)[:, None]  # (batch_size,1)
-            time_idx = np.arange(sequence_length)[None, :]  # (1,sequence_length)
-            selected_probs = y_pred_prob[
-                batch_idx, time_idx, y_true
-            ]  # shape (batch_size, sequence_length)
-
-            loss = -np.mean(np.log(selected_probs))
-            self.gather_index = (batch_idx, time_idx, y_true)  # store for backward
-
+        # Compute negative log-likelihood over non-pad positions
+        if selected_probs_non_pad.size == 0:
+            loss_val = 0.0
         else:
-            raise ValueError("SparseCrossEntropy only supports 2D or 3D y_pred")
+            loss_val = -np.mean(np.log(selected_probs_non_pad))
 
-        return loss
+        # Store for backward
+        self.y_pred_prob = y_pred
+        self.y_true_flat = y_true
+        self.pad_idx = pad_idx
+
+        return loss_val
 
     def backward(self, grad):
-        """
-        For 2D: grad_out[batch, label] = -1/(selected_probs * batch_size)
-        For 3D: grad_out[batch, time, label] = -1/(selected_probs * batch_size * sequence_len)
-        """
+        # Convert grad to np array if it's a Tensor
         grad = grad.data if isinstance(grad, Tensor) else grad
 
-        # Create grad array with same shape as y_pred
-        grad_out = np.zeros_like(self.y_pred_prob)
-        y_pred_prob = self.y_pred_prob
+        # Prepare an output gradient array same shape as flattened y_pred
+        grad_out_flat = np.zeros_like(self.y_pred_prob)
 
-        if len(self.y_pred_shape) == 2:
-            batch_size, sequence_length = self.y_pred_shape
-            # gather_index = (array([0,1,...,B-1]), array([...labels...]))
-            selected_probs = y_pred_prob[self.gather_index]
-            grad_values = -1.0 / (selected_probs * batch_size)  # average => divide by B
-            grad_out[self.gather_index] = grad_values * grad
+        # Gather the relevant probabilities
+        idx = np.arange(len(self.y_true_flat))
+        selected_probs = self.y_pred_prob[idx, self.y_true_flat]
 
-        elif len(self.y_pred_shape) == 3:
-            batch_size, sequence_length, feature_dim = self.y_pred_shape
-            # gather_index = (batch_idx, time_idx, labels)
-            batch_idx, time_idx, labels = self.gather_index
-            selected_probs = y_pred_prob[batch_idx, time_idx, labels]  # shape (B, T)
-            grad_values = -1.0 / (
-                selected_probs * batch_size * sequence_length
-            )  # average => divide by B*T
-            # Because gather_index are broadcast shapes, we can assign:
-            grad_out[batch_idx, time_idx, labels] = grad_values * grad
+        # Number of real (non-pad) tokens
+        count_non_pad = max(1, self.non_pad_mask.sum())
+
+        # d(-log p)/dp = -1/p (scaled by 1/count_non_pad and upstream grad)
+        grad_values = -grad / (selected_probs * count_non_pad)
+        # Zero out pad positions
+        grad_values[~self.non_pad_mask] = 0.0
+
+        # Scatter back into grad_out_flat
+        grad_out_flat[idx, self.y_true_flat] = grad_values
+
+        # Reshape to original shape
+        grad_out = grad_out_flat.reshape(self.original_shape)
 
         return grad_out, None
 
@@ -387,15 +369,15 @@ def binary_cross_entropy_with_logits(
 
 
 def sparse_cross_entropy(
-    y_pred: Tensor, y_true: Union[Tensor, np.ndarray], **kwargs
+    y_pred: Tensor, y_true: Union[Tensor, np.ndarray], pad_idx: int = None, **kwargs
 ) -> Tensor:
     if not isinstance(y_true, Tensor):
         y_true = Tensor(y_true, requires_grad=False)
-    return SparseCrossEntropy.apply(y_pred, y_true, **kwargs)
+    return SparseCrossEntropy.apply(y_pred, y_true, pad_idx=pad_idx, **kwargs)
 
 
 def sparse_cross_entropy_with_logits(
-    y_pred: Tensor, y_true: Union[Tensor, np.ndarray], **kwargs
+    y_pred: Tensor, y_true: Union[Tensor, np.ndarray], pad_idx=None, **kwargs
 ) -> Tensor:
     """
     Sparse Cross Entropy with logits input
@@ -404,7 +386,7 @@ def sparse_cross_entropy_with_logits(
     """
     if not isinstance(y_true, Tensor):
         y_true = Tensor(y_true, requires_grad=False)
-    return sparse_cross_entropy(softmax(y_pred), y_true, **kwargs)
+    return sparse_cross_entropy(softmax(y_pred), y_true, pad_idx=pad_idx, **kwargs)
 
 
 def cross_entropy_with_logits(
