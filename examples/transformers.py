@@ -509,19 +509,19 @@ def get_lr(step, model_dim, warmup_steps):
 
 
 if __name__ == "__main__":
-    NUM_EPOCHS = 50
-    seq_len = 100
+    NUM_EPOCHS = 10
+    seq_len = 80
     batch_size = 32
     warmup_steps = 300
-    d_model = 256
-    num_attention_heads = 2
+    d_model = 512
+    num_attention_heads = 8
 
     url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
     filename = "examples/tinyshakespeare.txt"
 
     data = load_data(url, filename)
     print(len(data))
-    data = data[:300000]
+    data = data
     data = text_utils.clean_and_tokenize(data)
     vocab = text_utils.create_vocabulary(data, max_features=20000)
     idx2word = {i: w for i, w in enumerate(vocab)}
@@ -585,21 +585,17 @@ if __name__ == "__main__":
             loss.backward()
             optimizer.step()
             epoch_loss += loss.detach().data
+
         print(f"Epoch {epoch} | Loss: {epoch_loss / len(train_data_loader)}")
 
         if epoch % max(1, (NUM_EPOCHS // 10)) == 0:
             print("----- Evaluation -----")
             model.eval()
 
-            test_X, test_y = test_data_loader.sample_random_sequence(
-                seq_len=30, as_tokens=True
-            )
-
             pred_tokens = inference(
                 model,
                 start_tokens=["<SOS>"],
                 max_length=30,
             )
-            print(f"Groundtruth: {' '.join(test_y)}")
             print(f"Prediction: {' '.join(pred_tokens)}")
             model.train()
