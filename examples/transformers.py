@@ -1,6 +1,7 @@
 import numpy as np
+from tqdm import tqdm
 
-from autograd.tools.data import load_data
+from autograd.tools.data import load_data, DataLoader
 from autograd.text import utils as text_utils
 from autograd.tensor import Tensor
 from autograd import nn, functional, optim
@@ -96,6 +97,7 @@ class Encoder(nn.Module):
             )
             for _ in range(6)
         ]
+        self.layer_norm = nn.LayerNorm(embedding_size)
 
     def forward(self, x, embedding_layer, mask=None):
         # Section 3.4 (Embedding Scaling) embedding layer is shared between Encoder and Decoder
@@ -107,7 +109,7 @@ class Encoder(nn.Module):
         # Section 3.1
         for sublayer in self.sublayers:
             x = sublayer(x, mask)
-        return x
+        return self.layer_norm(x)
 
 
 class Decoder(nn.Module):
@@ -121,6 +123,7 @@ class Decoder(nn.Module):
     def __init__(self, vocab_size, hidden_size, num_attention_heads=2):
         super().__init__()
         self.positional_encoder = PositionalEncoding(hidden_size=hidden_size)
+        self.hidden_size = hidden_size
 
         self.sublayers = [
             DecoderSublayer(
@@ -131,6 +134,7 @@ class Decoder(nn.Module):
             for _ in range(6)
         ]
         self.linear = nn.Linear(hidden_size, output_size=vocab_size)
+        self.layer_norm = nn.LayerNorm(hidden_size)
 
     def forward(self, x, embedding_layer, encoder_output, source_mask, target_mask):
         """
@@ -141,7 +145,7 @@ class Decoder(nn.Module):
             source_mask (Tensor): Source (padding) mask
             target_mask (Tensor): Target (causal + padding) mask
         """
-        x = embedding_layer(x)
+        x = embedding_layer(x) * Tensor(self.hidden_size).sqrt()
 
         # Section 3.5
         x = self.positional_encoder(x)
@@ -150,6 +154,7 @@ class Decoder(nn.Module):
         for sublayer in self.sublayers:
             x = sublayer(x, encoder_output, source_mask, target_mask)
 
+        x = self.layer_norm(x)
         x = self.linear(x)
         output = functional.softmax(x)
         return output
@@ -171,7 +176,7 @@ class ResidualAddAndNorm(nn.Module):
 
     def forward(self, x, previous_layer: nn.Module):
         # Residual connection from input x
-        return x + self.dropout(previous_layer(self.layer_norm(x)))
+        return x + self.dropout(self.layer_norm(previous_layer(x)))
 
 
 class EncoderSublayer(nn.Module):
@@ -360,8 +365,7 @@ class ScaledDotProductAttention(nn.Module):
             # broadcast across heads
             att_score = att_score + (mask * -1e9)
         att_score = functional.softmax(att_score)
-        att_score = att_score @ value
-        return att_score
+        return att_score @ value
 
 
 class MultiHeadAttention(nn.Module):
@@ -389,9 +393,6 @@ class MultiHeadAttention(nn.Module):
 
     def forward(self, query, key, value, mask=None):
         batch_size = query.shape[0]
-
-        if mask is not None:
-            pass
 
         # We try to avoid explicitly splitting and combining the heads
         # So we are just using matrix multiplication to paralellize everything
@@ -434,7 +435,23 @@ class MultiHeadAttention(nn.Module):
         return self.fc(att_score)
 
 
-def inference(model, start_tokens, max_length=50):
+def inference(model, start_tokens, max_length=50, temperature=1.0) -> list[str]:
+    """
+    Peform model inference, usually for evaluation purposes.
+    We will continously feed the model's generated tokens back to the model to generate
+    the next token (next token is conditioned on all previously generated token).
+
+    Args:
+        model (nn.Module): The transformer model
+        start_tokens (list[str]): The list of start tokens, usually ["<SOS>"]
+        max_length (int, optional): The maximum length of tokens to run. Defaults to 50.
+        temperature (float, optional): The amount of exploration/randomness to model output to be. Defaults to 1.0.
+        > 1.0 more random
+        < 1.0 less random
+
+    Returns:
+        list[str]: The list of tokens output from the model
+    """
     model.eval()
     generated = list(start_tokens)
     for _ in range(max_length):
@@ -453,70 +470,108 @@ def inference(model, start_tokens, max_length=50):
         # Create causal + pad mask for this partial sequence
         # Then run model(...) with encoder_output if necessary
         probs = model(cur_input, cur_input, source_mask, target_mask)
-        # The last token’s distribution is probs[:, -1, :]
-        next_token_id = np.argmax(probs.data[0, -1])
+        # probs has shape (batch_size=1, seq_len, vocab_size)
+        # We only care about the distribution over the last token:
+        dist = probs.data[0, -1]  # shape (vocab_size,)
+
+        # Apply temperature scaling: p_i^(1/T)
+        if temperature != 1.0:
+            dist = dist ** (1.0 / temperature)
+
+        # Re-normalize the distribution (so that sum=1)
+        dist_sum = np.sum(dist)
+        if dist_sum <= 1e-15:
+            # If the distribution collapses numerically, fall back to argmax
+            next_token_id = np.argmax(dist)
+        else:
+            dist /= dist_sum
+            # Sample from this scaled distribution
+            next_token_id = np.random.choice(len(dist), p=dist)
+
         generated.append(idx2word.get(next_token_id, "<UNK>"))
         # Possibly break if next_token_id is <eos> or similar
     return generated
 
 
+def get_lr(step, model_dim, warmup_steps):
+    """
+    Learning rate scheduler with warmup for transformers training. It will start with larger learning rate, then after the transition point sqrt(step) == step * warmup_steps^(-1.5), the learning rate will slowly decrease
+
+    Args:
+        step (int): The current timestep (not epoch), each batch will be 1 timestep
+        model_dim (int): The model dimension
+        warmup_steps (int): The number of timesteps to warm up (increase learning rate) before decreasing learning rate
+
+    Returns:
+        float: learning rate
+    """
+    return model_dim**-0.5 * min(step**-0.5, step * warmup_steps**-1.5)
+
+
 if __name__ == "__main__":
-    NUM_EPOCHS = 30
-    seq_len = 80
-    batch_size = 16
+    NUM_EPOCHS = 50
+    seq_len = 100
+    batch_size = 32
+    warmup_steps = 300
+    d_model = 256
+    num_attention_heads = 2
+
     url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
     filename = "examples/tinyshakespeare.txt"
 
-    data = load_data(url, filename)[:10000]
+    data = load_data(url, filename)
+    print(len(data))
+    data = data[:300000]
     data = text_utils.clean_and_tokenize(data)
-    vocab = text_utils.create_vocabulary(data, max_features=60000)
+    vocab = text_utils.create_vocabulary(data, max_features=20000)
     idx2word = {i: w for i, w in enumerate(vocab)}
-    sos_idx = vocab["<SOS>"]
     print(data.shape, data[:3], len(vocab))
 
-    # one_hot, indices = text_to_one_hot_and_sparse(data, vocab, max_sequence_length=20)
-    # print(Tensor(indices)[:3])
     n = int(len(data) * 0.9)
     train_data, test_data = data[:n], data[n:]
 
-    model = Transformer(vocab_size=len(vocab), hidden_size=512, num_attention_heads=8)
+    model = Transformer(
+        vocab_size=len(vocab),
+        hidden_size=d_model,
+        num_attention_heads=num_attention_heads,
+    )
     model.train()
 
-    optimizer = optim.Adam(model.parameters, lr=1e-3)
+    optimizer = optim.Adam(model.parameters, lr=0)
+    train_data_loader = DataLoader(
+        train_data,
+        vocab,
+        batch_size,
+        seq_len,
+        shuffle=True,
+        pad_idx=0,
+    )
+    test_data_loader = DataLoader(
+        test_data,
+        vocab,
+        batch_size,
+        seq_len,
+        shuffle=True,
+        pad_idx=0,
+    )
+    step_count = 0
 
     for epoch in range(NUM_EPOCHS):
-        total_loss = 0.0
-        num_batches = len(train_data) // (batch_size * seq_len)
+        epoch_loss = 0.0
+        train_data_loader.on_epoch_start()
 
-        for step in range(num_batches):
-            train_X, train_y = text_utils.create_batches(
-                train_data,
-                batch_size=batch_size,
-                seq_len=seq_len,
-                sampling="sequential",
-            )
-
-            x = text_utils.token_batch_to_indices(train_X, vocab)
-            y = text_utils.token_batch_to_indices(train_y, vocab)
-
-            # Create masks
-            source_mask = Tensor(
-                text_utils.create_padding_mask(x, pad_idx=0), requires_grad=False
-            )
-
-            # batch_size, seq_len = y.shape
-            pad_mask = text_utils.create_padding_mask(y, pad_idx=0)
-            causal_mask = text_utils.create_causal_mask(seq_len, batch_size)
-            target_mask = Tensor(pad_mask + causal_mask, requires_grad=False)
-
+        for x, y, source_mask, target_mask in tqdm(
+            train_data_loader, desc="Step", leave=False
+        ):
+            step_count += 1
+            lr = get_lr(step_count, d_model, warmup_steps)
+            optimizer.lr = lr
             optimizer.zero_grad()
 
             # y has shape (batch_size, seq_len)
-            sos_idx = vocab["<SOS>"]
-
             # Create decoder input by prepending <SOS> and dropping the last token
             y_inp = np.zeros_like(y)
-            y_inp[:, 0] = sos_idx
+            y_inp[:, 0] = vocab["<SOS>"]
             y_inp[:, 1:] = y[:, :-1]
 
             # pred_probs is (batch_size, sequence_len, vocabulary_size)
@@ -526,27 +581,25 @@ if __name__ == "__main__":
                 source_mask,
                 target_mask,
             )
-            loss = functional.sparse_cross_entropy(pred_prob, y)
+            loss = functional.sparse_cross_entropy(pred_prob, y, pad_idx=0)
             loss.backward()
             optimizer.step()
-            total_loss += loss.detach().data
-        print(f"Epoch {epoch} | Loss: {total_loss / num_batches}")
+            epoch_loss += loss.detach().data
+        print(f"Epoch {epoch} | Loss: {epoch_loss / len(train_data_loader)}")
 
         if epoch % max(1, (NUM_EPOCHS // 10)) == 0:
             print("----- Evaluation -----")
             model.eval()
-            test_X, test_y = text_utils.create_batches(
-                test_data, batch_size=1, seq_len=50, sampling="random"
-            )
 
-            x = text_utils.token_batch_to_indices(test_X, vocab)
-            y = text_utils.token_batch_to_indices(test_y, vocab)
+            test_X, test_y = test_data_loader.sample_random_sequence(
+                seq_len=30, as_tokens=True
+            )
 
             pred_tokens = inference(
                 model,
-                start_tokens=[vocab.get("<SOS>", 0)],
-                max_length=50,
+                start_tokens=["<SOS>"],
+                max_length=30,
             )
-            print(f"{' '.join(train_y[0][:15])=}")
-            print(f"{pred_tokens}")
+            print(f"Groundtruth: {' '.join(test_y)}")
+            print(f"Prediction: {' '.join(pred_tokens)}")
             model.train()
