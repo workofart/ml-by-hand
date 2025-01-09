@@ -228,21 +228,17 @@ class SparseCrossEntropy(Function):
 
         # For each position i in non-pad, define partial derivatives.
         # We'll do it in 2 steps for clarity:
-        # Step 1: For all classes j, add -(label_smoothing/(c-1))*1/p_j
+        # 1. For j != correct, partial derivative: -(alpha/(c-1)) * 1/p_j
         grad_out[non_pad_idx, :] = (
             -(self.label_smoothing / (c - 1)) / y_pred[non_pad_idx, :]
         )
 
-        # Step 2: For the correct class c_i, add extra -(1 - label_smoothing)*(1/p_correct)
-        #         minus the portion we already added in step 1 for that class.
-        correct_classes = y_true[non_pad_idx]  # shape (num_non_pad,)
-        idx = (non_pad_idx, correct_classes)  # row indices, col indices
-        grad_out[idx] += (
-            -(1.0 - self.label_smoothing) / y_pred[idx]
-        )  # add the correct-class term
-        # (No need to "undo" anything because we used +=)
+        # 2. For the correct class only, partial derivative: -(1 - alpha) * (1/p_correct)
+        # Make sure we don't add extra label-smoothing portion belonging to other class
+        correct_idx = (non_pad_idx, y_true[non_pad_idx])
+        grad_out[correct_idx] = -(1.0 - self.label_smoothing) / y_pred[correct_idx]
 
-        # Scale
+        # 3. Multiply by upstream grad / #non_pad
         grad_out *= grad / count_non_pad
 
         # Reshape to original shape if 3D

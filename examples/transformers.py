@@ -176,7 +176,8 @@ class ResidualAddAndNorm(nn.Module):
 
     def forward(self, x, previous_layer: nn.Module):
         # Residual connection from input x
-        return x + self.dropout(self.layer_norm(previous_layer(x)))
+        # Post Layer normalization (same as the paper)
+        return x + self.layer_norm(self.dropout(previous_layer(x)))
 
 
 class EncoderSublayer(nn.Module):
@@ -288,8 +289,8 @@ class PositionalEncoding(nn.Module):
     This allows the model to learn to attent to relative positions even
     without the sequence order information.
 
-    PE(pos, 2i) = sin(pos / 10000^(2i/hidden_size))
-    PE(pos, 2i+1) = cos(pos / 10000^(2i/hidden_size))
+    $$ PE(pos, 2i) = sin(\frac{pos}{10000^{(\frac{2i}{\text{hidden\_size}})}}) $$
+    $$ PE(pos, 2i+1) = cos(\frac{pos}{10000^{(\frac{2i}{\text{hidden\_size}})}}) $$
     Where:
         pos is the position
         i is the dimension
@@ -328,7 +329,7 @@ class FeedForward(nn.Module):
     """
     Position-wise Feed-forward Network (Section 3.3)
 
-    FFN(x) = max(0, xW1 + b1)W2 + b2
+    $$ FFN(x) = max(0, xW1 + b1)W2 + b2 $$
     """
 
     def __init__(self, fc_input_size, hidden_size, dropout_prob):
@@ -474,7 +475,7 @@ def inference(model, start_tokens, max_length=50, temperature=1.0) -> list[str]:
         # We only care about the distribution over the last token:
         dist = probs.data[0, -1]  # shape (vocab_size,)
 
-        # Apply temperature scaling: p_i^(1/T)
+        # Apply temperature scaling: $$p_{i}^{(1/T)}$$
         if temperature != 1.0:
             dist = dist ** (1.0 / temperature)
 
@@ -489,7 +490,7 @@ def inference(model, start_tokens, max_length=50, temperature=1.0) -> list[str]:
             next_token_id = np.random.choice(len(dist), p=dist)
 
         generated.append(idx2word.get(next_token_id, "<UNK>"))
-        # Possibly break if next_token_id is <eos> or similar
+        # TODO: Possibly break if next_token_id is <eos> or similar
     return generated
 
 
@@ -509,17 +510,18 @@ def get_lr(step, model_dim, warmup_steps):
 
 
 if __name__ == "__main__":
-    NUM_EPOCHS = 100
-    seq_len = 80
+    NUM_EPOCHS = 200
+    seq_len = 32
     batch_size = 32
     warmup_steps = 300
-    d_model = 512
-    num_attention_heads = 8
+    d_model = 128
+    num_attention_heads = 4
+    eval_iters = 20
 
     url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
     filename = "examples/tinyshakespeare.txt"
 
-    data = load_data(url, filename)
+    data = load_data(url, filename)[:20000]
     print(len(data))
     data = data
     data = text_utils.clean_and_tokenize(data)
@@ -549,7 +551,7 @@ if __name__ == "__main__":
     test_data_loader = DataLoader(
         test_data,
         vocab,
-        batch_size,
+        batch_size // 4,
         seq_len,
         shuffle=True,
         pad_idx=0,
@@ -588,16 +590,37 @@ if __name__ == "__main__":
             optimizer.step()
             epoch_loss += loss.detach().data
 
-        print(f"Epoch {epoch} | Loss: {epoch_loss / len(train_data_loader)}")
-
         if epoch % max(1, (NUM_EPOCHS // 10)) == 0:
-            print("----- Evaluation -----")
             model.eval()
+            test_data_loader.on_epoch_start()
+            test_loss = 0
+
+            for _ in tqdm(range(eval_iters), desc="Test Evaluation", leave=False):
+                x, y, source_mask, target_mask = next(iter(test_data_loader))
+                y_inp = np.zeros_like(y)
+                y_inp[:, 0] = vocab["<SOS>"]
+                y_inp[:, 1:] = y[:, :-1]
+
+                pred_prob = model(
+                    x,
+                    y_inp,  # prepend <SOS> for decoder input
+                    source_mask,
+                    target_mask,
+                )
+                loss = functional.sparse_cross_entropy(
+                    pred_prob, y, pad_idx=0, label_smoothing=0.0
+                )
+                test_loss += loss.detach().data
 
             pred_tokens = inference(
                 model,
                 start_tokens=["<SOS>"],
                 max_length=30,
+                temperature=0.2,
+            )
+            model.train()
+
+            print(
+                f"\nEpoch {epoch} | Train Loss: {epoch_loss / len(train_data_loader):.2f} | Test Loss: {test_loss / eval_iters:.2f}"
             )
             print(f"Prediction: {' '.join(pred_tokens)}")
-            model.train()
