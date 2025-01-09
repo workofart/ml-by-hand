@@ -44,6 +44,8 @@ We are creating an autograd engine from scratch and use it to build/train more c
 - [x] [Neural Turing Machine (with LSTM controller)](https://github.com/workofart/ml-by-hand/blob/main/examples/neural_turing_machine.py)
 - [x] Sequence-to-Sequence
   - [WikiSum](https://github.com/workofart/ml-by-hand/blob/c0ff3dd175ba3b94850dcad19ebdf4fd58c08973/examples/seq2seq.py#L21)
+- [x] Transformers
+  - [TinyShakespeare text generation](https://github.com/workofart/ml-by-hand/blob/724f5a7451be845c7efe6cc6c3f2c216283896a8/examples/transformers.py#L10)
 ## Technical Overview
 - `tensor` (base class)
   - support scalar, vector, N-dimensional matrices
