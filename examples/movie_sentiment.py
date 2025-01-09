@@ -3,9 +3,8 @@ import numpy as np
 import pandas as pd
 from autograd.tools.data import (
     train_test_split,
-    create_vocabulary,
-    text_to_one_hot_and_sparse,
 )
+from autograd.text.utils import create_vocabulary, text_to_one_hot_and_sparse
 from autograd.tools.metrics import accuracy
 from autograd.tools.trainer import Trainer
 from autograd import nn, optim, functional

@@ -144,104 +144,105 @@ class BinaryCrossEntropy(Function):
 
 class SparseCrossEntropy(Function):
     """
-    Sparse Cross Entropy
-    Note: this assumes y_pred contains probabilities in [0,1].
-    If your model outputs logits, use sparse_cross_entropy_with_logits()
-    which calls softmax internally.
-
-    -y_true * log(y_pred)
+    Sparse cross-entropy for 2D or 3D predictions with optional pad_idx ignoring.
     """
 
-    def forward(self, y_pred, y_true, **kwargs):
+    def forward(self, y_pred, y_true, pad_idx=0, label_smoothing=0.0, **kwargs):
         """
-        y_pred: (batch_size, feature_dim) or (batch_size, sequence_length, feature_dim) of probabilities
-        y_true: (batch_size,) or (batch_size, sequence_length) of integer labels
+        Args:
+            - If y_pred is (batch_size, feature_dim), y_true is (batch_size,)
+            - If y_pred is (batch_size, seq_len, feature_dim), y_true is (batch_size, seq_len)
+            - y_pred must be probabilities in [0,1], not raw logits.
+            - pad_idx (int, optional): The padding index, we will mask this in the loss calculation. Defaults to 0.
+            - label_smoothing (float, optional): How much weight to put on non-correct classes. Defaults to 0.0.
+                "Rethinking the Inception Architecture for Computer Vision"
+                Label Smoothing Paper: https://arxiv.org/abs/1512.00567
         """
-        # Convert y_true to np array if it's a Tensor
+        # 1) Ensure y_pred is a valid probability distribution.
+        if (y_pred.min() < 0) or (y_pred.max() > 1):
+            raise ValueError("y_pred must contain probabilities in [0, 1].")
+
+        # 2) Convert y_true to NumPy if it’s a Tensor.
         if isinstance(y_true, Tensor):
             y_true = y_true.data
         y_true = np.asarray(y_true, dtype=np.int64)
-        if y_pred.min() < 0 or y_pred.max() > 1:
-            raise ValueError("y_pred must contain probabilities between 0 and 1")
 
-        self.y_true_shape = y_true.shape
-        self.y_pred_shape = y_pred.shape
+        # 3) Clip probabilities to avoid log(0).
+        y_pred = np.clip(y_pred, 1e-15, 1 - 1e-15)
 
-        # We'll store clipped probabilities for backward
-        y_pred_prob = np.clip(y_pred, 1e-15, 1 - 1e-15)
-        self.y_pred_prob = y_pred_prob
-
-        # 2D Case
-        # y_pred is (batch_size, feature_dim)
-        # y_true is (batch_size,)
-        if y_pred.ndim == 2:
-            batch_size, feature_dim = y_pred.shape
-            if y_true.shape != (batch_size,):
-                raise ValueError(
-                    f"For 2D y_pred, expect y_true of shape ({batch_size},), got {y_true.shape}"
-                )
-
-            # Gather the correct prob per sample
-            selected_probs = y_pred_prob[
-                np.arange(batch_size), y_true
-            ]  # shape (batch_size,)
-
-            loss = -np.mean(np.log(selected_probs))
-            self.gather_index = (np.arange(batch_size), y_true)  # store for backward
-
-        # 3D Case
-        # y_pred is (batch_size, sequence_length, feature_dim)
-        # y_true is (batch_size, sequence_length)
-        elif y_pred.ndim == 3:
-            batch_size, sequence_length, feature_dim = y_pred.shape
-            if y_true.shape != (batch_size, sequence_length):
-                raise ValueError(
-                    f"For 3D y_pred, expect y_true of shape ({batch_size},{sequence_length}), got {y_true.shape}"
-                )
-
-            batch_idx = np.arange(batch_size)[:, None]  # (batch_size,1)
-            time_idx = np.arange(sequence_length)[None, :]  # (1,sequence_length)
-            selected_probs = y_pred_prob[
-                batch_idx, time_idx, y_true
-            ]  # shape (batch_size, sequence_length)
-
-            loss = -np.mean(np.log(selected_probs))
-            self.gather_index = (batch_idx, time_idx, y_true)  # store for backward
-
+        # 4) Flatten if 3D, store original shape for backward.
+        self.original_shape = y_pred.shape
+        if y_pred.ndim == 3:
+            batch_size, seq_len, num_classes = y_pred.shape
+            y_pred = y_pred.reshape(batch_size * seq_len, num_classes)
+            y_true = y_true.reshape(batch_size * seq_len)
         else:
-            raise ValueError("SparseCrossEntropy only supports 2D or 3D y_pred")
+            batch_size, num_classes = y_pred.shape
 
-        return loss
+        # 5) Create a mask for non-pad positions.
+        self.non_pad_mask = y_true != pad_idx
+        non_pad_idx = np.where(self.non_pad_mask)[0]
+
+        # 6) Compute the smoothed cross-entropy loss for each element.
+        # $$ L_i = -\left( (1 - \text{label\_smoothing}) \log p_{i,y_i} + \frac{\text{label\_smoothing}}{\text{num\_classes} - 1} \sum_{j \neq y_i} \log p_{i,j} \right) $$
+        # $$ = -\left( (1 - \text{label\_smoothing}) \log p_{i,y_i} + \frac{\text{label\_smoothing}}{\text{num\_classes} - 1} \left( \sum_{j=1}^{\text{num\_classes}} \log p_{i,j} - \log p_{i,y_i} \right) \right) $$
+        # Essentially, we putting some (label_smoothing) weight on a uniform distribution over the non-correct classes
+        # This will make the model prediction les confident, and thus less likely to overfit.
+        idx = np.arange(len(y_true))
+        log_p = np.log(y_pred)  # shape (batch_size * seq_len, num_classes)
+        log_p_correct = log_p[idx, y_true]  # shape (bath_size * seq_len,)
+        sum_log_p = np.sum(log_p, axis=1)  # sum over classes
+        losses = -(
+            (1.0 - label_smoothing) * log_p_correct
+            + (label_smoothing / (num_classes - 1)) * (sum_log_p - log_p_correct)
+        )
+
+        # 7) Average loss only over non-pad positions.
+        loss_val = np.mean(losses[non_pad_idx])
+
+        # 8) Store for backward.
+        self.y_pred_prob = y_pred
+        self.y_true_flat = y_true
+        self.pad_idx = pad_idx
+        self.label_smoothing = label_smoothing
+        return loss_val
 
     def backward(self, grad):
         """
-        For 2D: grad_out[batch, label] = -1/(selected_probs * batch_size)
-        For 3D: grad_out[batch, time, label] = -1/(selected_probs * batch_size * sequence_len)
+        Backprop for:
+          $$L_i = -\left( (1 - \text{label\_smoothing}) \log p_{correct} + \frac{\text{label\_smoothing}}{c - 1} \left( \sum_{j=1}^{c} \log p_{i,j} - \log p_{i,y_i} \right) \right) $$
+          $$ \partial{L}/\partial{p_{correct}} = -(1-\text{label\_smoothing}) * (1/p_{correct}) $$
+          $$ \partial{L}/\partial{p_j} (j \neq c) = -(\text{label\_smoothing}/(c-1)) * (1/p_j) $$
+          where c is the number of classes
+        Then multiply by (grad / #non_pad).
         """
         grad = grad.data if isinstance(grad, Tensor) else grad
+        y_pred = self.y_pred_prob
+        y_true = self.y_true_flat
+        batch_size_times_seq_length, c = y_pred.shape
 
-        # Create grad array with same shape as y_pred
-        grad_out = np.zeros_like(self.y_pred_prob)
-        y_pred_prob = self.y_pred_prob
+        # Prepare output gradient array
+        grad_out = np.zeros_like(y_pred)
+        non_pad_idx = np.where(self.non_pad_mask)[0]
+        count_non_pad = max(1, len(non_pad_idx))
 
-        if len(self.y_pred_shape) == 2:
-            batch_size, sequence_length = self.y_pred_shape
-            # gather_index = (array([0,1,...,B-1]), array([...labels...]))
-            selected_probs = y_pred_prob[self.gather_index]
-            grad_values = -1.0 / (selected_probs * batch_size)  # average => divide by B
-            grad_out[self.gather_index] = grad_values * grad
+        # For each position i in non-pad, define partial derivatives.
+        # We'll do it in 2 steps for clarity:
+        # 1. For j != correct, partial derivative: -(alpha/(c-1)) * 1/p_j
+        grad_out[non_pad_idx, :] = (
+            -(self.label_smoothing / (c - 1)) / y_pred[non_pad_idx, :]
+        )
 
-        elif len(self.y_pred_shape) == 3:
-            batch_size, sequence_length, feature_dim = self.y_pred_shape
-            # gather_index = (batch_idx, time_idx, labels)
-            batch_idx, time_idx, labels = self.gather_index
-            selected_probs = y_pred_prob[batch_idx, time_idx, labels]  # shape (B, T)
-            grad_values = -1.0 / (
-                selected_probs * batch_size * sequence_length
-            )  # average => divide by B*T
-            # Because gather_index are broadcast shapes, we can assign:
-            grad_out[batch_idx, time_idx, labels] = grad_values * grad
+        # 2. For the correct class only, partial derivative: -(1 - alpha) * (1/p_correct)
+        # Make sure we don't add extra label-smoothing portion belonging to other class
+        correct_idx = (non_pad_idx, y_true[non_pad_idx])
+        grad_out[correct_idx] = -(1.0 - self.label_smoothing) / y_pred[correct_idx]
 
+        # 3. Multiply by upstream grad / #non_pad
+        grad_out *= grad / count_non_pad
+
+        # Reshape to original shape if 3D
+        grad_out = grad_out.reshape(self.original_shape)
         return grad_out, None
 
 
@@ -387,15 +388,15 @@ def binary_cross_entropy_with_logits(
 
 
 def sparse_cross_entropy(
-    y_pred: Tensor, y_true: Union[Tensor, np.ndarray], **kwargs
+    y_pred: Tensor, y_true: Union[Tensor, np.ndarray], pad_idx: int = None, **kwargs
 ) -> Tensor:
     if not isinstance(y_true, Tensor):
         y_true = Tensor(y_true, requires_grad=False)
-    return SparseCrossEntropy.apply(y_pred, y_true, **kwargs)
+    return SparseCrossEntropy.apply(y_pred, y_true, pad_idx=pad_idx, **kwargs)
 
 
 def sparse_cross_entropy_with_logits(
-    y_pred: Tensor, y_true: Union[Tensor, np.ndarray], **kwargs
+    y_pred: Tensor, y_true: Union[Tensor, np.ndarray], pad_idx=None, **kwargs
 ) -> Tensor:
     """
     Sparse Cross Entropy with logits input
@@ -404,7 +405,7 @@ def sparse_cross_entropy_with_logits(
     """
     if not isinstance(y_true, Tensor):
         y_true = Tensor(y_true, requires_grad=False)
-    return sparse_cross_entropy(softmax(y_pred), y_true, **kwargs)
+    return sparse_cross_entropy(softmax(y_pred), y_true, pad_idx=pad_idx, **kwargs)
 
 
 def cross_entropy_with_logits(
