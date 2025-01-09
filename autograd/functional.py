@@ -147,83 +147,106 @@ class SparseCrossEntropy(Function):
     Sparse cross-entropy for 2D or 3D predictions with optional pad_idx ignoring.
     """
 
-    def forward(self, y_pred, y_true, pad_idx=0, **kwargs):
+    def forward(self, y_pred, y_true, pad_idx=0, label_smoothing=0.0, **kwargs):
         """
         Args:
             - If y_pred is (batch_size, feature_dim), y_true is (batch_size,)
             - If y_pred is (batch_size, seq_len, feature_dim), y_true is (batch_size, seq_len)
             - y_pred must be probabilities in [0,1], not raw logits.
-            pad_idx (int, optional): The padding index, we will mask this in the loss calculation. Defaults to 0.
+            - pad_idx (int, optional): The padding index, we will mask this in the loss calculation. Defaults to 0.
+            - label_smoothing (float, optional): How much weight to put on non-correct classes. Defaults to 0.0.
+                "Rethinking the Inception Architecture for Computer Vision"
+                Label Smoothing Paper: https://arxiv.org/abs/1512.00567
         """
-        # Ensure y_pred is in [0,1]
-        if y_pred.min() < 0 or y_pred.max() > 1:
-            raise ValueError("y_pred must contain probabilities between 0 and 1")
+        # 1) Ensure y_pred is a valid probability distribution.
+        if (y_pred.min() < 0) or (y_pred.max() > 1):
+            raise ValueError("y_pred must contain probabilities in [0, 1].")
 
-        # Convert y_true to NumPy if it's a Tensor
+        # 2) Convert y_true to NumPy if it’s a Tensor.
         if isinstance(y_true, Tensor):
             y_true = y_true.data
         y_true = np.asarray(y_true, dtype=np.int64)
 
-        # Clip to avoid log(0) or log(1)
+        # 3) Clip probabilities to avoid log(0).
         y_pred = np.clip(y_pred, 1e-15, 1 - 1e-15)
 
-        # Keep track of original shape (for backward reshaping)
+        # 4) Flatten if 3D, store original shape for backward.
         self.original_shape = y_pred.shape
-
-        # Flatten if we have 3D predictions (B, T, F -> B*T, F)
         if y_pred.ndim == 3:
-            B, T, F = y_pred.shape
-            y_pred = y_pred.reshape(B * T, F)
-            y_true = y_true.reshape(B * T)
-        elif y_pred.ndim != 2:
-            raise ValueError("SparseCrossEntropy supports only 2D or 3D y_pred.")
-
-        # Gather the predicted probability of the true class
-        idx = np.arange(len(y_true))
-        selected_probs = y_pred[idx, y_true]
-
-        # Create a mask for non-pad tokens
-        self.non_pad_mask = y_true != pad_idx
-        selected_probs_non_pad = selected_probs[self.non_pad_mask]
-
-        # Compute negative log-likelihood over non-pad positions
-        if selected_probs_non_pad.size == 0:
-            loss_val = 0.0
+            batch_size, seq_len, num_classes = y_pred.shape
+            y_pred = y_pred.reshape(batch_size * seq_len, num_classes)
+            y_true = y_true.reshape(batch_size * seq_len)
         else:
-            loss_val = -np.mean(np.log(selected_probs_non_pad))
+            batch_size, num_classes = y_pred.shape
 
-        # Store for backward
+        # 5) Create a mask for non-pad positions.
+        self.non_pad_mask = y_true != pad_idx
+        non_pad_idx = np.where(self.non_pad_mask)[0]
+
+        # 6) Compute the smoothed cross-entropy loss for each element.
+        # $$ L_i = -\left( (1 - \text{label\_smoothing}) \log p_{i,y_i} + \frac{\text{label\_smoothing}}{\text{num\_classes} - 1} \sum_{j \neq y_i} \log p_{i,j} \right) $$
+        # $$ = -\left( (1 - \text{label\_smoothing}) \log p_{i,y_i} + \frac{\text{label\_smoothing}}{\text{num\_classes} - 1} \left( \sum_{j=1}^{\text{num\_classes}} \log p_{i,j} - \log p_{i,y_i} \right) \right) $$
+        # Essentially, we putting some (label_smoothing) weight on a uniform distribution over the non-correct classes
+        # This will make the model prediction les confident, and thus less likely to overfit.
+        idx = np.arange(len(y_true))
+        log_p = np.log(y_pred)  # shape (batch_size * seq_len, num_classes)
+        log_p_correct = log_p[idx, y_true]  # shape (bath_size * seq_len,)
+        sum_log_p = np.sum(log_p, axis=1)  # sum over classes
+        losses = -(
+            (1.0 - label_smoothing) * log_p_correct
+            + (label_smoothing / (num_classes - 1)) * (sum_log_p - log_p_correct)
+        )
+
+        # 7) Average loss only over non-pad positions.
+        loss_val = np.mean(losses[non_pad_idx])
+
+        # 8) Store for backward.
         self.y_pred_prob = y_pred
         self.y_true_flat = y_true
         self.pad_idx = pad_idx
-
+        self.label_smoothing = label_smoothing
         return loss_val
 
     def backward(self, grad):
-        # Convert grad to np array if it's a Tensor
+        """
+        Backprop for:
+          $$L_i = -\left( (1 - \text{label\_smoothing}) \log p_{correct} + \frac{\text{label\_smoothing}}{c - 1} \left( \sum_{j=1}^{c} \log p_{i,j} - \log p_{i,y_i} \right) \right) $$
+          $$ \partial{L}/\partial{p_{correct}} = -(1-\text{label\_smoothing}) * (1/p_{correct}) $$
+          $$ \partial{L}/\partial{p_j} (j \neq c) = -(\text{label\_smoothing}/(c-1)) * (1/p_j) $$
+          where c is the number of classes
+        Then multiply by (grad / #non_pad).
+        """
         grad = grad.data if isinstance(grad, Tensor) else grad
+        y_pred = self.y_pred_prob
+        y_true = self.y_true_flat
+        batch_size_times_seq_length, c = y_pred.shape
 
-        # Prepare an output gradient array same shape as flattened y_pred
-        grad_out_flat = np.zeros_like(self.y_pred_prob)
+        # Prepare output gradient array
+        grad_out = np.zeros_like(y_pred)
+        non_pad_idx = np.where(self.non_pad_mask)[0]
+        count_non_pad = max(1, len(non_pad_idx))
 
-        # Gather the relevant probabilities
-        idx = np.arange(len(self.y_true_flat))
-        selected_probs = self.y_pred_prob[idx, self.y_true_flat]
+        # For each position i in non-pad, define partial derivatives.
+        # We'll do it in 2 steps for clarity:
+        # Step 1: For all classes j, add -(label_smoothing/(c-1))*1/p_j
+        grad_out[non_pad_idx, :] = (
+            -(self.label_smoothing / (c - 1)) / y_pred[non_pad_idx, :]
+        )
 
-        # Number of real (non-pad) tokens
-        count_non_pad = max(1, self.non_pad_mask.sum())
+        # Step 2: For the correct class c_i, add extra -(1 - label_smoothing)*(1/p_correct)
+        #         minus the portion we already added in step 1 for that class.
+        correct_classes = y_true[non_pad_idx]  # shape (num_non_pad,)
+        idx = (non_pad_idx, correct_classes)  # row indices, col indices
+        grad_out[idx] += (
+            -(1.0 - self.label_smoothing) / y_pred[idx]
+        )  # add the correct-class term
+        # (No need to "undo" anything because we used +=)
 
-        # d(-log p)/dp = -1/p (scaled by 1/count_non_pad and upstream grad)
-        grad_values = -grad / (selected_probs * count_non_pad)
-        # Zero out pad positions
-        grad_values[~self.non_pad_mask] = 0.0
+        # Scale
+        grad_out *= grad / count_non_pad
 
-        # Scatter back into grad_out_flat
-        grad_out_flat[idx, self.y_true_flat] = grad_values
-
-        # Reshape to original shape
-        grad_out = grad_out_flat.reshape(self.original_shape)
-
+        # Reshape to original shape if 3D
+        grad_out = grad_out.reshape(self.original_shape)
         return grad_out, None
 
 

@@ -509,7 +509,7 @@ def get_lr(step, model_dim, warmup_steps):
 
 
 if __name__ == "__main__":
-    NUM_EPOCHS = 10
+    NUM_EPOCHS = 100
     seq_len = 80
     batch_size = 32
     warmup_steps = 300
@@ -581,7 +581,9 @@ if __name__ == "__main__":
                 source_mask,
                 target_mask,
             )
-            loss = functional.sparse_cross_entropy(pred_prob, y, pad_idx=0)
+            loss = functional.sparse_cross_entropy(
+                pred_prob, y, pad_idx=0, label_smoothing=0.1
+            )
             loss.backward()
             optimizer.step()
             epoch_loss += loss.detach().data
