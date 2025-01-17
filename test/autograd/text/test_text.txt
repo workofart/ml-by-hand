@@ -1,0 +1,413 @@
+# Automatic differentiation - Wikipedia
+
+> ## Excerpt
+> In mathematics and computer algebra, automatic differentiation (auto-differentiation, autodiff, or AD), also called algorithmic differentiation, computational differentiation, and differentiation arithmetic[1][2][3][4] is a set of techniques to evaluate the partial derivative of a function specified by a computer program. Automatic differentiation is a subtle and central tool to automatize the simultaneous computation of the numerical values of arbitrarily complex functions and their derivatives with no need for the symbolic representation of the derivative, only the function rule or an algorithm thereof is required [3][4]. Auto-differentiation is thus neither numeric nor symbolic, nor is it a combination of both. It is also preferable to ordinary numerical methods: In contrast to the more traditional numerical methods based on finite differences, auto-differentiation is 'in theory' exact, and in comparison to symbolic algorithms, it is computationally inexpensive.[5][3][6]
+
+---
+In mathematics and computer algebra, **automatic differentiation** (**auto-differentiation**, **autodiff**, or **AD**), also called **algorithmic differentiation**, **computational differentiation**, and **differentiation arithmetic**<sup id="cite_ref-1"><a href="https://en.wikipedia.org/wiki/Automatic_differentiation#cite_note-1"><span>[</span>1<span>]</span></a></sup><sup id="cite_ref-baydin2018automatic_2-0"><a href="https://en.wikipedia.org/wiki/Automatic_differentiation#cite_note-baydin2018automatic-2"><span>[</span>2<span>]</span></a></sup><sup id="cite_ref-Dawood.Megahed.2023_3-0"><a href="https://en.wikipedia.org/wiki/Automatic_differentiation#cite_note-Dawood.Megahed.2023-3"><span>[</span>3<span>]</span></a></sup><sup id="cite_ref-Dawood.Megahed.2019_4-0"><a href="https://en.wikipedia.org/wiki/Automatic_differentiation#cite_note-Dawood.Megahed.2019-4"><span>[</span>4<span>]</span></a></sup> is a set of techniques to evaluate the partial derivative of a function specified by a computer program. Automatic differentiation is a subtle and central tool to automatize the simultaneous computation of the numerical values of arbitrarily complex functions and their derivatives with no need for the symbolic representation of the derivative, only the function rule or an algorithm thereof is required <sup id="cite_ref-Dawood.Megahed.2023_3-1"><a href="https://en.wikipedia.org/wiki/Automatic_differentiation#cite_note-Dawood.Megahed.2023-3"><span>[</span>3<span>]</span></a></sup><sup id="cite_ref-Dawood.Megahed.2019_4-1"><a href="https://en.wikipedia.org/wiki/Automatic_differentiation#cite_note-Dawood.Megahed.2019-4"><span>[</span>4<span>]</span></a></sup>. Auto-differentiation is thus neither numeric nor symbolic, nor is it a combination of both. It is also preferable to ordinary numerical methods: In contrast to the more traditional numerical methods based on finite differences, auto-differentiation is 'in theory' exact, and in comparison to symbolic algorithms, it is computationally inexpensive.<sup id="cite_ref-Dawood-attribution_5-0"><a href="https://en.wikipedia.org/wiki/Automatic_differentiation#cite_note-Dawood-attribution-5"><span>[</span>5<span>]</span></a></sup><sup id="cite_ref-Dawood.Megahed.2023_3-2"><a href="https://en.wikipedia.org/wiki/Automatic_differentiation#cite_note-Dawood.Megahed.2023-3"><span>[</span>3<span>]</span></a></sup><sup id="cite_ref-Dawood.Dawood.2022_6-0"><a href="https://en.wikipedia.org/wiki/Automatic_differentiation#cite_note-Dawood.Dawood.2022-6"><span>[</span>6<span>]</span></a></sup>
+
+Automatic differentiation exploits the fact that every computer calculation, no matter how complicated, executes a sequence of elementary arithmetic operations (addition, subtraction, multiplication, division, etc.) and elementary functions (exp, log, sin, cos, etc.). By applying the chain rule repeatedly to these operations, partial derivatives of arbitrary order can be computed automatically, accurately to working precision, and using at most a small constant factor of more arithmetic operations than the original program.
+
+## Difference from other differentiation methods
+
+\[edit\]
+
+Figure 1: How automatic differentiation relates to symbolic differentiation
+
+Automatic differentiation is distinct from symbolic differentiation and numerical differentiation. Symbolic differentiation faces the difficulty of converting a computer program into a single mathematical expression and can lead to inefficient code. Numerical differentiation (the method of finite differences) can introduce round-off errors in the discretization process and cancellation. Both of these classical methods have problems with calculating higher derivatives, where complexity and errors increase. Finally, both of these classical methods are slow at computing partial derivatives of a function with respect to _many_ inputs, as is needed for gradient\-based optimization algorithms. Automatic differentiation solves all of these problems.
+
+Currently, for its efficiency and accuracy in computing first and higher order derivatives, auto-differentiation is a celebrated technique with diverse applications in scientific computing and mathematics. It should therefore come as no surprise that there are numerous computational implementations of auto-differentiation. Among these, one mentions INTLAB, Sollya, and InCLosure<sup id="cite_ref-Rump.1999_7-0"><a href="https://en.wikipedia.org/wiki/Automatic_differentiation#cite_note-Rump.1999-7"><span>[</span>7<span>]</span></a></sup><sup id="cite_ref-Chevillard.Joldes.Lauter.2010_8-0"><a href="https://en.wikipedia.org/wiki/Automatic_differentiation#cite_note-Chevillard.Joldes.Lauter.2010-8"><span>[</span>8<span>]</span></a></sup><sup id="cite_ref-Dawood.Inc4.2022_9-0"><a href="https://en.wikipedia.org/wiki/Automatic_differentiation#cite_note-Dawood.Inc4.2022-9"><span>[</span>9<span>]</span></a></sup>. In practice, there are two types (modes) of algorithmic differentiation: a forward-type and a reversed-type<sup id="cite_ref-Dawood.Megahed.2023_3-3"><a href="https://en.wikipedia.org/wiki/Automatic_differentiation#cite_note-Dawood.Megahed.2023-3"><span>[</span>3<span>]</span></a></sup><sup id="cite_ref-Dawood.Megahed.2019_4-2"><a href="https://en.wikipedia.org/wiki/Automatic_differentiation#cite_note-Dawood.Megahed.2019-4"><span>[</span>4<span>]</span></a></sup>. Presently, the two types are highly correlated and complementary and both have a wide variety of applications in, e.g., non-linear optimization, sensitivity analysis, robotics, machine learning, computer graphics, and computer vision.<sup id="cite_ref-Dawood-attribution_5-1"><a href="https://en.wikipedia.org/wiki/Automatic_differentiation#cite_note-Dawood-attribution-5"><span>[</span>5<span>]</span></a></sup><sup id="cite_ref-Fries.2019_10-0"><a href="https://en.wikipedia.org/wiki/Automatic_differentiation#cite_note-Fries.2019-10"><span>[</span>10<span>]</span></a></sup><sup id="cite_ref-Dawood.Megahed.2023_3-4"><a href="https://en.wikipedia.org/wiki/Automatic_differentiation#cite_note-Dawood.Megahed.2023-3"><span>[</span>3<span>]</span></a></sup><sup id="cite_ref-Dawood.Megahed.2019_4-3"><a href="https://en.wikipedia.org/wiki/Automatic_differentiation#cite_note-Dawood.Megahed.2019-4"><span>[</span>4<span>]</span></a></sup><sup id="cite_ref-Dawood.Dawood.2020_11-0"><a href="https://en.wikipedia.org/wiki/Automatic_differentiation#cite_note-Dawood.Dawood.2020-11"><span>[</span>11<span>]</span></a></sup><sup id="cite_ref-Dawood.2014_12-0"><a href="https://en.wikipedia.org/wiki/Automatic_differentiation#cite_note-Dawood.2014-12"><span>[</span>12<span>]</span></a></sup> Automatic differentiation is particularly important in the field of machine learning. For example, it allows one to implement backpropagation in a neural network without a manually-computed derivative.
+
+## Forward and reverse accumulation
+
+\[edit\]
+
+### Chain rule of partial derivatives of composite functions
+
+\[edit\]
+
+Fundamental to automatic differentiation is the decomposition of differentials provided by the chain rule of partial derivatives of composite functions. For the simple composition  the chain rule gives
+
+### Two types of automatic differentiation
+
+\[edit\]
+
+Usually, two distinct modes of automatic differentiation are presented.
+
+-   **forward accumulation** (also called **bottom-up**, **forward mode**, or **tangent mode**)
+-   **reverse accumulation** (also called **top-down**, **reverse mode**, or **adjoint mode**)
+
+Forward accumulation specifies that one traverses the chain rule from inside to outside (that is, first compute  and then  and at last ), while reverse accumulation has the traversal from outside to inside (first compute  and then  and at last ). More succinctly,
+
+The value of the partial derivative, called _seed_, is propagated forward or backward and is initially  or . Forward accumulation evaluates the function and calculates the derivative with respect to one independent variable in one pass. For each independent variable  a separate pass is therefore necessary in which the derivative with respect to that independent variable is set to one () and of all others to zero (). In contrast, reverse accumulation requires the evaluated partial functions for the partial derivatives. Reverse accumulation therefore evaluates the function first and calculates the derivatives with respect to all independent variables in an additional pass.
+
+Which of these two types should be used depends on the sweep count. The computational complexity of one sweep is proportional to the complexity of the original code.
+
+-   Forward accumulation is more efficient than reverse accumulation for functions _f_ : **R**<sup><i>n</i></sup> → **R**<sup><i>m</i></sup> with _n_ ≪ _m_ as only _n_ sweeps are necessary, compared to _m_ sweeps for reverse accumulation.
+-   Reverse accumulation is more efficient than forward accumulation for functions _f_ : **R**<sup><i>n</i></sup> → **R**<sup><i>m</i></sup> with _n_ ≫ _m_ as only _m_ sweeps are necessary, compared to _n_ sweeps for forward accumulation.
+
+Backpropagation of errors in multilayer perceptrons, a technique used in machine learning, is a special case of reverse accumulation.<sup id="cite_ref-baydin2018automatic_2-1"><a href="https://en.wikipedia.org/wiki/Automatic_differentiation#cite_note-baydin2018automatic-2"><span>[</span>2<span>]</span></a></sup>
+
+Forward accumulation was introduced by R.E. Wengert in 1964.<sup id="cite_ref-Wengert1964_13-0"><a href="https://en.wikipedia.org/wiki/Automatic_differentiation#cite_note-Wengert1964-13"><span>[</span>13<span>]</span></a></sup> According to Andreas Griewank, reverse accumulation has been suggested since the late 1960s, but the inventor is unknown.<sup id="cite_ref-grie2012_14-0"><a href="https://en.wikipedia.org/wiki/Automatic_differentiation#cite_note-grie2012-14"><span>[</span>14<span>]</span></a></sup> Seppo Linnainmaa published reverse accumulation in 1976.<sup id="cite_ref-lin1976_15-0"><a href="https://en.wikipedia.org/wiki/Automatic_differentiation#cite_note-lin1976-15"><span>[</span>15<span>]</span></a></sup>
+
+### Forward accumulation
+
+\[edit\]
+
+Forward accumulation
+
+In forward accumulation AD, one first fixes the _independent variable_ with respect to which differentiation is performed and computes the derivative of each sub-expression recursively. In a pen-and-paper calculation, this involves repeatedly substituting the derivative of the _inner_ functions in the chain rule:  This can be generalized to multiple variables as a matrix product of Jacobians.
+
+Compared to reverse accumulation, forward accumulation is natural and easy to implement as the flow of derivative information coincides with the order of evaluation. Each variable  is augmented with its derivative  (stored as a numerical value, not a symbolic expression),  as denoted by the dot. The derivatives are then computed in sync with the evaluation steps and combined with other derivatives via the chain rule.
+
+Using the chain rule, if  has predecessors in the computational graph:
+
+Figure 2: Example of forward accumulation with computational graph
+
+As an example, consider the function:  For clarity, the individual sub-expressions have been labeled with the variables .
+
+The choice of the independent variable to which differentiation is performed affects the _seed_ values _ẇ_<sub>1</sub> and _ẇ_<sub>2</sub>. Given interest in the derivative of this function with respect to _x_<sub>1</sub>, the seed values should be set to:
+
+With the seed values set, the values propagate using the chain rule as shown. Figure 2 shows a pictorial depiction of this process as a computational graph.
+
+| Operations to compute value | Operations to compute derivative |
+| --- | --- |
+|  |  (seed) |
+|  |  (seed) |
+|  |  |
+|  |  |
+|  |  |
+
+To compute the gradient of this example function, which requires not only  but also , an _additional_ sweep is performed over the computational graph using the seed values .
+
+Forward accumulation calculates the function and the derivative (but only for one independent variable each) in one pass. The associated method call expects the expression _Z_ to be derived with regard to a variable _V_. The method returns a pair of the evaluated function and its derivative. The method traverses the expression tree recursively until a variable is reached. If the derivative with respect to this variable is requested, its derivative is 1, 0 otherwise. Then the partial function as well as the partial derivative are evaluated.<sup id="cite_ref-demm22_16-0"><a href="https://en.wikipedia.org/wiki/Automatic_differentiation#cite_note-demm22-16"><span>[</span>16<span>]</span></a></sup>
+
+```
+<span></span><span>tuple</span><span>&lt;</span><span>float</span><span>,</span><span>float</span><span>&gt;</span><span> </span><span>evaluateAndDerive</span><span>(</span><span>Expression</span><span> </span><span>Z</span><span>,</span><span> </span><span>Variable</span><span> </span><span>V</span><span>)</span><span> </span><span>{</span>
+<span>   </span><span>if</span><span> </span><span>isVariable</span><span>(</span><span>Z</span><span>)</span>
+<span>      </span><span>if</span><span> </span><span>(</span><span>Z</span><span> </span><span>=</span><span> </span><span>V</span><span>)</span><span> </span><span>return</span><span> </span><span>{</span><span>valueOf</span><span>(</span><span>Z</span><span>),</span><span> </span><span>1</span><span>};</span>
+<span>      </span><span>else</span><span> </span><span>return</span><span> </span><span>{</span><span>valueOf</span><span>(</span><span>Z</span><span>),</span><span> </span><span>0</span><span>};</span>
+<span>   </span><span>else</span><span> </span><span>if</span><span> </span><span>(</span><span>Z</span><span> </span><span>=</span><span> </span><span>A</span><span> </span><span>+</span><span> </span><span>B</span><span>)</span>
+<span>      </span><span>{</span><span>a</span><span>,</span><span> </span><span>a</span><span>'</span><span>}</span><span> </span><span>=</span><span> </span><span>evaluateAndDerive</span><span>(</span><span>A</span><span>,</span><span> </span><span>V</span><span>);</span>
+<span>      </span><span>{</span><span>b</span><span>,</span><span> </span><span>b</span><span>'</span><span>}</span><span> </span><span>=</span><span> </span><span>evaluateAndDerive</span><span>(</span><span>B</span><span>,</span><span> </span><span>V</span><span>);</span>
+<span>      </span><span>return</span><span> </span><span>{</span><span>a</span><span> </span><span>+</span><span> </span><span>b</span><span>,</span><span> </span><span>a</span><span>'</span><span> </span><span>+</span><span> </span><span>b</span><span>'</span><span>};</span>
+<span>   </span><span>else</span><span> </span><span>if</span><span> </span><span>(</span><span>Z</span><span> </span><span>=</span><span> </span><span>A</span><span> </span><span>-</span><span> </span><span>B</span><span>)</span>
+<span>      </span><span>{</span><span>a</span><span>,</span><span> </span><span>a</span><span>'</span><span>}</span><span> </span><span>=</span><span> </span><span>evaluateAndDerive</span><span>(</span><span>A</span><span>,</span><span> </span><span>V</span><span>);</span>
+<span>      </span><span>{</span><span>b</span><span>,</span><span> </span><span>b</span><span>'</span><span>}</span><span> </span><span>=</span><span> </span><span>evaluateAndDerive</span><span>(</span><span>B</span><span>,</span><span> </span><span>V</span><span>);</span>
+<span>      </span><span>return</span><span> </span><span>{</span><span>a</span><span> </span><span>-</span><span> </span><span>b</span><span>,</span><span> </span><span>a</span><span>'</span><span> </span><span>-</span><span> </span><span>b</span><span>'</span><span>};</span>
+<span>   </span><span>else</span><span> </span><span>if</span><span> </span><span>(</span><span>Z</span><span> </span><span>=</span><span> </span><span>A</span><span> </span><span>*</span><span> </span><span>B</span><span>)</span>
+<span>      </span><span>{</span><span>a</span><span>,</span><span> </span><span>a</span><span>'</span><span>}</span><span> </span><span>=</span><span> </span><span>evaluateAndDerive</span><span>(</span><span>A</span><span>,</span><span> </span><span>V</span><span>);</span>
+<span>      </span><span>{</span><span>b</span><span>,</span><span> </span><span>b</span><span>'</span><span>}</span><span> </span><span>=</span><span> </span><span>evaluateAndDerive</span><span>(</span><span>B</span><span>,</span><span> </span><span>V</span><span>);</span>
+<span>      </span><span>return</span><span> </span><span>{</span><span>a</span><span> </span><span>*</span><span> </span><span>b</span><span>,</span><span> </span><span>b</span><span> </span><span>*</span><span> </span><span>a</span><span>'</span><span> </span><span>+</span><span> </span><span>a</span><span> </span><span>*</span><span> </span><span>b</span><span>'</span><span>};</span>
+<span>}</span>
+```
+
+```
+<span></span><span>#include</span><span> </span><span>&lt;iostream&gt;</span>
+<span>struct</span><span> </span><span>ValueAndPartial</span><span> </span><span>{</span><span> </span><span>float</span><span> </span><span>value</span><span>,</span><span> </span><span>partial</span><span>;</span><span> </span><span>};</span>
+<span>struct</span><span> </span><span>Variable</span><span>;</span>
+<span>struct</span><span> </span><span>Expression</span><span> </span><span>{</span>
+<span>   </span><span>virtual</span><span> </span><span>ValueAndPartial</span><span> </span><span>evaluateAndDerive</span><span>(</span><span>Variable</span><span> </span><span>*</span><span>variable</span><span>)</span><span> </span><span>=</span><span> </span><span>0</span><span>;</span>
+<span>};</span>
+<span>struct</span><span> </span><span>Variable</span><span>:</span><span> </span><span>public</span><span> </span><span>Expression</span><span> </span><span>{</span>
+<span>   </span><span>float</span><span> </span><span>value</span><span>;</span>
+<span>   </span><span>Variable</span><span>(</span><span>float</span><span> </span><span>value</span><span>)</span><span>:</span><span> </span><span>value</span><span>(</span><span>value</span><span>)</span><span> </span><span>{}</span>
+<span>   </span><span>ValueAndPartial</span><span> </span><span>evaluateAndDerive</span><span>(</span><span>Variable</span><span> </span><span>*</span><span>variable</span><span>)</span><span> </span><span>{</span>
+<span>      </span><span>float</span><span> </span><span>partial</span><span> </span><span>=</span><span> </span><span>(</span><span>this</span><span> </span><span>==</span><span> </span><span>variable</span><span>)</span><span> </span><span>?</span><span> </span><span>1.0f</span><span> </span><span>:</span><span> </span><span>0.0f</span><span>;</span>
+<span>      </span><span>return</span><span> </span><span>{</span><span>value</span><span>,</span><span> </span><span>partial</span><span>};</span>
+<span>   </span><span>}</span>
+<span>};</span>
+<span>struct</span><span> </span><span>Plus</span><span>:</span><span> </span><span>public</span><span> </span><span>Expression</span><span> </span><span>{</span>
+<span>   </span><span>Expression</span><span> </span><span>*</span><span>a</span><span>,</span><span> </span><span>*</span><span>b</span><span>;</span>
+<span>   </span><span>Plus</span><span>(</span><span>Expression</span><span> </span><span>*</span><span>a</span><span>,</span><span> </span><span>Expression</span><span> </span><span>*</span><span>b</span><span>)</span><span>:</span><span> </span><span>a</span><span>(</span><span>a</span><span>),</span><span> </span><span>b</span><span>(</span><span>b</span><span>)</span><span> </span><span>{}</span>
+<span>   </span><span>ValueAndPartial</span><span> </span><span>evaluateAndDerive</span><span>(</span><span>Variable</span><span> </span><span>*</span><span>variable</span><span>)</span><span> </span><span>{</span>
+<span>      </span><span>auto</span><span> </span><span>[</span><span>valueA</span><span>,</span><span> </span><span>partialA</span><span>]</span><span> </span><span>=</span><span> </span><span>a</span><span>-&gt;</span><span>evaluateAndDerive</span><span>(</span><span>variable</span><span>);</span>
+<span>      </span><span>auto</span><span> </span><span>[</span><span>valueB</span><span>,</span><span> </span><span>partialB</span><span>]</span><span> </span><span>=</span><span> </span><span>b</span><span>-&gt;</span><span>evaluateAndDerive</span><span>(</span><span>variable</span><span>);</span>
+<span>      </span><span>return</span><span> </span><span>{</span><span>valueA</span><span> </span><span>+</span><span> </span><span>valueB</span><span>,</span><span> </span><span>partialA</span><span> </span><span>+</span><span> </span><span>partialB</span><span>};</span>
+<span>   </span><span>}</span>
+<span>};</span>
+<span>struct</span><span> </span><span>Multiply</span><span>:</span><span> </span><span>public</span><span> </span><span>Expression</span><span> </span><span>{</span>
+<span>   </span><span>Expression</span><span> </span><span>*</span><span>a</span><span>,</span><span> </span><span>*</span><span>b</span><span>;</span>
+<span>   </span><span>Multiply</span><span>(</span><span>Expression</span><span> </span><span>*</span><span>a</span><span>,</span><span> </span><span>Expression</span><span> </span><span>*</span><span>b</span><span>)</span><span>:</span><span> </span><span>a</span><span>(</span><span>a</span><span>),</span><span> </span><span>b</span><span>(</span><span>b</span><span>)</span><span> </span><span>{}</span>
+<span>   </span><span>ValueAndPartial</span><span> </span><span>evaluateAndDerive</span><span>(</span><span>Variable</span><span> </span><span>*</span><span>variable</span><span>)</span><span> </span><span>{</span>
+<span>      </span><span>auto</span><span> </span><span>[</span><span>valueA</span><span>,</span><span> </span><span>partialA</span><span>]</span><span> </span><span>=</span><span> </span><span>a</span><span>-&gt;</span><span>evaluateAndDerive</span><span>(</span><span>variable</span><span>);</span>
+<span>      </span><span>auto</span><span> </span><span>[</span><span>valueB</span><span>,</span><span> </span><span>partialB</span><span>]</span><span> </span><span>=</span><span> </span><span>b</span><span>-&gt;</span><span>evaluateAndDerive</span><span>(</span><span>variable</span><span>);</span>
+<span>      </span><span>return</span><span> </span><span>{</span><span>valueA</span><span> </span><span>*</span><span> </span><span>valueB</span><span>,</span><span> </span><span>valueB</span><span> </span><span>*</span><span> </span><span>partialA</span><span> </span><span>+</span><span> </span><span>valueA</span><span> </span><span>*</span><span> </span><span>partialB</span><span>};</span>
+<span>   </span><span>}</span>
+<span>};</span>
+<span>int</span><span> </span><span>main</span><span> </span><span>()</span><span> </span><span>{</span>
+<span>   </span><span>// Example: Finding the partials of z = x * (x + y) + y * y at (x, y) = (2, 3)</span>
+<span>   </span><span>Variable</span><span> </span><span>x</span><span>(</span><span>2</span><span>),</span><span> </span><span>y</span><span>(</span><span>3</span><span>);</span>
+<span>   </span><span>Plus</span><span> </span><span>p1</span><span>(</span><span>&amp;</span><span>x</span><span>,</span><span> </span><span>&amp;</span><span>y</span><span>);</span><span> </span><span>Multiply</span><span> </span><span>m1</span><span>(</span><span>&amp;</span><span>x</span><span>,</span><span> </span><span>&amp;</span><span>p1</span><span>);</span><span> </span><span>Multiply</span><span> </span><span>m2</span><span>(</span><span>&amp;</span><span>y</span><span>,</span><span> </span><span>&amp;</span><span>y</span><span>);</span><span> </span><span>Plus</span><span> </span><span>z</span><span>(</span><span>&amp;</span><span>m1</span><span>,</span><span> </span><span>&amp;</span><span>m2</span><span>);</span>
+<span>   </span><span>float</span><span> </span><span>xPartial</span><span> </span><span>=</span><span> </span><span>z</span><span>.</span><span>evaluateAndDerive</span><span>(</span><span>&amp;</span><span>x</span><span>).</span><span>partial</span><span>;</span>
+<span>   </span><span>float</span><span> </span><span>yPartial</span><span> </span><span>=</span><span> </span><span>z</span><span>.</span><span>evaluateAndDerive</span><span>(</span><span>&amp;</span><span>y</span><span>).</span><span>partial</span><span>;</span>
+<span>   </span><span>std</span><span>::</span><span>cout</span><span> </span><span>&lt;&lt;</span><span> </span><span>"∂z/∂x = "</span><span> </span><span>&lt;&lt;</span><span> </span><span>xPartial</span><span> </span><span>&lt;&lt;</span><span> </span><span>", "</span>
+<span>             </span><span>&lt;&lt;</span><span> </span><span>"∂z/∂y = "</span><span> </span><span>&lt;&lt;</span><span> </span><span>yPartial</span><span> </span><span>&lt;&lt;</span><span> </span><span>std</span><span>::</span><span>endl</span><span>;</span>
+<span>   </span><span>// Output: ∂z/∂x = 7, ∂z/∂y = 8</span>
+<span>   </span><span>return</span><span> </span><span>0</span><span>;</span>
+<span>}</span>
+```
+
+### Reverse accumulation
+
+\[edit\]
+
+Reverse accumulation
+
+In reverse accumulation AD, the _dependent variable_ to be differentiated is fixed and the derivative is computed _with respect to_ each sub-expression recursively. In a pen-and-paper calculation, the derivative of the _outer_ functions is repeatedly substituted in the chain rule:
+
+In reverse accumulation, the quantity of interest is the _adjoint_, denoted with a bar ; it is a derivative of a chosen dependent variable with respect to a subexpression :
+
+Using the chain rule, if  has successors in the computational graph:
+
+Reverse accumulation traverses the chain rule from outside to inside, or in the case of the computational graph in Figure 3, from top to bottom. The example function is scalar-valued, and thus there is only one seed for the derivative computation, and only one sweep of the computational graph is needed to calculate the (two-component) gradient. This is only half the work when compared to forward accumulation, but reverse accumulation requires the storage of the intermediate variables _w_<sub><i>i</i></sub> as well as the instructions that produced them in a data structure known as a "tape" or a Wengert list<sup id="cite_ref-17"><a href="https://en.wikipedia.org/wiki/Automatic_differentiation#cite_note-17"><span>[</span>17<span>]</span></a></sup> (however, Wengert published forward accumulation, not reverse accumulation<sup id="cite_ref-Wengert1964_13-1"><a href="https://en.wikipedia.org/wiki/Automatic_differentiation#cite_note-Wengert1964-13"><span>[</span>13<span>]</span></a></sup>), which may consume significant memory if the computational graph is large. This can be mitigated to some extent by storing only a subset of the intermediate variables and then reconstructing the necessary work variables by repeating the evaluations, a technique known as rematerialization. Checkpointing is also used to save intermediary states.
+
+Figure 3: Example of reverse accumulation with computational graph
+
+The operations to compute the derivative using reverse accumulation are shown in the table below (note the reversed order):
+
+The data flow graph of a computation can be manipulated to calculate the gradient of its original calculation. This is done by adding an adjoint node for each primal node, connected by adjoint edges which parallel the primal edges but flow in the opposite direction. The nodes in the adjoint graph represent multiplication by the derivatives of the functions calculated by the nodes in the primal. For instance, addition in the primal causes fanout in the adjoint; fanout in the primal causes addition in the adjoint;<sup id="cite_ref-18"><a href="https://en.wikipedia.org/wiki/Automatic_differentiation#cite_note-18"><span>[</span>a<span>]</span></a></sup> a unary function _y_ = _f_(_x_) in the primal causes _x̄_ = _ȳ_ _f_′(_x_) in the adjoint; etc.
+
+Reverse accumulation requires two passes: In the forward pass, the function is evaluated first and the partial results are cached. In the reverse pass, the partial derivatives are calculated and the previously derived value is backpropagated. The corresponding method call expects the expression _Z_ to be derived and _seed_ with the derived value of the parent expression. For the top expression, Z derived with regard to Z, this is 1. The method traverses the expression tree recursively until a variable is reached and adds the current _seed_ value to the derivative expression.<sup id="cite_ref-ssdbm21_19-0"><a href="https://en.wikipedia.org/wiki/Automatic_differentiation#cite_note-ssdbm21-19"><span>[</span>18<span>]</span></a></sup><sup id="cite_ref-dpd_20-0"><a href="https://en.wikipedia.org/wiki/Automatic_differentiation#cite_note-dpd-20"><span>[</span>19<span>]</span></a></sup>
+
+```
+<span></span><span>void</span><span> </span><span>derive</span><span>(</span><span>Expression</span><span> </span><span>Z</span><span>,</span><span> </span><span>float</span><span> </span><span>seed</span><span>)</span><span> </span><span>{</span>
+<span>   </span><span>if</span><span> </span><span>isVariable</span><span>(</span><span>Z</span><span>)</span>
+<span>      </span><span>partialDerivativeOf</span><span>(</span><span>Z</span><span>)</span><span> </span><span>+=</span><span> </span><span>seed</span><span>;</span>
+<span>   </span><span>else</span><span> </span><span>if</span><span> </span><span>(</span><span>Z</span><span> </span><span>=</span><span> </span><span>A</span><span> </span><span>+</span><span> </span><span>B</span><span>)</span>
+<span>      </span><span>derive</span><span>(</span><span>A</span><span>,</span><span> </span><span>seed</span><span>);</span>
+<span>      </span><span>derive</span><span>(</span><span>B</span><span>,</span><span> </span><span>seed</span><span>);</span>
+<span>   </span><span>else</span><span> </span><span>if</span><span> </span><span>(</span><span>Z</span><span> </span><span>=</span><span> </span><span>A</span><span> </span><span>-</span><span> </span><span>B</span><span>)</span>
+<span>      </span><span>derive</span><span>(</span><span>A</span><span>,</span><span> </span><span>seed</span><span>);</span>
+<span>      </span><span>derive</span><span>(</span><span>B</span><span>,</span><span> </span><span>-</span><span>seed</span><span>);</span>
+<span>   </span><span>else</span><span> </span><span>if</span><span> </span><span>(</span><span>Z</span><span> </span><span>=</span><span> </span><span>A</span><span> </span><span>*</span><span> </span><span>B</span><span>)</span>
+<span>      </span><span>derive</span><span>(</span><span>A</span><span>,</span><span> </span><span>valueOf</span><span>(</span><span>B</span><span>)</span><span> </span><span>*</span><span> </span><span>seed</span><span>);</span>
+<span>      </span><span>derive</span><span>(</span><span>B</span><span>,</span><span> </span><span>valueOf</span><span>(</span><span>A</span><span>)</span><span> </span><span>*</span><span> </span><span>seed</span><span>);</span>
+<span>}</span>
+```
+
+```
+<span></span><span>#include</span><span> </span><span>&lt;iostream&gt;</span>
+<span>struct</span><span> </span><span>Expression</span><span> </span><span>{</span>
+<span>   </span><span>float</span><span> </span><span>value</span><span>;</span>
+<span>   </span><span>virtual</span><span> </span><span>void</span><span> </span><span>evaluate</span><span>()</span><span> </span><span>=</span><span> </span><span>0</span><span>;</span>
+<span>   </span><span>virtual</span><span> </span><span>void</span><span> </span><span>derive</span><span>(</span><span>float</span><span> </span><span>seed</span><span>)</span><span> </span><span>=</span><span> </span><span>0</span><span>;</span>
+<span>};</span>
+<span>struct</span><span> </span><span>Variable</span><span>:</span><span> </span><span>public</span><span> </span><span>Expression</span><span> </span><span>{</span>
+<span>   </span><span>float</span><span> </span><span>partial</span><span>;</span>
+<span>   </span><span>Variable</span><span>(</span><span>float</span><span> </span><span>value</span><span>)</span><span> </span><span>{</span>
+<span>      </span><span>this</span><span>-&gt;</span><span>value</span><span> </span><span>=</span><span> </span><span>value</span><span>;</span>
+<span>      </span><span>partial</span><span> </span><span>=</span><span> </span><span>0.0f</span><span>;</span>
+<span>   </span><span>}</span>
+<span>   </span><span>void</span><span> </span><span>evaluate</span><span>()</span><span> </span><span>{}</span>
+<span>   </span><span>void</span><span> </span><span>derive</span><span>(</span><span>float</span><span> </span><span>seed</span><span>)</span><span> </span><span>{</span>
+<span>      </span><span>partial</span><span> </span><span>+=</span><span> </span><span>seed</span><span>;</span>
+<span>   </span><span>}</span>
+<span>};</span>
+<span>struct</span><span> </span><span>Plus</span><span>:</span><span> </span><span>public</span><span> </span><span>Expression</span><span> </span><span>{</span>
+<span>   </span><span>Expression</span><span> </span><span>*</span><span>a</span><span>,</span><span> </span><span>*</span><span>b</span><span>;</span>
+<span>   </span><span>Plus</span><span>(</span><span>Expression</span><span> </span><span>*</span><span>a</span><span>,</span><span> </span><span>Expression</span><span> </span><span>*</span><span>b</span><span>)</span><span>:</span><span> </span><span>a</span><span>(</span><span>a</span><span>),</span><span> </span><span>b</span><span>(</span><span>b</span><span>)</span><span> </span><span>{}</span>
+<span>   </span><span>void</span><span> </span><span>evaluate</span><span>()</span><span> </span><span>{</span>
+<span>      </span><span>a</span><span>-&gt;</span><span>evaluate</span><span>();</span>
+<span>      </span><span>b</span><span>-&gt;</span><span>evaluate</span><span>();</span>
+<span>      </span><span>value</span><span> </span><span>=</span><span> </span><span>a</span><span>-&gt;</span><span>value</span><span> </span><span>+</span><span> </span><span>b</span><span>-&gt;</span><span>value</span><span>;</span>
+<span>   </span><span>}</span>
+<span>   </span><span>void</span><span> </span><span>derive</span><span>(</span><span>float</span><span> </span><span>seed</span><span>)</span><span> </span><span>{</span>
+<span>      </span><span>a</span><span>-&gt;</span><span>derive</span><span>(</span><span>seed</span><span>);</span>
+<span>      </span><span>b</span><span>-&gt;</span><span>derive</span><span>(</span><span>seed</span><span>);</span>
+<span>   </span><span>}</span>
+<span>};</span>
+<span>struct</span><span> </span><span>Multiply</span><span>:</span><span> </span><span>public</span><span> </span><span>Expression</span><span> </span><span>{</span>
+<span>   </span><span>Expression</span><span> </span><span>*</span><span>a</span><span>,</span><span> </span><span>*</span><span>b</span><span>;</span>
+<span>   </span><span>Multiply</span><span>(</span><span>Expression</span><span> </span><span>*</span><span>a</span><span>,</span><span> </span><span>Expression</span><span> </span><span>*</span><span>b</span><span>)</span><span>:</span><span> </span><span>a</span><span>(</span><span>a</span><span>),</span><span> </span><span>b</span><span>(</span><span>b</span><span>)</span><span> </span><span>{}</span>
+<span>   </span><span>void</span><span> </span><span>evaluate</span><span>()</span><span> </span><span>{</span>
+<span>      </span><span>a</span><span>-&gt;</span><span>evaluate</span><span>();</span>
+<span>      </span><span>b</span><span>-&gt;</span><span>evaluate</span><span>();</span>
+<span>      </span><span>value</span><span> </span><span>=</span><span> </span><span>a</span><span>-&gt;</span><span>value</span><span> </span><span>*</span><span> </span><span>b</span><span>-&gt;</span><span>value</span><span>;</span>
+<span>   </span><span>}</span>
+<span>   </span><span>void</span><span> </span><span>derive</span><span>(</span><span>float</span><span> </span><span>seed</span><span>)</span><span> </span><span>{</span>
+<span>      </span><span>a</span><span>-&gt;</span><span>derive</span><span>(</span><span>b</span><span>-&gt;</span><span>value</span><span> </span><span>*</span><span> </span><span>seed</span><span>);</span>
+<span>      </span><span>b</span><span>-&gt;</span><span>derive</span><span>(</span><span>a</span><span>-&gt;</span><span>value</span><span> </span><span>*</span><span> </span><span>seed</span><span>);</span>
+<span>   </span><span>}</span>
+<span>};</span>
+<span>int</span><span> </span><span>main</span><span> </span><span>()</span><span> </span><span>{</span>
+<span>   </span><span>// Example: Finding the partials of z = x * (x + y) + y * y at (x, y) = (2, 3)</span>
+<span>   </span><span>Variable</span><span> </span><span>x</span><span>(</span><span>2</span><span>),</span><span> </span><span>y</span><span>(</span><span>3</span><span>);</span>
+<span>   </span><span>Plus</span><span> </span><span>p1</span><span>(</span><span>&amp;</span><span>x</span><span>,</span><span> </span><span>&amp;</span><span>y</span><span>);</span><span> </span><span>Multiply</span><span> </span><span>m1</span><span>(</span><span>&amp;</span><span>x</span><span>,</span><span> </span><span>&amp;</span><span>p1</span><span>);</span><span> </span><span>Multiply</span><span> </span><span>m2</span><span>(</span><span>&amp;</span><span>y</span><span>,</span><span> </span><span>&amp;</span><span>y</span><span>);</span><span> </span><span>Plus</span><span> </span><span>z</span><span>(</span><span>&amp;</span><span>m1</span><span>,</span><span> </span><span>&amp;</span><span>m2</span><span>);</span>
+<span>   </span><span>z</span><span>.</span><span>evaluate</span><span>();</span>
+<span>   </span><span>std</span><span>::</span><span>cout</span><span> </span><span>&lt;&lt;</span><span> </span><span>"z = "</span><span> </span><span>&lt;&lt;</span><span> </span><span>z</span><span>.</span><span>value</span><span> </span><span>&lt;&lt;</span><span> </span><span>std</span><span>::</span><span>endl</span><span>;</span>
+<span>   </span><span>// Output: z = 19</span>
+<span>   </span><span>z</span><span>.</span><span>derive</span><span>(</span><span>1</span><span>);</span>
+<span>   </span><span>std</span><span>::</span><span>cout</span><span> </span><span>&lt;&lt;</span><span> </span><span>"∂z/∂x = "</span><span> </span><span>&lt;&lt;</span><span> </span><span>x</span><span>.</span><span>partial</span><span> </span><span>&lt;&lt;</span><span> </span><span>", "</span>
+<span>             </span><span>&lt;&lt;</span><span> </span><span>"∂z/∂y = "</span><span> </span><span>&lt;&lt;</span><span> </span><span>y</span><span>.</span><span>partial</span><span> </span><span>&lt;&lt;</span><span> </span><span>std</span><span>::</span><span>endl</span><span>;</span>
+<span>   </span><span>// Output: ∂z/∂x = 7, ∂z/∂y = 8</span>
+<span>   </span><span>return</span><span> </span><span>0</span><span>;</span>
+<span>}</span>
+```
+
+### Beyond forward and reverse accumulation
+
+\[edit\]
+
+Forward and reverse accumulation are just two (extreme) ways of traversing the chain rule. The problem of computing a full Jacobian of _f_ : **R**<sup><i>n</i></sup> → **R**<sup><i>m</i></sup> with a minimum number of arithmetic operations is known as the _optimal Jacobian accumulation_ (OJA) problem, which is NP-complete.<sup id="cite_ref-21"><a href="https://en.wikipedia.org/wiki/Automatic_differentiation#cite_note-21"><span>[</span>20<span>]</span></a></sup> Central to this proof is the idea that algebraic dependencies may exist between the local partials that label the edges of the graph. In particular, two or more edge labels may be recognized as equal. The complexity of the problem is still open if it is assumed that all edge labels are unique and algebraically independent.
+
+## Automatic differentiation using dual numbers
+
+\[edit\]
+
+Forward mode automatic differentiation is accomplished by augmenting the algebra of real numbers and obtaining a new arithmetic. An additional component is added to every number to represent the derivative of a function at the number, and all arithmetic operators are extended for the augmented algebra. The augmented algebra is the algebra of dual numbers.
+
+Replace every number  with the number , where  is a real number, but  is an abstract number with the property  (an infinitesimal; see _Smooth infinitesimal analysis_). Using only this, regular arithmetic gives  using .
+
+Now, polynomials can be calculated in this augmented arithmetic. If , then  where  denotes the derivative of  with respect to its first argument, and , called a _seed_, can be chosen arbitrarily.
+
+The new arithmetic consists of ordered pairs, elements written , with ordinary arithmetics on the first component, and first order differentiation arithmetic on the second component, as described above. Extending the above results on polynomials to analytic functions gives a list of the basic arithmetic and some standard functions for the new arithmetic:  and in general for the primitive function ,  where  and  are the derivatives of  with respect to its first and second arguments, respectively.
+
+When a binary basic arithmetic operation is applied to mixed arguments—the pair  and the real number —the real number is first lifted to . The derivative of a function  at the point  is now found by calculating  using the above arithmetic, which gives  as the result.
+
+An example implementation based on the dual number approach follows.
+
+```
+Dual plus(Dual A, Dual B) {
+  return {
+    realPartOf(A) + realPartOf(B),
+    infinitesimalPartOf(A) + infinitesimalPartOf(B)
+  };
+}
+Dual minus(Dual A, Dual B) {
+  return {
+    realPartOf(A) - realPartOf(B),
+    infinitesimalPartOf(A) - infinitesimalPartOf(B)
+  };
+}
+Dual multiply(Dual A, Dual B) {
+  return {
+    realPartOf(A) * realPartOf(B),
+    realPartOf(B) * infinitesimalPartOf(A) + realPartOf(A) * infinitesimalPartOf(B)
+  };
+}
+X = {x, 0};
+Y = {y, 0};
+Epsilon = {0, 1};
+xPartial = infinitesimalPartOf(f(X + Epsilon, Y));
+yPartial = infinitesimalPartOf(f(X, Y + Epsilon));
+```
+
+```
+<span></span><span>#include</span><span> </span><span>&lt;iostream&gt;</span>
+<span>struct</span><span> </span><span>Dual</span><span> </span><span>{</span>
+<span>   </span><span>float</span><span> </span><span>realPart</span><span>,</span><span> </span><span>infinitesimalPart</span><span>;</span>
+<span>   </span><span>Dual</span><span>(</span><span>float</span><span> </span><span>realPart</span><span>,</span><span> </span><span>float</span><span> </span><span>infinitesimalPart</span><span>=</span><span>0</span><span>)</span><span>:</span><span> </span><span>realPart</span><span>(</span><span>realPart</span><span>),</span><span> </span><span>infinitesimalPart</span><span>(</span><span>infinitesimalPart</span><span>)</span><span> </span><span>{}</span>
+<span>   </span><span>Dual</span><span> </span><span>operator</span><span>+</span><span>(</span><span>Dual</span><span> </span><span>other</span><span>)</span><span> </span><span>{</span>
+<span>      </span><span>return</span><span> </span><span>Dual</span><span>(</span>
+<span>         </span><span>realPart</span><span> </span><span>+</span><span> </span><span>other</span><span>.</span><span>realPart</span><span>,</span>
+<span>         </span><span>infinitesimalPart</span><span> </span><span>+</span><span> </span><span>other</span><span>.</span><span>infinitesimalPart</span>
+<span>      </span><span>);</span>
+<span>   </span><span>}</span>
+<span>   </span><span>Dual</span><span> </span><span>operator</span><span>*</span><span>(</span><span>Dual</span><span> </span><span>other</span><span>)</span><span> </span><span>{</span>
+<span>      </span><span>return</span><span> </span><span>Dual</span><span>(</span>
+<span>         </span><span>realPart</span><span> </span><span>*</span><span> </span><span>other</span><span>.</span><span>realPart</span><span>,</span>
+<span>         </span><span>other</span><span>.</span><span>realPart</span><span> </span><span>*</span><span> </span><span>infinitesimalPart</span><span> </span><span>+</span><span> </span><span>realPart</span><span> </span><span>*</span><span> </span><span>other</span><span>.</span><span>infinitesimalPart</span>
+<span>      </span><span>);</span>
+<span>   </span><span>}</span>
+<span>};</span>
+<span>// Example: Finding the partials of z = x * (x + y) + y * y at (x, y) = (2, 3)</span>
+<span>Dual</span><span> </span><span>f</span><span>(</span><span>Dual</span><span> </span><span>x</span><span>,</span><span> </span><span>Dual</span><span> </span><span>y</span><span>)</span><span> </span><span>{</span><span> </span><span>return</span><span> </span><span>x</span><span> </span><span>*</span><span> </span><span>(</span><span>x</span><span> </span><span>+</span><span> </span><span>y</span><span>)</span><span> </span><span>+</span><span> </span><span>y</span><span> </span><span>*</span><span> </span><span>y</span><span>;</span><span> </span><span>}</span>
+<span>int</span><span> </span><span>main</span><span> </span><span>()</span><span> </span><span>{</span>
+<span>   </span><span>Dual</span><span> </span><span>x</span><span> </span><span>=</span><span> </span><span>Dual</span><span>(</span><span>2</span><span>);</span>
+<span>   </span><span>Dual</span><span> </span><span>y</span><span> </span><span>=</span><span> </span><span>Dual</span><span>(</span><span>3</span><span>);</span>
+<span>   </span><span>Dual</span><span> </span><span>epsilon</span><span> </span><span>=</span><span> </span><span>Dual</span><span>(</span><span>0</span><span>,</span><span> </span><span>1</span><span>);</span>
+<span>   </span><span>Dual</span><span> </span><span>a</span><span> </span><span>=</span><span> </span><span>f</span><span>(</span><span>x</span><span> </span><span>+</span><span> </span><span>epsilon</span><span>,</span><span> </span><span>y</span><span>);</span>
+<span>   </span><span>Dual</span><span> </span><span>b</span><span> </span><span>=</span><span> </span><span>f</span><span>(</span><span>x</span><span>,</span><span> </span><span>y</span><span> </span><span>+</span><span> </span><span>epsilon</span><span>);</span>
+<span>   </span><span>std</span><span>::</span><span>cout</span><span> </span><span>&lt;&lt;</span><span> </span><span>"∂z/∂x = "</span><span> </span><span>&lt;&lt;</span><span> </span><span>a</span><span>.</span><span>infinitesimalPart</span><span> </span><span>&lt;&lt;</span><span> </span><span>", "</span>
+<span>             </span><span>&lt;&lt;</span><span> </span><span>"∂z/∂y = "</span><span> </span><span>&lt;&lt;</span><span> </span><span>b</span><span>.</span><span>infinitesimalPart</span><span> </span><span>&lt;&lt;</span><span> </span><span>std</span><span>::</span><span>endl</span><span>;</span>
+<span>   </span><span>// Output: ∂z/∂x = 7, ∂z/∂y = 8</span>
+<span>   </span><span>return</span><span> </span><span>0</span><span>;</span>
+<span>}</span>
+```
+
+### Vector arguments and functions
+
+\[edit\]
+
+Multivariate functions can be handled with the same efficiency and mechanisms as univariate functions by adopting a directional derivative operator. That is, if it is sufficient to compute , the directional derivative  of  at  in the direction  may be calculated as  using the same arithmetic as above. If all the elements of  are desired, then  function evaluations are required. Note that in many optimization applications, the directional derivative is indeed sufficient.
+
+### High order and many variables
+
+\[edit\]
+
+The above arithmetic can be generalized to calculate second order and higher derivatives of multivariate functions. However, the arithmetic rules quickly grow complicated: complexity is quadratic in the highest derivative degree. Instead, truncated Taylor polynomial algebra can be used. The resulting arithmetic, defined on generalized dual numbers, allows efficient computation using functions as if they were a data type. Once the Taylor polynomial of a function is known, the derivatives are easily extracted.
+
+Forward-mode AD is implemented by a nonstandard interpretation of the program in which real numbers are replaced by dual numbers, constants are lifted to dual numbers with a zero epsilon coefficient, and the numeric primitives are lifted to operate on dual numbers. This nonstandard interpretation is generally implemented using one of two strategies: _source code transformation_ or _operator overloading_.
+
+### Source code transformation (SCT)
+
+\[edit\]
+
+Figure 4: Example of how source code transformation could work
+
+The source code for a function is replaced by an automatically generated source code that includes statements for calculating the derivatives interleaved with the original instructions.
+
+Source code transformation can be implemented for all programming languages, and it is also easier for the compiler to do compile time optimizations. However, the implementation of the AD tool itself is more difficult and the build system is more complex.
+
+### Operator overloading (OO)
+
+\[edit\]
+
+Figure 5: Example of how operator overloading could work
+
+Operator overloading is a possibility for source code written in a language supporting it. Objects for real numbers and elementary mathematical operations must be overloaded to cater for the augmented arithmetic depicted above. This requires no change in the form or sequence of operations in the original source code for the function to be differentiated, but often requires changes in basic data types for numbers and vectors to support overloading and often also involves the insertion of special flagging operations. Due to the inherent operator overloading overhead on each loop, this approach usually demonstrates weaker speed performance.
+
+### Operator overloading and source code transformation
+
+\[edit\]
+
+Overloaded Operators can be used to extract the valuation graph, followed by automatic generation of the AD-version of the primal function at run-time. Unlike the classic OO AAD, such AD-function does not change from one iteration to the next one. Hence there is any OO or tape interpretation run-time overhead per Xi sample.
+
+With the AD-function being generated at runtime, it can be optimised to take into account the current state of the program and precompute certain values. In addition, it can be generated in a way to consistently utilize native CPU vectorization to process 4(8)-double chunks of user data (AVX2\\AVX512 speed up x4-x8). With multithreading added into account, such approach can lead to a final acceleration of order 8 × #Cores compared to the traditional AAD tools. A reference implementation is available on GitHub.<sup id="cite_ref-22"><a href="https://en.wikipedia.org/wiki/Automatic_differentiation#cite_note-22"><span>[</span>21<span>]</span></a></sup>
+
+-   Differentiable programming
+
+1.  **^** Neidinger, Richard D. (2010). "Introduction to Automatic Differentiation and MATLAB Object-Oriented Programming" (PDF). _SIAM Review_. **52** (3): 545–563\. CiteSeerX 10.1.1.362.6580. doi:10.1137/080743627. S2CID 17134969.
+2.  ^ Jump up to: <sup><i><b>a</b></i></sup> <sup><i><b>b</b></i></sup> Baydin, Atilim Gunes; Pearlmutter, Barak; Radul, Alexey Andreyevich; Siskind, Jeffrey (2018). "Automatic differentiation in machine learning: a survey". _Journal of Machine Learning Research_. **18**: 1–43.
+3.  ^ Jump up to: <sup><i><b>a</b></i></sup> <sup><i><b>b</b></i></sup> <sup><i><b>c</b></i></sup> <sup><i><b>d</b></i></sup> <sup><i><b>e</b></i></sup> Hend Dawood and Nefertiti Megahed (2023). Automatic differentiation of uncertainties: an interval computational differentiation for first and higher derivatives with implementation. PeerJ Computer Science 9:e1301 https://doi.org/10.7717/peerj-cs.1301.
+4.  ^ Jump up to: <sup><i><b>a</b></i></sup> <sup><i><b>b</b></i></sup> <sup><i><b>c</b></i></sup> <sup><i><b>d</b></i></sup> Hend Dawood and Nefertiti Megahed (2019). A Consistent and Categorical Axiomatization of Differentiation Arithmetic Applicable to First and Higher Order Derivatives. Punjab University Journal of Mathematics. 51(11). pp. 77-100. doi: 10.5281/zenodo.3479546. http://doi.org/10.5281/zenodo.3479546.
+5.  ^ Jump up to: <sup><i><b>a</b></i></sup> <sup><i><b>b</b></i></sup>  _This article incorporates text by Dawood and Megahed available under the CC BY-SA 4.0 license._
+6.  **^** Hend Dawood and Yasser Dawood (2022). Interval Root Finding and Interval Polynomials: Methods and Applications in Science and Engineering. In S. Chakraverty, editor, Polynomial Paradigms: Trends and Applications in Science and Engineering, chapter 15. IOP Publishing. ISBN 978-0-7503-5065-5. doi: 10.1088/978-0-7503-5067-9ch15. URL https://doi.org/10.1088/978-0-7503-5067-9ch15.
+7.  **^** Siegfried M. Rump (1999). INTLAB–INTerval LABoratory. In T. Csendes, editor, Developments in Reliable Computing, pages 77–104. Kluwer Academic Publishers, Dordrecht.
+8.  **^** S. Chevillard, M. Joldes, and C. Lauter. Sollya (2010). An Environment for the Development of Numerical Codes. In K. Fukuda, J. van der Hoeven, M. Joswig, and N. Takayama, editors, Mathematical Software - ICMS 2010, volume 6327 of Lecture Notes in Computer Science, pages 28–31, Heidelberg, Germany. Springer.
+9.  **^** Hend Dawood (2022). InCLosure (Interval enCLosure)–A Language and Environment for Reliable Scientific Computing. Computer Software, Version 4.0. Department of Mathematics. Faculty of Science, Cairo University, Giza, Egypt, September 2022. url: https://doi.org/10.5281/zenodo.2702404.
+10.  **^** Christian P. Fries (2019). Stochastic Automatic Differentiation: Automatic Differentiation for Monte-Carlo Simulations. Quantitative Finance, 19(6):1043–1059. doi: 10.1080/14697688.2018.1556398. url: https://doi.org/10.1080/14697688.2018.1556398.
+11.  **^** Hend Dawood and Yasser Dawood (2020). Universal Intervals: Towards a Dependency-Aware Interval Algebra. In S. Chakraverty, editor, Mathematical Methods in Interdisciplinary Sciences. chapter 10, pages 167–214. John Wiley & Sons, Hoboken, New Jersey. ISBN: 978-1-119-58550-3. doi: 10.1002/9781119585640.ch10. url: https://doi.org/10.1002/9781119585640.ch10.
+12.  **^** Hend Dawood (2014). Interval Mathematics as a Potential Weapon against Uncertainty. In S. Chakraverty, editor, Mathematics of Uncertainty Modeling in the Analysis of Engineering and Science Problems. chapter 1, pages 1–38. IGI Global, Hershey, PA. ISBN: 978-1-4666-4991-0.
+13.  ^ Jump up to: <sup><i><b>a</b></i></sup> <sup><i><b>b</b></i></sup> R.E. Wengert (1964). "A simple automatic derivative evaluation program". _Comm. ACM_. **7** (8): 463–464\. doi:10.1145/355586.364791. S2CID 24039274.
+14.  **^** Griewank, Andreas (2012). "Who Invented the Reverse Mode of Differentiation?" (PDF). _Optimization Stories, Documenta Matematica_. Documenta Mathematica Series. Extra Volume ISMP: 389–400\. doi:10.4171/dms/6/38. ISBN 978-3-936609-58-5.
+15.  **^** Linnainmaa, Seppo (1976). "Taylor Expansion of the Accumulated Rounding Error". _BIT Numerical Mathematics_. **16** (2): 146–160\. doi:10.1007/BF01931367. S2CID 122357351.
+16.  **^** Maximilian E. Schüle, Maximilian Springer, Alfons Kemper, Thomas Neumann (2022). "LLVM code optimisation for automatic differentiation". _Proceedings of the Sixth Workshop on Data Management for End-To-End Machine Learning_. pp. 1–4\. doi:10.1145/3533028.3533302. ISBN 9781450393751. S2CID 248853034.
+17.  **^** Bartholomew-Biggs, Michael; Brown, Steven; Christianson, Bruce; Dixon, Laurence (2000). "Automatic differentiation of algorithms". _Journal of Computational and Applied Mathematics_. **124** (1–2): 171–190\. Bibcode:2000JCoAM.124..171B. doi:10.1016/S0377-0427(00)00422-2. hdl:2299/3010.
+18.  **^** Maximilian E. Schüle, Harald Lang, Maximilian Springer, Alfons Kemper, Thomas Neumann, Stephan Günnemann (2021). "In-Database Machine Learning with SQL on GPUs". _33rd International Conference on Scientific and Statistical Database Management_. pp. 25–36\. doi:10.1145/3468791.3468840. ISBN 9781450384131. S2CID 235386969.
+19.  **^** Maximilian E. Schüle, Harald Lang, Maximilian Springer, Alfons Kemper, Thomas Neumann, Stephan Günnemann (2022). "Recursive SQL and GPU-support for in-database machine learning". _Distributed and Parallel Databases_. **40** (2–3): 205–259\. doi:10.1007/s10619-022-07417-7. S2CID 250412395.
+20.  **^** Naumann, Uwe (April 2008). "Optimal Jacobian accumulation is NP-complete". _Mathematical Programming_. **112** (2): 427–441\. CiteSeerX 10.1.1.320.5665. doi:10.1007/s10107-006-0042-z. S2CID 30219572.
+21.  **^** "AADC Prototype Library". June 22, 2022 – via GitHub.
+
+-   Rall, Louis B. (1981). _Automatic Differentiation: Techniques and Applications_. Lecture Notes in Computer Science. Vol. 120. Springer. ISBN 978-3-540-10861-0.
+-   Griewank, Andreas; Walther, Andrea (2008). _Evaluating Derivatives: Principles and Techniques of Algorithmic Differentiation_. Other Titles in Applied Mathematics. Vol. 105 (2nd ed.). SIAM. doi:10.1137/1.9780898717761. ISBN 978-0-89871-659-7.
+-   Neidinger, Richard (2010). "Introduction to Automatic Differentiation and MATLAB Object-Oriented Programming" (PDF). _SIAM Review_. **52** (3): 545–563\. CiteSeerX 10.1.1.362.6580. doi:10.1137/080743627. S2CID 17134969. Retrieved 2013-03-15.
+-   Naumann, Uwe (2012). _The Art of Differentiating Computer Programs_. Software-Environments-tools. SIAM. ISBN 978-1-611972-06-1.
+-   Henrard, Marc (2017). _Algorithmic Differentiation in Finance Explained_. Financial Engineering Explained. Palgrave Macmillan. ISBN 978-3-319-53978-2.
+
+-   www.autodiff.org, An "entry site to everything you want to know about automatic differentiation"
+-   Automatic Differentiation of Parallel OpenMP Programs
+-   Automatic Differentiation, C++ Templates and Photogrammetry
+-   Automatic Differentiation, Operator Overloading Approach
+-   Compute analytic derivatives of any Fortran77, Fortran95, or C program through a web-based interface Automatic Differentiation of Fortran programs
+-   Description and example code for forward Automatic Differentiation in Scala Archived 2016-08-03 at the Wayback Machine
+-   finmath-lib stochastic automatic differentiation, Automatic differentiation for random variables (Java implementation of the stochastic automatic differentiation).
+-   Adjoint Algorithmic Differentiation: Calibration and Implicit Function Theorem
+-   C++ Template-based automatic differentiation article and implementation
+-   Tangent Source-to-Source Debuggable Derivatives
+-   Exact First- and Second-Order Greeks by Algorithmic Differentiation
+-   Adjoint Algorithmic Differentiation of a GPU Accelerated Application
+-   Adjoint Methods in Computational Finance Software Tool Support for Algorithmic Differentiationop
+-   More than a Thousand Fold Speed Up for xVA Pricing Calculations with Intel Xeon Scalable Processors
+-   Sparse truncated Taylor series implementation with VBIC95 example for higher order derivatives

@@ -109,6 +109,8 @@ pytz==2024.2
     # via pandas
 pyyaml==6.0.2
     # via pre-commit
+regex==2024.11.6
+    # via -r requirements.in
 requests==2.32.3
     # via openml
 rich==13.9.4
@@ -125,8 +127,6 @@ scipy==1.14.1
     # via
     #   openml
     #   scikit-learn
-setuptools==75.2.0
-    # via torch
 six==1.16.0
     # via python-dateutil
 sympy==1.13.1
