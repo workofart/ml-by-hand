@@ -190,6 +190,6 @@ def token_batch_to_indices(token_batch, vocab):
     for batch in token_batch:
         seq = []
         for token in batch:
-            seq.append(vocab.get(token, vocab["<UNK>".encode("utf-8")]))
+            seq.append(vocab.get(token, vocab[b"<UNK>"]))
         X.append(seq)
     return np.array(X)

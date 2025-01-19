@@ -24,7 +24,7 @@ class BytePairEncoder:
 
     def train_vocabulary(
         self, input_text: str, overwrite_saved_file: bool = False
-    ) -> tuple[dict[int, ByteString], dict[ByteString, int]]:
+    ) -> tuple[dict[ByteString, int], dict[int, ByteString]]:
         if os.path.exists(self.vocab_file_path) and not overwrite_saved_file:
             with open(self.vocab_file_path, "rb") as f:
                 logger.info("Loading the vocabulary from disk")
