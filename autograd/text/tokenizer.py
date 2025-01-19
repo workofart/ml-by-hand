@@ -10,10 +10,10 @@ logger = logging.getLogger(__name__)
 
 class BytePairEncoder:
     SPECIAL_TOKENS = ["<|endoftext|>", "<PAD>", "<SOS>", "<UNK>"]
-    VOCAB_FILE_PATH = "vocab.pkl"
 
-    def __init__(self, num_merges=500) -> None:
+    def __init__(self, num_merges=500, vocab_file_path="vocab.pkl") -> None:
         self.num_merges = num_merges
+        self.vocab_file_path = vocab_file_path
         self._unicode_to_int_vocab = self._construct_unicode_to_int_vocab()
         self._int_to_unicode_vocab = dict(
             zip(self._unicode_to_int_vocab.values(), self._unicode_to_int_vocab.keys())
@@ -25,8 +25,8 @@ class BytePairEncoder:
     def train_vocabulary(
         self, input_text: str, overwrite_saved_file: bool = False
     ) -> tuple[dict[int, ByteString], dict[ByteString, int]]:
-        if os.path.exists(self.VOCAB_FILE_PATH) and not overwrite_saved_file:
-            with open(self.VOCAB_FILE_PATH, "rb") as f:
+        if os.path.exists(self.vocab_file_path) and not overwrite_saved_file:
+            with open(self.vocab_file_path, "rb") as f:
                 logger.info("Loading the vocabulary from disk")
                 self._unicode_to_int_vocab, self._int_to_unicode_vocab = pickle.load(f)
                 return self._unicode_to_int_vocab, self._int_to_unicode_vocab
@@ -82,7 +82,7 @@ class BytePairEncoder:
                     f"[{i+1}/{self.num_merges} merge] Best Pair Merged with {pair_counts[best_pair]} occurrences"
                 )
 
-        with open(self.VOCAB_FILE_PATH, "wb") as f:
+        with open(self.vocab_file_path, "wb") as f:
             logger.info("Saving the vocabulary from disk")
             pickle.dump((self._unicode_to_int_vocab, self._int_to_unicode_vocab), f)
 

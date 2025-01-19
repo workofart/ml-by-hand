@@ -1,13 +1,17 @@
 from unittest import TestCase
+import os
 
 from autograd.text.tokenizer import BytePairEncoder
 
 
 class TestTokenizer(TestCase):
     def setUp(self):
-        self.bpe = BytePairEncoder(num_merges=50)
+        self.bpe = BytePairEncoder(num_merges=50, vocab_file_path="test_vocab.pkl")
         with open("test/autograd/text/test_text.txt", "r", encoding="utf-8") as f:
             self.original_text = f.read()
+
+    def tearDown(self) -> None:
+        os.remove("test_vocab.pkl")
 
     def test_construct_unicode_to_int_vocab(self):
         assert len(self.bpe._construct_unicode_to_int_vocab()) == 256 + len(
