@@ -66,7 +66,7 @@ class BytePairEncoder:
     def train_vocabulary(
         self, input_text: str, overwrite_saved_file: bool = False
     ) -> tuple[dict[ByteString, int], dict[int, ByteString]]:
-        if not self._unicode_to_int_vocab and not overwrite_saved_file:
+        if self._unicode_to_int_vocab and not overwrite_saved_file:
             return self._unicode_to_int_vocab, self._int_to_unicode_vocab
 
         text_chunks = self._pretokenize(input_text)
@@ -117,7 +117,7 @@ class BytePairEncoder:
 
             if (i + 1) % 100 == 0:
                 logger.info(
-                    f"[{i+1}/{self.num_merges} merge] Best Pair Merged with {pair_counts[best_pair]} occurrences"
+                    f"[{i+1}/{self.num_merges} merge] Best Pair Merged with {pair_counts[best_pair]} occurrences and {len(self._unicode_to_int_vocab)} tokens in vocab"
                 )
 
         with open(self.vocab_file_path, "wb") as f:

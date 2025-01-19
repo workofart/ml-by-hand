@@ -466,8 +466,7 @@ def inference(
     for _ in range(max_length):
         seq_len = len(generated)
 
-        # Convert current tokens to indices & mask
-        # cur_input = text_utils.token_batch_to_indices([generated], vocab)
+        # "generated" is a list of integers, each int for each token
         cur_input = np.array([generated])
 
         source_mask = Tensor(
@@ -500,7 +499,6 @@ def inference(
             next_token_id = np.random.choice(len(dist), p=dist)
 
         generated.append(next_token_id)
-        # generated.append(idx2word.get(next_token_id, "<UNK>"))
         # TODO: Possibly break if next_token_id is <eos> or similar
     return bpe.decode(generated)
 
@@ -523,8 +521,8 @@ def get_lr(step, model_dim, warmup_steps):
 if __name__ == "__main__":
     logger = logging.getLogger(__name__)
     NUM_EPOCHS = 100
-    seq_len = 32
-    batch_size = 64
+    seq_len = 96
+    batch_size = 32
     warmup_steps = 1000
     d_model = 128
     num_attention_heads = 4
@@ -534,14 +532,15 @@ if __name__ == "__main__":
     filename = "examples/tinyshakespeare.txt"
 
     data = load_data(url, filename)
-    logger.info(f"Length of data: {len(data)}")
+    logger.info(f"Length of entire dataset: {len(data)}")
 
     # Create the vocabulary first
-    bpe = tokenizer.BytePairEncoder(num_merges=3000)
+    bpe = tokenizer.BytePairEncoder(num_merges=3000, vocab_file_path="vocab.pkl")
     vocab, idx2word = bpe.train_vocabulary(data, overwrite_saved_file=False)
 
     # Now encode the subset of data
-    data = data.split("\n\n")[:1500]
+    logger.info("Encoding the new data...")
+    data = data.split("\n\n")[:3000]
     logger.info(f"Example data: {data[:5]}")
 
     encoded_data = np.array(bpe.encode("<|endoftext|>".join(data)))
@@ -621,12 +620,12 @@ if __name__ == "__main__":
             for _ in tqdm(range(eval_iters), desc="Test Evaluation", leave=False):
                 x, y, source_mask, target_mask = next(iter(test_data_loader))
                 y_inp = np.zeros_like(y)
-                y_inp[:, 0] = vocab[b"<SOS>"]
+                y_inp[:, 0] = vocab[b"<SOS>"]  # prepend <SOS> for decoder input
                 y_inp[:, 1:] = y[:, :-1]
 
                 pred_prob = model(
                     x,
-                    y_inp,  # prepend <SOS> for decoder input
+                    y_inp,
                     source_mask,
                     target_mask,
                 )
@@ -645,8 +644,9 @@ if __name__ == "__main__":
             )
             model.train()
 
-            logger.info(
-                f"\nEpoch {epoch} | Train Loss: {epoch_loss / len(train_data_loader):.2f} | Test Loss: {test_loss / eval_iters:.2f}"
+            logger.warning(
+                f"\nEpoch {epoch} | Train Loss: {epoch_loss / len(train_data_loader):.2f} "
+                f"| Test Loss: {test_loss / eval_iters:.2f}"
             )
             prediction_string = "\n".join("".join(pred_tokens).split("<|endoftext|>"))
-            logger.info(f"Prediction: {prediction_string}")
+            logger.info(f"Prediction:\n{prediction_string}")
