@@ -4,6 +4,7 @@ import regex
 from typing import ByteString
 import logging
 import pickle
+from autograd.tools.data import load_data
 
 logger = logging.getLogger(__name__)
 
@@ -258,12 +259,20 @@ class BytePairEncoder:
 
 
 if __name__ == "__main__":
-    bpe = BytePairEncoder(num_merges=50)
-    with open("autograd/text/taylorswift.txt", "r", encoding="utf-8") as f:
-        original_text = f.read()
-    encoded_tokens = bpe.encode(original_text)
+    url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
+    filename = "examples/tinyshakespeare.txt"
+
+    data = load_data(url, filename)
+
+    bpe = BytePairEncoder(num_merges=50, vocab_file_path="tiny_shakespeare_vocab.pkl")
+    with open("examples/tinyshakespeare.txt", "r", encoding="utf-8") as f:
+        original_text = f.read()[:10000]
+    bpe.train_vocabulary(original_text, overwrite_saved_file=True)
+
+    subset_text = original_text[:100]
+    encoded_tokens = bpe.encode(subset_text)
     decoded_tokens = bpe.decode(encoded_tokens)
     logger.info(f"Size of vocabulary: {len(bpe._int_to_unicode_vocab)}")
-    logger.info(original_text[:50])
-    logger.info(encoded_tokens[:50])
-    logger.info(decoded_tokens[:50])
+    logger.info(f"Original text: {subset_text}")
+    logger.info(f"Encoded text: {encoded_tokens}")
+    logger.info(f"Decoded text: {decoded_tokens}")
