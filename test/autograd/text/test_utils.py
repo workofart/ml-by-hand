@@ -105,10 +105,6 @@ class TestTextUtils(TestCase):
         self.assertEqual(mask.shape, (2, 1, 4, 4))
         # For lookforward, upper triangle is masked.
         # Because mask_diagonal=True, diagonal is included in the mask.
-        # So row0 => [1,1,1,1]
-        #            [0,1,1,1]
-        #            [0,0,1,1]
-        #            [0,0,0,1]
         expected_single = np.array(
             [[1, 1, 1, 1], [0, 1, 1, 1], [0, 0, 1, 1], [0, 0, 0, 1]], dtype=np.float32
         )
@@ -116,7 +112,22 @@ class TestTextUtils(TestCase):
         for b in range(batch_size):
             np.testing.assert_array_equal(mask[b, 0], expected_single)
 
-    def test_create_causal_mask_lookback_no_diag(self):
+        mask = create_causal_mask(
+            seq_len, batch_size, lookback=False, mask_diagonal=False
+        )
+
+        # shape => (batch_size, 1, seq_len, seq_len)
+        self.assertEqual(mask.shape, (2, 1, 4, 4))
+        # For lookforward, upper triangle is not masked.
+        # Because mask_diagonal=False, diagonal is not included in the mask.
+        expected_single = np.array(
+            [[0, 1, 1, 1], [0, 0, 1, 1], [0, 0, 0, 1], [0, 0, 0, 0]], dtype=np.float32
+        )
+
+        for b in range(batch_size):
+            np.testing.assert_array_equal(mask[b, 0], expected_single)
+
+    def test_create_causal_mask_lookback(self):
         seq_len = 3
         batch_size = 1
         mask = create_causal_mask(
@@ -125,10 +136,16 @@ class TestTextUtils(TestCase):
         # shape => (1, 1, 3, 3)
         # For lookback, we mask the lower triangle.  mask_diagonal=False => diagonal is not masked.
         # So the result should mask strictly below diagonal
-        # row0 => [0,0,0]
-        #         [1,0,0]
-        #         [1,1,0]
         expected = np.array([[[[0, 0, 0], [1, 0, 0], [1, 1, 0]]]], dtype=np.float32)
+        self.assertEqual(mask.shape, (1, 1, 3, 3))
+        np.testing.assert_array_equal(mask, expected)
+
+        mask = create_causal_mask(
+            seq_len, batch_size, lookback=True, mask_diagonal=True
+        )
+        # For lookback, we mask the lower triangle.  mask_diagonal=True => diagonal is masked.
+        # So the result should mask including diagonal
+        expected = np.array([[[[1, 0, 0], [1, 1, 0], [1, 1, 1]]]], dtype=np.float32)
         self.assertEqual(mask.shape, (1, 1, 3, 3))
         np.testing.assert_array_equal(mask, expected)
 

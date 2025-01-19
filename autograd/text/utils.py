@@ -88,7 +88,7 @@ def text_to_one_hot_and_sparse(
     return one_hot, matrix
 
 
-def create_causal_mask(seq_len, batch_size, lookback=False, mask_diagonal=True):
+def create_causal_mask(seq_len, batch_size, lookback=False, mask_diagonal=False):
     """
     Creates a causal mask that prevents positions from attending to future (lookforward)
     or past (lookback) positions. 1.0 => masked.
@@ -190,6 +190,6 @@ def token_batch_to_indices(token_batch, vocab):
     for batch in token_batch:
         seq = []
         for token in batch:
-            seq.append(vocab.get(token, vocab["<UNK>"]))
+            seq.append(vocab.get(token, vocab["<UNK>".encode("utf-8")]))
         X.append(seq)
     return np.array(X)
