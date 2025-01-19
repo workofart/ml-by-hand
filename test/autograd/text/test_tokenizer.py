@@ -11,7 +11,8 @@ class TestTokenizer(TestCase):
             self.original_text = f.read()
 
     def tearDown(self) -> None:
-        os.remove("test_vocab.pkl")
+        if os.path.exists("test_vocab.pkl"):
+            os.remove("test_vocab.pkl")
 
     def test_construct_unicode_to_int_vocab(self):
         assert len(self.bpe._construct_unicode_to_int_vocab()) == 256 + len(
@@ -59,7 +60,7 @@ class TestTokenizer(TestCase):
         self.bpe.train_vocabulary(input_text, overwrite_saved_file=True)
 
         # Re-instantiate and check if vocab loads correctly
-        new_bpe = BytePairEncoder(num_merges=50)
+        new_bpe = BytePairEncoder(num_merges=50, vocab_file_path="test_vocab.pkl")
         new_bpe.train_vocabulary(
             "", overwrite_saved_file=False
         )  # Should load from disk

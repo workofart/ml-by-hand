@@ -14,22 +14,59 @@ class BytePairEncoder:
     def __init__(self, num_merges=500, vocab_file_path="vocab.pkl") -> None:
         self.num_merges = num_merges
         self.vocab_file_path = vocab_file_path
-        self._unicode_to_int_vocab = self._construct_unicode_to_int_vocab()
-        self._int_to_unicode_vocab = dict(
-            zip(self._unicode_to_int_vocab.values(), self._unicode_to_int_vocab.keys())
-        )
-        self.learned_merges = []
+        self._load_dictionary()
+
         # start merged token ids from the first unused index after the base vocabulary
         self.new_idx = max(self._unicode_to_int_vocab.values()) + 1
+
+    def _load_dictionary(self):
+        if not os.path.exists(self.vocab_file_path):
+            logger.info(
+                "Vocabulary file does not exist. Creating new dictionary from scratch."
+            )
+            self._unicode_to_int_vocab = self._construct_unicode_to_int_vocab()
+            self._int_to_unicode_vocab = dict(
+                zip(
+                    self._unicode_to_int_vocab.values(),
+                    self._unicode_to_int_vocab.keys(),
+                )
+            )
+            # We need to store the merges we've learned
+            # so we can apply them to new text during the encode step
+            self.learned_merges = []
+            return
+
+        # If the file exists, attempt to load. Fallback to a new dictionary if there's an error.
+        try:
+            with open(self.vocab_file_path, "rb") as f:
+                logger.info("Loading the vocabulary from disk.")
+                data = pickle.load(f)
+                (
+                    self._unicode_to_int_vocab,
+                    self._int_to_unicode_vocab,
+                    self.learned_merges,
+                ) = data
+        except (pickle.UnpicklingError, EOFError) as e:
+            logger.warning(
+                f"Failed to load the vocabulary from {self.vocab_file_path}. "
+                f"Reason: {e}. Creating new dictionary."
+            )
+            self._unicode_to_int_vocab = self._construct_unicode_to_int_vocab()
+            self._int_to_unicode_vocab = dict(
+                zip(
+                    self._unicode_to_int_vocab.values(),
+                    self._unicode_to_int_vocab.keys(),
+                )
+            )
+            # We need to store the merges we've learned
+            # so we can apply them to new text during the encode step
+            self.learned_merges = []
 
     def train_vocabulary(
         self, input_text: str, overwrite_saved_file: bool = False
     ) -> tuple[dict[ByteString, int], dict[int, ByteString]]:
-        if os.path.exists(self.vocab_file_path) and not overwrite_saved_file:
-            with open(self.vocab_file_path, "rb") as f:
-                logger.info("Loading the vocabulary from disk")
-                self._unicode_to_int_vocab, self._int_to_unicode_vocab = pickle.load(f)
-                return self._unicode_to_int_vocab, self._int_to_unicode_vocab
+        if not self._unicode_to_int_vocab and not overwrite_saved_file:
+            return self._unicode_to_int_vocab, self._int_to_unicode_vocab
 
         text_chunks = self._pretokenize(input_text)
         logger.debug(f"Text chunks: {text_chunks[:10]}")
@@ -83,8 +120,15 @@ class BytePairEncoder:
                 )
 
         with open(self.vocab_file_path, "wb") as f:
-            logger.info("Saving the vocabulary from disk")
-            pickle.dump((self._unicode_to_int_vocab, self._int_to_unicode_vocab), f)
+            logger.info("Saving the vocabulary to disk")
+            pickle.dump(
+                (
+                    self._unicode_to_int_vocab,
+                    self._int_to_unicode_vocab,
+                    self.learned_merges,
+                ),
+                f,
+            )
 
         return self._unicode_to_int_vocab, self._int_to_unicode_vocab
 
