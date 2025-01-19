@@ -1,11 +1,8 @@
 import numpy as np
 from autograd import nn, optim, functional
-from sklearn.datasets import load_breast_cancer
-from openml.datasets import get_dataset
+from sklearn.datasets import load_breast_cancer, load_diabetes
 from unittest import TestCase
 import logging
-import os
-import pickle
 
 from autograd.tools.trainer import Trainer
 from autograd.tools.metrics import accuracy, mean_squared_error
@@ -13,30 +10,6 @@ from autograd.tools.metrics import accuracy, mean_squared_error
 logger = logging.getLogger(__name__)
 
 np.random.seed(42)
-
-
-CACHE_DIR = os.getenv("DATASET_CACHE", "./dataset_cache")
-os.makedirs(CACHE_DIR, exist_ok=True)
-
-
-def load_or_download_dataset(dataset_id, target):
-    cache_path = os.path.join(CACHE_DIR, f"dataset_{dataset_id}.pkl")
-
-    if os.path.exists(cache_path):
-        logger.info(f"Loading dataset from cache: {cache_path}")
-        with open(cache_path, "rb") as f:
-            X, y = pickle.load(f)
-    else:
-        logger.info(f"Downloading dataset from OpenML: {dataset_id}")
-        dataset = get_dataset(dataset_id, download_data=True)
-        X, y, _, __ = dataset.get_data(target=target, dataset_format="array")
-
-        # Save to cache
-        with open(cache_path, "wb") as f:
-            pickle.dump((X, y), f)
-        logger.info(f"Dataset cached at: {cache_path}")
-
-    return X, y
 
 
 class Classifier(nn.Module):
@@ -104,7 +77,7 @@ class TestTrain(TestCase):
         assert acc > 0.9
 
     def test_regression(self):
-        X, y = load_or_download_dataset(dataset_id=44971, target="quality")
+        X, y = load_diabetes(return_X_y=True)
         logger.info(f"Dataset: {X.shape=}, {y.shape=}")
         logger.info(f"y unique values: {np.unique(y)}")
 
