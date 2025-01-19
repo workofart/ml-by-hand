@@ -2,9 +2,10 @@ import numpy as np
 from tqdm import tqdm
 
 from autograd.tools.data import load_data, DataLoader
-from autograd.text import utils as text_utils
+from autograd.text import utils as text_utils, tokenizer
 from autograd.tensor import Tensor
 from autograd import nn, functional, optim
+import logging
 
 
 class Transformer(nn.Module):
@@ -436,7 +437,14 @@ class MultiHeadAttention(nn.Module):
         return self.fc(att_score)
 
 
-def inference(model, start_tokens, max_length=50, temperature=1.0) -> list[str]:
+def inference(
+    model,
+    bpe: tokenizer.BytePairEncoder,
+    start_tokens: list[str],
+    pad_idx,
+    max_length=50,
+    temperature=1.0,
+) -> list[str]:
     """
     Peform model inference, usually for evaluation purposes.
     We will continously feed the model's generated tokens back to the model to generate
@@ -454,17 +462,18 @@ def inference(model, start_tokens, max_length=50, temperature=1.0) -> list[str]:
         list[str]: The list of tokens output from the model
     """
     model.eval()
-    generated = list(start_tokens)
+    generated = [bpe._unicode_to_int_vocab[t.encode("utf-8")] for t in start_tokens]
     for _ in range(max_length):
         seq_len = len(generated)
 
-        # Convert current tokens to indices & mask
-        cur_input = text_utils.token_batch_to_indices([generated], vocab)
+        # "generated" is a list of integers, each int for each token
+        cur_input = np.array([generated])
 
         source_mask = Tensor(
-            text_utils.create_padding_mask(cur_input, pad_idx=0), requires_grad=False
+            text_utils.create_padding_mask(cur_input, pad_idx=pad_idx),
+            requires_grad=False,
         )
-        pad_mask = text_utils.create_padding_mask(cur_input, pad_idx=0)
+        pad_mask = text_utils.create_padding_mask(cur_input, pad_idx=pad_idx)
         causal_mask = text_utils.create_causal_mask(seq_len, 1)
         target_mask = Tensor(pad_mask + causal_mask, requires_grad=False)
 
@@ -489,9 +498,9 @@ def inference(model, start_tokens, max_length=50, temperature=1.0) -> list[str]:
             # Sample from this scaled distribution
             next_token_id = np.random.choice(len(dist), p=dist)
 
-        generated.append(idx2word.get(next_token_id, "<UNK>"))
+        generated.append(next_token_id)
         # TODO: Possibly break if next_token_id is <eos> or similar
-    return generated
+    return bpe.decode(generated)
 
 
 def get_lr(step, model_dim, warmup_steps):
@@ -510,10 +519,11 @@ def get_lr(step, model_dim, warmup_steps):
 
 
 if __name__ == "__main__":
-    NUM_EPOCHS = 200
-    seq_len = 32
+    logger = logging.getLogger(__name__)
+    NUM_EPOCHS = 100
+    seq_len = 96
     batch_size = 32
-    warmup_steps = 300
+    warmup_steps = 1000
     d_model = 128
     num_attention_heads = 4
     eval_iters = 20
@@ -521,16 +531,28 @@ if __name__ == "__main__":
     url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
     filename = "examples/tinyshakespeare.txt"
 
-    data = load_data(url, filename)[:20000]
-    print(len(data))
-    data = data
-    data = text_utils.clean_and_tokenize(data)
-    vocab = text_utils.create_vocabulary(data, max_features=20000)
-    idx2word = {i: w for i, w in enumerate(vocab)}
-    print(data.shape, data[:3], len(vocab))
+    data = load_data(url, filename)
+    logger.info(f"Length of entire dataset: {len(data)}")
 
-    n = int(len(data) * 0.9)
-    train_data, test_data = data[:n], data[n:]
+    # Create the vocabulary first
+    bpe = tokenizer.BytePairEncoder(num_merges=3000, vocab_file_path="vocab.pkl")
+    vocab, idx2word = bpe.train_vocabulary(data, overwrite_saved_file=False)
+
+    # Now encode the subset of data
+    logger.info("Encoding the new data...")
+    data = data.split("\n\n")[:3000]
+    logger.info(f"Example data: {data[:5]}")
+
+    encoded_data = np.array(bpe.encode("<|endoftext|>".join(data)))
+    pad_idx = vocab[b"<PAD>"]
+    logger.info(
+        f"Vocabulary size: {len(vocab)}, encoded_data length: {len(encoded_data)}"
+    )
+    logger.info(f"Data: {data[:3]}, Encoded_Data: {encoded_data[:50]}")
+
+    # encoded_data is a list of integers without the concept of samples
+    n = int(len(encoded_data) * 0.9)
+    train_data, test_data = encoded_data[:n], encoded_data[n:]
 
     model = Transformer(
         vocab_size=len(vocab),
@@ -546,7 +568,7 @@ if __name__ == "__main__":
         batch_size,
         seq_len,
         shuffle=True,
-        pad_idx=0,
+        pad_idx=pad_idx,
     )
     test_data_loader = DataLoader(
         test_data,
@@ -554,7 +576,7 @@ if __name__ == "__main__":
         batch_size // 4,
         seq_len,
         shuffle=True,
-        pad_idx=0,
+        pad_idx=pad_idx,
     )
     step_count = 0
 
@@ -573,7 +595,7 @@ if __name__ == "__main__":
             # y has shape (batch_size, seq_len)
             # Create decoder input by prepending <SOS> and dropping the last token
             y_inp = np.zeros_like(y)
-            y_inp[:, 0] = vocab["<SOS>"]
+            y_inp[:, 0] = vocab[b"<SOS>"]
             y_inp[:, 1:] = y[:, :-1]
 
             # pred_probs is (batch_size, sequence_len, vocabulary_size)
@@ -584,7 +606,7 @@ if __name__ == "__main__":
                 target_mask,
             )
             loss = functional.sparse_cross_entropy(
-                pred_prob, y, pad_idx=0, label_smoothing=0.1
+                pred_prob, y, pad_idx=pad_idx, label_smoothing=0.1
             )
             loss.backward()
             optimizer.step()
@@ -598,29 +620,33 @@ if __name__ == "__main__":
             for _ in tqdm(range(eval_iters), desc="Test Evaluation", leave=False):
                 x, y, source_mask, target_mask = next(iter(test_data_loader))
                 y_inp = np.zeros_like(y)
-                y_inp[:, 0] = vocab["<SOS>"]
+                y_inp[:, 0] = vocab[b"<SOS>"]  # prepend <SOS> for decoder input
                 y_inp[:, 1:] = y[:, :-1]
 
                 pred_prob = model(
                     x,
-                    y_inp,  # prepend <SOS> for decoder input
+                    y_inp,
                     source_mask,
                     target_mask,
                 )
                 loss = functional.sparse_cross_entropy(
-                    pred_prob, y, pad_idx=0, label_smoothing=0.0
+                    pred_prob, y, pad_idx=pad_idx, label_smoothing=0.0
                 )
                 test_loss += loss.detach().data
 
             pred_tokens = inference(
                 model,
+                bpe,
                 start_tokens=["<SOS>"],
-                max_length=30,
+                pad_idx=pad_idx,
+                max_length=100,
                 temperature=0.2,
             )
             model.train()
 
-            print(
-                f"\nEpoch {epoch} | Train Loss: {epoch_loss / len(train_data_loader):.2f} | Test Loss: {test_loss / eval_iters:.2f}"
+            logger.warning(
+                f"\nEpoch {epoch} | Train Loss: {epoch_loss / len(train_data_loader):.2f} "
+                f"| Test Loss: {test_loss / eval_iters:.2f}"
             )
-            print(f"Prediction: {' '.join(pred_tokens)}")
+            prediction_string = "\n".join("".join(pred_tokens).split("<|endoftext|>"))
+            logger.info(f"Prediction:\n{prediction_string}")

@@ -1,5 +1,4 @@
 import numpy as np
-from typing import Union
 import os
 import requests
 import pyarrow.parquet as pq
@@ -18,7 +17,7 @@ def train_test_split(X, y, test_size=0.2, random_state=None):
     return X_train, X_test, y_train, y_test
 
 
-def load_data(url: str, filename: str, max_rows: int = None) -> Union[str, np.ndarray]:
+def load_data(url: str, filename: str, max_rows: int = None) -> str:
     """
     Load data from a file, downloading (GET request) it first if it doesn't exist.
     Automatically handles parquet and text files based on extension.
@@ -139,20 +138,20 @@ class DataLoader:
 
             # If your data is still string tokens, we convert them to indices.
             # If it's already integer IDs, you could skip this step.
-            x = text_utils.token_batch_to_indices(X_chunk, self.vocab)
-            y = text_utils.token_batch_to_indices(Y_chunk, self.vocab)
+            # x = text_utils.token_batch_to_indices(X_chunk, self.vocab)
+            # y = text_utils.token_batch_to_indices(Y_chunk, self.vocab)
 
             # Create the masks
             smask = Tensor(
-                text_utils.create_padding_mask(x, pad_idx=self.pad_idx),
+                text_utils.create_padding_mask(X_chunk, pad_idx=self.pad_idx),
                 requires_grad=False,
             )
-            pmask = text_utils.create_padding_mask(y, pad_idx=self.pad_idx)
+            pmask = text_utils.create_padding_mask(Y_chunk, pad_idx=self.pad_idx)
             cmask = text_utils.create_causal_mask(self.seq_len, self.batch_size)
             tmask = Tensor(pmask + cmask, requires_grad=False)
 
-            self.batches_X.append(x)
-            self.batches_y.append(y)
+            self.batches_X.append(X_chunk)
+            self.batches_y.append(Y_chunk)
             self.source_masks.append(smask)
             self.target_masks.append(tmask)
 

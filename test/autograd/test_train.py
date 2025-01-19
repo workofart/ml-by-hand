@@ -1,7 +1,6 @@
 import numpy as np
 from autograd import nn, optim, functional
-from sklearn.datasets import load_breast_cancer
-from openml.datasets import get_dataset
+from sklearn.datasets import load_breast_cancer, load_diabetes
 from unittest import TestCase
 import logging
 
@@ -78,9 +77,7 @@ class TestTrain(TestCase):
         assert acc > 0.9
 
     def test_regression(self):
-        X, y, _, __ = get_dataset(dataset_id=44971, download_data=True).get_data(
-            target="quality", dataset_format="array"
-        )
+        X, y = load_diabetes(return_X_y=True)
         logger.info(f"Dataset: {X.shape=}, {y.shape=}")
         logger.info(f"y unique values: {np.unique(y)}")
 

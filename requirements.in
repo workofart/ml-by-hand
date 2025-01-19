@@ -7,6 +7,7 @@ tqdm
 pyright
 pytest
 openml
+regex
 torch
 torchvision
 torchaudio
