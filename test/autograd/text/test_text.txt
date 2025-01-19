@@ -1,4 +1,4 @@
-# Automatic differentiation - Wikipedia
+# Automatic differentiation - Wikipedia <|endoftext|>
 
 > ## Excerpt
 > In mathematics and computer algebra, automatic differentiation (auto-differentiation, autodiff, or AD), also called algorithmic differentiation, computational differentiation, and differentiation arithmetic[1][2][3][4] is a set of techniques to evaluate the partial derivative of a function specified by a computer program. Automatic differentiation is a subtle and central tool to automatize the simultaneous computation of the numerical values of arbitrarily complex functions and their derivatives with no need for the symbolic representation of the derivative, only the function rule or an algorithm thereof is required [3][4]. Auto-differentiation is thus neither numeric nor symbolic, nor is it a combination of both. It is also preferable to ordinary numerical methods: In contrast to the more traditional numerical methods based on finite differences, auto-differentiation is 'in theory' exact, and in comparison to symbolic algorithms, it is computationally inexpensive.[5][3][6]

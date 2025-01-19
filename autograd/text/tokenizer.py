@@ -1,31 +1,50 @@
 from collections import Counter
+import os
 import regex
+from typing import ByteString
+import logging
+import pickle
+
+logger = logging.getLogger(__name__)
 
 
 class BytePairEncoder:
-    SPECIAL_TOKENS = ["<|endoftext|>"]
+    SPECIAL_TOKENS = ["<|endoftext|>", "<PAD>", "<SOS>", "<UNK>"]
+    VOCAB_FILE_PATH = "vocab.pkl"
 
     def __init__(self, num_merges=500) -> None:
         self.num_merges = num_merges
         self._unicode_to_int_vocab = self._construct_unicode_to_int_vocab()
-        print(self._unicode_to_int_vocab)
         self._int_to_unicode_vocab = dict(
             zip(self._unicode_to_int_vocab.values(), self._unicode_to_int_vocab.keys())
         )
-
+        self.learned_merges = []
         # start merged token ids from the first unused index after the base vocabulary
         self.new_idx = max(self._unicode_to_int_vocab.values()) + 1
 
-    def encode(self, input_text: str) -> list[int]:
+    def train_vocabulary(
+        self, input_text: str, overwrite_saved_file: bool = False
+    ) -> tuple[dict[int, ByteString], dict[ByteString, int]]:
+        if os.path.exists(self.VOCAB_FILE_PATH) and not overwrite_saved_file:
+            with open(self.VOCAB_FILE_PATH, "rb") as f:
+                logger.info("Loading the vocabulary from disk")
+                self._unicode_to_int_vocab, self._int_to_unicode_vocab = pickle.load(f)
+                return self._unicode_to_int_vocab, self._int_to_unicode_vocab
+
         text_chunks = self._pretokenize(input_text)
-        print(f"Text chunks: {text_chunks[:10]}")
+        logger.debug(f"Text chunks: {text_chunks[:10]}")
 
         # Convert a list of strings to a list of integers,
         # where each integer is the index of the character in the vocabulary
-        byte_encoded_chars = [
-            char for string in text_chunks for char in list(string.encode("utf-8"))
-        ]
-        print(f"Byte encoded chars: {byte_encoded_chars[:10]}")
+        byte_encoded_chars = []
+        for chunk in text_chunks:
+            if chunk in self.SPECIAL_TOKENS:
+                # convert to single ID
+                special_id = self._unicode_to_int_vocab[chunk.encode("utf-8")]
+                byte_encoded_chars.append(special_id)
+            else:
+                byte_encoded_chars.extend(list(chunk.encode("utf-8")))
+        logger.debug(f"Byte encoded chars: {byte_encoded_chars[:10]}")
 
         for i in range(self.num_merges):
             pair_counts = self._get_bigrams_to_count(byte_encoded_chars)
@@ -44,19 +63,57 @@ class BytePairEncoder:
             self.new_idx += 1
 
             # Store the merged pair into the vocab
-            self._int_to_unicode_vocab[new_id] = (
+            merged_bytes = (
                 self._int_to_unicode_vocab[best_pair[0]]
                 + self._int_to_unicode_vocab[best_pair[1]]
             )
+            self._int_to_unicode_vocab[new_id] = merged_bytes
+            self._unicode_to_int_vocab[merged_bytes] = new_id
 
             # Update the original encoded chars with the merged one
             byte_encoded_chars = self._merge_pairs(
                 best_pair, new_id, byte_encoded_chars
             )
+            # Record this for encoding step later
+            self.learned_merges.append((best_pair, new_id))
 
-            print(
-                f"Merge {i+1}/{self.num_merges}: {best_pair} -> {new_id} ({self._int_to_unicode_vocab[new_id]}) had {pair_counts[best_pair]} occurrences"
-            )
+            if (i + 1) % 100 == 0:
+                logger.info(
+                    f"[{i+1}/{self.num_merges} merge] Best Pair Merged with {pair_counts[best_pair]} occurrences"
+                )
+
+        with open(self.VOCAB_FILE_PATH, "wb") as f:
+            logger.info("Saving the vocabulary from disk")
+            pickle.dump((self._unicode_to_int_vocab, self._int_to_unicode_vocab), f)
+
+        return self._unicode_to_int_vocab, self._int_to_unicode_vocab
+
+    def encode(self, input_text: str) -> list[int]:
+        """
+        We need to perform the merges that appear in the vocabulary
+        Merge the highest-frequency pair of tokens in the text, then repeat
+        """
+        text_chunks = self._pretokenize(input_text)
+        logger.info(f"Text chunks: {text_chunks[:20]}")
+
+        # Convert a list of strings to a list of integers,
+        # where each integer is the index of the character in the vocabulary
+        byte_encoded_chars = []
+        for chunk in text_chunks:
+            if chunk in self.SPECIAL_TOKENS:
+                # convert to single ID
+                special_id = self._unicode_to_int_vocab[chunk.encode("utf-8")]
+                byte_encoded_chars.append(special_id)
+            else:
+                for b_int in list(chunk.encode("utf-8")):
+                    single_byte = bytes([b_int])  # e.g. b"\x46"
+                    byte_encoded_chars.append(self._unicode_to_int_vocab[single_byte])
+        logger.info(f"Byte encoded chars: {byte_encoded_chars[:10]}")
+
+        # Re-apply merges on the input_text
+        for pair, new_id in self.learned_merges:
+            byte_encoded_chars = self._merge_pairs(pair, new_id, byte_encoded_chars)
+
         return byte_encoded_chars
 
     def decode(self, encoded_tokens: list[int]):
@@ -69,7 +126,7 @@ class BytePairEncoder:
         # Remember our result contains bytes, so we need to join them and decode them
         return b"".join(result).decode("utf-8", errors="replace")
 
-    def _construct_unicode_to_int_vocab(self) -> dict[str, int]:
+    def _construct_unicode_to_int_vocab(self) -> dict[ByteString, int]:
         """
         Returns a dict: char -> int, for 0..255, plus expansions for non-printable control characters
         """
@@ -90,11 +147,28 @@ class BytePairEncoder:
         - `?\p{N}+` similarly for digits (e.g. `" 2022"` becomes a token) optionally preceded by a space.
         - `?[^\s\p{L}\p{N}]+` captures punctuation or other symbols optionally preceded by a space.
         """
-        pattern = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s"""
-        pattern = regex.compile(pattern)
-        chunks = pattern.findall(input_text)
+        # We handle the special tokens first
+        special_pattern = (
+            "(" + "|".join(regex.escape(k) for k in self.SPECIAL_TOKENS) + ")"
+        )
+        splitted_input = regex.split(special_pattern, input_text)
 
-        return chunks
+        general_pattern = regex.compile(
+            r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s"""
+        )
+
+        final_chunks = []
+        for segment in splitted_input:
+            if not segment:  # Skip empty splits
+                continue
+            if segment in self.SPECIAL_TOKENS:
+                # Preserve special tokens as-is
+                final_chunks.append(segment)
+            else:
+                # Apply secondary regex for normal text
+                final_chunks.extend(general_pattern.findall(segment))
+
+        return final_chunks
 
     def _get_bigrams_to_count(self, tokens: list[int]) -> dict[list[tuple[int]], int]:
         """
@@ -108,8 +182,8 @@ class BytePairEncoder:
             dict[list[tuple[int]], int]: A dictionary mapping each pair of tokens to the number of times it occurs
         """
         counter = Counter()
-        for tuple in list(zip(tokens[:-1], tokens[1:])):
-            counter[tuple] += 1
+        for tup in list(zip(tokens[:-1], tokens[1:])):
+            counter[tup] += 1
         return counter
 
     def _merge_pairs(
@@ -145,7 +219,7 @@ if __name__ == "__main__":
         original_text = f.read()
     encoded_tokens = bpe.encode(original_text)
     decoded_tokens = bpe.decode(encoded_tokens)
-    print(f"Size of vocabulary: {len(bpe._int_to_unicode_vocab)}")
-    print(original_text[:50])
-    print(encoded_tokens[:50])
-    print(decoded_tokens[:50])
+    logger.info(f"Size of vocabulary: {len(bpe._int_to_unicode_vocab)}")
+    logger.info(original_text[:50])
+    logger.info(encoded_tokens[:50])
+    logger.info(decoded_tokens[:50])
