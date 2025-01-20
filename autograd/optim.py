@@ -1,6 +1,7 @@
 import numpy as np
 import logging
 from collections import defaultdict
+from typing import Any, Callable, Dict, Union
 
 logger = logging.getLogger(__name__)
 
@@ -19,11 +20,13 @@ class Optimizer:
         optimizer.step()
     """
 
-    def __init__(self, model_parameters, lr, **kwargs) -> None:
+    def __init__(self, model_parameters: Any, lr: float, **kwargs: Any) -> None:
         self.model_parameters = model_parameters
         self.lr = lr
 
-    def _recursive_param_op(self, params, update_fn):
+    def _recursive_param_op(
+        self, params: Any, update_fn: Callable[[Any], None]
+    ) -> None:
         # 1) If params is a dict
         if isinstance(params, dict):
             for _, v in params.items():
@@ -38,15 +41,15 @@ class Optimizer:
         elif hasattr(params, "grad"):
             update_fn(params)
 
-    def zero_grad(self):
+    def zero_grad(self) -> None:
         """Set the gradients of all optimized tensors to zero."""
 
-        def update_fn(x):
+        def update_fn(x: Any) -> None:
             x.grad = None
 
         self._recursive_param_op(self.model_parameters, update_fn)
 
-    def step(self):
+    def step(self) -> None:
         """
         Performs a single optimization step.
         """
@@ -58,11 +61,11 @@ class SGD(Optimizer):
     Stochastic Gradient Descent Optimizer
     """
 
-    def __init__(self, model_parameters, lr, **kwargs) -> None:
+    def __init__(self, model_parameters: Any, lr: float, **kwargs: Any) -> None:
         super(SGD, self).__init__(model_parameters, lr, **kwargs)
 
-    def step(self):
-        def update_fn(param):
+    def step(self) -> None:
+        def update_fn(param: Any) -> None:
             param.data -= self.lr * param.grad.data
 
         self._recursive_param_op(self.model_parameters, update_fn)
@@ -76,7 +79,13 @@ class Adam(Optimizer):
     """
 
     def __init__(
-        self, model_parameters, lr, beta1=0.9, beta2=0.999, epsilon=1e-7, **kwargs
+        self,
+        model_parameters: Any,
+        lr: float,
+        beta1: float = 0.9,
+        beta2: float = 0.999,
+        epsilon: float = 1e-7,
+        **kwargs: Any,
     ) -> None:
         super(Adam, self).__init__(model_parameters, lr, **kwargs)
         self.beta1 = beta1
@@ -85,16 +94,20 @@ class Adam(Optimizer):
 
         # Note that we are creating new state attributes to store these
         # These notations are based on the same notations in the paper linked above
-        self.m = defaultdict(float)  # first momentum estimate
-        self.v = defaultdict(float)  # second momentum estimate
+        self.m: Dict[int, Union[float, np.ndarray]] = defaultdict(
+            float
+        )  # first momentum estimate
+        self.v: Dict[int, Union[float, np.ndarray]] = defaultdict(
+            float
+        )  # second momentum estimate
         self.timestep = (
             0  # to keep track of the timestep, this will adapt our learning rate
         )
 
-    def step(self):
+    def step(self) -> None:
         self.timestep += 1
 
-        def update_fn(param):
+        def update_fn(param: Any) -> None:
             if param.grad is None:
                 return
             param_id = id(
