@@ -620,18 +620,14 @@ class SetItem(Function):
         return x
 
     def backward(self, grad: "Tensor") -> np.ndarray:
-        grad = grad.data
-        if np.isscalar(grad):
-            return grad[self.idx].sum()
-        else:
-            return grad[self.idx]
+        return grad.data[self.idx]
 
 
 class Sqrt(Function):
     def forward(self, x: "Tensor") -> np.ndarray:
         # Store input for backward pass
         self.x = x
-        return np.sqrt(x)
+        return np.sqrt(x.data)
 
     def backward(self, grad: "Tensor") -> np.ndarray:
         # d/dx(sqrt(x)) = 1/(2*sqrt(x))
@@ -814,7 +810,7 @@ class Mean(Function):
         num_elements = (
             np.prod([self.tensors[0].shape[ax] for ax in self.axis])
             if self.axis is not None
-            else self.tensors[0].size
+            else self.tensors[0].shape
         )
         return grad_arr / num_elements
 
