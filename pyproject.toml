@@ -1,0 +1,10 @@
+[tool.pyright]
+reportIncompatibleMethodOverride = "none"
+exclude = [
+    "**/test/**",    # Ignore all files in the "test" directory
+]
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+python_files = "test_*.py"
+memray = true

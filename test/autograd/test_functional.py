@@ -6,6 +6,7 @@ from unittest import TestCase
 
 
 class TestActivationFunctions(TestCase):
+    # TODO: add backward pass tests
     def setUp(self) -> None:
         self.X = Tensor(data=np.array([[1, 1, 1], [2, 2, 2]]), requires_grad=True)
 
