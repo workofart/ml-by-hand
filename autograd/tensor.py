@@ -1030,14 +1030,14 @@ class Cat(Function):
 class Permute(Function):
     """Movement op: reorder dimensions"""
 
-    def forward(self, x: np.ndarray, dims: Union[int, Sequence[int]]) -> np.ndarray:
+    def forward(self, x: np.ndarray, dims: Sequence[int]) -> np.ndarray:
         if len(dims) == 1 and isinstance(dims[0], (tuple, list)):
             dims = dims[0]
+
         self.dims = dims
         return np.transpose(x, dims)
 
     def backward(self, grad: "Tensor") -> np.ndarray:
-        # Compute inverse permutation to get back to original ordering
         inv_dims = [self.dims.index(i) for i in range(len(self.dims))]
         return np.transpose(grad.data, inv_dims)
 
