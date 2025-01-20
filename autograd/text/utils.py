@@ -1,18 +1,25 @@
 from collections import defaultdict
+from typing import (
+    List,
+    Dict,
+    Optional,
+    Callable,
+    Tuple,
+    Union,
+)
 import numpy as np
 import re
 
 
 def create_vocabulary(
-    texts,
-    max_features: int,
-    custom_tokenizer=None,
-    special_tokens=["<PAD>", "<SOS>", "<UNK>"],
-):
+    texts: List[str],
+    max_features: Optional[int],
+    custom_tokenizer: Optional[Callable[[str], List[str]]] = None,
+    special_tokens: List[str] = ["<PAD>", "<SOS>", "<UNK>"],
+) -> Dict[str, int]:
     """
     Create a vocabulary (word->index) from given texts,
     keeping up to max_features most common words.
-
     """
     token_freq = defaultdict(int)
     for text in texts:
@@ -38,8 +45,11 @@ def create_vocabulary(
 
 
 def text_to_one_hot_and_sparse(
-    texts: list, vocabulary: list, max_sequence_length: int, pad_str="<PAD>"
-):
+    texts: List[str],
+    vocabulary: Dict[str, int],
+    max_sequence_length: int,
+    pad_str: str = "<PAD>",
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     Convert list of texts into a sequential feature matrix using the vocabulary.
     It will do the padding/truncation based on max_sequence_length, then convert to one-hot encoding
@@ -59,8 +69,8 @@ def text_to_one_hot_and_sparse(
     vocab_size = len(vocabulary)
     pad_idx = vocabulary[pad_str]
 
-    # Create an integer marix of shape (batch_size, max_sequence_length)
-    # filled with pad_idx initially, then we will overwrite with actual indices later
+    # Create an integer matrix of shape (batch_size, max_sequence_length)
+    # filled with pad_idx initially, then we overwrite with actual indices later
     matrix = np.full(
         (batch_size, max_sequence_length), fill_value=pad_idx, dtype=np.int32
     )
@@ -88,7 +98,12 @@ def text_to_one_hot_and_sparse(
     return one_hot, matrix
 
 
-def create_causal_mask(seq_len, batch_size, lookback=False, mask_diagonal=False):
+def create_causal_mask(
+    seq_len: int,
+    batch_size: int,
+    lookback: bool = False,
+    mask_diagonal: bool = False,
+) -> np.ndarray:
     """
     Creates a causal mask that prevents positions from attending to future (lookforward)
     or past (lookback) positions. 1.0 => masked.
@@ -126,7 +141,11 @@ def create_causal_mask(seq_len, batch_size, lookback=False, mask_diagonal=False)
     return mask_4d
 
 
-def create_padding_mask(token_indices, pad_idx=0, dims=None):
+def create_padding_mask(
+    token_indices: np.ndarray,
+    pad_idx: int = 0,
+    dims: Optional[Tuple[int, ...]] = None,
+) -> np.ndarray:
     """
     Creates a padding mask with configurable output dimensions.
 
@@ -151,33 +170,31 @@ def create_padding_mask(token_indices, pad_idx=0, dims=None):
 
 
 def clean_and_tokenize(
-    text, pattern=r"\w+|[^\w\s]|[\n\s]", lowercase=True
-) -> list[str]:
+    text: str, pattern: str = r"\w+|[^\w\s]|[\n\s]", lowercase: bool = True
+) -> List[str]:
     """
     Naive tokenizer split by words
 
     Args:
         text (str): The entire input text to be tokenized
         pattern (str): Regular expression pattern used for tokenization.
-                      Default splits on words, punctuation and whitespace.
+                       Default splits on words, punctuation and whitespace.
         lowercase (bool): Whether to convert tokens to lowercase. Default True.
 
     Returns:
         list of tokens (str)
     """
-    # Split using provided regex pattern
     tokens = np.array(re.findall(pattern, text))
 
-    # Optionally convert to lowercase
     if lowercase:
         tokens = np.vectorize(str.lower)(tokens)
 
     # Filter out whitespace tokens
     tokens = tokens[(tokens != " ") & (tokens != "\n")]
-    return tokens
+    return tokens.tolist()
 
 
-def validate_batches(x, y):
+def validate_batches(x: np.ndarray, y: np.ndarray) -> None:
     batch_size, seq_len = x.shape
     for b in range(min(4, batch_size)):
         for seq_idx in range(seq_len):
@@ -185,11 +202,14 @@ def validate_batches(x, y):
             print("[y]: ", y[b, seq_idx])
 
 
-def token_batch_to_indices(token_batch, vocab):
-    X = []
+def token_batch_to_indices(
+    token_batch: List[List[str]],
+    vocab: Dict[Union[str, bytes], int],
+) -> np.ndarray:
+    X: List[List[int]] = []
     for batch in token_batch:
-        seq = []
+        seq: List[int] = []
         for token in batch:
             seq.append(vocab.get(token, vocab[b"<UNK>"]))
         X.append(seq)
-    return np.array(X)
+    return np.array(X, dtype=np.int32)

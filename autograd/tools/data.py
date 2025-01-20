@@ -2,11 +2,17 @@ import numpy as np
 import os
 import requests
 import pyarrow.parquet as pq
+from typing import Tuple, List, Dict, Union, Optional, Iterator, Any
 from autograd.text import utils as text_utils
 from autograd.tensor import Tensor
 
 
-def train_test_split(X, y, test_size=0.2, random_state=None):
+def train_test_split(
+    X: np.ndarray,
+    y: np.ndarray,
+    test_size: float = 0.2,
+    random_state: Optional[int] = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     if random_state is not None:
         np.random.seed(random_state)
     num_samples = len(X)
@@ -17,7 +23,9 @@ def train_test_split(X, y, test_size=0.2, random_state=None):
     return X_train, X_test, y_train, y_test
 
 
-def load_data(url: str, filename: str, max_rows: int = None) -> str:
+def load_data(
+    url: str, filename: str, max_rows: Optional[int] = None
+) -> Union[str, np.ndarray]:
     """
     Load data from a file, downloading (GET request) it first if it doesn't exist.
     Automatically handles parquet and text files based on extension.
@@ -54,12 +62,12 @@ class DataLoader:
     def __init__(
         self,
         data: np.ndarray,
-        vocab: dict,
+        vocab: Dict[Any, Any],
         batch_size: int,
         seq_len: int,
         shuffle: bool = True,
         pad_idx: int = 0,
-    ):
+    ) -> None:
         """
         Args:
             data (np.ndarray): Tokenized data (list of token IDs or strings).
@@ -87,7 +95,7 @@ class DataLoader:
         self.source_masks = []
         self.target_masks = []
 
-    def on_epoch_start(self):
+    def on_epoch_start(self) -> None:
         """
         Perform any epoch-begin tasks, e.g. row-level shuffling for contiguous sampling,
         then create the new epoch's batches.
@@ -100,7 +108,7 @@ class DataLoader:
 
         self._create_batches()
 
-    def _create_batches(self):
+    def _create_batches(self) -> None:
         """
         Contiguously chunk the data into shape (batch_size, -1).
         Then partition each row into seq_len segments.
@@ -155,13 +163,13 @@ class DataLoader:
             self.source_masks.append(smask)
             self.target_masks.append(tmask)
 
-    def __len__(self):
+    def __len__(self) -> int:
         """
         Number of batches per epoch.
         """
         return self.num_batches
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[Tuple[np.ndarray, np.ndarray, Tensor, Tensor]]:
         """
         Iterate over precomputed batches (X, y, source_mask, target_mask).
         """
@@ -178,7 +186,10 @@ class DataLoader:
         seq_len: int,
         as_tokens: bool = False,
         return_dict: bool = False,
-    ):
+    ) -> Union[
+        Tuple[Union[List[Any], np.ndarray], Union[List[Any], np.ndarray]],
+        Dict[str, Union[List[Any], np.ndarray]],
+    ]:
         """
         Sample a random contiguous chunk of length `seq_len` from `self.data`.
         Optionally convert it from integer IDs -> tokens (using the reverse of self.vocab).

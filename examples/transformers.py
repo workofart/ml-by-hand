@@ -6,6 +6,7 @@ from autograd.text import utils as text_utils, tokenizer
 from autograd.tensor import Tensor
 from autograd import nn, functional, optim
 import logging
+from typing import List, Optional, Any
 
 
 class Transformer(nn.Module):
@@ -23,7 +24,9 @@ class Transformer(nn.Module):
       and feed-forward sub-layers
     """
 
-    def __init__(self, vocab_size, hidden_size, num_attention_heads, **kwargs):
+    def __init__(
+        self, vocab_size: int, hidden_size: int, num_attention_heads: int, **kwargs: Any
+    ) -> None:
         """
         Args:
             vocab_size (int): Vocabulary size for the embeddings
@@ -50,8 +53,8 @@ class Transformer(nn.Module):
         self,
         source: Tensor,
         target: Tensor,
-        source_mask: Tensor = None,
-        target_mask: Tensor = None,
+        source_mask: Optional[Tensor] = None,
+        target_mask: Optional[Tensor] = None,
     ) -> Tensor:
         """
         Forward pass of the transformer
@@ -84,7 +87,7 @@ class Encoder(nn.Module):
     - 6 identical EncoderSublayer (Section 3.1)
     """
 
-    def __init__(self, embedding_size, num_attention_heads):
+    def __init__(self, embedding_size: int, num_attention_heads: int) -> None:
         super().__init__()
         self.embedding_size = embedding_size
 
@@ -100,7 +103,9 @@ class Encoder(nn.Module):
         ]
         self.layer_norm = nn.LayerNorm(embedding_size)
 
-    def forward(self, x, embedding_layer, mask=None):
+    def forward(
+        self, x: Tensor, embedding_layer: nn.Module, mask: Optional[Tensor] = None
+    ) -> Tensor:
         # Section 3.4 (Embedding Scaling) embedding layer is shared between Encoder and Decoder
         x = embedding_layer(x) * Tensor(self.embedding_size).sqrt()
 
@@ -121,7 +126,9 @@ class Decoder(nn.Module):
     - Linear + Softmax to produce probability distribution over entire vocabulary
     """
 
-    def __init__(self, vocab_size, hidden_size, num_attention_heads=2):
+    def __init__(
+        self, vocab_size: int, hidden_size: int, num_attention_heads: int = 2
+    ) -> None:
         super().__init__()
         self.positional_encoder = PositionalEncoding(hidden_size=hidden_size)
         self.hidden_size = hidden_size
@@ -137,7 +144,14 @@ class Decoder(nn.Module):
         self.linear = nn.Linear(hidden_size, output_size=vocab_size)
         self.layer_norm = nn.LayerNorm(hidden_size)
 
-    def forward(self, x, embedding_layer, encoder_output, source_mask, target_mask):
+    def forward(
+        self,
+        x: Tensor,
+        embedding_layer: nn.Module,
+        encoder_output: Tensor,
+        source_mask: Optional[Tensor],
+        target_mask: Optional[Tensor],
+    ) -> Tensor:
         """
         Args:
             x (Tensor): Target sequence (decoder input)
@@ -167,7 +181,7 @@ class ResidualAddAndNorm(nn.Module):
     from Section 3.1 in the paper.
     """
 
-    def __init__(self, input_size, dropout_prob=0.1):
+    def __init__(self, input_size: int, dropout_prob: float = 0.1) -> None:
         super().__init__()
         self.layer_norm = nn.LayerNorm(input_size)
 
@@ -175,7 +189,7 @@ class ResidualAddAndNorm(nn.Module):
         # adding to sublayer input
         self.dropout = nn.Dropout(p=dropout_prob)
 
-    def forward(self, x, previous_layer: nn.Module):
+    def forward(self, x: Tensor, previous_layer: nn.Module) -> Tensor:
         # Residual connection from input x
         # Post Layer normalization (same as the paper)
         return x + self.layer_norm(self.dropout(previous_layer(x)))
@@ -192,11 +206,11 @@ class EncoderSublayer(nn.Module):
 
     def __init__(
         self,
-        hidden_size=512,
-        ff_hidden_size=2048,
-        dropout_prob=0.1,
-        num_attention_heads=2,
-    ):
+        hidden_size: int = 512,
+        ff_hidden_size: int = 2048,
+        dropout_prob: float = 0.1,
+        num_attention_heads: int = 2,
+    ) -> None:
         super().__init__()
 
         # Multi-head self attention
@@ -213,7 +227,7 @@ class EncoderSublayer(nn.Module):
             dropout_prob=dropout_prob,
         )
 
-    def forward(self, x, mask):
+    def forward(self, x: Tensor, mask: Optional[Tensor]) -> Tensor:
         # (Section 3.2.2) Multi-head self attention
         x = self.add_and_norm1(
             x, lambda x_: self.multi_head_attention(x_, x_, x_, mask=mask)
@@ -235,11 +249,11 @@ class DecoderSublayer(nn.Module):
 
     def __init__(
         self,
-        hidden_size=512,
-        ff_hidden_size=2048,
-        dropout_prob=0.1,
-        num_attention_heads=2,
-    ):
+        hidden_size: int = 512,
+        ff_hidden_size: int = 2048,
+        dropout_prob: float = 0.1,
+        num_attention_heads: int = 2,
+    ) -> None:
         super().__init__()
 
         # Section 3.2.3 Masked Multi-head self-attention
@@ -262,7 +276,13 @@ class DecoderSublayer(nn.Module):
             dropout_prob=dropout_prob,
         )
 
-    def forward(self, x, encoder_output: Tensor, source_mask, target_mask):
+    def forward(
+        self,
+        x: Tensor,
+        encoder_output: Tensor,
+        source_mask: Optional[Tensor],
+        target_mask: Optional[Tensor],
+    ) -> Tensor:
         # Masked Multi-head Attention
         # Figure 1 in Paper.
         x = self.add_and_norm1(
@@ -287,7 +307,7 @@ class DecoderSublayer(nn.Module):
 class PositionalEncoding(nn.Module):
     """
     Implements the Positional Encoding from Section 3.5 in the paper.
-    This allows the model to learn to attent to relative positions even
+    This allows the model to learn to attend to relative positions even
     without the sequence order information.
 
     $$ PE(pos, 2i) = sin(\frac{pos}{10000^{(\frac{2i}{\text{hidden\_size}})}}) $$
@@ -297,7 +317,9 @@ class PositionalEncoding(nn.Module):
         i is the dimension
     """
 
-    def __init__(self, hidden_size, max_seq_len=5000, dropout_prob=0.1):
+    def __init__(
+        self, hidden_size: int, max_seq_len: int = 5000, dropout_prob: float = 0.1
+    ) -> None:
         super().__init__()
         pe = np.zeros((max_seq_len, hidden_size), dtype=np.float32)
         position = np.arange(0, max_seq_len)[:, np.newaxis]
@@ -310,7 +332,7 @@ class PositionalEncoding(nn.Module):
 
         self.dropout = nn.Dropout(p=dropout_prob)
 
-    def forward(self, x: Tensor):
+    def forward(self, x: Tensor) -> Tensor:
         """
         Takes (batch_size, seq_len, vocab_size) and returns the same shape
 
@@ -333,13 +355,15 @@ class FeedForward(nn.Module):
     $$ FFN(x) = max(0, xW1 + b1)W2 + b2 $$
     """
 
-    def __init__(self, fc_input_size, hidden_size, dropout_prob):
+    def __init__(
+        self, fc_input_size: int, hidden_size: int, dropout_prob: float
+    ) -> None:
         super().__init__()
         self.fc1 = nn.Linear(fc_input_size, hidden_size)
         self.fc2 = nn.Linear(hidden_size, fc_input_size)
         self.dropout = nn.Dropout(p=dropout_prob)
 
-    def forward(self, x):
+    def forward(self, x: Tensor) -> Tensor:
         x = functional.relu(self.fc1(x))
         x = self.fc2(self.dropout(x))
         return x
@@ -352,10 +376,12 @@ class ScaledDotProductAttention(nn.Module):
     Attention(Q,K,V) = softmax(Q transpose(K) / sqrt(key_dim)) V
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
 
-    def forward(self, query: Tensor, key: Tensor, value: Tensor, mask=None):
+    def forward(
+        self, query: Tensor, key: Tensor, value: Tensor, mask: Optional[Tensor] = None
+    ) -> Tensor:
         attention_size = Tensor(key.shape[-1])
 
         # scaled dot product
@@ -378,7 +404,7 @@ class MultiHeadAttention(nn.Module):
     we project them "num_heads" times with different learned linear projects
     """
 
-    def __init__(self, num_heads, hidden_size):
+    def __init__(self, num_heads: int, hidden_size: int) -> None:
         super().__init__()
         self.num_heads = num_heads
         self.attention_size = (
@@ -393,7 +419,9 @@ class MultiHeadAttention(nn.Module):
         self.attention = ScaledDotProductAttention()
         self.fc = nn.Linear(hidden_size, hidden_size)
 
-    def forward(self, query, key, value, mask=None):
+    def forward(
+        self, query: Tensor, key: Tensor, value: Tensor, mask: Optional[Tensor] = None
+    ) -> Tensor:
         batch_size = query.shape[0]
 
         # We try to avoid explicitly splitting and combining the heads
@@ -438,13 +466,13 @@ class MultiHeadAttention(nn.Module):
 
 
 def inference(
-    model,
+    model: nn.Module,
     bpe: tokenizer.BytePairEncoder,
-    start_tokens: list[str],
-    pad_idx,
-    max_length=50,
-    temperature=1.0,
-) -> list[str]:
+    start_tokens: List[str],
+    pad_idx: int,
+    max_length: int = 50,
+    temperature: float = 1.0,
+) -> str:
     """
     Peform model inference, usually for evaluation purposes.
     We will continously feed the model's generated tokens back to the model to generate
@@ -503,7 +531,7 @@ def inference(
     return bpe.decode(generated)
 
 
-def get_lr(step, model_dim, warmup_steps):
+def get_lr(step: int, model_dim: int, warmup_steps: int) -> float:
     """
     Learning rate scheduler with warmup for transformers training. It will start with larger learning rate, then after the transition point sqrt(step) == step * warmup_steps^(-1.5), the learning rate will slowly decrease
 
@@ -648,5 +676,5 @@ if __name__ == "__main__":
                 f"\nEpoch {epoch} | Train Loss: {epoch_loss / len(train_data_loader):.2f} "
                 f"| Test Loss: {test_loss / eval_iters:.2f}"
             )
-            prediction_string = "\n".join("".join(pred_tokens).split("<|endoftext|>"))
+            prediction_string = "\n".join(pred_tokens.split("<|endoftext|>"))
             logger.info(f"Prediction:\n{prediction_string}")

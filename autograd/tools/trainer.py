@@ -75,7 +75,11 @@ class Trainer:
 
                 # Forward pass
                 y_pred = self.model(batch_X)
-                loss = self.loss_fn(y_pred, batch_y, weight=batch_weight)
+                loss = self.loss_fn(
+                    y_pred,
+                    batch_y,
+                    **({"weight": batch_weight} if batch_weight is not None else {}),
+                )
                 total_loss += loss.detach().data * (end_idx - start_idx)
 
                 # Backward pass

@@ -1,4 +1,5 @@
 import numpy as np
+from typing import Union, Optional, Any, Dict, Tuple
 from .tensor import Tensor
 import logging
 from .init import xavier_uniform
@@ -8,12 +9,12 @@ logger = logging.getLogger(__name__)
 
 
 class Module:
-    def __init__(self):
-        self._parameters = {}
-        self._modules = {}
-        self._is_training = None
+    def __init__(self) -> None:
+        self._parameters: Dict[str, Tensor] = {}
+        self._modules: Dict[str, "Module"] = {}
+        self._is_training: Optional[bool] = None
 
-    def zero_grad(self):
+    def zero_grad(self) -> None:
         # Zero gradients for parameters in current module
         for p in self._parameters.values():
             p.grad = 0
@@ -22,17 +23,17 @@ class Module:
         for module in self._modules.values():
             module.zero_grad()
 
-    def forward(self, x):
+    def forward(self, x: Any) -> Tensor:
         raise NotImplementedError
 
-    def __call__(self, *args, **kwargs):
+    def __call__(self, *args: Any, **kwargs: Any) -> Tensor:
         """
         Sometimes people like to call model = Module() then call model(x)
         as a forward pass. So this is an alias.
         """
         return self.forward(*args, **kwargs)
 
-    def __setattr__(self, name, value):
+    def __setattr__(self, name: str, value: Any) -> None:
         if isinstance(value, Module):
             self._modules[name] = value
         elif isinstance(value, Tensor):
@@ -40,19 +41,17 @@ class Module:
         else:
             super().__setattr__(name, value)
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str) -> Any:
         return self._modules[name]
 
     @property
-    def parameters(self):
+    def parameters(self) -> Dict[str, Any]:
         params = self._parameters.copy()
-
         for k, module in self._modules.items():
             params.update({k: module.parameters})
-
         return params
 
-    def num_parameters(self):
+    def num_parameters(self) -> int:
         """
         Returns the total number of parameters in the module and its submodules.
         """
@@ -65,19 +64,19 @@ class Module:
 
         return total
 
-    def train(self):
+    def train(self) -> None:
         for module in self._modules.values():
             module.train()
         self._is_training = True
 
-    def eval(self):
+    def eval(self) -> None:
         for module in self._modules.values():
             module.eval()
         self._is_training = False
 
 
 class Linear(Module):
-    def __init__(self, input_size, output_size, **kwargs):
+    def __init__(self, input_size: int, output_size: int, **kwargs: Any) -> None:
         super().__init__(**kwargs)
 
         # weight is a matrix of shape (input_size, output_size)
@@ -88,7 +87,7 @@ class Linear(Module):
         # bias is always 1-dimensional
         self._parameters["bias"] = Tensor(np.random.rand(output_size))
 
-    def forward(self, x) -> Tensor:
+    def forward(self, x: Union[Tensor, np.ndarray]) -> Tensor:
         if not isinstance(x, Tensor):
             x = Tensor(x)
 
@@ -102,14 +101,14 @@ class Linear(Module):
 class Conv2d(Module):
     def __init__(
         self,
-        in_channels,
-        out_channels,
-        kernel_size,
-        stride=1,
-        padding_mode="valid",
-        bias=True,
-        **kwargs,
-    ):
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        stride: int = 1,
+        padding_mode: str = "valid",
+        bias: bool = True,
+        **kwargs: Any,
+    ) -> None:
         """
         Applies a 2D convolution over an input tensor.
         The shape convention is the same as PyTorch:
@@ -160,7 +159,7 @@ class Conv2d(Module):
                 np.random.rand(self.out_channels)
             )  # one bias per kernel
 
-    def forward(self, x):
+    def forward(self, x: Union[Tensor, np.ndarray]) -> Tensor:
         if not isinstance(x, Tensor):
             x = Tensor(x)
 
@@ -212,7 +211,13 @@ class Conv2d(Module):
 
 
 class MaxPool2d(Module):
-    def __init__(self, kernel_size, stride=None, padding_mode="valid", **kwargs):
+    def __init__(
+        self,
+        kernel_size: int,
+        stride: Optional[int] = None,
+        padding_mode: str = "valid",
+        **kwargs: Any,
+    ) -> None:
         """
         2D Max Pooling Layer
 
@@ -230,7 +235,7 @@ class MaxPool2d(Module):
         )  # Default to kernel_size
         self.padding_mode = padding_mode
 
-    def forward(self, x):
+    def forward(self, x: Union[Tensor, np.ndarray]) -> Tensor:
         if not isinstance(x, Tensor):
             x = Tensor(x)
 
@@ -262,7 +267,7 @@ class ResidualBlock(Module):
     Paper: https://arxiv.org/abs/1512.03385
     """
 
-    def __init__(self, in_channels, out_channels, stride=1):
+    def __init__(self, in_channels: int, out_channels: int, stride: int = 1) -> None:
         super().__init__()
         self.conv1 = Conv2d(
             in_channels, out_channels, kernel_size=3, stride=stride, padding_mode="same"
@@ -280,7 +285,7 @@ class ResidualBlock(Module):
             in_channels, out_channels, kernel_size=1, stride=stride, padding_mode="same"
         )
 
-    def forward(self, x):
+    def forward(self, x: Union[Tensor, np.ndarray]) -> Tensor:
         identity = self.shortcut(x)  # Match channels
 
         out = self.conv1(x)
@@ -290,7 +295,13 @@ class ResidualBlock(Module):
 
 
 class RecurrentBlock(Module):
-    def __init__(self, input_size, hidden_size, output_size=None, dropout_prob=None):
+    def __init__(
+        self,
+        input_size: int,
+        hidden_size: int,
+        output_size: Optional[int] = None,
+        dropout_prob: Optional[float] = None,
+    ) -> None:
         """
         Recurrent Neural Network (RNN)
         Paper: https://arxiv.org/abs/1308.0850
@@ -332,7 +343,7 @@ class RecurrentBlock(Module):
             self._parameters["W_hy"] = None
             self._parameters["bias_y"] = None
 
-    def forward(self, x):
+    def forward(self, x: Union[Tensor, np.ndarray]) -> Tensor:
         """
         Forward pass of the RNN
 
@@ -375,7 +386,13 @@ class RecurrentBlock(Module):
 
 
 class LongShortTermMemoryBlock(Module):
-    def __init__(self, input_size, hidden_size, output_size=None, dropout_prob=None):
+    def __init__(
+        self,
+        input_size: int,
+        hidden_size: int,
+        output_size: Optional[int] = None,
+        dropout_prob: Optional[float] = None,
+    ) -> None:
         """
         Long Short-Term Memory (LSTM) Neural Network
         Paper: https://www.bioinf.jku.at/publications/older/2604.pdf
@@ -433,7 +450,12 @@ class LongShortTermMemoryBlock(Module):
             self._parameters["W_hy"] = None
             self._parameters["bias_y"] = None
 
-    def forward(self, x, hidden_state=None, C_t=None):
+    def forward(
+        self,
+        x: Union[Tensor, np.ndarray],
+        hidden_state: Optional[Tensor] = None,
+        C_t: Optional[Tensor] = None,
+    ) -> Tuple[Tensor, Tensor]:
         """
         Forward pass of the LSTM
 
@@ -529,7 +551,7 @@ class Embedding(Module):
     Embedding layer that projects an arbitrary input_size down to embedding_size
     """
 
-    def __init__(self, input_size, embedding_size):
+    def __init__(self, input_size: int, embedding_size: int) -> None:
         super().__init__()
 
         # weight.shape: (input_size, embedding_size)
@@ -538,7 +560,7 @@ class Embedding(Module):
             requires_grad=True,
         )
 
-    def forward(self, x):
+    def forward(self, x: Union[Tensor, np.ndarray]) -> Tensor:
         """
         x: shape (batch_size, seq_len), each entry is an integer index in [0..vocab_size-1].
         Returns: (batch_size, seq_len, embedding_size)
@@ -560,13 +582,13 @@ class LayerNorm(Module):
     Paper: https://arxiv.org/abs/1607.06450
     """
 
-    def __init__(self, input_size, epsilon=1e-5, **kwargs):
+    def __init__(self, input_size: int, epsilon: float = 1e-5, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.epsilon = epsilon
         self._parameters["gain"] = Tensor(np.ones((input_size,)))
         self._parameters["bias"] = Tensor(np.zeros((input_size,)))
 
-    def forward(self, x: Tensor):
+    def forward(self, x: Tensor) -> Tensor:
         # Equation 4 in section 3.1 in the paper
         mean = x.mean(
             axis=-1, keepdims=True
@@ -594,7 +616,13 @@ class BatchNorm(Module):
     Paper: http://arxiv.org/abs/1502.03167
     """
 
-    def __init__(self, input_size, momentum=0.1, epsilon=1e-5, **kwargs):
+    def __init__(
+        self,
+        input_size: int,
+        momentum: float = 0.1,
+        epsilon: float = 1e-5,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(**kwargs)
 
         self.momentum = momentum  # used in running mean and variance calculation
@@ -607,8 +635,6 @@ class BatchNorm(Module):
         # gamma and beta are learnable parameters
         # gamma is responsible for scaling the normalized input
         # beta is responsible for shifting the normalized input
-        # self._parameters["weight"] = Tensor(np.ones((1, input_size)))
-        # self._parameters["bias"] = Tensor(np.zeros((1, input_size)))
         self._parameters["weight"] = Tensor(np.ones(input_size, dtype=np.float32))
         self._parameters["bias"] = Tensor(np.zeros(input_size, dtype=np.float32))
 
@@ -649,7 +675,7 @@ class BatchNorm(Module):
 
 
 class Dropout(Module):
-    def __init__(self, p=0.5, **kwargs):
+    def __init__(self, p: float = 0.5, **kwargs: Any) -> None:
         """
         The Dropout layer randomly sets a fraction of input units to 0 at each update during training time.
 
@@ -679,7 +705,12 @@ class Dropout(Module):
 
 
 ########### Utility Functions ###########
-def extract_windows(x, kernel_size, stride, padding_mode="valid"):
+def extract_windows(
+    x: Union[Tensor, np.ndarray],
+    kernel_size: int,
+    stride: int,
+    padding_mode: str = "valid",
+) -> Tuple[Tensor, Tuple[int, int]]:
     """
     Extract windows from input tensor while maintaining computational graph.
 

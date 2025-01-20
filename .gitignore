@@ -6,6 +6,8 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.pkl
+*.bin
 
 # C extensions
 *.so

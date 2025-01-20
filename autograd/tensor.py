@@ -1,22 +1,29 @@
 import numpy as np
 import logging
-from typing import Union, Self, List, Tuple, Iterable
+from typing import (
+    Union,
+    Optional,
+    List,
+    Tuple,
+    Sequence,
+    Any,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class Function:
-    def __init__(self, *tensors: Iterable["Tensor"]):
+    def __init__(self, *tensors: "Tensor"):
         self.tensors = tensors
 
-    def forward(self, *args, **kwargs) -> "Tensor":
+    def forward(self, *args: np.ndarray, **kwargs: Any) -> np.ndarray:
         raise NotImplementedError("Forward pass not implemented for this function")
 
-    def backward(self, *args, **kwargs) -> np.ndarray:
+    def backward(self, grad: "Tensor") -> np.ndarray:
         raise NotImplementedError("Backward pass not implemented for this function")
 
     @classmethod
-    def apply(cls, *tensors, **kwargs):
+    def apply(cls, *tensors: "Tensor", **kwargs: Any) -> "Tensor":
         # Create the function object
         func = cls(*tensors)
         # Run forward pass with tensor.data already, so we don't need to get it again
@@ -29,23 +36,30 @@ class Function:
 
 
 class Tensor:
-    def __init__(self, data, creator=None, requires_grad=True):
+    def __init__(
+        self,
+        data: Union[np.ndarray, float, int, Sequence[float], Sequence[Sequence[float]]],
+        creator: Optional[Function] = None,
+        requires_grad: bool = True,
+    ):
         self.data = np.asarray(data, dtype=np.float32)
-        self._grad = None  # lazy initialize, we will only initialize if needed in the backward pass
+        self._grad: Optional["Tensor"] = (
+            None  # lazy initialize, we will only initialize if needed in the backward pass
+        )
         self.creator = creator
 
         self._backward = lambda: None
         self.requires_grad = requires_grad
 
     @property
-    def grad(self):
+    def grad(self) -> Optional["Tensor"]:
         # Always return a Tensor
         if isinstance(self._grad, np.ndarray):
             return Tensor(self._grad, requires_grad=False)
         return self._grad
 
     @grad.setter
-    def grad(self, value):
+    def grad(self, value: Union["Tensor", np.ndarray, float, int, None]) -> None:
         if value is None:
             self._grad = None
             return
@@ -70,7 +84,7 @@ class Tensor:
             # the same underlying array.
             self._grad.data += value_data
 
-    def view(self, *shape) -> "Tensor":
+    def view(self, *shape: int) -> "Tensor":
         """
         Create a view of the tensor with the same data but with the specified shape
         A view function is a callable that transforms the original tensor data into a new shape or representation without copying the underlying data.
@@ -78,14 +92,14 @@ class Tensor:
         return View.apply(self, new_shape=shape)
 
     @staticmethod
-    def stack(tensors: List[Self], axis=0) -> Self:
+    def stack(tensors: List["Tensor"], axis: int = 0) -> "Tensor":
         return Stack.apply(*tensors, axis=axis)
 
     @staticmethod
-    def cat(tensors, axis=0) -> "Tensor":
+    def cat(tensors: List["Tensor"], axis: int = 0) -> "Tensor":
         return Cat.apply(*tensors, axis=axis)
 
-    def __add__(self, other):
+    def __add__(self, other: Union["Tensor", float, int]) -> "Tensor":
         """Compute op: addition with explicit movement"""
         if not isinstance(other, Tensor):
             other = Tensor(other, requires_grad=False)
@@ -102,7 +116,7 @@ class Tensor:
         # 3. Simple compute op (no shape logic)
         return Add.apply(x, y)
 
-    def __mul__(self, other):
+    def __mul__(self, other: Union["Tensor", float, int]) -> "Tensor":
         """Multiply two tensors element-wise"""
         if not isinstance(other, Tensor):
             other = Tensor(other, requires_grad=False)
@@ -120,13 +134,12 @@ class Tensor:
         # 3. Simple compute op
         return Mul.apply(x, y)
 
-    def __matmul__(self, other: Union[Self, float, int]):
+    def __matmul__(self, other: Union["Tensor", float, int]) -> "Tensor":
         if not isinstance(other, Tensor):
             other = Tensor(other, requires_grad=False)
-
         return Matmul.apply(self, other)
 
-    def __pow__(self, other):
+    def __pow__(self, other: Union["Tensor", float, int]) -> "Tensor":
         if not isinstance(other, Tensor):
             other = Tensor(other, requires_grad=False)
 
@@ -140,7 +153,7 @@ class Tensor:
 
         return Pow.apply(x, y)
 
-    def __iadd__(self, other):
+    def __iadd__(self, other: Union["Tensor", float, int]) -> "Tensor":
         """
         In-place addition operation (+=).
         This should maintain the computational graph while modifying the tensor in-place.
@@ -154,33 +167,39 @@ class Tensor:
 
         return IAdd.apply(self, expanded_other)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: Union[int, slice, tuple]) -> "Tensor":
         return GetItem.apply(self, idx=idx)
 
     def __setitem__(
-        self, idx: Union[int, slice, tuple], value: Union[Self, float, int]
-    ):
+        self, idx: Union[int, slice, tuple], value: Union["Tensor", float, int]
+    ) -> "Tensor":
         if not isinstance(value, Tensor):
             value = Tensor(value, requires_grad=False)  # this is important
 
         return SetItem.apply(self, idx=idx, value=value)
 
-    def sum(self, axis=None, keepdims=False):
+    def sum(
+        self, axis: Optional[Union[int, Tuple[int, ...]]] = None, keepdims: bool = False
+    ):
         return Sum.apply(self, axis=axis, keepdims=keepdims)
 
-    def mean(self, axis=None, keepdims=False):
+    def mean(
+        self, axis: Optional[Union[int, Tuple[int, ...]]] = None, keepdims: bool = False
+    ) -> "Tensor":
         return Mean.apply(self, axis=axis, keepdims=keepdims)
 
-    def max(self, axis=None, keepdims=False):
+    def max(
+        self, axis: Optional[Union[int, Tuple[int, ...]]] = None, keepdims: bool = False
+    ) -> "Tensor":
         return Max.apply(self, axis=axis, keepdims=keepdims)
 
-    def gather(self, index=0):
+    def gather(self, index: int = 0) -> "Tensor":
         return Gather.apply(self, index=index)
 
-    def sqrt(self):
+    def sqrt(self) -> "Tensor":
         return Sqrt.apply(self)
 
-    def maximum(self, other: Union[Self, float, int]):
+    def maximum(self, other: Union["Tensor", float, int]) -> "Tensor":
         if not isinstance(other, Tensor):
             other = Tensor(other, requires_grad=False)
 
@@ -191,7 +210,14 @@ class Tensor:
 
         return Maximum.apply(x, y)
 
-    def pad(self, pad_width, mode="constant", constant_values=0):
+    def pad(
+        self,
+        pad_width: Union[
+            int, Tuple[int, int], Tuple[int, int, int, int], Tuple[Tuple[int, int], ...]
+        ],
+        mode: str = "constant",
+        constant_values: Union[int, float] = 0,
+    ) -> "Tensor":
         return Pad.apply(
             self,
             pad_width=pad_width,
@@ -199,22 +225,24 @@ class Tensor:
             constant_values=constant_values,
         )
 
-    def forward(self, data):
+    def forward(self, data: Any) -> None:
         pass
 
-    def backward(self, grad=None):
+    def backward(
+        self, grad: Optional[Union["Tensor", np.ndarray, float, int]] = None
+    ) -> None:
         if not self.requires_grad:
             return
 
         # Initialize gradient if none provided
         if grad is None:
-            grad = np.ones_like(self.data)
-        elif isinstance(grad, Tensor):
-            grad = grad.data
-        else:
-            grad = np.asarray(grad)
+            grad = Tensor(np.ones_like(self.data))
+        # elif isinstance(grad, Tensor):
+        #     grad = grad.data
+        # else:
+        #     grad = np.asarray(grad)
 
-        self._grad = grad  # store as np array directly
+        self.grad = grad  # store as np array directly
 
         # Build computational graph in reverse order
         topological_sorted_tensors = []
@@ -261,7 +289,7 @@ class Tensor:
             node.creator = None
 
     @property
-    def shape(self):
+    def shape(self) -> Tuple[int, ...]:
         """
         Return the shape of the tensor data.
         For scalars, returns an empty tuple ().
@@ -273,30 +301,29 @@ class Tensor:
         return self.data.shape
 
     ########### Movement ops ###########
-    def reshape(self, *shape) -> "Tensor":
+    def reshape(self, *shape: int) -> "Tensor":
         """Movement op: reshape"""
         return Reshape.apply(self, shape=shape)
 
-    def expand(self, *shape) -> "Tensor":
+    def expand(self, *shape: Union[int, Sequence[int]]) -> "Tensor":
         """Movement op: broadcast without copying"""
         if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
-            shape = shape[0]
-
+            shape = tuple(shape[0])
         return Expand.apply(self, shape=shape)
 
-    def permute(self, *dims) -> "Tensor":
+    def permute(self, *dims: int) -> "Tensor":
         return Permute.apply(self, dims=dims)
 
-    def transpose(self, dim0=0, dim1=1):
+    def transpose(self, dim0: int = 0, dim1: int = 1) -> "Tensor":
         return Transpose.apply(self, dim0=dim0, dim1=dim1)
 
     def strided_windows(self, kernel_size: int, stride: int) -> "Tensor":
         return StridedWindows.apply(self, kernel_size=kernel_size, stride=stride)
 
-    def roll(self, shifts: int, dims: int):
+    def roll(self, shifts: int, dims: int) -> "Tensor":
         return Roll.apply(self, shifts=shifts, dims=dims)
 
-    def detach(self) -> Self:
+    def detach(self) -> "Tensor":
         """
         Detach the tensor from the computational graph.
 
@@ -306,11 +333,11 @@ class Tensor:
         return Tensor(self.data, requires_grad=False)
 
     @property
-    def ndim(self):
+    def ndim(self) -> int:
         return len(self.data.shape)
 
     @property
-    def T(self) -> Self:
+    def T(self) -> "Tensor":
         """
         Convenience method for 2D matrix transpose.
         For higher dimensions, use transpose() with explicit dims.
@@ -321,7 +348,9 @@ class Tensor:
             )
         return self.transpose(1, 0)
 
-    def _accumulate_grad(self, grad, idx=None):
+    def _accumulate_grad(
+        self, grad: Union["Tensor", np.ndarray], idx: Optional[Any] = None
+    ) -> None:
         """
         Helper method to lazily initialize and accumulate gradients
         Args:
@@ -331,6 +360,9 @@ class Tensor:
         if grad is None:
             return
 
+        if not isinstance(grad, Tensor):
+            grad = Tensor(grad, requires_grad=False)
+
         # Initialize or accumulate gradient
         if self._grad is None:
             if idx is not None:
@@ -339,8 +371,6 @@ class Tensor:
                 # Accumulate at index without reshaping
                 self._grad.data[idx] = grad.data
             else:
-                if not isinstance(grad, Tensor):
-                    grad = Tensor(grad, requires_grad=False)
                 self._grad = grad
         else:
             if idx is not None:
@@ -350,43 +380,43 @@ class Tensor:
                 self._grad.data += grad.data
 
     ##### Wrappers #####
-    def __radd__(self, other):
+    def __radd__(self, other: Union["Tensor", float, int]) -> "Tensor":
         return self + other
 
-    def __rmul__(self, other):
+    def __rmul__(self, other: Union["Tensor", float, int, np.ndarray]) -> "Tensor":
         return self * other
 
-    def __sub__(self, other):
+    def __sub__(self, other: Union["Tensor", float, int]) -> "Tensor":
         return self + (-other)
 
-    def __rsub__(self, other):
+    def __rsub__(self, other: Union["Tensor", float, int]) -> "Tensor":
         return other + (-self)
 
-    def __truediv__(self, other):
+    def __truediv__(self, other: Union["Tensor", float, int]) -> "Tensor":
         return self * other**-1
 
-    def __neg__(self):
+    def __neg__(self) -> "Tensor":
         return self * -1
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"Tensor(data={self.data}, grad={self.grad})"
 
-    def __lt__(self, other):
+    def __lt__(self, other: Union["Tensor", float, int]) -> np.ndarray:
         return self.data < other
 
-    def __le__(self, other):
+    def __le__(self, other: Union["Tensor", float, int]) -> np.ndarray:
         return self.data <= other
 
-    def __gt__(self, other):
+    def __gt__(self, other: Union["Tensor", float, int]) -> np.ndarray:
         return self.data > other
 
-    def __ge__(self, other):
+    def __ge__(self, other: Union["Tensor", float, int]) -> np.ndarray:
         return self.data >= other
 
-    def __eq__(self, other):
+    def __eq__(self, other: Union["Tensor", float, int]) -> np.ndarray:
         return self.data == other
 
-    def __hash__(self):
+    def __hash__(self) -> int:
         return id(self)
 
 
@@ -396,20 +426,24 @@ Binary Ops
 
 
 class Add(Function):
-    def forward(self, x, y):
+    def forward(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
         return x + y
 
-    def backward(self, grad: Tensor):
+    def backward(
+        self, grad: "Tensor"
+    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         grad_x = grad.data if self.tensors[0].requires_grad else None
         grad_y = grad.data if self.tensors[1].requires_grad else None
         return grad_x, grad_y
 
 
 class Mul(Function):
-    def forward(self, x, y):
+    def forward(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
         return x * y
 
-    def backward(self, grad: Tensor):
+    def backward(
+        self, grad: "Tensor"
+    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         grad_x = (
             grad.data * self.tensors[1].data if self.tensors[0].requires_grad else None
         )
@@ -420,10 +454,12 @@ class Mul(Function):
 
 
 class Pow(Function):
-    def forward(self, x, y):
+    def forward(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
         return x**y
 
-    def backward(self, grad):
+    def backward(
+        self, grad: "Tensor"
+    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         """
         d(loss) / dx = d(loss) / d(x**y) * d(x**y) / dx
         d(loss) / d(x**y) = result.grad
@@ -448,7 +484,7 @@ class Pow(Function):
 
 
 class Matmul(Function):
-    def forward(self, x, y):
+    def forward(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
         """
         x, y = Tensors
         x.data, y.data = NumPy arrays of shape:
@@ -457,14 +493,15 @@ class Matmul(Function):
           - Possibly 3D+ for batched matmul
         We'll do np.matmul, which handles broadcasting/batching.
         """
-        self.x_shape = x.data.shape
-        self.y_shape = y.data.shape
-
         # Save references so backward() can know which Tensors to differentiate
-        out = np.matmul(x.data, y.data)
+        self.x_shape = x.shape
+        self.y_shape = y.shape
+        out = np.matmul(x, y)
         return out
 
-    def backward(self, grad):
+    def backward(
+        self, grad: "Tensor"
+    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         """
         We'll compute grad_x and grad_y via the standard rules:
           grad_x = grad @ y^T  (on the innermost 2 dims)
@@ -539,12 +576,12 @@ class Matmul(Function):
 
 
 class IAdd(Function):
-    def forward(self, x, y):
+    def forward(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
         # Update data in-place
         x += y
         return x
 
-    def backward(self, grad):
+    def backward(self, grad: "Tensor") -> Tuple[np.ndarray, np.ndarray]:
         # Both inputs receive the same gradient (like Add)
         return grad.data, grad.data
 
@@ -552,11 +589,11 @@ class IAdd(Function):
 class GetItem(Function):
     """Get item from tensor using numpy-style indexing"""
 
-    def forward(self, x, idx):
+    def forward(self, x: np.ndarray, idx: Any) -> np.ndarray:
         self.idx = idx
         return x[idx]
 
-    def backward(self, grad):
+    def backward(self, grad: "Tensor") -> np.ndarray:
         grad = grad.data if isinstance(grad, Tensor) else grad
 
         # Create a zero tensor of the original shape
@@ -575,28 +612,24 @@ class SetItem(Function):
         value (Tensor): value to assign
     """
 
-    def forward(self, x, idx, value):
+    def forward(self, x: np.ndarray, idx: Any, value: np.ndarray) -> np.ndarray:
         # Extract numpy array from value
         val_data = value.data if isinstance(value, Tensor) else value
         x[idx] = val_data
         self.idx = idx
         return x
 
-    def backward(self, grad):
-        grad = grad.data
-        if np.isscalar(grad):
-            return grad[self.idx].sum()
-        else:
-            return grad[self.idx]
+    def backward(self, grad: "Tensor") -> np.ndarray:
+        return grad.data[self.idx]
 
 
 class Sqrt(Function):
-    def forward(self, x):
+    def forward(self, x: "Tensor") -> np.ndarray:
         # Store input for backward pass
         self.x = x
-        return np.sqrt(x)
+        return np.sqrt(x.data)
 
-    def backward(self, grad):
+    def backward(self, grad: "Tensor") -> np.ndarray:
         # d/dx(sqrt(x)) = 1/(2*sqrt(x))
         # dL/dx = dL/dy * dy/dx = grad * 1/(2*sqrt(x))
         # where dL/dy is the current gradient
@@ -622,7 +655,12 @@ class Sum(Function):
         - original tensor shape(3,4,5), axis(None), keepdims(False) -> result shape()
     """
 
-    def forward(self, x, axis=None, keepdims=False):
+    def forward(
+        self,
+        x: np.ndarray,
+        axis: Optional[Union[int, Tuple[int, ...]]] = None,
+        keepdims: bool = False,
+    ) -> np.ndarray:
         # Handle scalar case
         if not hasattr(x, "ndim") or x.ndim == 0:
             return x
@@ -632,14 +670,12 @@ class Sum(Function):
         self.x_shape = x.shape
         return np.sum(x, axis=self.axis, keepdims=self.keepdims)
 
-    def backward(self, grad):
+    def backward(self, grad: "Tensor") -> np.ndarray:
         # Use expand to handle gradient broadcasting
-
         if grad is None:
             return None
 
-        grad = grad.data
-
+        grad_arr = grad.data
         # Turn axis into a tuple
         if isinstance(self.axis, int):
             reduce_axes = (self.axis,)
@@ -650,21 +686,26 @@ class Sum(Function):
         if reduce_axes is None:
             # Summed over all dims, so grad is scalar, shape=()
             # Just broadcast to original shape:
-            return np.broadcast_to(grad, self.x_shape).copy()
+            return np.broadcast_to(grad_arr, self.x_shape).copy()
 
         if not self.keepdims:
             # Re-insert those axes as size=1 so that broadcasting works
             # Sort them or reverse them so that inserting doesn’t shift the later dims incorrectly
             for ax in sorted(reduce_axes):
-                grad = np.expand_dims(grad, ax)
+                grad_arr = np.expand_dims(grad_arr, ax)
 
         # Now grad has shape (2,8,1) if we did sum over axis=2
         # broadcast to (2,8,5)
-        return np.broadcast_to(grad, self.x_shape).copy()
+        return np.broadcast_to(grad_arr, self.x_shape).copy()
 
 
 class Max(Function):
-    def forward(self, x, axis=None, keepdims=False):
+    def forward(
+        self,
+        x: np.ndarray,
+        axis: Optional[Union[int, Tuple[int, ...]]] = None,
+        keepdims: bool = False,
+    ) -> np.ndarray:
         """
         Compute the max of tensor elements
 
@@ -677,7 +718,7 @@ class Max(Function):
         self.keepdims = keepdims
         return np.max(x, axis=axis, keepdims=keepdims)
 
-    def backward(self, grad):
+    def backward(self, grad: "Tensor") -> np.ndarray:
         """
         d(loss) / dx = d(loss) / d(max(x)) * d(max(x)) / dx
         d(loss) / d(max(x)) = result.grad
@@ -707,12 +748,14 @@ class Maximum(Function):
     When both inputs equal the maximum, gradient is split equally between them.
     """
 
-    def forward(self, x, y):
+    def forward(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
         out = np.maximum(x, y)
         self.out_data = out
         return out
 
-    def backward(self, grad):
+    def backward(
+        self, grad: "Tensor"
+    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         x = self.tensors[0]
         y = self.tensors[1]
 
@@ -745,40 +788,43 @@ class Mean(Function):
         - original tensor shape(3,4,5), axis(None), keepdims(False) -> result shape()
     """
 
-    def forward(self, x, axis=None, keepdims=False):
+    def forward(
+        self,
+        x: np.ndarray,
+        axis: Optional[Union[int, Tuple[int, ...]]] = None,
+        keepdims: bool = False,
+    ) -> np.ndarray:
         # Normalize axis to a tuple
         axis = (axis,) if isinstance(axis, int) else axis
         self.axis = axis
         self.keepdims = keepdims
         return np.mean(x, axis=axis, keepdims=keepdims)
 
-    def backward(self, grad):
+    def backward(self, grad: "Tensor") -> np.ndarray:
         # Use expand for gradient broadcasting
-        grad = grad.expand(
+        grad_expanded = grad.expand(
             self.tensors[0].shape if self.keepdims else self.tensors[0].shape
         )
-
+        grad_arr = grad_expanded.data
         # Scale gradient by number of elements
         num_elements = (
             np.prod([self.tensors[0].shape[ax] for ax in self.axis])
             if self.axis is not None
-            else self.tensors[0].size
+            else self.tensors[0].shape
         )
-        return grad.data / num_elements
+        return grad_arr / num_elements
 
 
 class Gather(Function):
-    def forward(self, x, index: np.ndarray) -> Tensor:
+    def forward(self, x: np.ndarray, index: np.ndarray) -> np.ndarray:
         out = x[index, :]
-
         # Save references for backward
         self.x = x
         self.index = index
         return out
 
-    def backward(self, grad: Tensor) -> np.ndarray:
+    def backward(self, grad: "Tensor") -> Tuple[np.ndarray, None]:
         dx = np.zeros_like(self.x.data)
-
         flat_indices = self.index.ravel()
         flat_grads = grad.data.reshape(-1, dx.shape[1])
         np.add.at(dx, flat_indices, flat_grads)
@@ -791,7 +837,9 @@ Movement Ops
 
 
 class View(Function):
-    def forward(self, x, new_shape=(1,)):
+    def forward(
+        self, x: np.ndarray, new_shape: Union[Tuple[int, ...], List[int]] = (1,)
+    ) -> np.ndarray:
         if len(new_shape) == 1 and isinstance(new_shape[0], (tuple, list)):
             new_shape = new_shape[0]
 
@@ -820,67 +868,70 @@ class View(Function):
 
         return np.reshape(x, new_shape)
 
-    def backward(self, grad):
+    def backward(self, grad: Optional["Tensor"]) -> Optional[np.ndarray]:
         # reshape grad to original shape
         return grad.reshape(self.original_shape).data if grad is not None else None
 
 
 class Expand(Function):
-    def forward(self, x, shape=(1,)):
+    def forward(
+        self, x: np.ndarray, shape: Union[Tuple[int, ...], List[int]] = (1,)
+    ) -> np.ndarray:
         self.original_shape = x.shape
         expanded = np.broadcast_to(x, shape)
         return expanded.copy()
 
-    def backward(self, grad):
-        # Ensure grad is a NumPy array
-        if isinstance(grad, Tensor):
-            grad = grad.data
-
+    def backward(self, grad: "Tensor") -> np.ndarray:
+        grad_arr = grad.data
         # Handle extra leading dimensions
-        if len(grad.shape) > len(self.original_shape):
-            reduce_dims = list(range(len(grad.shape) - len(self.original_shape)))
+        if len(grad_arr.shape) > len(self.original_shape):
+            reduce_dims = list(range(len(grad_arr.shape) - len(self.original_shape)))
         else:
             reduce_dims = []
 
         # Handle broadcasting dimensions
         for i, (self_dim, grad_dim) in enumerate(
             zip(
-                self.original_shape[::-1], grad.shape[-len(self.original_shape) :][::-1]
+                self.original_shape[::-1],
+                grad_arr.shape[-len(self.original_shape) :][::-1],
             )
         ):
             if self_dim == 1 and grad_dim != 1:
-                reduce_dims.append(len(grad.shape) - 1 - i)
+                reduce_dims.append(len(grad_arr.shape) - 1 - i)
 
         # Sum across all reduction dimensions
         if reduce_dims:
-            grad = np.sum(grad, axis=tuple(reduce_dims), keepdims=True)
+            grad_arr = np.sum(grad_arr, axis=tuple(reduce_dims), keepdims=True)
 
         # Ensure final shape matches original
-        if grad.shape != self.original_shape:
-            grad = grad.reshape(self.original_shape)
+        if grad_arr.shape != self.original_shape:
+            grad_arr = grad_arr.reshape(self.original_shape)
 
-        return grad
+        return grad_arr
 
 
 class Reshape(Function):
-    def forward(self, x, shape=(1,)):
+    def forward(
+        self, x: np.ndarray, shape: Union[Tuple[int, ...], List[int]] = (1,)
+    ) -> np.ndarray:
         if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
             shape = shape[0]
-
         self.original_shape = x.shape
         return np.reshape(x, shape)
 
-    def backward(self, grad):
+    def backward(self, grad: Optional["Tensor"]) -> Optional[np.ndarray]:
         return grad.data.reshape(self.original_shape) if grad is not None else None
 
 
 class Transpose(Function):
-    def _get_transpose_axes(self, x, dim0: int, dim1: int) -> Tuple[int, ...]:
+    def _get_transpose_axes(
+        self, x: np.ndarray, dim0: int, dim1: int
+    ) -> Tuple[int, ...]:
         axes = list(range(x.ndim))
         axes[dim0], axes[dim1] = axes[dim1], axes[dim0]
         return tuple(axes)
 
-    def forward(self, x, dim0=0, dim1=1):
+    def forward(self, x: np.ndarray, dim0: int = 0, dim1: int = 1) -> np.ndarray:
         ndim = x.ndim
         if not (0 <= dim0 < ndim and 0 <= dim1 < ndim):
             raise ValueError(
@@ -892,7 +943,7 @@ class Transpose(Function):
         self.dim1 = dim1
         return np.transpose(x, axes)
 
-    def backward(self, grad):
+    def backward(self, grad: "Tensor") -> np.ndarray:
         transposed_grad = np.transpose(
             grad.data,
             self._get_transpose_axes(self.tensors[0].data, self.dim0, self.dim1),
@@ -911,7 +962,18 @@ class Pad(Function):
         constant_values: Value to pad with (default: 0)
     """
 
-    def forward(self, x, pad_width, mode="constant", constant_values=0):
+    def forward(
+        self,
+        x: np.ndarray,
+        pad_width: Union[
+            int,
+            Tuple[int, int],
+            Tuple[int, int, int, int],
+            Tuple[Tuple[int, int], ...],
+        ],
+        mode: str = "constant",
+        constant_values: Union[int, float] = 0,
+    ) -> np.ndarray:
         # Normalize pad_width to numpy style
         if isinstance(pad_width, int):
             # For int, create tuple of tuples for all dimensions
@@ -932,7 +994,7 @@ class Pad(Function):
         self.out_data = np.pad(x, pad_width, mode=mode, constant_values=constant_values)
         return self.out_data
 
-    def backward(self, grad):
+    def backward(self, grad: "Tensor") -> np.ndarray:
         # Extract the unpadded region
         slices = tuple(
             slice(p[0], s - p[1]) for s, p in zip(self.out_data.shape, self.pad_width)
@@ -943,12 +1005,12 @@ class Pad(Function):
 class Cat(Function):
     """Concatenates tensors along specified axis"""
 
-    def forward(self, *tensors, axis=0):
+    def forward(self, *tensors: "Tensor", axis: int = 0) -> np.ndarray:
         self.axis = axis
         self.original_shapes = [t.data.shape for t in tensors]
         return np.concatenate([t.data for t in tensors], axis=axis)
 
-    def backward(self, grad):
+    def backward(self, grad: "Tensor") -> Tuple[Optional[np.ndarray], ...]:
         grads = []
         start_idx = 0
         for t, shape in zip(self.tensors, self.original_shapes):
@@ -968,15 +1030,14 @@ class Cat(Function):
 class Permute(Function):
     """Movement op: reorder dimensions"""
 
-    def forward(self, x, dims):
-        # Normalize dims if it's nested (e.g. a single tuple in dims)
+    def forward(self, x: np.ndarray, dims: Sequence[int]) -> np.ndarray:
         if len(dims) == 1 and isinstance(dims[0], (tuple, list)):
             dims = dims[0]
+
         self.dims = dims
         return np.transpose(x, dims)
 
-    def backward(self, grad):
-        # Compute inverse permutation to get back to original ordering
+    def backward(self, grad: "Tensor") -> np.ndarray:
         inv_dims = [self.dims.index(i) for i in range(len(self.dims))]
         return np.transpose(grad.data, inv_dims)
 
@@ -993,7 +1054,7 @@ class Stack(Function):
         Tensor: stacked tensor
     """
 
-    def forward(self, *tensors, axis=0):
+    def forward(self, *tensors: "Tensor", axis: int = 0) -> np.ndarray:
         if not tensors:
             raise ValueError("Need at least one tensor to stack")
 
@@ -1004,7 +1065,7 @@ class Stack(Function):
         self.axis = axis
         return stacked_data
 
-    def backward(self, grad):
+    def backward(self, grad: "Tensor") -> Tuple[Optional[np.ndarray], ...]:
         # Memory optimization: Use views instead of splits where possible
         grad_size = grad.shape[self.axis]
         chunk_size = grad_size // len(self.tensors)
@@ -1025,7 +1086,7 @@ class Stack(Function):
 class StridedWindows(Function):
     """Movement op: create strided windows view of the tensor"""
 
-    def forward(self, x, kernel_size: int, stride: int):
+    def forward(self, x: np.ndarray, kernel_size: int, stride: int) -> np.ndarray:
         batch_size, channels, height, width = x.shape
         H_out = (height - kernel_size) // stride + 1
         W_out = (width - kernel_size) // stride + 1
@@ -1052,9 +1113,9 @@ class StridedWindows(Function):
             writeable=False,
         )
 
-    def backward(self, grad):
+    def backward(self, grad: "Tensor") -> np.ndarray:
         # Reshape grad back to original window format
-        grad = grad.data.reshape(
+        grad_arr = grad.data.reshape(
             self.H_out,
             self.W_out,
             self.batch_size,
@@ -1062,8 +1123,8 @@ class StridedWindows(Function):
             self.kernel_size,
             self.kernel_size,
         )
-        grad = grad.transpose(2, 3, 0, 1, 4, 5)
-        grad_padded = np.zeros(self.data_shape, dtype=grad.dtype)
+        grad_arr = grad_arr.transpose(2, 3, 0, 1, 4, 5)
+        grad_padded = np.zeros(self.data_shape, dtype=grad_arr.dtype)
 
         for i in range(self.kernel_size):
             for j in range(self.kernel_size):
@@ -1072,13 +1133,15 @@ class StridedWindows(Function):
                     :,
                     i : i + self.H_out * self.stride : self.stride,
                     j : j + self.W_out * self.stride : self.stride,
-                ] += grad[:, :, :, :, i, j]
+                ] += grad_arr[:, :, :, :, i, j]
 
         return grad_padded
 
 
 class Roll(Function):
-    def forward(self, x, shifts, dims=None):
+    def forward(
+        self, x: np.ndarray, shifts: int, dims: Optional[int] = None
+    ) -> np.ndarray:
         """Roll tensor elements along a given dimension
 
         Args:
@@ -1091,7 +1154,7 @@ class Roll(Function):
         self.input_shape = x.shape
         return np.roll(x, shift=shifts, axis=dims)
 
-    def backward(self, grad):
+    def backward(self, grad: "Tensor") -> np.ndarray:
         """Backward pass for roll operation
 
         The gradient is rolled in the opposite direction to undo the forward roll.
@@ -1100,11 +1163,11 @@ class Roll(Function):
         Args:
             grad: Gradient of the loss with respect to output
         """
-        grad = grad.data
-
+        grad_arr = grad.data
         # Handle scalar gradients by reshaping to original input shape
-        if grad.ndim == 0:
-            grad = np.full(self.input_shape, grad)
+
+        if grad_arr.ndim == 0:
+            grad_arr = np.full(self.input_shape, grad_arr)
 
         # Roll gradient in opposite direction by negating the shift
-        return np.roll(grad, shift=-self.shifts, axis=self.dims)
+        return np.roll(grad_arr, shift=-self.shifts, axis=self.dims)
