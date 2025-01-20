@@ -7,7 +7,6 @@ from typing import (
     Tuple,
     Sequence,
     Any,
-    Self,
 )
 
 logger = logging.getLogger(__name__)
@@ -20,7 +19,7 @@ class Function:
     def forward(self, *args: np.ndarray, **kwargs: Any) -> np.ndarray:
         raise NotImplementedError("Forward pass not implemented for this function")
 
-    def backward(self, *args: "Tensor", **kwargs: Any) -> np.ndarray:
+    def backward(self, grad: "Tensor") -> np.ndarray:
         raise NotImplementedError("Backward pass not implemented for this function")
 
     @classmethod
@@ -135,12 +134,12 @@ class Tensor:
         # 3. Simple compute op
         return Mul.apply(x, y)
 
-    def __matmul__(self, other: Union[Self, float, int]) -> "Tensor":
+    def __matmul__(self, other: Union["Tensor", float, int]) -> "Tensor":
         if not isinstance(other, Tensor):
             other = Tensor(other, requires_grad=False)
         return Matmul.apply(self, other)
 
-    def __pow__(self, other: Union[Self, float, int]) -> "Tensor":
+    def __pow__(self, other: Union["Tensor", float, int]) -> "Tensor":
         if not isinstance(other, Tensor):
             other = Tensor(other, requires_grad=False)
 
@@ -154,7 +153,7 @@ class Tensor:
 
         return Pow.apply(x, y)
 
-    def __iadd__(self, other: Union[Self, float, int]) -> "Tensor":
+    def __iadd__(self, other: Union["Tensor", float, int]) -> "Tensor":
         """
         In-place addition operation (+=).
         This should maintain the computational graph while modifying the tensor in-place.
@@ -172,7 +171,7 @@ class Tensor:
         return GetItem.apply(self, idx=idx)
 
     def __setitem__(
-        self, idx: Union[int, slice, tuple], value: Union[Self, float, int]
+        self, idx: Union[int, slice, tuple], value: Union["Tensor", float, int]
     ) -> "Tensor":
         if not isinstance(value, Tensor):
             value = Tensor(value, requires_grad=False)  # this is important
@@ -237,13 +236,13 @@ class Tensor:
 
         # Initialize gradient if none provided
         if grad is None:
-            grad = np.ones_like(self.data)
-        elif isinstance(grad, Tensor):
-            grad = grad.data
-        else:
-            grad = np.asarray(grad)
+            grad = Tensor(np.ones_like(self.data))
+        # elif isinstance(grad, Tensor):
+        #     grad = grad.data
+        # else:
+        #     grad = np.asarray(grad)
 
-        self._grad = grad  # store as np array directly
+        self.grad = grad  # store as np array directly
 
         # Build computational graph in reverse order
         topological_sorted_tensors = []
@@ -309,7 +308,7 @@ class Tensor:
     def expand(self, *shape: Union[int, Sequence[int]]) -> "Tensor":
         """Movement op: broadcast without copying"""
         if len(shape) == 1 and isinstance(shape[0], (tuple, list)):
-            shape = shape[0]
+            shape = tuple(shape[0])
         return Expand.apply(self, shape=shape)
 
     def permute(self, *dims: int) -> "Tensor":
@@ -324,7 +323,7 @@ class Tensor:
     def roll(self, shifts: int, dims: int) -> "Tensor":
         return Roll.apply(self, shifts=shifts, dims=dims)
 
-    def detach(self) -> Self:
+    def detach(self) -> "Tensor":
         """
         Detach the tensor from the computational graph.
 
@@ -338,7 +337,7 @@ class Tensor:
         return len(self.data.shape)
 
     @property
-    def T(self) -> Self:
+    def T(self) -> "Tensor":
         """
         Convenience method for 2D matrix transpose.
         For higher dimensions, use transpose() with explicit dims.

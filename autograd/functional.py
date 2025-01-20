@@ -1,4 +1,4 @@
-from typing import Union, Optional
+from typing import Union, Optional, Tuple, Any
 from autograd.tensor import Tensor, Function
 import numpy as np
 import logging
@@ -29,24 +29,24 @@ class Relu(Function):
     ReLU(x) = max(0, x)
     """
 
-    def forward(self, x):
+    def forward(self, x: np.ndarray) -> np.ndarray:
         self.x = x
         return np.maximum(x, 0)
 
-    def backward(self, grad):
+    def backward(self, grad: Tensor) -> np.ndarray:
         # dL/dx = dL/dy * dy/dx
-        return grad * (self.x > 0)
+        return grad.data * (self.x > 0)
 
 
 class Sigmoid(Function):
-    def forward(self, x):
+    def forward(self, x: np.ndarray) -> np.ndarray:
         # 709 is the maximum value that can be passed to np.exp without overflowing
         self.out = 1 / (1 + np.exp(np.clip(-x, -709, 709)))
         return self.out
 
-    def backward(self, grad):
+    def backward(self, grad: Tensor) -> np.ndarray:
         # d(sigmoid(x))/dx = sigmoid(x) * (1 - sigmoid(x))
-        return grad * self.out * (1 - self.out)
+        return grad.data * self.out * (1 - self.out)
 
 
 class Softmax(Function):
@@ -55,13 +55,13 @@ class Softmax(Function):
     softmax(x) = e^x / sum(e^x)
     """
 
-    def forward(self, x):
+    def forward(self, x: np.ndarray) -> np.ndarray:
         # Subtract the maximum value for numerical stability
         exp_x = np.exp(x - np.max(x, axis=-1, keepdims=True))
         self.probs = exp_x / np.sum(exp_x, axis=-1, keepdims=True)
         return self.probs
 
-    def backward(self, grad):
+    def backward(self, grad: Tensor) -> np.ndarray:
         # There are two cases for this gradient because each element in the matrix affects
         # every other elements' gradient due to the fact of sum(e^x) in the denominator.
         # Let's denote i, j as the ith and jth elements in the matrix.
@@ -71,10 +71,8 @@ class Softmax(Function):
         # d(softmax(x))/dx_i = -softmax(x)_i * softmax(x)_j
 
         # dL/dx = y * (dL/dy - sum(dL/dy * y, axis=-1, keepdims=True))
-        if isinstance(grad, Tensor):
-            grad = grad.data
-        sum_term = np.sum(grad * self.probs, axis=-1, keepdims=True)
-        dLdx = self.probs * (grad - sum_term)
+        sum_term = np.sum(grad.data * self.probs, axis=-1, keepdims=True)
+        dLdx = self.probs * (grad.data - sum_term)
         return dLdx
 
 
@@ -84,7 +82,7 @@ class Tanh(Function):
     tanh(x) = (e^x - e^-x) / (e^x + e^-x)
     """
 
-    def forward(self, x):
+    def forward(self, x: np.ndarray) -> np.ndarray:
         # For numerical stability, use the fact that tanh(x) = 2*sigmoid(2x) - 1
         # This avoids computing large exponentials directly
         x = 2 * x
@@ -94,9 +92,9 @@ class Tanh(Function):
         self.out = 2 * sigmoid_2x - 1
         return self.out
 
-    def backward(self, grad):
+    def backward(self, grad: Tensor) -> np.ndarray:
         # d(tanh(x))/dx = 1 - tanh(x)^2
-        return grad * (1 - self.out**2)
+        return grad.data * (1 - self.out**2)
 
 
 ###################### Loss Functions #####################
@@ -107,7 +105,9 @@ class BinaryCrossEntropy(Function):
     -(x * log(y)) + (1 - x) * log(1 - y)
     """
 
-    def forward(self, y_pred, y_true, **kwargs):
+    def forward(
+        self, y_pred: np.ndarray, y_true: np.ndarray, **kwargs: Any
+    ) -> np.floating:
         y_true = np.asarray(y_true, dtype=np.float32)
         y_pred = np.asarray(y_pred, dtype=np.float32)
 
@@ -127,7 +127,7 @@ class BinaryCrossEntropy(Function):
         )
         return loss
 
-    def backward(self, grad):
+    def backward(self, grad: Tensor) -> Tuple[np.ndarray, None]:
         # dL/dpred = -(y/p - (1-y)/(1-p))
         y_true = self.y_true
         y_pred_prob = self.y_pred_prob
@@ -147,7 +147,14 @@ class SparseCrossEntropy(Function):
     Sparse cross-entropy for 2D or 3D predictions with optional pad_idx ignoring.
     """
 
-    def forward(self, y_pred, y_true, pad_idx=0, label_smoothing=0.0, **kwargs):
+    def forward(
+        self,
+        y_pred: np.ndarray,
+        y_true: Union[np.ndarray, Tensor],
+        pad_idx: int = 0,
+        label_smoothing: float = 0.0,
+        **kwargs: Any,
+    ) -> float:
         """
         Args:
             - If y_pred is (batch_size, feature_dim), y_true is (batch_size,)
@@ -207,7 +214,7 @@ class SparseCrossEntropy(Function):
         self.label_smoothing = label_smoothing
         return loss_val
 
-    def backward(self, grad):
+    def backward(self, grad: Tensor) -> Tuple[np.ndarray, None]:
         """
         Backprop for:
           $$L_i = -\left( (1 - \text{label\_smoothing}) \log p_{correct} + \frac{\text{label\_smoothing}}{c - 1} \left( \sum_{j=1}^{c} \log p_{i,j} - \log p_{i,y_i} \right) \right) $$
@@ -216,7 +223,6 @@ class SparseCrossEntropy(Function):
           where c is the number of classes
         Then multiply by (grad / #non_pad).
         """
-        grad = grad.data if isinstance(grad, Tensor) else grad
         y_pred = self.y_pred_prob
         y_true = self.y_true_flat
         batch_size_times_seq_length, c = y_pred.shape
@@ -239,7 +245,7 @@ class SparseCrossEntropy(Function):
         grad_out[correct_idx] = -(1.0 - self.label_smoothing) / y_pred[correct_idx]
 
         # 3. Multiply by upstream grad / #non_pad
-        grad_out *= grad / count_non_pad
+        grad_out *= grad.data / count_non_pad
 
         # Reshape to original shape if 3D
         grad_out = grad_out.reshape(self.original_shape)
@@ -255,7 +261,13 @@ class CrossEntropyWithLogits(Function):
     - Targets: same shape (Batch Size, # of Classes) or (Batch Size, Sequence Length, # of Classes), each row is one-hot
     """
 
-    def forward(self, y_pred_probs, targets, weight=None, **kwargs):
+    def forward(
+        self,
+        y_pred_probs: np.ndarray,
+        targets: np.ndarray,
+        weight: Optional[np.ndarray] = None,
+        **kwargs: Any,
+    ) -> float:
         self.y_pred_probs = Softmax().forward(y_pred_probs)
         self.targets = targets
 
@@ -268,7 +280,7 @@ class CrossEntropyWithLogits(Function):
         loss_value = numerator.mean()
         return loss_value
 
-    def backward(self, grad):
+    def backward(self, grad: Tensor) -> Tuple[np.ndarray, None]:
         """
         dL/dlogits = (probs - y)
         Then average over the batch/time dimension
@@ -298,7 +310,13 @@ class HingeLoss(Function):
     Paper: https://ieeexplore.ieee.org/document/708428
     """
 
-    def forward(self, y_pred, y_true, reduction="none", **kwargs):
+    def forward(
+        self,
+        y_pred: np.ndarray,
+        y_true: Union[np.ndarray, Tensor],
+        reduction: str = "none",
+        **kwargs: Any,
+    ) -> Union[float, np.ndarray]:
         if isinstance(y_true, Tensor):
             y_true = y_true.data
         y_true = np.asarray(y_true, dtype=np.float32)
@@ -325,14 +343,13 @@ class HingeLoss(Function):
             raise ValueError(f"Invalid reduction: {reduction}")
         return loss_data
 
-    def backward(self, grad):
+    def backward(self, grad: Tensor) -> Tuple[np.ndarray, None]:
         """
         d (1/2||w||^2)/dw = w (we multiple 1/2 because it makes the gradient calculation easier)
         d(C * sum(max(0, 1 - y_true * y_pred)))/dw = C * max(0, 1 - y_true * y_pred)
         = 1 - y_true * y_pred (if y_true * y_pred < 1)
         = 0 (if y_true * y_pred >= 1)
         """
-        grad = grad.data if isinstance(grad, Tensor) else grad
         # Initialize gradient array with same shape as predictions
         grad_y_pred = np.zeros_like(self.y_pred)
 
@@ -344,22 +361,24 @@ class HingeLoss(Function):
             grad_y_pred /= self.y_pred.size
 
         # Handle scalar gradient (from mean/sum reduction)
-        if np.isscalar(grad) or grad.size == 1:
-            grad_y_pred *= grad
+        if np.isscalar(grad.data) or grad.data.size == 1:
+            grad_y_pred *= grad.data
         else:
             # For elementwise gradient
-            grad_y_pred *= grad.reshape(grad_y_pred.shape)
+            grad_y_pred *= grad.data.reshape(grad_y_pred.shape)
 
         return grad_y_pred, None
 
 
 class MeanSquaredLoss(Function):
-    def forward(self, y_pred, y_true, **kwargs):
+    def forward(
+        self, y_pred: np.ndarray, y_true: np.ndarray, **kwargs: Any
+    ) -> np.floating:
         self.y_pred = y_pred
         self.y_true = y_true
         return np.mean((y_pred - y_true) ** 2)
 
-    def backward(self, grad):
+    def backward(self, grad: Tensor) -> np.ndarray:
         """
         dL/dx = 2 * (x - y)
         """
@@ -367,7 +386,7 @@ class MeanSquaredLoss(Function):
 
 
 def binary_cross_entropy(
-    y_pred: Tensor, y_true: Union[Tensor, np.ndarray], **kwargs
+    y_pred: Tensor, y_true: Union[Tensor, np.ndarray], **kwargs: Any
 ) -> Tensor:
     if not isinstance(y_true, Tensor):
         y_true = Tensor(y_true, requires_grad=False)
@@ -375,7 +394,7 @@ def binary_cross_entropy(
 
 
 def binary_cross_entropy_with_logits(
-    y_pred: Tensor, y_true: Union[Tensor, np.ndarray], **kwargs
+    y_pred: Tensor, y_true: Union[Tensor, np.ndarray], **kwargs: Any
 ) -> Tensor:
     """
     Binary Cross Entropy Loss with logits input
@@ -388,7 +407,10 @@ def binary_cross_entropy_with_logits(
 
 
 def sparse_cross_entropy(
-    y_pred: Tensor, y_true: Union[Tensor, np.ndarray], pad_idx: int = None, **kwargs
+    y_pred: Tensor,
+    y_true: Union[Tensor, np.ndarray],
+    pad_idx: Optional[int] = None,
+    **kwargs: Any,
 ) -> Tensor:
     if not isinstance(y_true, Tensor):
         y_true = Tensor(y_true, requires_grad=False)
@@ -396,7 +418,10 @@ def sparse_cross_entropy(
 
 
 def sparse_cross_entropy_with_logits(
-    y_pred: Tensor, y_true: Union[Tensor, np.ndarray], pad_idx=None, **kwargs
+    y_pred: Tensor,
+    y_true: Union[Tensor, np.ndarray],
+    pad_idx: Optional[int] = None,
+    **kwargs: Any,
 ) -> Tensor:
     """
     Sparse Cross Entropy with logits input
@@ -412,7 +437,7 @@ def cross_entropy_with_logits(
     logits: Tensor,
     y_true: Union[Tensor, np.ndarray],
     weight: Optional[np.ndarray] = None,
-    **kwargs,
+    **kwargs: Any,
 ) -> Tensor:
     """
     For multi-class classification with one-hot y_true
@@ -423,7 +448,10 @@ def cross_entropy_with_logits(
 
 
 def hinge_loss(
-    y_pred: Tensor, y_true: Union[Tensor, np.ndarray], reduction: str = "none", **kwargs
+    y_pred: Tensor,
+    y_true: Union[Tensor, np.ndarray],
+    reduction: str = "none",
+    **kwargs: Any,
 ) -> Tensor:
     if not isinstance(y_true, Tensor):
         y_true = Tensor(y_true, requires_grad=False)
@@ -431,7 +459,7 @@ def hinge_loss(
 
 
 def mean_squared_loss(
-    y_pred: Tensor, y_true: Union[Tensor, np.ndarray], **kwargs
+    y_pred: Tensor, y_true: Union[Tensor, np.ndarray], **kwargs: Any
 ) -> Tensor:
     if not isinstance(y_true, Tensor):
         y_true = Tensor(y_true, requires_grad=False)
