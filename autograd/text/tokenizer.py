@@ -1,7 +1,12 @@
 from collections import Counter
 import os
 import regex
-from typing import ByteString
+from typing import (
+    ByteString,
+    Dict,
+    List,
+    Tuple,
+)
 import logging
 import pickle
 from autograd.tools.data import load_data
@@ -12,15 +17,27 @@ logger = logging.getLogger(__name__)
 class BytePairEncoder:
     SPECIAL_TOKENS = ["<|endoftext|>", "<PAD>", "<SOS>", "<UNK>"]
 
-    def __init__(self, num_merges=500, vocab_file_path="vocab.pkl") -> None:
+    def __init__(
+        self,
+        num_merges: int = 500,
+        vocab_file_path: str = "vocab.pkl",
+    ) -> None:
         self.num_merges = num_merges
         self.vocab_file_path = vocab_file_path
+
+        # For storing vocab: char -> int
+        self._unicode_to_int_vocab: Dict[ByteString, int] = {}
+        # For storing reverse vocab: int -> char
+        self._int_to_unicode_vocab: Dict[int, ByteString] = {}
+        # Store merges: list of ((tokenA, tokenB), new_id)
+        self.learned_merges: List[Tuple[Tuple[int, int], int]] = []
+
         self._load_dictionary()
 
         # start merged token ids from the first unused index after the base vocabulary
         self.new_idx = max(self._unicode_to_int_vocab.values()) + 1
 
-    def _load_dictionary(self):
+    def _load_dictionary(self) -> None:
         if not os.path.exists(self.vocab_file_path):
             logger.info(
                 "Vocabulary file does not exist. Creating new dictionary from scratch."
@@ -65,7 +82,7 @@ class BytePairEncoder:
 
     def train_vocabulary(
         self, input_text: str, overwrite_saved_file: bool = False
-    ) -> tuple[dict[ByteString, int], dict[int, ByteString]]:
+    ) -> Tuple[Dict[ByteString, int], Dict[int, ByteString]]:
         if self._unicode_to_int_vocab and not overwrite_saved_file:
             return self._unicode_to_int_vocab, self._int_to_unicode_vocab
 
@@ -74,7 +91,7 @@ class BytePairEncoder:
 
         # Convert a list of strings to a list of integers,
         # where each integer is the index of the character in the vocabulary
-        byte_encoded_chars = []
+        byte_encoded_chars: List[int] = []
         for chunk in text_chunks:
             if chunk in self.SPECIAL_TOKENS:
                 # convert to single ID
@@ -133,7 +150,7 @@ class BytePairEncoder:
 
         return self._unicode_to_int_vocab, self._int_to_unicode_vocab
 
-    def encode(self, input_text: str) -> list[int]:
+    def encode(self, input_text: str) -> List[int]:
         """
         We need to perform the merges that appear in the vocabulary
         Merge the highest-frequency pair of tokens in the text, then repeat
@@ -143,7 +160,7 @@ class BytePairEncoder:
 
         # Convert a list of strings to a list of integers,
         # where each integer is the index of the character in the vocabulary
-        byte_encoded_chars = []
+        byte_encoded_chars: List[int] = []
         for chunk in text_chunks:
             if chunk in self.SPECIAL_TOKENS:
                 # convert to single ID
@@ -161,8 +178,8 @@ class BytePairEncoder:
 
         return byte_encoded_chars
 
-    def decode(self, encoded_tokens: list[int]):
-        result = []
+    def decode(self, encoded_tokens: List[int]) -> str:
+        result: List[ByteString] = []
         for t in encoded_tokens:
             if t in self._int_to_unicode_vocab:
                 result.append(self._int_to_unicode_vocab[t])
@@ -171,11 +188,11 @@ class BytePairEncoder:
         # Remember our result contains bytes, so we need to join them and decode them
         return b"".join(result).decode("utf-8", errors="replace")
 
-    def _construct_unicode_to_int_vocab(self) -> dict[ByteString, int]:
+    def _construct_unicode_to_int_vocab(self) -> Dict[ByteString, int]:
         """
         Returns a dict: char -> int, for 0..255, plus expansions for non-printable control characters
         """
-        unicode_to_int_vocab = {}
+        unicode_to_int_vocab: Dict[ByteString, int] = {}
         for i in range(256):
             # Each i is mapped to the single byte b"\x00" ... b"\xff"
             unicode_to_int_vocab[bytes([i])] = i
@@ -183,7 +200,7 @@ class BytePairEncoder:
             unicode_to_int_vocab[special_char.encode("utf-8")] = 256 + i
         return unicode_to_int_vocab
 
-    def _pretokenize(self, input_text: str) -> list[str]:
+    def _pretokenize(self, input_text: str) -> List[str]:
         r"""
         From OpenAI GPT-2 regex pattern
         https://github.com/openai/tiktoken/blob/63527649963def8c759b0f91f2eb69a40934e468/tiktoken_ext/openai_public.py#L9-L14
@@ -192,7 +209,6 @@ class BytePairEncoder:
         - `?\p{N}+` similarly for digits (e.g. `" 2022"` becomes a token) optionally preceded by a space.
         - `?[^\s\p{L}\p{N}]+` captures punctuation or other symbols optionally preceded by a space.
         """
-        # We handle the special tokens first
         special_pattern = (
             "(" + "|".join(regex.escape(k) for k in self.SPECIAL_TOKENS) + ")"
         )
@@ -202,20 +218,18 @@ class BytePairEncoder:
             r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s"""
         )
 
-        final_chunks = []
+        final_chunks: List[str] = []
         for segment in splitted_input:
-            if not segment:  # Skip empty splits
+            if not segment:
                 continue
             if segment in self.SPECIAL_TOKENS:
-                # Preserve special tokens as-is
                 final_chunks.append(segment)
             else:
-                # Apply secondary regex for normal text
                 final_chunks.extend(general_pattern.findall(segment))
 
         return final_chunks
 
-    def _get_bigrams_to_count(self, tokens: list[int]) -> dict[list[tuple[int]], int]:
+    def _get_bigrams_to_count(self, tokens: List[int]) -> Dict[Tuple[int, int], int]:
         """
         Count how frequently each adjacent pair of tokens occurs in the entire corpus.
         Note: This function should be called before merging any bigrams/pairs.
@@ -224,16 +238,16 @@ class BytePairEncoder:
             tokens (list[int]): The list of integers representing the characters in the original corpus
 
         Returns:
-            dict[list[tuple[int]], int]: A dictionary mapping each pair of tokens to the number of times it occurs
+            dict[tuple[int,int], int]: A dictionary mapping each pair of tokens to the number of times it occurs
         """
         counter = Counter()
-        for tup in list(zip(tokens[:-1], tokens[1:])):
+        for tup in zip(tokens[:-1], tokens[1:]):
             counter[tup] += 1
-        return counter
+        return dict(counter)
 
     def _merge_pairs(
-        self, pair: tuple[int, int], new_idx: int, corpus: list[int]
-    ) -> list[int]:
+        self, pair: Tuple[int, int], new_idx: int, corpus: List[int]
+    ) -> List[int]:
         """
         Given a pair (a, b) and its new_id, replace all occurrences of (a, b) in each line
         with [new_id].
@@ -243,7 +257,7 @@ class BytePairEncoder:
             pair = (10, 11), new_id=256
             result -> [256, 11, 12]
         """
-        merged_tokens = []
+        merged_tokens: List[int] = []
         i = 0
 
         # Use while loop instead of for loop
