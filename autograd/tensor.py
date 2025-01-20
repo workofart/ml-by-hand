@@ -383,7 +383,7 @@ class Tensor:
     def __radd__(self, other: Union["Tensor", float, int]) -> "Tensor":
         return self + other
 
-    def __rmul__(self, other: Union["Tensor", float, int]) -> "Tensor":
+    def __rmul__(self, other: Union["Tensor", float, int, np.ndarray]) -> "Tensor":
         return self * other
 
     def __sub__(self, other: Union["Tensor", float, int]) -> "Tensor":
