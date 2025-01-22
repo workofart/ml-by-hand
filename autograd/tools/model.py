@@ -1,12 +1,9 @@
 import json
 import os
-import logging
 import numpy as np
 from autograd.tensor import Tensor
-from typing import Dict, Any, List
+from typing import Dict, Any
 
-
-logger = logging.getLogger(__name__)
 # Define a type for the serialized metadata structure
 SerializedMeta = Dict[str, Any]
 
@@ -18,45 +15,61 @@ def save_model(
     Serialize any Python object (model checkpoint, etc.) to:
       1. JSON file with nested structure (metadata).
       2. NPZ file with numeric array data.
+
+    Args:
+       obj: The object to serialize (usually the state_dict of a model or optimizer).
+            You can also add custom metadata to this object.
+       json_path: Path to save the JSON metadata file.
+       npz_path: Path to save the NPZ data file.
     """
 
-    def _serialize_object(
-        obj: Any, arrays_dict: Dict[str, np.ndarray], prefix: str = ""
+    def _serialize(
+        obj: Any, arrays: Dict[str, np.ndarray], prefix: str = ""
     ) -> SerializedMeta:
         """
-        Serialize a single object (recursively).
+        Recursively serialize a Python object into a structure
+        that can be stored as JSON + NPZ.
         """
-        if isinstance(obj, (dict, list, tuple)):
-            if isinstance(obj, dict):
-                meta: SerializedMeta = {"_type": "dict", "items": {}}
-                for k, v in obj.items():
-                    sub_prefix = f"{prefix}.{k}" if prefix else k
-                    meta["items"][k] = _serialize_object(v, arrays_dict, sub_prefix)
-            else:
-                meta = {
-                    "_type": "list" if isinstance(obj, list) else "tuple",
-                    "items": [],
-                }
-                for i, v in enumerate(obj):
-                    sub_prefix = f"{prefix}.{str(i)}" if prefix else str(i)
-                    meta["items"].append(_serialize_object(v, arrays_dict, sub_prefix))
-            return meta
-        elif isinstance(obj, (Tensor, np.ndarray)):
-            key = prefix if prefix else "root_array"
-            # Extract raw numpy data:
-            arr = obj.data if isinstance(obj, Tensor) else obj
-            arrays_dict[key] = arr
+        # Dictionary
+        if isinstance(obj, dict):
+            return {
+                "_type": "dict",
+                "items": {
+                    k: _serialize(v, arrays, f"{prefix}.{k}" if prefix else k)
+                    for k, v in obj.items()
+                },
+            }
 
+        # List or Tuple
+        if isinstance(obj, (list, tuple)):
+            items = [
+                _serialize(v, arrays, f"{prefix}.{i}" if prefix else str(i))
+                for i, v in enumerate(obj)
+            ]
+            return {
+                "_type": "list" if isinstance(obj, list) else "tuple",
+                "items": items,
+            }
+
+        # Tensor or NumPy array
+        if isinstance(obj, (Tensor, np.ndarray)):
+            key = prefix if prefix else "root_array"
+            arr = obj.data if isinstance(obj, Tensor) else obj
+            arrays[key] = arr
             return {
                 "_type": "tensor" if isinstance(obj, Tensor) else "np.ndarray",
                 "key": key,
             }
-        elif isinstance(obj, (int, float, str, bool, type(None))):
+
+        # Primitive scalar types
+        if isinstance(obj, (int, float, str, bool, type(None))):
             return {"_type": "scalar", "value": obj}
+
+        # Fallback for other types
         return {"_type": "raw", "value": str(obj)}
 
     arrays_dict: Dict[str, np.ndarray] = {}
-    meta: SerializedMeta = _serialize_object(obj, arrays_dict)
+    meta: SerializedMeta = _serialize(obj, arrays_dict)
 
     # Save metadata to JSON
     with open(json_path, "w") as f:
@@ -69,47 +82,38 @@ def save_model(
 def load_model(
     json_path: str = "checkpoint.json",
     npz_path: str = "checkpoint.npz",
-    weights_only=False,
+    weights_only: bool = False,
 ) -> Any:
     """
     Load an object saved by `save_model`, reconstructing Tensors, arrays, etc.
 
     Args:
-       json_path (str): Path to the JSON file containing the serialized object.
-       npz_path (str): Path to the NPZ file containing the serialized arrays.
-       weights_only (bool): If True, only load the weights and not the states.
+       json_path: Path to the JSON file containing the serialized object.
+       npz_path: Path to the NPZ file containing the serialized arrays.
+       weights_only: If True, only load the weights (e.g., "parameters" key), ignoring other states.
     """
 
-    def _deserialize_object(
-        meta: SerializedMeta, data_dict: Dict[str, np.ndarray]
-    ) -> Any:
+    def _deserialize(meta: SerializedMeta, data: Dict[str, np.ndarray]) -> Any:
         """
         Recursively reconstruct an object from its serialized form.
         """
-        t: str = meta["_type"]
-        if t in ("dict", "list", "tuple"):
-            if t == "dict":
-                result: Dict[str, Any] = {}
-                for k, v in meta["items"].items():
-                    result[k] = _deserialize_object(v, data_dict)
-                return result
-            else:
-                items: List[Any] = [
-                    _deserialize_object(x, data_dict) for x in meta["items"]
-                ]
-                return items if t == "list" else tuple(items)
-        elif t in ("tensor", "np.ndarray"):
-            arr = data_dict[meta["key"]]
-            return Tensor(arr) if meta["_type"] == "tensor" else arr
-        elif t in ("scalar", "raw"):
-            if t == "scalar":
-                return meta["value"]
-            elif t == "raw":
-                return meta["value"]
-            else:
-                raise ValueError(f"Unknown primitive type: {t}")
-        else:
-            raise ValueError(f"Unknown meta type: {t}")
+        t = meta["_type"]
+
+        if t == "dict":
+            return {k: _deserialize(v, data) for k, v in meta["items"].items()}
+
+        if t in ("list", "tuple"):
+            items = [_deserialize(x, data) for x in meta["items"]]
+            return items if t == "list" else tuple(items)
+
+        if t in ("tensor", "np.ndarray"):
+            arr = data[meta["key"]]
+            return Tensor(arr) if t == "tensor" else arr
+
+        if t in ("scalar", "raw"):
+            return meta["value"]
+
+        raise ValueError(f"Unknown meta type: {t}")
 
     if not os.path.exists(json_path):
         raise ValueError(f"Checkpoint file not found: {json_path}")
@@ -120,17 +124,14 @@ def load_model(
     with open(json_path, "r") as f:
         meta: SerializedMeta = json.load(f)
 
-    # Load arrays
-    with np.load(npz_path, allow_pickle=True) as data:
-        data_dict: Dict[str, np.ndarray] = dict(data.items())
+    # Load NPZ data
+    with np.load(npz_path, allow_pickle=True) as npz_data:
+        data_dict: Dict[str, np.ndarray] = dict(npz_data.items())
 
-    deserialized_data = _deserialize_object(meta, data_dict)
+    deserialized_data = _deserialize(meta, data_dict)
 
-    if (
-        weights_only
-        and isinstance(deserialized_data, dict)
-        and "parameters" in deserialized_data
-    ):
-        return deserialized_data["parameters"]
+    # If requested, return only the "parameters" sub-dictionary
+    if weights_only and isinstance(deserialized_data, dict):
+        return deserialized_data.get("parameters", deserialized_data)
 
     return deserialized_data
