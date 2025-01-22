@@ -94,6 +94,7 @@ class DataLoader:
         self.batches_y = []
         self.source_masks = []
         self.target_masks = []
+        self.causal_mask = []
 
     def on_epoch_start(self) -> None:
         """
@@ -105,6 +106,7 @@ class DataLoader:
         self.batches_y.clear()
         self.source_masks.clear()
         self.target_masks.clear()
+        self.causal_mask.clear()
 
         self._create_batches()
 
@@ -162,6 +164,7 @@ class DataLoader:
             self.batches_y.append(Y_chunk)
             self.source_masks.append(smask)
             self.target_masks.append(tmask)
+            self.causal_mask.append(cmask)
 
     def __len__(self) -> int:
         """
@@ -169,7 +172,9 @@ class DataLoader:
         """
         return self.num_batches
 
-    def __iter__(self) -> Iterator[Tuple[np.ndarray, np.ndarray, Tensor, Tensor]]:
+    def __iter__(
+        self,
+    ) -> Iterator[Tuple[np.ndarray, np.ndarray, Tensor, Tensor, Tensor]]:
         """
         Iterate over precomputed batches (X, y, source_mask, target_mask).
         """
@@ -179,6 +184,7 @@ class DataLoader:
                 self.batches_y[i],
                 self.source_masks[i],
                 self.target_masks[i],
+                self.causal_mask[i],
             )
 
     def sample_random_sequence(
