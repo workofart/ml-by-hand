@@ -1,6 +1,8 @@
 from typing import Optional, List
 from autograd.tensor import Tensor
 from autograd import nn, functional, optim
+
+# TODO: Extract the common modules out to nn.py module
 from examples.transformers import (
     MultiHeadAttention,
     ResidualAddAndNorm,
@@ -13,6 +15,93 @@ from autograd.text import utils as text_utils
 import logging
 import numpy as np
 from tqdm import tqdm
+
+
+class GPT1(nn.Module):
+    """
+    GPT-1
+    Paper: Improving Language Understanding by Generative Pre-Training
+    https://www.semanticscholar.org/paper/Improving-Language-Understanding-by-Generative-Radford-Narasimhan/cd18800a0fe0b668a1cc19f2ec95b5003d0a5035
+    """
+
+    def __init__(
+        self,
+        vocab_size,
+        hidden_size,
+        num_attention_heads,
+        max_seq_len,
+        dropout_prob,
+        num_decoder_layers,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.token_embedding = nn.Embedding(vocab_size, hidden_size)
+        self.position_embedding = nn.Embedding(max_seq_len, hidden_size)
+        self.dropout = nn.Dropout(dropout_prob)
+        self.layer_norm = nn.LayerNorm(hidden_size)
+
+        self.sublayers = [
+            DecoderSublayer(
+                hidden_size=hidden_size,
+                ff_hidden_size=hidden_size * 4,
+                num_attention_heads=num_attention_heads,
+                dropout_prob=dropout_prob,
+            )
+            for _ in range(num_decoder_layers)
+        ]
+
+    def forward(self, tokens, mask: Optional[Tensor]):
+        """
+        Following the same notation in the original paper
+        Section 3.1 Unsupervised pre-training
+        """
+        batch_size, seq_len = tokens.shape
+        positions = np.arange(seq_len)  # shape (seq_len,)
+        positions = np.tile(positions, (batch_size, 1))  # shape (batch, seq_len)
+
+        token_embedding = self.token_embedding(
+            tokens
+        )  # shape: (batch, seq_len, hidden_dim)
+        position_embedding = self.position_embedding(
+            positions
+        )  # shape: (batch, seq_len, hidden_dim)
+        h_0 = self.dropout(token_embedding + position_embedding)
+
+        for sublayer in self.sublayers:
+            h_0 = sublayer(h_0, mask)
+
+        output = self.layer_norm(h_0)
+        output = output @ self.token_embedding.parameters["weight"].T
+        return functional.softmax(output)
+
+
+class DecoderSublayer(nn.Module):
+    def __init__(
+        self,
+        hidden_size=512,
+        ff_hidden_size=2048,
+        dropout_prob=0.1,
+        num_attention_heads=2,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.multi_head_attention = MultiHeadAttention(
+            hidden_size=hidden_size, num_heads=num_attention_heads
+        )
+        self.add_and_norm1 = ResidualAddAndNorm(hidden_size)
+        self.add_and_norm2 = ResidualAddAndNorm(hidden_size)
+        self.feedforward = FeedForward(
+            fc_input_size=hidden_size,
+            hidden_size=ff_hidden_size,
+            dropout_prob=dropout_prob,
+        )
+
+    def forward(self, x: Tensor, mask: Optional[Tensor]) -> Tensor:
+        x = self.add_and_norm1(
+            x, lambda x_: self.multi_head_attention(x_, x_, x_, mask=mask)
+        )
+        x = self.add_and_norm2(x, self.feedforward)
+        return x
 
 
 # TODO: consolidate this with the transformers one
@@ -75,105 +164,21 @@ def inference(
     return bpe.decode(generated)
 
 
-class GPT1(nn.Module):
-    """
-    GPT-1
-    Paper: Improving Language Understanding by Generative Pre-Training
-    https://www.semanticscholar.org/paper/Improving-Language-Understanding-by-Generative-Radford-Narasimhan/cd18800a0fe0b668a1cc19f2ec95b5003d0a5035
-    """
-
-    def __init__(
-        self,
-        vocab_size,
-        hidden_size,
-        num_attention_heads,
-        max_seq_len,
-        dropout_prob,
-        **kwargs,
-    ) -> None:
-        super().__init__(**kwargs)
-        self.token_embedding = nn.Embedding(vocab_size, hidden_size)
-        self.position_embedding = nn.Embedding(max_seq_len, hidden_size)
-        self.dropout = nn.Dropout(dropout_prob)
-        self.layer_norm = nn.LayerNorm(hidden_size)
-
-        self.sublayers = [
-            DecoderSublayer(
-                hidden_size=hidden_size,
-                ff_hidden_size=hidden_size * 4,
-                num_attention_heads=num_attention_heads,
-                dropout_prob=dropout_prob,
-            )
-            for _ in range(8)  # TODO: paper used 12 layers
-        ]
-
-    def forward(self, tokens, mask: Optional[Tensor]):
-        """
-        Following the same notation in the original paper
-        Section 3.1 Unsupervised pre-training
-        """
-        batch_size, seq_len = tokens.shape
-        positions = np.arange(seq_len)  # shape (seq_len,)
-        positions = np.tile(positions, (batch_size, 1))  # shape (batch, seq_len)
-
-        token_embedding = self.token_embedding(
-            tokens
-        )  # shape: (batch, seq_len, hidden_dim)
-        position_embedding = self.position_embedding(
-            positions
-        )  # shape: (batch, seq_len, hidden_dim)
-        h_0 = self.dropout(token_embedding + position_embedding)
-
-        for sublayer in self.sublayers:
-            h_0 = sublayer(h_0, mask)
-
-        output = self.layer_norm(h_0)
-        output = output @ self.token_embedding.parameters["weight"].T
-        return functional.softmax(output)
-
-
-class DecoderSublayer(nn.Module):
-    def __init__(
-        self,
-        hidden_size=512,
-        ff_hidden_size=2048,
-        dropout_prob=0.1,
-        num_attention_heads=2,
-        **kwargs,
-    ) -> None:
-        super().__init__(**kwargs)
-        self.multi_head_attention = MultiHeadAttention(
-            hidden_size=hidden_size, num_heads=num_attention_heads
-        )
-        self.add_and_norm1 = ResidualAddAndNorm(hidden_size)
-        self.add_and_norm2 = ResidualAddAndNorm(hidden_size)
-        self.feedforward = FeedForward(
-            fc_input_size=hidden_size,
-            hidden_size=ff_hidden_size,
-            dropout_prob=dropout_prob,
-        )
-
-    def forward(self, x: Tensor, mask: Optional[Tensor]) -> Tensor:
-        x = self.add_and_norm1(
-            x, lambda x_: self.multi_head_attention(x_, x_, x_, mask=mask)
-        )
-        x = self.add_and_norm2(x, self.feedforward)
-        return x
-
-
 if __name__ == "__main__":
     logger = logging.getLogger(__name__)
 
     # Based on the paper
     # Section 4.1 Setup - Model Specifications
+    # TODO: parse the hyperparams from CLI
     HYPERPARAMS = {
         "num_epochs": 30,
         "warmup_steps": 1000,
-        "num_attention_heads": 8,  # 12
-        "d_model": 256,  # 768
+        "num_attention_heads": 12,  # 12
+        "d_model": 144,  # 768, must be divisible by num_attention_heads
         "batch_size": 64,  # 64
         "dropout_prob": 0.1,
         "seq_len": 128,  # 512
+        "num_decoder_layers": 12,
         "eval_iters": 16,
     }
 
@@ -208,6 +213,7 @@ if __name__ == "__main__":
         num_attention_heads=HYPERPARAMS["num_attention_heads"],
         dropout_prob=HYPERPARAMS["dropout_prob"],
         max_seq_len=int(HYPERPARAMS["seq_len"] * 1.5),
+        num_decoder_layers=HYPERPARAMS["num_decoder_layers"],
     )
     model.train()
     logger.info(f"Model parameters: {model.num_parameters()}")
@@ -243,17 +249,14 @@ if __name__ == "__main__":
             optimizer.lr = lr
             optimizer.zero_grad()
 
-            # y has shape (batch_size, seq_len)
-            # Create decoder input by prepending <SOS> and dropping the last token
-            # y_inp = np.zeros_like(y)
-            # y_inp[:, 0] = vocab[b"<SOS>"]
-            # y_inp[:, 1:] = y[:, :-1]
-
             # pred_probs is (batch_size, sequence_len, vocabulary_size)
+            # No need the initial <SOS> token for the decoder input
             pred_prob = model(
                 x,
                 causal_mask,
             )
+            # y has shape (batch_size, seq_len) and is already a shifted sequence
+            # compared to x
             loss = functional.sparse_cross_entropy(
                 pred_prob, y, pad_idx=pad_idx, label_smoothing=0.1
             )
@@ -270,10 +273,6 @@ if __name__ == "__main__":
                 range(HYPERPARAMS["eval_iters"]), desc="Test Evaluation", leave=False
             ):
                 x, y, _, __, causal_mask = next(iter(test_data_loader))
-                # y_inp = np.zeros_like(y)
-                # y_inp[:, 0] = vocab[b"<SOS>"]  # prepend <SOS> for decoder input
-                # y_inp[:, 1:] = y[:, :-1]
-
                 pred_prob = model(
                     x,
                     causal_mask,
@@ -286,7 +285,7 @@ if __name__ == "__main__":
             pred_tokens = inference(
                 model,
                 bpe,
-                start_tokens=["All"],
+                start_tokens=["All"],  # Dummy token to start the generation
                 max_length=int(HYPERPARAMS["seq_len"] * 1.1),
                 temperature=1.0,
             )
