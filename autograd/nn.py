@@ -9,9 +9,10 @@ logger = logging.getLogger(__name__)
 
 
 class Module:
-    def __init__(self) -> None:
+    def __init__(self, *args, **kwargs) -> None:
         self._parameters: Dict[str, Tensor] = {}
         self._modules: Dict[str, "Module"] = {}
+        self._states: Dict[str, Any] = {}
         self._is_training: Optional[bool] = None
 
     def zero_grad(self) -> None:
@@ -34,35 +35,98 @@ class Module:
         return self.forward(*args, **kwargs)
 
     def __setattr__(self, name: str, value: Any) -> None:
+        """
+        Hook into attribute setting so that submodules / parameters
+        are automatically registered.
+        """
+        if name.startswith("_"):
+            # Bypass custom logic for private/internal attributes
+            super().__setattr__(name, value)
+            return
+
         if isinstance(value, Module):
             self._modules[name] = value
         elif isinstance(value, Tensor):
             self._parameters[name] = value
         else:
+            self._states[name] = value
             super().__setattr__(name, value)
 
     def __getattr__(self, name: str) -> Any:
-        return self._modules[name]
+        if name in self._modules:
+            return self._modules[name]
+        if name in self._states:
+            return self._states[name]
+        raise AttributeError(
+            f"Module {self.__class__.__name__} has no attribute {name}"
+        )
 
     @property
     def parameters(self) -> Dict[str, Any]:
-        params = self._parameters.copy()
-        for k, module in self._modules.items():
-            params.update({k: module.parameters})
-        return params
+        """
+        Return a flattened dictionary of all Tensors (trainable parameters)
+        from this module and submodules:
+          { 'weight': <Tensor>, 'submodule1.weight': <Tensor>, ... }
+        """
+        return {
+            k: v
+            for k, v in self._get_attr_nested("_parameters").items()
+            if isinstance(v, Tensor)
+        }
+
+    @property
+    def states(self) -> Dict[str, Any]:
+        """
+        Return a flattened dictionary of all non-trainable states/buffers
+        from this module and submodules:
+          { 'some_state': <np.ndarray>, 'submodule1.running_var': <np.ndarray>, ... }
+        """
+        return {
+            k: v
+            for k, v in self._get_attr_nested("_states").items()
+            if isinstance(v, np.ndarray)
+        }
+
+    def state_dict(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Return a dict of:
+          {
+            'parameters': { 'weight': np.array(...), 'bias': np.array(...), ... },
+            'states': { 'stateful_states': np.array(...), ... }
+          }
+        This is a flat representation (like PyTorch's state_dict).
+        """
+        # Convert Tensors to raw np.array
+        param_arrays = {k: v.data for k, v in self.parameters.items()}
+        state_arrays = self.states  # already np.ndarray
+        return {"parameters": param_arrays, "states": state_arrays}
+
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        """
+        Inverse of state_dict(). For example:
+            loaded = load_model('checkpoint.json', 'checkpoint.npz')
+            model.load_state_dict(loaded)
+        Expects a dict of the form:
+        {
+            'parameters': { 'weight': np.array(...), 'bias': np.array(...) },
+            'states': { 'stateful_states': np.array(...), ... }
+        }
+        """
+        # 1. Update parameters
+        if "parameters" in state_dict:
+            self._set_attr_nested(
+                "_parameters", state_dict["parameters"], is_parameter=True
+            )
+
+        # 2. Update states
+        if "states" in state_dict:
+            self._set_attr_nested("_states", state_dict["states"], is_parameter=False)
 
     def num_parameters(self) -> int:
         """
         Returns the total number of parameters in the module and its submodules.
         """
-        # Count parameters in current module
-        total = sum(p.data.size for p in self._parameters.values())
-
-        # Recursively count parameters in submodules
-        for module in self._modules.values():
-            total += module.num_parameters()
-
-        return total
+        return sum(p.data.size for p in self.parameters.values())
 
     def train(self) -> None:
         for module in self._modules.values():
@@ -74,10 +138,64 @@ class Module:
             module.eval()
         self._is_training = False
 
+    def _get_attr_nested(self, attr_name: str, prefix: str = "") -> Dict[str, Any]:
+        """
+        Recursively collect items (parameters or states) from self and submodules.
+        Returns a flattened dict: { 'prefix.param_name': value, ... }
+        """
+        out = {}
+        # 1. Collect this module's items (e.g. self._parameters or self._states)
+        current_dict = getattr(self, attr_name)  # e.g. self._parameters
+        for k, v in current_dict.items():
+            full_name = f"{prefix}.{k}" if prefix else k
+            out[full_name] = v
+
+        # 2. Recursively collect submodules
+        for sub_name, mod in self._modules.items():
+            sub_prefix = f"{prefix}.{sub_name}" if prefix else sub_name
+            out.update(mod._get_attr_nested(attr_name, prefix=sub_prefix))
+
+        return out
+
+    def _set_attr_nested(
+        self, attr_name: str, flat_dict: Dict[str, Any], is_parameter: bool
+    ) -> None:
+        """
+        Recursively update either `_parameters` or `_states` by descending into submodules.
+
+        Args:
+            flat_dict: is a mapping
+                { "submodule1.sub_weight": np.array(...),  ... }
+            attr_name: "_parameters" or "_states"
+            is_parameter: indicates if these are trainable parameters (Tensor) or not.
+        """
+        for full_name, value in flat_dict.items():
+            parts = full_name.split(".")  # e.g. ["submodule1", "sub_weight"]
+            *path, var_name = parts
+            module_ref = self
+            # Descend into submodules
+            for p in path:
+                module_ref = module_ref._modules[p]
+
+            # Now module_ref is the submodule owning var_name in its container
+            container = getattr(module_ref, attr_name)
+
+            if var_name not in container:
+                # If it doesn't exist, create it
+                container[var_name] = Tensor(value) if is_parameter else value
+            else:
+                # Important: In-place update for parameters to avoid breaking optimizer references
+                # Otherwise, the model would not train because optimizer will be pointing to old parameters
+                if is_parameter:
+                    container[var_name].data[...] = value
+                else:
+                    # For states, just assign (or do an in-place copy if desired)
+                    container[var_name] = value
+
 
 class Linear(Module):
     def __init__(self, input_size: int, output_size: int, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
+        super().__init__(input_size, output_size, **kwargs)
 
         # weight is a matrix of shape (input_size, output_size)
         self._parameters["weight"] = xavier_uniform(
@@ -130,7 +248,15 @@ class Conv2d(Module):
             - "valid" means no padding.
             - "same" means padding such that the output shape is the same as the input shape.
         """
-        super().__init__(**kwargs)
+        super().__init__(
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride=stride,
+            padding_mode=padding_mode,
+            bias=bias,
+            **kwargs,
+        )
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.kernel_size = kernel_size
@@ -228,7 +354,7 @@ class MaxPool2d(Module):
             - "valid" means no padding.
             - "same" means padding such that the output shape is the same as the input shape.
         """
-        super().__init__(**kwargs)
+        super().__init__(kernel_size, **kwargs)
         self.kernel_size = kernel_size
         self.stride = (
             stride if stride is not None else kernel_size
@@ -268,7 +394,7 @@ class ResidualBlock(Module):
     """
 
     def __init__(self, in_channels: int, out_channels: int, stride: int = 1) -> None:
-        super().__init__()
+        super().__init__(in_channels, out_channels, stride=stride)
         self.conv1 = Conv2d(
             in_channels, out_channels, kernel_size=3, stride=stride, padding_mode="same"
         )
@@ -318,7 +444,12 @@ class RecurrentBlock(Module):
         W_hh: transforms the hidden state into the next hidden state
         W_hy: transforms the hidden state into the output
         """
-        super().__init__()
+        super().__init__(
+            input_size,
+            hidden_size,
+            output_size=output_size,
+            dropout_prob=dropout_prob,
+        )
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.output_size = output_size
@@ -417,7 +548,9 @@ class LongShortTermMemoryBlock(Module):
         W_o/bias_o: weights for the output gate
         W_hy/bias_y: weights for the final output (if output_size is specified)
         """
-        super().__init__()
+        super().__init__(
+            input_size, hidden_size, output_size=output_size, dropout_prob=dropout_prob
+        )
         self.input_size = input_size
         self.hidden_size = hidden_size
         # Apply dropout only to non-recurrent connections
@@ -623,7 +756,7 @@ class BatchNorm(Module):
         epsilon: float = 1e-5,
         **kwargs: Any,
     ) -> None:
-        super().__init__(**kwargs)
+        super().__init__(input_size, momentum=momentum, epsilon=epsilon, **kwargs)
 
         self.momentum = momentum  # used in running mean and variance calculation
         self.epsilon = epsilon  # small constant for numeric stability
@@ -686,7 +819,7 @@ class Dropout(Module):
         Args:
             p (float, optional): Fraction of the input units to drop. Defaults to 0.5.
         """
-        super().__init__(**kwargs)
+        super().__init__(p=p, **kwargs)
         self.p = p
 
     def forward(self, x: Tensor) -> Tensor:

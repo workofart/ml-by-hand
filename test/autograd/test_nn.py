@@ -1,5 +1,6 @@
 from unittest import TestCase
 from autograd.nn import (
+    Module,
     Linear,
     Embedding,
     BatchNorm,
@@ -11,6 +12,7 @@ from autograd.nn import (
     LongShortTermMemoryBlock,
 )
 from autograd.tensor import Tensor
+from copy import deepcopy
 import random
 import numpy as np
 import torch  # for comparison
@@ -18,6 +20,92 @@ import torch  # for comparison
 random.seed(1337)
 np.random.seed(1337)
 torch.manual_seed(1337)
+
+
+class TestMainModule(Module):
+    def __init__(self):
+        super().__init__()
+        # Top-level parameter
+        self.main_weight = Tensor(np.zeros((3, 3)))
+        # Top-level state
+        self.top_level_state = np.array([99, 99, 99])
+
+        # Submodule
+        self.submodule1 = TestSubModule()
+
+    def forward(self, x: Tensor) -> Tensor:
+        return x @ self.main_weight
+
+
+class TestSubModule(Module):
+    def __init__(self):
+        super().__init__()
+        # Parameter
+        self.sub_weight = Tensor(np.ones((2, 2)))
+        # State
+        self.running_avg = np.array([10.0])
+
+    def forward(self, x: Tensor) -> Tensor:
+        return x + self.sub_weight
+
+
+class TestModule(TestCase):
+    def setUp(self) -> None:
+        self.model = TestMainModule()
+
+    def test_parameters_and_states(self):
+        # 1) Check top-level parameter
+        params = self.model.parameters
+        assert "main_weight" in params
+        assert np.allclose(params["main_weight"].data, 0.0)
+
+        # 2) Check submodule parameter
+        assert "submodule1.sub_weight" in params
+        assert np.allclose(params["submodule1.sub_weight"].data, 1.0)
+
+        # 3) Check top-level state
+        states = self.model.states
+        assert "top_level_state" in states
+        assert np.allclose(states["top_level_state"], [99, 99, 99])
+
+        # 4) Check submodule state
+        assert "submodule1.running_avg" in states
+        assert np.allclose(states["submodule1.running_avg"], [10.0])
+
+    def test_num_parameters(self):
+        # main_weight: shape (3,3) => 9 elements
+        # sub_weight: shape (2,2) => 4 elements
+        # total => 13
+        n_params = self.model.num_parameters()
+        assert n_params == 13
+
+    def test_state_dict_and_load(self):
+        # 1) Retrieve the state dict, save "pass by reference" behavior as PyTorch
+        # So we will deep copy for loading later
+        sd = deepcopy(self.model.state_dict())
+        assert "parameters" in sd
+        assert "states" in sd
+
+        # Check that 'main_weight' and 'submodule1.sub_weight' are in 'parameters'
+        assert "main_weight" in sd["parameters"]
+        assert "submodule1.sub_weight" in sd["parameters"]
+        assert np.allclose(sd["parameters"]["main_weight"], 0.0)
+        assert np.allclose(sd["parameters"]["submodule1.sub_weight"], 1.0)
+
+        # 2) Modify the model parameters and states to random values
+        self.model.parameters["main_weight"].data[:] = 42
+        self.model.parameters["submodule1.sub_weight"].data[:] = 77
+        self.model.states["top_level_state"][:] = 999
+        self.model.states["submodule1.running_avg"][:] = 555
+
+        # 3) Load the original state dict
+        self.model.load_state_dict(sd)
+
+        # 4) Ensure we are back to the original values
+        assert np.allclose(self.model.parameters["main_weight"].data, 0.0)
+        assert np.allclose(self.model.parameters["submodule1.sub_weight"].data, 1.0)
+        assert np.allclose(self.model.states["top_level_state"], [99, 99, 99])
+        assert np.allclose(self.model.states["submodule1.running_avg"], [10.0])
 
 
 class TestLinear(TestCase):
