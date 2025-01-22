@@ -78,8 +78,8 @@ class Optimizer:
                 ... any other hyperparams ...
             },
             'states': {
-                123: {'m': ..., 'v': ..., ...},  # keyed by id(param)
-                456: {...},
+                "module1.weight": {'m': ..., 'v': ..., ...},
+                "module1.bias": {...},
             }
           }
         """
@@ -93,7 +93,11 @@ class Optimizer:
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
         """
-        Load the optimizer state from a checkpoint.
+        Load the optimizer state from a checkpoint. This performs an in-place
+        update of the optimizer's internal state and hyperparameter.
+
+        Args:
+           state_dict(Dict[str, Any]): The state dict read from a checkpoint
         """
         # Restore hyperparams:
         for k, v in state_dict["hyperparams"].items():
@@ -150,13 +154,16 @@ class Adam(Optimizer):
         **kwargs: Any,
     ) -> None:
         super(Adam, self).__init__(model_parameters, lr=lr, **kwargs)
+        # These notations are based on the same notations in the paper linked above
         self._hyperparams["beta1"] = beta1
         self._hyperparams["beta2"] = beta2
         self._hyperparams["epsilon"] = epsilon
 
-        self._states["m"] = defaultdict(float)
-        self._states["v"] = defaultdict(float)
-        self._states["timestep"] = defaultdict(int)
+        self._states["m"] = defaultdict(float)  # first momentum estimate
+        self._states["v"] = defaultdict(float)  # second momentum estimate
+        self._states["timestep"] = defaultdict(
+            int
+        )  # to keep track of the timestep, this will adapt our learning rate
 
     def step(self):
         beta1 = self._hyperparams["beta1"]
@@ -176,8 +183,10 @@ class Adam(Optimizer):
             v_old = self._states["v"][name]
 
             grad = param.grad.data  # or param.grad if it's np array
-            new_m = beta1 * m_old + (1 - beta1) * grad
-            new_v = beta2 * v_old + (1 - beta2) * (grad**2)
+            new_m = beta1 * m_old + (1 - beta1) * grad  # update first order momentum
+            new_v = beta2 * v_old + (1 - beta2) * (
+                grad**2
+            )  # update second order momentum
 
             # Store them back
             self._states["m"][name] = new_m
@@ -187,5 +196,5 @@ class Adam(Optimizer):
             m_hat = new_m / (1 - beta1**t)
             v_hat = new_v / (1 - beta2**t)
 
-            # Update param
+            # Update parameters
             param.data -= self.lr * m_hat / (np.sqrt(v_hat) + epsilon)

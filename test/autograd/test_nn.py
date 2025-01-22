@@ -34,7 +34,7 @@ class TestMainModule(Module):
         self.submodule1 = TestSubModule()
 
     def forward(self, x: Tensor) -> Tensor:
-        return x @ self.main_weight  # trivial example
+        return x @ self.main_weight
 
 
 class TestSubModule(Module):
@@ -46,7 +46,7 @@ class TestSubModule(Module):
         self.running_avg = np.array([10.0])
 
     def forward(self, x: Tensor) -> Tensor:
-        return x + self.sub_weight  # trivial example
+        return x + self.sub_weight
 
 
 class TestModule(TestCase):
@@ -92,8 +92,7 @@ class TestModule(TestCase):
         assert np.allclose(sd["parameters"]["main_weight"], 0.0)
         assert np.allclose(sd["parameters"]["submodule1.sub_weight"], 1.0)
 
-        # 2) Modify the model parameters and states
-        # e.g. set them to some random values
+        # 2) Modify the model parameters and states to random values
         self.model.parameters["main_weight"].data[:] = 42
         self.model.parameters["submodule1.sub_weight"].data[:] = 77
         self.model.states["top_level_state"][:] = 999

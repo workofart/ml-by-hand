@@ -493,6 +493,7 @@ def inference(
     Returns:
         list[str]: The list of tokens output from the model
     """
+    # TODO: Integrate this into the trainer class
     model.eval()
     generated = [bpe._unicode_to_int_vocab[t.encode("utf-8")] for t in start_tokens]
     for _ in range(max_length):
@@ -538,6 +539,7 @@ def inference(
 def get_lr(step: int, model_dim: int, warmup_steps: int) -> float:
     """
     Learning rate scheduler with warmup for transformers training. It will start with larger learning rate, then after the transition point sqrt(step) == step * warmup_steps^(-1.5), the learning rate will slowly decrease
+    TODO: Move this to a centralized place later.
 
     Args:
         step (int): The current timestep (not epoch), each batch will be 1 timestep
@@ -559,6 +561,7 @@ def evaluate(
     epoch: int,
     hyperparams: dict,
 ):
+    # TODO: Integrate this into the trainer class
     model.eval()
     test_data_loader.on_epoch_start()
     test_loss = 0
@@ -691,7 +694,7 @@ if __name__ == "__main__":
             "seq_len": 80,
             "batch_size": 32,
             "warmup_steps": 1000,
-            "d_model": 128,
+            "d_model": 128,  # must be divisible by num_attention_heads
             "num_attention_heads": 4,
             "eval_iters": 20,
         }

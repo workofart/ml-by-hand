@@ -9,7 +9,7 @@ from autograd.tensor import Tensor
 from autograd.tools.model import load_model, save_model
 
 
-class TestModule(Module):
+class MockModule(Module):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._parameters["weight"] = xavier_uniform(Tensor(np.zeros((4, 5))))
@@ -26,7 +26,7 @@ class TestModule(Module):
 class TestModel(TestCase):
     def setUp(self):
         # Create a test model with some initial arguments
-        self.model = TestModule(999, kwarg0="testing_kwarg0")
+        self.model = MockModule(999, kwarg0="testing_kwarg0")
         self.json_path = "test_model.json"
         self.npz_path = "test_model.npz"
 
@@ -85,7 +85,7 @@ class TestModel(TestCase):
 
     def test_load_weights_only(self):
         # 1. Instantiate a new model and demonstrate weights-only loading
-        new_model = TestModule(999, kwarg0="testing_kwarg0")
+        new_model = MockModule(999, kwarg0="testing_kwarg0")
         original_params = deepcopy(new_model.parameters)
         # Save the model including the states
         save_model(

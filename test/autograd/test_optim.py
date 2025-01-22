@@ -99,17 +99,16 @@ class TestOptimizer(TestCase):
                 new_adam._states["timestep"][pid], adam._states["timestep"][pid]
             )
 
-        # 8) Optionally, verify if the entire dict matches
+        # 8) Verify if the entire dict matches
         old_sd = adam.state_dict()
         new_sd = new_adam.state_dict()
-
-        # Check hyperparams match
         self.assertEqual(old_sd["hyperparams"].keys(), new_sd["hyperparams"].keys())
         for k in old_sd["hyperparams"]:
             self.assertEqual(old_sd["hyperparams"][k], new_sd["hyperparams"][k])
 
         # Check top-level states
         self.assertEqual(old_sd["states"].keys(), new_sd["states"].keys())
+
         # Check that the param_id keys match in m & v
         self.assertEqual(old_sd["states"]["m"].keys(), new_sd["states"]["m"].keys())
         self.assertEqual(old_sd["states"]["v"].keys(), new_sd["states"]["v"].keys())
