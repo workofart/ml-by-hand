@@ -9,7 +9,6 @@ from typing import (
 )
 import logging
 import pickle
-from autograd.tools.data import load_data
 
 logger = logging.getLogger(__name__)
 
@@ -273,6 +272,8 @@ class BytePairEncoder:
 
 
 if __name__ == "__main__":
+    from autograd.tools.data import load_data
+
     url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
     filename = "examples/tinyshakespeare.txt"
 

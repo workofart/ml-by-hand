@@ -55,8 +55,8 @@ def load_data(
 
 class DataLoader:
     """
-    A simple data loader pipeline for generating batched data (X, y) plus
-    precomputed masks (source_mask, target_mask). Optionally shuffles data every epoch.
+    A simple data loader pipeline for generating batched data (X, y) for autoregressive use-case (y is X shifted by 1 position)
+    It also precomputes masks (source_mask, target_mask). Optionally shuffles data every epoch.
     """
 
     def __init__(

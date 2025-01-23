@@ -1,16 +1,15 @@
-from typing import Optional, List
+from typing import Optional
 from autograd.tensor import Tensor
 from autograd import nn, functional, optim
 
 # TODO: Extract the common modules out to nn.py module
 from examples.transformers import (
-    MultiHeadAttention,
     ResidualAddAndNorm,
     FeedForward,
-    get_lr,
 )
 from autograd.text.tokenizer import BytePairEncoder
 from autograd.tools.data import load_data, DataLoader
+from autograd.tools.trainer import get_lr, grad_l2_norm
 from autograd.text import utils as text_utils
 import logging
 import os
@@ -88,7 +87,7 @@ class DecoderSublayer(nn.Module):
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
-        self.multi_head_attention = MultiHeadAttention(
+        self.multi_head_attention = nn.MultiHeadAttention(
             hidden_size=hidden_size, num_heads=num_attention_heads
         )
         self.add_and_norm1 = ResidualAddAndNorm(hidden_size)
@@ -105,66 +104,6 @@ class DecoderSublayer(nn.Module):
         )
         x = self.add_and_norm2(x, self.feedforward)
         return x
-
-
-# TODO: consolidate this with the transformers one
-def inference(
-    model: nn.Module,
-    bpe: BytePairEncoder,
-    start_tokens: List[str],
-    max_length: int = 50,
-    temperature: float = 1.0,
-) -> str:
-    """
-    Peform model inference, usually for evaluation purposes.
-    We will continously feed the model's generated tokens back to the model to generate
-    the next token (next token is conditioned on all previously generated token).
-
-    Args:
-        model (nn.Module): The transformer model
-        start_tokens (list[str]): The list of start tokens, usually ["<SOS>"]
-        max_length (int, optional): The maximum length of tokens to run. Defaults to 50.
-        temperature (float, optional): The amount of exploration/randomness to model output to be. Defaults to 1.0.
-        > 1.0 more random
-        < 1.0 less random
-
-    Returns:
-        list[str]: The list of tokens output from the model
-    """
-    model.eval()
-    generated = [bpe._unicode_to_int_vocab[t.encode("utf-8")] for t in start_tokens]
-    for _ in range(max_length):
-        seq_len = len(generated)
-
-        # "generated" is a list of integers, each int for each token
-        cur_input = np.array([generated])
-
-        causal_mask = text_utils.create_causal_mask(seq_len, 1)
-
-        # Create causal + pad mask for this partial sequence
-        # Then run model(...) with encoder_output if necessary
-        probs = model(cur_input, causal_mask)
-        # probs has shape (batch_size=1, seq_len, vocab_size)
-        # We only care about the distribution over the last token:
-        dist = probs.data[0, -1]  # shape (vocab_size,)
-
-        # Apply temperature scaling: $$p_{i}^{(1/T)}$$
-        if temperature != 1.0:
-            dist = dist ** (1.0 / temperature)
-
-        # Re-normalize the distribution (so that sum=1)
-        dist_sum = np.sum(dist)
-        if dist_sum <= 1e-15:
-            # If the distribution collapses numerically, fall back to argmax
-            next_token_id = np.argmax(dist)
-        else:
-            dist /= dist_sum
-            # Sample from this scaled distribution
-            next_token_id = np.random.choice(len(dist), p=dist)
-
-        generated.append(next_token_id)
-        # TODO: Possibly break if next_token_id is <eos> or similar
-    return bpe.decode(generated)
 
 
 if __name__ == "__main__":
@@ -184,12 +123,14 @@ if __name__ == "__main__":
         "num_decoder_layers": 12,
         "eval_iters": 16,
     }
+    # Whether to check the model performance by feeding the groundtruth tokens to compare whether the model can predict the next token correctly.
+    teacher_enforcing = False
 
     url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
     filename = "examples/tinyshakespeare.txt"
 
     data = load_data(url, filename)
-    logger.info(f"Length of entire dataset: {len(data)}")
+    logger.info(f"{len(data)} characters in the entire dataset")
 
     # Create the vocabulary first
     bpe = BytePairEncoder(num_merges=3000, vocab_file_path="vocab.pkl")
@@ -224,7 +165,7 @@ if __name__ == "__main__":
         hidden_size=HYPERPARAMS["d_model"],
         num_attention_heads=HYPERPARAMS["num_attention_heads"],
         dropout_prob=HYPERPARAMS["dropout_prob"],
-        max_seq_len=int(HYPERPARAMS["seq_len"] * 1.5),
+        max_seq_len=int(HYPERPARAMS["seq_len"] * 1.1),
         num_decoder_layers=HYPERPARAMS["num_decoder_layers"],
     )
     model.train()
@@ -248,6 +189,7 @@ if __name__ == "__main__":
         pad_idx=pad_idx,
     )
     step_count = 0
+    lr = 0
 
     for epoch in range(HYPERPARAMS["num_epochs"]):
         epoch_loss = 0.0
@@ -294,18 +236,36 @@ if __name__ == "__main__":
                 )
                 test_loss += loss.detach().data
 
-            pred_tokens = inference(
-                model,
-                bpe,
-                start_tokens=["All"],  # Dummy token to start the generation
-                max_length=int(HYPERPARAMS["seq_len"] * 1.1),
-                temperature=1.0,
-            )
-            model.train()
-
             logger.warning(
-                f"\nEpoch {epoch} | Train Loss: {epoch_loss / len(train_data_loader):.2f} "
-                f"| Test Loss: {test_loss / HYPERPARAMS['eval_iters']:.2f}"
+                f"\nEpoch {epoch}\n"
+                f"| Train Loss: {epoch_loss / len(train_data_loader):.2f}\n"
+                f"| Gradient L2 Norm: {grad_l2_norm(model.parameters):.2f}\n"
+                f"| Test Loss: {test_loss / HYPERPARAMS['eval_iters']:.2f}\n"
+                f"| Test Perplexity: {np.exp(test_loss / HYPERPARAMS['eval_iters']):.2f} vs {len(vocab)} (vocab size)\n"
+                f"| Learning Rate: {lr:.4f}"
             )
-            prediction_string = "\n".join(pred_tokens.split("<|endoftext|>"))
-            logger.info(f"Prediction:\n{prediction_string}")
+
+            if teacher_enforcing:
+                text_utils.teacher_forcing_inference(
+                    lambda x: model(
+                        x,
+                        text_utils.create_causal_mask(seq_len=x.shape[0], batch_size=1),
+                    ),  # shape: (1, seq_len, vocab_size)
+                    bpe,
+                    train_data[:100],
+                    vocab_idx2word=idx2word,
+                )
+            else:
+                text_utils.inference(
+                    lambda x: model(
+                        x,
+                        text_utils.create_causal_mask(seq_len=x.shape[0], batch_size=1),
+                    ),  # shape: (1, seq_len, vocab_size)
+                    bpe,
+                    start_tokens=["All"],  # Dummy token to start the generation
+                    max_length=int(HYPERPARAMS["seq_len"] * 1.1),
+                    temperature=1.0,
+                    top_k=10,
+                )
+
+            model.train()
