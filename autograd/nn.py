@@ -193,6 +193,38 @@ class Module:
                     container[var_name] = value
 
 
+class ModuleList(Module):
+    """
+    A list-like container of submodules.
+    Each submodule is properly registered so that it
+    appears in this container's .parameters, .modules, etc.
+    """
+
+    def __init__(self, modules=None):
+        super().__init__()
+        if modules is not None:
+            for module in modules:
+                self.append(module)
+
+    def append(self, module: Module) -> None:
+        """Append a module to the end of the list."""
+        index = len(self._modules)  # how many modules we already have
+        # Use __setattr__ with a string key so that it registers `module` as a submodule
+        setattr(self, str(index), module)
+
+    def __getitem__(self, idx: int) -> Module:
+        """Retrieve the submodule at index `idx`."""
+        return self._modules[str(idx)]
+
+    def __len__(self) -> int:
+        return len(self._modules)
+
+    def __iter__(self):
+        """Allow iteration over submodules in a for-loop, e.g. for m in module_list: ..."""
+        for idx in range(len(self)):
+            yield self[idx]
+
+
 class Linear(Module):
     def __init__(self, input_size: int, output_size: int, **kwargs: Any) -> None:
         super().__init__(input_size, output_size, **kwargs)
