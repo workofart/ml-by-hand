@@ -13,6 +13,7 @@ from autograd.text.tokenizer import BytePairEncoder
 from autograd.tools.data import load_data, DataLoader
 from autograd.text import utils as text_utils
 import logging
+import os
 import numpy as np
 from tqdm import tqdm
 
@@ -40,15 +41,17 @@ class GPT1(nn.Module):
         self.dropout = nn.Dropout(dropout_prob)
         self.layer_norm = nn.LayerNorm(hidden_size)
 
-        self.sublayers = [
-            DecoderSublayer(
-                hidden_size=hidden_size,
-                ff_hidden_size=hidden_size * 4,
-                num_attention_heads=num_attention_heads,
-                dropout_prob=dropout_prob,
-            )
-            for _ in range(num_decoder_layers)
-        ]
+        self.sublayers = nn.ModuleList(
+            [
+                DecoderSublayer(
+                    hidden_size=hidden_size,
+                    ff_hidden_size=hidden_size * 4,
+                    num_attention_heads=num_attention_heads,
+                    dropout_prob=dropout_prob,
+                )
+                for _ in range(num_decoder_layers)
+            ]
+        )
 
     def forward(self, tokens, mask: Optional[Tensor]):
         """
@@ -194,9 +197,18 @@ if __name__ == "__main__":
 
     # Now encode the subset of data
     logger.info("Encoding the new data...")
-    data = data.split("\n\n")[:12000]
+    data = data.split("\n\n")
 
-    encoded_data = np.array(bpe.encode("<|endoftext|>".join(data)))
+    if os.path.exists("bpe_mini_shakespeare.npz"):
+        logger.info("Found existing encoded data, loading it...")
+        with np.load("bpe_mini_shakespeare.npz", allow_pickle=True) as npz_data:
+            encoded_data = npz_data.get("arr_0")[:50000]
+    else:
+        logger.info("Encoding the new data...")
+        encoded_data = np.array(bpe.encode("<|endoftext|>".join(data)))
+        np.savez_compressed("bpe_mini_shakespeare.npz", encoded_data)
+        logger.info("Saved encoded data to bpe_mini_shakespeare.npz")
+
     pad_idx = vocab[b"<PAD>"]
     logger.info(
         f"Vocabulary size: {len(vocab)}, encoded_data length: {len(encoded_data)}"

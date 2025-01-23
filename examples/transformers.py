@@ -7,6 +7,7 @@ from autograd.text import utils as text_utils, tokenizer
 from autograd.tensor import Tensor
 from autograd import nn, functional, optim
 import logging
+import os
 from typing import List, Optional, Any
 
 
@@ -94,14 +95,16 @@ class Encoder(nn.Module):
 
         self.positional_encoder = PositionalEncoding(hidden_size=embedding_size)
 
-        self.sublayers = [
-            EncoderSublayer(
-                hidden_size=embedding_size,
-                ff_hidden_size=embedding_size * 4,
-                num_attention_heads=num_attention_heads,
-            )
-            for _ in range(6)
-        ]
+        self.sublayers = nn.ModuleList(
+            [
+                EncoderSublayer(
+                    hidden_size=embedding_size,
+                    ff_hidden_size=embedding_size * 4,
+                    num_attention_heads=num_attention_heads,
+                )
+                for _ in range(6)
+            ]
+        )
         self.layer_norm = nn.LayerNorm(embedding_size)
 
     def forward(
@@ -134,14 +137,16 @@ class Decoder(nn.Module):
         self.positional_encoder = PositionalEncoding(hidden_size=hidden_size)
         self.hidden_size = hidden_size
 
-        self.sublayers = [
-            DecoderSublayer(
-                hidden_size=hidden_size,
-                ff_hidden_size=hidden_size * 4,
-                num_attention_heads=num_attention_heads,
-            )
-            for _ in range(6)
-        ]
+        self.sublayers = nn.ModuleList(
+            [
+                DecoderSublayer(
+                    hidden_size=hidden_size,
+                    ff_hidden_size=hidden_size * 4,
+                    num_attention_heads=num_attention_heads,
+                )
+                for _ in range(6)
+            ]
+        )
         self.linear = nn.Linear(hidden_size, output_size=vocab_size)
         self.layer_norm = nn.LayerNorm(hidden_size)
 
@@ -569,7 +574,7 @@ def evaluate(
     for _ in tqdm(
         range(hyperparams["eval_iters"]), desc="Test Evaluation", leave=False
     ):
-        x, y, source_mask, target_mask = next(iter(test_data_loader))
+        x, y, source_mask, target_mask, _ = next(iter(test_data_loader))
         y_inp = np.zeros_like(y)
         y_inp[:, 0] = vocab[b"<SOS>"]  # prepend <SOS> for decoder input
         y_inp[:, 1:] = y[:, :-1]
@@ -649,6 +654,7 @@ if __name__ == "__main__":
 
     url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
     filename = "examples/tinyshakespeare.txt"
+    resume_epoch = None  # determine whether to read from checkpoint. TODO: change this to CLI args later
 
     data = load_data(url, filename)
     logger.info(f"Length of entire dataset: {len(data)}")
@@ -658,9 +664,18 @@ if __name__ == "__main__":
     vocab, idx2word = bpe.train_vocabulary(data, overwrite_saved_file=False)
 
     # Encode a subset of the data
-    logger.info("Encoding the new data...")
-    data = data.split("\n\n")[:5000]
-    encoded_data = np.array(bpe.encode("<|endoftext|>".join(data)))
+    data = data.split("\n\n")
+
+    if os.path.exists("bpe_mini_shakespeare.npz"):
+        logger.info("Found existing encoded data, loading it...")
+        with np.load("bpe_mini_shakespeare.npz", allow_pickle=True) as npz_data:
+            encoded_data = npz_data.get("arr_0")[:50000]
+    else:
+        logger.info("Encoding the new data...")
+        encoded_data = np.array(bpe.encode("<|endoftext|>".join(data)))
+        np.savez_compressed("bpe_mini_shakespeare.npz", encoded_data)
+        logger.info("Saved encoded data to bpe_mini_shakespeare.npz")
+
     pad_idx = vocab[b"<PAD>"]
     logger.info(
         f"Vocabulary size: {len(vocab)}, encoded_data length: {len(encoded_data)}"
@@ -670,7 +685,6 @@ if __name__ == "__main__":
     # Split data into train and test sets
     n = int(len(encoded_data) * 0.9)
     train_data, test_data = encoded_data[:n], encoded_data[n:]
-    resume_epoch = None  # TODO: change this to CLI args later
 
     if resume_epoch is not None:
         ckpt_json = f"checkpoints/transformer_{resume_epoch}.json"
@@ -704,12 +718,14 @@ if __name__ == "__main__":
         start_epoch = 0
         step_count = 0
 
+    logger.info(f"Model parameters: {model.num_parameters()}")
+
     for epoch in range(start_epoch, HYPERPARAMS["NUM_EPOCHS"]):
         epoch_loss = 0.0
         train_data_loader.on_epoch_start()
         model.train()
 
-        for x, y, source_mask, target_mask in tqdm(
+        for x, y, source_mask, target_mask, _ in tqdm(
             train_data_loader, desc="Step", leave=False
         ):
             step_count += 1
