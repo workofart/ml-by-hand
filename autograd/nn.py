@@ -3,7 +3,7 @@ from typing import Union, Optional, Any, Dict, Tuple
 from .tensor import Tensor
 import logging
 from .init import xavier_uniform
-from .functional import tanh, sigmoid, relu
+from .functional import tanh, sigmoid, relu, softmax
 
 logger = logging.getLogger(__name__)
 
@@ -191,6 +191,38 @@ class Module:
                 else:
                     # For states, just assign (or do an in-place copy if desired)
                     container[var_name] = value
+
+
+class ModuleList(Module):
+    """
+    A list-like container of submodules.
+    Each submodule is properly registered so that it
+    appears in this container's .parameters, .modules, etc.
+    """
+
+    def __init__(self, modules=None):
+        super().__init__()
+        if modules is not None:
+            for module in modules:
+                self.append(module)
+
+    def append(self, module: Module) -> None:
+        """Append a module to the end of the list."""
+        index = len(self._modules)  # how many modules we already have
+        # Use __setattr__ with a string key so that it registers `module` as a submodule
+        setattr(self, str(index), module)
+
+    def __getitem__(self, idx: int) -> Module:
+        """Retrieve the submodule at index `idx`."""
+        return self._modules[str(idx)]
+
+    def __len__(self) -> int:
+        return len(self._modules)
+
+    def __iter__(self):
+        """Allow iteration over submodules in a for-loop, e.g. for m in module_list: ..."""
+        for idx in range(len(self)):
+            yield self[idx]
 
 
 class Linear(Module):
@@ -835,6 +867,104 @@ class Dropout(Module):
                 else x * 0  # when p=1, drop everything by multiplying by 0
             )
         return x
+
+
+class ScaledDotProductAttention(Module):
+    """
+    Implements the Scaled Dot-Product Attention in Section 3.2.1 in the paper.
+    Paper: https://arxiv.org/abs/1706.03762
+
+    Attention(Q,K,V) = softmax(Q transpose(K) / sqrt(key_dim)) V
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+
+    def forward(
+        self, query: Tensor, key: Tensor, value: Tensor, mask: Optional[Tensor] = None
+    ) -> Tensor:
+        attention_size = Tensor(key.shape[-1])
+
+        # scaled dot product
+        # (batch_size, num_heads, sequence_len, sequence_len)
+        att_score = (query @ key.transpose(2, 3)) / attention_size.sqrt()
+
+        # mask (optional)
+        if mask is not None:
+            # broadcast across heads
+            att_score = att_score + (mask * -1e9)
+        att_score = softmax(att_score)
+        return att_score @ value
+
+
+class MultiHeadAttention(Module):
+    """
+    Implements the Multi-Head Attention in Section 3.2.2 in the paper.
+    Paper: https://arxiv.org/abs/1706.03762
+
+    Instead of performing a single attention with hidden_size keys, query, and values,
+    we project them "num_heads" times with different learned linear projects
+    """
+
+    def __init__(self, num_heads: int, hidden_size: int) -> None:
+        super().__init__()
+        self.num_heads = num_heads
+        self.attention_size = (
+            hidden_size // num_heads
+        )  # We assume query, key, value all have the same dimension
+
+        # Project query, key, value using linear layers before passing to attention
+        self.q_linear = Linear(hidden_size, hidden_size)
+        self.k_linear = Linear(hidden_size, hidden_size)
+        self.v_linear = Linear(hidden_size, hidden_size)
+
+        self.attention = ScaledDotProductAttention()
+        self.fc = Linear(hidden_size, hidden_size)
+
+    def forward(
+        self, query: Tensor, key: Tensor, value: Tensor, mask: Optional[Tensor] = None
+    ) -> Tensor:
+        batch_size = query.shape[0]
+
+        # We try to avoid explicitly splitting and combining the heads
+        # So we are just using matrix multiplication to paralellize everything
+        # Then we are going to reshape the resulting output to the correct
+        # dimensions
+        # 1. Linear Projections
+        # (batch_size, num_heads, seq_len, input_size)
+        query = (
+            self.q_linear(query)
+            .view(batch_size, -1, self.num_heads, self.attention_size)
+            .permute(0, 2, 1, 3)
+        )
+        key = (
+            self.k_linear(key)
+            .view(batch_size, -1, self.num_heads, self.attention_size)
+            .permute(0, 2, 1, 3)
+        )
+        value = (
+            self.v_linear(value)
+            .view(batch_size, -1, self.num_heads, self.attention_size)
+            .permute(0, 2, 1, 3)
+        )
+
+        # 2. Apply Attention
+        att_score = self.attention(query, key, value, mask=mask)
+
+        att_score = att_score.permute(
+            0, 2, 1, 3
+        )  # (batch_size, num_heads , seq_len, input_size)
+        # Expect (batch_size, seq_len, hidden_size)
+        att_score = att_score.view(batch_size, -1, self.num_heads * self.attention_size)
+        assert att_score.shape == (
+            batch_size,
+            query.shape[2],
+            self.num_heads * query.shape[3],
+        )
+
+        del query, key, value
+
+        return self.fc(att_score)
 
 
 ########### Utility Functions ###########

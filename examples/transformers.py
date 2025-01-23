@@ -3,11 +3,13 @@ from tqdm import tqdm
 
 from autograd.tools.data import load_data, DataLoader
 from autograd.tools.model import save_model, load_model
+from autograd.tools.trainer import get_lr, grad_l2_norm
 from autograd.text import utils as text_utils, tokenizer
 from autograd.tensor import Tensor
 from autograd import nn, functional, optim
 import logging
-from typing import List, Optional, Any
+import os
+from typing import Optional, Any
 
 
 class Transformer(nn.Module):
@@ -94,14 +96,16 @@ class Encoder(nn.Module):
 
         self.positional_encoder = PositionalEncoding(hidden_size=embedding_size)
 
-        self.sublayers = [
-            EncoderSublayer(
-                hidden_size=embedding_size,
-                ff_hidden_size=embedding_size * 4,
-                num_attention_heads=num_attention_heads,
-            )
-            for _ in range(6)
-        ]
+        self.sublayers = nn.ModuleList(
+            [
+                EncoderSublayer(
+                    hidden_size=embedding_size,
+                    ff_hidden_size=embedding_size * 4,
+                    num_attention_heads=num_attention_heads,
+                )
+                for _ in range(6)
+            ]
+        )
         self.layer_norm = nn.LayerNorm(embedding_size)
 
     def forward(
@@ -134,14 +138,16 @@ class Decoder(nn.Module):
         self.positional_encoder = PositionalEncoding(hidden_size=hidden_size)
         self.hidden_size = hidden_size
 
-        self.sublayers = [
-            DecoderSublayer(
-                hidden_size=hidden_size,
-                ff_hidden_size=hidden_size * 4,
-                num_attention_heads=num_attention_heads,
-            )
-            for _ in range(6)
-        ]
+        self.sublayers = nn.ModuleList(
+            [
+                DecoderSublayer(
+                    hidden_size=hidden_size,
+                    ff_hidden_size=hidden_size * 4,
+                    num_attention_heads=num_attention_heads,
+                )
+                for _ in range(6)
+            ]
+        )
         self.linear = nn.Linear(hidden_size, output_size=vocab_size)
         self.layer_norm = nn.LayerNorm(hidden_size)
 
@@ -216,7 +222,7 @@ class EncoderSublayer(nn.Module):
 
         # Multi-head self attention
         self.add_and_norm1 = ResidualAddAndNorm(hidden_size)
-        self.multi_head_attention = MultiHeadAttention(
+        self.multi_head_attention = nn.MultiHeadAttention(
             num_heads=num_attention_heads, hidden_size=hidden_size
         )
 
@@ -259,13 +265,13 @@ class DecoderSublayer(nn.Module):
 
         # Section 3.2.3 Masked Multi-head self-attention
         self.add_and_norm1 = ResidualAddAndNorm(hidden_size)
-        self.masked_multi_head_attention = MultiHeadAttention(
+        self.masked_multi_head_attention = nn.MultiHeadAttention(
             num_heads=num_attention_heads, hidden_size=hidden_size
         )
 
         # Section 3.2.3 Encoder-Decoder Attention in the paper
         self.add_and_norm2 = ResidualAddAndNorm(hidden_size)
-        self.multi_head_attention = MultiHeadAttention(
+        self.multi_head_attention = nn.MultiHeadAttention(
             num_heads=num_attention_heads, hidden_size=hidden_size
         )
 
@@ -370,186 +376,22 @@ class FeedForward(nn.Module):
         return x
 
 
-class ScaledDotProductAttention(nn.Module):
-    """
-    Implements the Scaled Dot-Product Attention in Section 3.2.1 in the paper.
-
-    Attention(Q,K,V) = softmax(Q transpose(K) / sqrt(key_dim)) V
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-
-    def forward(
-        self, query: Tensor, key: Tensor, value: Tensor, mask: Optional[Tensor] = None
-    ) -> Tensor:
-        attention_size = Tensor(key.shape[-1])
-
-        # scaled dot product
-        # (batch_size, num_heads, sequence_len, sequence_len)
-        att_score = (query @ key.transpose(2, 3)) / attention_size.sqrt()
-
-        # mask (optional)
-        if mask is not None:
-            # broadcast across heads
-            att_score = att_score + (mask * -1e9)
-        att_score = functional.softmax(att_score)
-        return att_score @ value
-
-
-class MultiHeadAttention(nn.Module):
-    """
-    Implements the Multi-Head Attention in Section 3.2.2 in the paper.
-
-    Instead of performing a single attention with hidden_size keys, query, and values,
-    we project them "num_heads" times with different learned linear projects
-    """
-
-    def __init__(self, num_heads: int, hidden_size: int) -> None:
-        super().__init__()
-        self.num_heads = num_heads
-        self.attention_size = (
-            hidden_size // num_heads
-        )  # We assume query, key, value all have the same dimension
-
-        # Project query, key, value using linear layers before passing to attention
-        self.q_linear = nn.Linear(hidden_size, hidden_size)
-        self.k_linear = nn.Linear(hidden_size, hidden_size)
-        self.v_linear = nn.Linear(hidden_size, hidden_size)
-
-        self.attention = ScaledDotProductAttention()
-        self.fc = nn.Linear(hidden_size, hidden_size)
-
-    def forward(
-        self, query: Tensor, key: Tensor, value: Tensor, mask: Optional[Tensor] = None
-    ) -> Tensor:
-        batch_size = query.shape[0]
-
-        # We try to avoid explicitly splitting and combining the heads
-        # So we are just using matrix multiplication to paralellize everything
-        # Then we are going to reshape the resulting output to the correct
-        # dimensions
-        # 1. Linear Projections
-        # (batch_size, num_heads, seq_len, input_size)
-        query = (
-            self.q_linear(query)
-            .view(batch_size, -1, self.num_heads, self.attention_size)
-            .permute(0, 2, 1, 3)
-        )
-        key = (
-            self.k_linear(key)
-            .view(batch_size, -1, self.num_heads, self.attention_size)
-            .permute(0, 2, 1, 3)
-        )
-        value = (
-            self.v_linear(value)
-            .view(batch_size, -1, self.num_heads, self.attention_size)
-            .permute(0, 2, 1, 3)
-        )
-
-        # 2. Apply Attention
-        att_score = self.attention(query, key, value, mask=mask)
-
-        att_score = att_score.permute(
-            0, 2, 1, 3
-        )  # (batch_size, num_heads , seq_len, input_size)
-        # Expect (batch_size, seq_len, hidden_size)
-        att_score = att_score.view(batch_size, -1, self.num_heads * self.attention_size)
-        assert att_score.shape == (
-            batch_size,
-            query.shape[2],
-            self.num_heads * query.shape[3],
-        )
-
-        del query, key, value
-
-        return self.fc(att_score)
-
-
 # ------------------ Training Helper Functions --------------------------#
 
 
-def inference(
-    model: nn.Module,
-    bpe: tokenizer.BytePairEncoder,
-    start_tokens: List[str],
-    pad_idx: int,
-    max_length: int = 50,
-    temperature: float = 1.0,
-) -> str:
-    """
-    Peform model inference, usually for evaluation purposes.
-    We will continously feed the model's generated tokens back to the model to generate
-    the next token (next token is conditioned on all previously generated token).
-
-    Args:
-        model (nn.Module): The transformer model
-        start_tokens (list[str]): The list of start tokens, usually ["<SOS>"]
-        max_length (int, optional): The maximum length of tokens to run. Defaults to 50.
-        temperature (float, optional): The amount of exploration/randomness to model output to be. Defaults to 1.0.
-        > 1.0 more random
-        < 1.0 less random
-
-    Returns:
-        list[str]: The list of tokens output from the model
-    """
-    # TODO: Integrate this into the trainer class
-    model.eval()
-    generated = [bpe._unicode_to_int_vocab[t.encode("utf-8")] for t in start_tokens]
-    for _ in range(max_length):
-        seq_len = len(generated)
-
-        # "generated" is a list of integers, each int for each token
-        cur_input = np.array([generated])
-
-        source_mask = Tensor(
-            text_utils.create_padding_mask(cur_input, pad_idx=pad_idx),
-            requires_grad=False,
-        )
-        pad_mask = text_utils.create_padding_mask(cur_input, pad_idx=pad_idx)
-        causal_mask = text_utils.create_causal_mask(seq_len, 1)
-        target_mask = Tensor(pad_mask + causal_mask, requires_grad=False)
-
-        # Create causal + pad mask for this partial sequence
-        # Then run model(...) with encoder_output if necessary
-        probs = model(cur_input, cur_input, source_mask, target_mask)
-        # probs has shape (batch_size=1, seq_len, vocab_size)
-        # We only care about the distribution over the last token:
-        dist = probs.data[0, -1]  # shape (vocab_size,)
-
-        # Apply temperature scaling: $$p_{i}^{(1/T)}$$
-        if temperature != 1.0:
-            dist = dist ** (1.0 / temperature)
-
-        # Re-normalize the distribution (so that sum=1)
-        dist_sum = np.sum(dist)
-        if dist_sum <= 1e-15:
-            # If the distribution collapses numerically, fall back to argmax
-            next_token_id = np.argmax(dist)
-        else:
-            dist /= dist_sum
-            # Sample from this scaled distribution
-            next_token_id = np.random.choice(len(dist), p=dist)
-
-        generated.append(next_token_id)
-        # TODO: Possibly break if next_token_id is <eos> or similar
-    return bpe.decode(generated)
-
-
-def get_lr(step: int, model_dim: int, warmup_steps: int) -> float:
-    """
-    Learning rate scheduler with warmup for transformers training. It will start with larger learning rate, then after the transition point sqrt(step) == step * warmup_steps^(-1.5), the learning rate will slowly decrease
-    TODO: Move this to a centralized place later.
-
-    Args:
-        step (int): The current timestep (not epoch), each batch will be 1 timestep
-        model_dim (int): The model dimension
-        warmup_steps (int): The number of timesteps to warm up (increase learning rate) before decreasing learning rate
-
-    Returns:
-        float: learning rate
-    """
-    return model_dim**-0.5 * min(step**-0.5, step * warmup_steps**-1.5)
+def transformer_predict(model: nn.Module, encoded_input: np.ndarray):
+    source_mask = Tensor(
+        text_utils.create_padding_mask(encoded_input, pad_idx=pad_idx),
+        requires_grad=False,
+    )
+    # Create causal + pad mask for this partial sequence
+    # Then run model(...) with encoder_output if necessary
+    pad_mask = text_utils.create_padding_mask(encoded_input, pad_idx=pad_idx)
+    causal_mask = text_utils.create_causal_mask(
+        seq_len=encoded_input.shape[1], batch_size=1
+    )
+    target_mask = Tensor(pad_mask + causal_mask, requires_grad=False)
+    return model(encoded_input, encoded_input, source_mask, target_mask)
 
 
 def evaluate(
@@ -560,6 +402,8 @@ def evaluate(
     bpe: tokenizer.BytePairEncoder,
     epoch: int,
     hyperparams: dict,
+    seq_len: int,
+    teacher_enforcing: bool = False,
 ):
     # TODO: Integrate this into the trainer class
     model.eval()
@@ -569,7 +413,7 @@ def evaluate(
     for _ in tqdm(
         range(hyperparams["eval_iters"]), desc="Test Evaluation", leave=False
     ):
-        x, y, source_mask, target_mask = next(iter(test_data_loader))
+        x, y, source_mask, target_mask, _ = next(iter(test_data_loader))
         y_inp = np.zeros_like(y)
         y_inp[:, 0] = vocab[b"<SOS>"]  # prepend <SOS> for decoder input
         y_inp[:, 1:] = y[:, :-1]
@@ -585,20 +429,33 @@ def evaluate(
         )
         test_loss += loss.detach().data
 
-    pred_tokens = inference(
-        model,
-        bpe,
-        start_tokens=["<SOS>"],
-        pad_idx=pad_idx,
-        max_length=100,
-        temperature=0.2,
+    logger.warning(
+        f"\nEpoch {epoch}\n"
+        f"| Train Loss: {epoch_loss / len(train_data_loader):.2f}\n"
+        f"| Gradient L2 Norm: {grad_l2_norm(model.parameters):.2f}\n"
+        f"| Test Loss: {test_loss / hyperparams['eval_iters']:.2f}\n"
+        f"| Test Perplexity: {np.exp(test_loss / hyperparams['eval_iters']):.2f} vs {len(vocab)} (vocab size)\n"
+        f"| Learning Rate: {lr:.4f}"
     )
+
+    if teacher_enforcing:
+        text_utils.teacher_forcing_inference(
+            lambda x: transformer_predict(model, x),
+            bpe,
+            train_data[:seq_len],
+            vocab_idx2word=idx2word,
+        )
+    else:
+        text_utils.inference(
+            lambda x: transformer_predict(model, x),
+            bpe,
+            start_tokens=["<SOS>"],
+            max_length=seq_len,
+            temperature=1.0,
+        )
+
     model.train()
 
-    logger.warning(
-        f"\nEpoch {epoch} | Train Loss: {epoch_loss / len(train_data_loader):.2f} "
-        f"| Test Loss: {test_loss / hyperparams['eval_iters']:.2f}"
-    )
     # Save checkpoint
     checkpoint = {
         "epoch": epoch,
@@ -613,9 +470,6 @@ def evaluate(
         npz_path=f"checkpoints/transformer_{epoch}.npz",
     )
     logger.info(f"Saving checkpoint to checkpoints/transformer_{epoch}.json and .npz")
-
-    prediction_string = "\n".join(pred_tokens.split("<|endoftext|>"))
-    logger.info(f"Prediction:\n{prediction_string}")
 
 
 def initialize(hyperparams: dict, vocab: dict, pad_idx: int):
@@ -649,6 +503,7 @@ if __name__ == "__main__":
 
     url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
     filename = "examples/tinyshakespeare.txt"
+    resume_epoch = None  # determine whether to read from checkpoint. TODO: change this to CLI args later
 
     data = load_data(url, filename)
     logger.info(f"Length of entire dataset: {len(data)}")
@@ -658,9 +513,18 @@ if __name__ == "__main__":
     vocab, idx2word = bpe.train_vocabulary(data, overwrite_saved_file=False)
 
     # Encode a subset of the data
-    logger.info("Encoding the new data...")
-    data = data.split("\n\n")[:5000]
-    encoded_data = np.array(bpe.encode("<|endoftext|>".join(data)))
+    data = data.split("\n\n")
+
+    if os.path.exists("bpe_mini_shakespeare.npz"):
+        logger.info("Found existing encoded data, loading it...")
+        with np.load("bpe_mini_shakespeare.npz", allow_pickle=True) as npz_data:
+            encoded_data = npz_data.get("arr_0")[:10000]
+    else:
+        logger.info("Encoding the new data...")
+        encoded_data = np.array(bpe.encode("<|endoftext|>".join(data)))
+        np.savez_compressed("bpe_mini_shakespeare.npz", encoded_data)
+        logger.info("Saved encoded data to bpe_mini_shakespeare.npz")
+
     pad_idx = vocab[b"<PAD>"]
     logger.info(
         f"Vocabulary size: {len(vocab)}, encoded_data length: {len(encoded_data)}"
@@ -670,7 +534,6 @@ if __name__ == "__main__":
     # Split data into train and test sets
     n = int(len(encoded_data) * 0.9)
     train_data, test_data = encoded_data[:n], encoded_data[n:]
-    resume_epoch = None  # TODO: change this to CLI args later
 
     if resume_epoch is not None:
         ckpt_json = f"checkpoints/transformer_{resume_epoch}.json"
@@ -689,11 +552,15 @@ if __name__ == "__main__":
             f"Loaded model from checkpoint, resuming at epoch {start_epoch}, step {step_count}"
         )
     else:
+        # Note: The current hyperparameters are not optimal, they are just used
+        # for overfitting the model quickly to test the model architecture and training
+        # loop are free of bugs.
+        # TODO: parse the hyperparams from CLI
         HYPERPARAMS = {
-            "NUM_EPOCHS": 100,
+            "NUM_EPOCHS": 90,
             "seq_len": 80,
-            "batch_size": 32,
-            "warmup_steps": 1000,
+            "batch_size": 16,
+            "warmup_steps": 100,
             "d_model": 128,  # must be divisible by num_attention_heads
             "num_attention_heads": 4,
             "eval_iters": 20,
@@ -704,12 +571,14 @@ if __name__ == "__main__":
         start_epoch = 0
         step_count = 0
 
+    logger.info(f"Model parameters: {model.num_parameters()}")
+
     for epoch in range(start_epoch, HYPERPARAMS["NUM_EPOCHS"]):
         epoch_loss = 0.0
         train_data_loader.on_epoch_start()
         model.train()
 
-        for x, y, source_mask, target_mask in tqdm(
+        for x, y, source_mask, target_mask, _ in tqdm(
             train_data_loader, desc="Step", leave=False
         ):
             step_count += 1
@@ -732,4 +601,14 @@ if __name__ == "__main__":
             epoch_loss += loss.detach().data
 
         if epoch % max(1, (HYPERPARAMS["NUM_EPOCHS"] // 10)) == 0:
-            evaluate(model, test_data_loader, vocab, pad_idx, bpe, epoch, HYPERPARAMS)
+            evaluate(
+                model,
+                test_data_loader,
+                vocab,
+                pad_idx,
+                bpe,
+                epoch,
+                HYPERPARAMS,
+                seq_len=HYPERPARAMS["seq_len"],
+                teacher_enforcing=True,
+            )

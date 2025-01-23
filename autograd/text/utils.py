@@ -1,5 +1,6 @@
 from collections import defaultdict
 from typing import (
+    ByteString,
     List,
     Dict,
     Optional,
@@ -7,8 +8,12 @@ from typing import (
     Tuple,
     Union,
 )
+from autograd.text.tokenizer import BytePairEncoder
 import numpy as np
 import re
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def create_vocabulary(
@@ -213,3 +218,128 @@ def token_batch_to_indices(
             seq.append(vocab.get(token, vocab[b"<UNK>"]))
         X.append(seq)
     return np.array(X, dtype=np.int32)
+
+
+def inference(
+    prediction_func: Callable,
+    bpe: BytePairEncoder,
+    start_tokens: List[str],
+    max_length: int = 50,
+    temperature: float = 1.0,
+    top_k: Optional[int] = None,
+) -> str:
+    """
+    Perform model inference, usually for evaluation purposes.
+    We will continuously feed the model's generated tokens back to the model
+    to generate the next token (i.e. next token is conditioned on all previously
+    generated tokens).
+
+    Args:
+        prediction_func (Callable): The function that takes in a list of tokens, runs model() and returns a list of tokens
+        bpe (BytePairEncoder): BPE tokenizer
+        start_tokens (List[str]): The list of initial tokens (e.g. ["<SOS>"])
+        max_length (int): The maximum length of tokens to run
+        temperature (float): The amount of randomness in sampling
+            > 1.0 => more random
+            < 1.0 => less random
+        top_k (int, optional): If set, only keep the top_k tokens from the distribution
+
+    Returns:
+        str: The decoded string (joined tokens)
+    """
+    generated = [bpe._unicode_to_int_vocab[t.encode("utf-8")] for t in start_tokens]
+
+    for _ in range(max_length):
+        # "generated" is a list of integers, each int for each token
+        cur_input = np.array([generated])  # shape: (1, seq_len)
+
+        probs = prediction_func(cur_input)
+
+        # We only care about the distribution for the last token:
+        dist = probs.data[0, -1]  # shape: (vocab_size,)
+
+        # 1. Apply temperature scaling
+        if temperature != 1.0:
+            # If temperature > 1, distribution flattens
+            # If temperature < 1, distribution becomes sharper
+            dist = dist ** (1.0 / temperature)
+
+        # 2. (Optional) Top-k filtering
+        if top_k is not None and top_k < len(dist):
+            # Get indices of top_k tokens
+            top_k_indices = np.argpartition(dist, -top_k)[-top_k:]
+            # Create a zero array and fill it only for the top_k indices
+            top_dist = np.zeros_like(dist)
+            top_dist[top_k_indices] = dist[top_k_indices]
+            dist = top_dist
+
+        # 3. Re-normalize distribution
+        dist_sum = np.sum(dist)
+        if dist_sum <= 1e-15:
+            # If the distribution collapses numerically, fall back to argmax
+            next_token_id = np.argmax(dist)
+        else:
+            dist /= dist_sum
+            next_token_id = np.random.choice(len(dist), p=dist)
+
+        generated.append(next_token_id)
+
+    pred_tokens = bpe.decode(generated)
+    prediction_string = "\n".join(pred_tokens.split("<|endoftext|>"))
+    logger.info(f"Prediction:\n{prediction_string}")
+    return pred_tokens
+
+
+def teacher_forcing_inference(
+    prediction_func: Callable,
+    bpe: BytePairEncoder,
+    reference_ids: np.ndarray,
+    vocab_idx2word: Dict[int, ByteString],
+    max_length: Optional[int] = None,
+) -> str:
+    """
+    Generates text by teacher forcing on `reference_text`.
+    That is, at each time step, we feed the model the *ground truth* tokens
+    up to that point, and measure or collect the *predicted* next token.
+
+    Args:
+        prediction_func (Callable): The function that takes in a list of tokens, runs model() and returns a list of tokens
+        bpe (BytePairEncoder): BPE tokenizer
+        reference_ids (np.ndarray): Ground-truth tokens to use for teacher forcing. These should
+        be in integer ids that are already encoded
+        vocab_idx2word (Dict[int, ByteString]): Mapping from token ids to words
+        max_length (int, optional): If set, we only run up to this many tokens in reference_text.
+
+    Returns:
+        str: A "predicted" string (though it will closely match `reference_text`
+             if the model has memorized or can overfit).
+    """
+    if max_length is None or max_length > len(reference_ids):
+        max_length = len(reference_ids)
+
+    predictions = []  # We'll store the model's predicted *next token* at each step
+
+    for i in range(max_length - 1):
+        # Feed tokens up to i (inclusive) => model tries to predict token i+1
+        cur_input = np.array([reference_ids[: i + 1]])  # shape (1, i+1)
+
+        probs = prediction_func(cur_input)  # shape: (1, i+1, vocab_size)
+        dist = probs.data[0, -1]  # distribution for next token i+1
+
+        # (Optional) you could do argmax or sampling.  For teacher forcing debugging,
+        # typically we just do argmax to see how close the model is to the ground truth.
+        next_token_id = np.argmax(dist)
+
+        predictions.append(next_token_id)
+
+    # Convert predicted IDs back to text
+    predicted_text = bpe.decode(predictions)
+    groundtruth_text = "".join(
+        [str(vocab_idx2word[t].decode("utf-8")) for t in reference_ids]
+    )
+    groundtruth_text = "\n".join(groundtruth_text.split("<|endoftext|>"))
+    teach_force_pred = "\n".join(predicted_text.split("<|endoftext|>"))
+    logger.info(f"Teacher forcing groundtruth:\n{groundtruth_text}")
+    logger.info(f"Teacher forcing inference:\n{teach_force_pred}")
+
+    return predicted_text

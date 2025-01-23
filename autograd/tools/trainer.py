@@ -3,6 +3,7 @@ import time
 import numpy as np
 from autograd.tools.metrics import accuracy, mean_squared_error
 from autograd.tensor import Tensor
+from typing import Dict
 
 logger = logging.getLogger(__name__)
 
@@ -249,3 +250,27 @@ class Trainer:
         else:
             # For unknown output types, just return data
             return y_pred, y_true
+
+
+def get_lr(step: int, model_dim: int, warmup_steps: int) -> float:
+    """
+    Learning rate scheduler with warmup for transformers training. It will start with larger learning rate, then after the transition point sqrt(step) == step * warmup_steps^(-1.5), the learning rate will slowly decrease
+
+    Args:
+        step (int): The current timestep (not epoch), each batch will be 1 timestep
+        model_dim (int): The model dimension
+        warmup_steps (int): The number of timesteps to warm up (increase learning rate) before decreasing learning rate
+
+    Returns:
+        float: learning rate
+    """
+    return model_dim**-0.5 * min(step**-0.5, step * warmup_steps**-1.5)
+
+
+def grad_l2_norm(parameters: Dict[str, Tensor]) -> float:
+    """Compute the L2 norm of the gradients of the given parameters."""
+    grad_norm = 0.0
+    for p in parameters.values():
+        if p.grad is not None:
+            grad_norm += (p.grad.data**2).sum()
+    return grad_norm**0.5
