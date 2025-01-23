@@ -45,9 +45,10 @@ We are creating an autograd engine from scratch and use it to build/train more c
   - Teach the model how to copy data from a source sequence to produce the same output sequence
 - [x] Sequence-to-Sequence
   - [WikiSum](https://github.com/workofart/ml-by-hand/blob/c0ff3dd175ba3b94850dcad19ebdf4fd58c08973/examples/seq2seq.py#L21)
-- [x] Transformers
+- [x] (Original) Transformers
   - [TinyShakespeare text generation](https://github.com/workofart/ml-by-hand/blob/724f5a7451be845c7efe6cc6c3f2c216283896a8/examples/transformers.py#L10)
   - [Byte Pair Encoder (BPE)](https://github.com/workofart/ml-by-hand/blob/d6210422ac9c71016c53ce30e4e6517085f84226/autograd/text/tokenizer.py#L12) as a tokenizer
+- [x] [GPT-1](https://github.com/workofart/ml-by-hand/blob/9ef6cfb8b50d29dca108767ae19b6d0dcc0ae07c/examples/gpt-1.py#L20)
 ## Technical Overview
 - `tensor` (base class)
   - support scalar, vector, N-dimensional matrices
