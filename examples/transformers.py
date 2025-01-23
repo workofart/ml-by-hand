@@ -402,6 +402,7 @@ def evaluate(
     bpe: tokenizer.BytePairEncoder,
     epoch: int,
     hyperparams: dict,
+    seq_len: int,
     teacher_enforcing: bool = False,
 ):
     # TODO: Integrate this into the trainer class
@@ -441,7 +442,7 @@ def evaluate(
         text_utils.teacher_forcing_inference(
             lambda x: transformer_predict(model, x),
             bpe,
-            train_data[:100],
+            train_data[:seq_len],
             vocab_idx2word=idx2word,
         )
     else:
@@ -449,7 +450,7 @@ def evaluate(
             lambda x: transformer_predict(model, x),
             bpe,
             start_tokens=["<SOS>"],
-            max_length=100,
+            max_length=seq_len,
             temperature=1.0,
         )
 
@@ -551,8 +552,12 @@ if __name__ == "__main__":
             f"Loaded model from checkpoint, resuming at epoch {start_epoch}, step {step_count}"
         )
     else:
+        # Note: The current hyperparameters are not optimal, they are just used
+        # for overfitting the model quickly to test the model architecture and training
+        # loop are free of bugs.
+        # TODO: parse the hyperparams from CLI
         HYPERPARAMS = {
-            "NUM_EPOCHS": 60,
+            "NUM_EPOCHS": 90,
             "seq_len": 80,
             "batch_size": 16,
             "warmup_steps": 100,
@@ -596,4 +601,14 @@ if __name__ == "__main__":
             epoch_loss += loss.detach().data
 
         if epoch % max(1, (HYPERPARAMS["NUM_EPOCHS"] // 10)) == 0:
-            evaluate(model, test_data_loader, vocab, pad_idx, bpe, epoch, HYPERPARAMS)
+            evaluate(
+                model,
+                test_data_loader,
+                vocab,
+                pad_idx,
+                bpe,
+                epoch,
+                HYPERPARAMS,
+                seq_len=HYPERPARAMS["seq_len"],
+                teacher_enforcing=True,
+            )

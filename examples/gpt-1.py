@@ -111,20 +111,23 @@ if __name__ == "__main__":
 
     # Based on the paper
     # Section 4.1 Setup - Model Specifications
+    # Note: The current hyperparameters are not optimal, they are just used
+    # for overfitting the model quickly to test the model architecture and training
+    # loop are free of bugs.
     # TODO: parse the hyperparams from CLI
     HYPERPARAMS = {
-        "num_epochs": 30,
-        "warmup_steps": 1000,
-        "num_attention_heads": 12,  # 12
+        "num_epochs": 90,
+        "warmup_steps": 100,
+        "num_attention_heads": 6,  # 12
         "d_model": 144,  # 768, must be divisible by num_attention_heads
         "batch_size": 64,  # 64
         "dropout_prob": 0.1,
         "seq_len": 128,  # 512
-        "num_decoder_layers": 12,
+        "num_decoder_layers": 6,
         "eval_iters": 16,
     }
     # Whether to check the model performance by feeding the groundtruth tokens to compare whether the model can predict the next token correctly.
-    teacher_enforcing = False
+    teacher_enforcing = True
 
     url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
     filename = "examples/tinyshakespeare.txt"
@@ -249,17 +252,17 @@ if __name__ == "__main__":
                 text_utils.teacher_forcing_inference(
                     lambda x: model(
                         x,
-                        text_utils.create_causal_mask(seq_len=x.shape[0], batch_size=1),
+                        text_utils.create_causal_mask(seq_len=x.shape[1], batch_size=1),
                     ),  # shape: (1, seq_len, vocab_size)
                     bpe,
-                    train_data[:100],
+                    train_data[: HYPERPARAMS["seq_len"]],
                     vocab_idx2word=idx2word,
                 )
             else:
                 text_utils.inference(
                     lambda x: model(
                         x,
-                        text_utils.create_causal_mask(seq_len=x.shape[0], batch_size=1),
+                        text_utils.create_causal_mask(seq_len=x.shape[1], batch_size=1),
                     ),  # shape: (1, seq_len, vocab_size)
                     bpe,
                     start_tokens=["All"],  # Dummy token to start the generation
