@@ -102,7 +102,10 @@ class BinaryCrossEntropy(Function):
     """
     Binary Cross Entropy Loss
     Note: We assume the input y_pred contain probabilities not logits.
-    -(x * log(y)) + (1 - x) * log(1 - y)
+    - If you have logits, use `binary_cross_entropy_with_logits`, which applies a sigmoid before computing the loss.
+
+    Forward:
+        BCE = -(y_true * log(y_pred)) + (1 - y_true) * log(1 - y_pred)
     """
 
     def forward(
@@ -111,6 +114,7 @@ class BinaryCrossEntropy(Function):
         y_true = np.asarray(y_true, dtype=np.float32)
         y_pred = np.asarray(y_pred, dtype=np.float32)
 
+        # If labels come in as (batch_size,), explicitly reshaping them to (batch_size, 1) avoids shape mismatch, and certain elementwise operations will broadcast in unintended ways
         if y_true.ndim == 1 and y_pred.ndim == 1:
             pass
         elif y_true.ndim == 1:
@@ -120,15 +124,15 @@ class BinaryCrossEntropy(Function):
             raise ValueError("y_pred and y_true must have the same shape")
 
         self.y_true = y_true
-        self.y_pred_prob = np.clip(y_pred, 1e-15, 1 - 1e-15)
+        self.y_pred_prob = np.clip(y_pred, 1e-7, 1 - 1e-7)
         loss = -np.mean(
-            y_true * np.log(np.clip(self.y_pred_prob, 1e-15, None))
-            + (1 - y_true) * np.log(np.clip(1 - self.y_pred_prob, 1e-15, None))
+            y_true * np.log(self.y_pred_prob)
+            + (1 - y_true) * np.log(1 - self.y_pred_prob)
         )
         return loss
 
     def backward(self, grad: Tensor) -> Tuple[np.ndarray, None]:
-        # dL/dpred = -(y/p - (1-y)/(1-p))
+        # $$ \frac{\partial{L}}{\partial{y_{pred}}} = -(\frac{y_{true}}{y_{pred}} - \frac{1-y_{true}}{1-y_{pred}})$$
         y_true = self.y_true
         y_pred_prob = self.y_pred_prob
 
@@ -140,6 +144,227 @@ class BinaryCrossEntropy(Function):
         grad_y_pred *= grad.data
 
         return grad_y_pred, None  # y_true doesn't need gradient
+
+
+class BinaryCrossEntropyWithLogits(Function):
+    """
+    Stable implementation of binary cross-entropy with logits.
+    """
+
+    def forward(self, y_pred: np.ndarray, y_true: np.ndarray) -> np.floating:
+        """
+        Args:
+            y_pred (np.ndarray): shape (N, ...) unbounded real values
+            y_true (np.ndarray): same shape as y_pred in {0, 1}
+
+        Returns:
+            float: the binary cross-entropy loss
+        """
+        y_true = np.asarray(y_true, dtype=np.float32)
+        y_pred = np.asarray(y_pred, dtype=np.float32)
+
+        # If labels come in as (batch_size,), explicitly reshaping them to (batch_size, 1) avoids shape mismatch, and certain elementwise operations will broadcast in unintended ways
+        if y_true.ndim == 1 and y_pred.ndim == 1:
+            pass
+        elif y_true.ndim == 1:
+            y_true = y_true.reshape(-1, 1)
+
+        if y_pred.shape != y_true.shape:
+            raise ValueError("y_pred and y_true must have the same shape.")
+
+        # compute loss
+        # loss_i = max(y_pred, 0) - y_pred * y_true + log(1 + exp(-|y_pred|))
+        loss = np.mean(
+            np.maximum(y_pred, 0.0)
+            - y_pred * y_true
+            + np.log1p(np.exp(-np.abs(y_pred)))
+        )
+
+        self.y_pred = y_pred
+        self.y_true = y_true
+        return loss
+
+    def backward(self, grad: Tensor) -> Tuple[np.ndarray, None]:
+        """
+        Args:
+            grad (Tensor): upstream gradient
+
+        dL/dy_pred = sigmoid(y_pred) - y_true
+        """
+        # $$ \frac{\partial{L}}{\partial{y_{pred}}} = -(\frac{y_{true}}{y_{pred}} - \frac{1-y_{true}}{1-y_{pred}})$$
+        # sigmoid = 1 / (1 + exp(-y_pred))
+
+        # 1) Stable sigmoid computation
+        sig = np.empty_like(self.y_pred, dtype=np.float32)
+
+        # For z >= 0, sigmoid(z) = 1 / (1 + exp(-z))
+        pos_mask = self.y_pred >= 0
+        # clamp to avoid overflow in exp
+        z_pos_clamped = np.clip(self.y_pred[pos_mask], -100, 100)
+        exp_neg_pos = np.exp(-z_pos_clamped)
+        sig[pos_mask] = 1.0 / (1.0 + exp_neg_pos)
+
+        # For z < 0, sigmoid(z) = exp(z) / (1 + exp(z))
+        neg_mask = ~pos_mask
+        z_neg_clamped = np.clip(self.y_pred[neg_mask], -100, 100)
+        exp_pos_neg = np.exp(z_neg_clamped)
+        sig[neg_mask] = exp_pos_neg / (1.0 + exp_pos_neg)
+
+        # 2) Compute dL/dy_pred = sigmoid(y_pred) - y_true divided by batch_size
+        grad_y_pred = (sig - self.y_true) / np.prod(self.y_pred.shape[0])
+
+        # 3) Multiply by upstream gradient
+        grad_y_pred *= grad.data
+
+        # we don't need a gradient for y_true (labels)
+        return grad_y_pred, None
+
+
+class SparseCrossEntropyWithLogits(Function):
+    """
+    Sparse cross-entropy for 2D or 3D predictions with optional pad_idx ignoring,
+    BUT accepts raw logits (not probabilities).
+
+    Usage is analogous to SparseCrossEntropy, but we do:
+    - stable log-softmax inside the forward pass
+    - label smoothing if label_smoothing > 0
+    """
+
+    def forward(
+        self,
+        y_pred: np.ndarray,
+        y_true: Union[np.ndarray, Tensor],
+        pad_idx: int = 0,
+        label_smoothing: float = 0.0,
+        **kwargs: Any,
+    ) -> float:
+        """
+        Args:
+            - y_pred are raw logits (not restricted to [0,1]).
+              Shape can be (batch_size, feature_dim) or (batch_size, seq_len, feature_dim).
+            - y_true must be integer class indices in [0, feature_dim):
+              If y_pred is (batch_size, feature_dim), y_true is (batch_size,).
+              If y_pred is (batch_size, seq_len, feature_dim), y_true is (batch_size, seq_len).
+            - pad_idx (int, optional): The padding index, which will be masked out from the loss.
+              Defaults to 0.
+            - label_smoothing (float, optional): How much uniform smoothing to add to the "correct" class.
+              Defaults to 0.0.
+              (Ref: "Rethinking the Inception Architecture for Computer Vision", https://arxiv.org/abs/1512.00567)
+
+        Returns:
+            - A scalar float representing the average sparse cross-entropy loss over non-pad positions.
+        """
+
+        # 1. Convert y_true to NumPy if it’s a Tensor, ensure it's int64 for indexing.
+        if isinstance(y_true, Tensor):
+            y_true = y_true.data
+        y_true = np.asarray(y_true, dtype=np.int64)
+
+        # 2. If 3D logits, flatten them for simpler processing.
+        self.original_shape = y_pred.shape
+        if y_pred.ndim == 3:
+            batch_size, seq_len, num_classes = y_pred.shape
+            y_pred = y_pred.reshape(batch_size * seq_len, num_classes)
+            y_true = y_true.reshape(batch_size * seq_len)
+        else:
+            batch_size, num_classes = y_pred.shape
+
+        # 3. Create a mask for non-pad positions (where y_true != pad_idx).
+        self.non_pad_mask = y_true != pad_idx
+        non_pad_idx = np.where(self.non_pad_mask)[0]
+
+        # 4. Compute stable log-softmax:
+        # log(softmax(y_pred)) = y_pred - log(sum(exp(y_pred)))
+        # However, log(sum(exp(y_pred))) can overflow if y_pred is large.
+        # To avoid this, we use the following trick:
+        # shifted = y_pred - max(y_pred) along each row
+        shifted = y_pred - np.max(y_pred, axis=1, keepdims=True)
+
+        # Going back to the log-softmax formula:
+        # log(softmax(y_pred)) = y_pred - log(sum(exp(y_pred)))
+        # Instead of computing exp(y_pred), we compute exp(shifted):
+        # exp(shifted) = exp(y_pred - max(y_pred)) = exp(y_pred) / exp(max(y_pred))
+        # Then we have: log(softmax(shifted)) = shifted - log(sum(exp(shifted)))
+        # the largest value in shifted is 0, so sum(exp(shifted)) is safe to compute.
+        log_softmax = shifted - np.log(np.sum(np.exp(shifted), axis=1, keepdims=True))
+
+        # 5. Compute the label-smoothed cross-entropy for each element i.
+        # $$ L_i = -\left( (1 - \text{label\_smoothing}) \log p_{i,y_i} + \frac{\text{label\_smoothing}}{\text{num\_classes} - 1} \sum_{j \neq y_i} \log p_{i,j} \right) $$
+        # $$ = -\left( (1 - \text{label\_smoothing}) \log p_{i,y_i} + \frac{\text{label\_smoothing}}{\text{num\_classes} - 1} \left( \sum_{j=1}^{\text{num\_classes}} \log p_{i,j} - \log p_{i,y_i} \right) \right) $$
+        # Essentially, we are putting some (label_smoothing) weight on a uniform distribution over the non-correct classes
+        # This will make the model prediction les confident, and thus less likely to overfit.
+        log_p_correct = log_softmax[np.arange(len(y_true)), y_true]
+        sum_log_p = np.sum(log_softmax, axis=1)
+
+        losses = -(
+            (1.0 - label_smoothing) * log_p_correct
+            + (label_smoothing / (num_classes - 1)) * (sum_log_p - log_p_correct)
+        )
+
+        # 6) Average the loss only over non-pad positions.
+        if len(non_pad_idx) == 0:
+            loss_val = 0.0
+        else:
+            loss_val = np.mean(losses[non_pad_idx])
+
+        # 7) Store for backward pass:
+        self.log_softmax = log_softmax
+        self.y_true = y_true
+        self.pad_idx = pad_idx
+        self.label_smoothing = label_smoothing
+        self.num_classes = num_classes
+
+        return loss_val
+
+    def backward(self, grad: Tensor) -> Tuple[np.ndarray, None]:
+        """
+        Backprop through the label-smoothed log-softmax cross-entropy.
+
+        p_{i,j} = exp(log_softmax_{i,j})
+        dL/dlogits[i,j] = p_{i,j} - T_{i,j}
+        $$
+        T_{i,j} = (1 - \alpha) * y_{i,j} + \frac{\alpha}{K-1} * (1 - y_{i,j})
+        $$
+        Then zero out for padded positions, and scale by grad / number of non-padded.
+        """
+
+        # 1. Softmax from log-softmax is safe: p_{i,j} = exp(log_sm[i,j])
+        softmax_probs = np.exp(self.log_softmax)
+
+        # 2. Prepare the output gradient array with a copy of softmax_probs
+        grad_out = np.copy(softmax_probs)
+
+        # 3. Identify which samples are non-padding
+        non_pad_idx = np.where(self.non_pad_mask)[0]
+
+        # 4. Label Smoothing
+        # When label_smoothing > 0, we subtract (1-label_smoothing) or something smaller
+        # than 1, because we don't want to be too confident (1) about the correct class
+        # We do this in two steps.
+        # Step 1: Incorrect class and correct class: a / (num_class - 1)
+        # Step 2: Correct class: 1 - a
+        # This is equivalent to:
+        # Correct class: 1 - a + a / (num_class - 1) = (1 - a) + a / (num_class - 1)
+        # Incorrect class: a / (num_class - 1)
+
+        # Step 1: All classes
+        grad_out[non_pad_idx, :] -= self.label_smoothing / (self.num_classes - 1)
+
+        # Step 2: Correct classes
+        correct_idx = (non_pad_idx, self.y_true[non_pad_idx])
+        grad_out[correct_idx] -= 1.0 - self.label_smoothing
+
+        # 5. For pad positions, set gradient = 0.0
+        grad_out[np.where(~self.non_pad_mask)[0], :] = 0.0
+
+        # 6. Multiply by upstream grad and average by non-padded positions
+        grad_out *= grad.data / max(1, len(non_pad_idx))
+
+        # 7. Reshape to original shape if 3D
+        grad_out = grad_out.reshape(self.original_shape)
+
+        # We do not need grad for y_true
+        return grad_out, None
 
 
 class SparseCrossEntropy(Function):
@@ -157,9 +382,10 @@ class SparseCrossEntropy(Function):
     ) -> float:
         """
         Args:
-            - If y_pred is (batch_size, feature_dim), y_true is (batch_size,)
-            - If y_pred is (batch_size, seq_len, feature_dim), y_true is (batch_size, seq_len)
             - y_pred must be probabilities in [0,1], not raw logits.
+            - y_true must be integers in [0, feature_dim)
+                - If y_pred is (batch_size, feature_dim), y_true is (batch_size,)
+                - If y_pred is (batch_size, seq_len, feature_dim), y_true is (batch_size, seq_len)
             - pad_idx (int, optional): The padding index, we will mask this in the loss calculation. Defaults to 0.
             - label_smoothing (float, optional): How much weight to put on non-correct classes. Defaults to 0.0.
                 "Rethinking the Inception Architecture for Computer Vision"
@@ -208,9 +434,10 @@ class SparseCrossEntropy(Function):
         loss_val = np.mean(losses[non_pad_idx])
 
         # 8) Store for backward.
-        self.y_pred_prob = y_pred
-        self.y_true_flat = y_true
+        self.y_pred = y_pred
+        self.y_true = y_true
         self.pad_idx = pad_idx
+        self.num_classes = num_classes
         self.label_smoothing = label_smoothing
         return loss_val
 
@@ -223,29 +450,33 @@ class SparseCrossEntropy(Function):
           where c is the number of classes
         Then multiply by (grad / #non_pad).
         """
-        y_pred = self.y_pred_prob
-        y_true = self.y_true_flat
-        batch_size_times_seq_length, c = y_pred.shape
 
         # Prepare output gradient array
-        grad_out = np.zeros_like(y_pred)
+        grad_out = np.zeros_like(self.y_pred)
         non_pad_idx = np.where(self.non_pad_mask)[0]
-        count_non_pad = max(1, len(non_pad_idx))
 
-        # For each position i in non-pad, define partial derivatives.
-        # We'll do it in 2 steps for clarity:
-        # 1. For j != correct, partial derivative: -(alpha/(c-1)) * 1/p_j
+        # Label Smoothing
+        # When label_smoothing > 0, we subtract (1-label_smoothing) or something smaller
+        # than 1, because we don't want to be too confident (1) about the correct class
+        # We do this in two steps.
+        # Step 1: Incorrect class and correct class: a / (num_class - 1)
+        # Step 2: Correct class: 1 - a
+        # This is equivalent to:
+        # Correct class: 1 - a + a / (num_class - 1) = (1 - a) + a / (num_class - 1)
+        # Incorrect class: a / (num_class - 1)
+
+        # Step 1: All classes
         grad_out[non_pad_idx, :] = (
-            -(self.label_smoothing / (c - 1)) / y_pred[non_pad_idx, :]
+            -(self.label_smoothing / (self.num_classes - 1))
+            / self.y_pred[non_pad_idx, :]
         )
 
-        # 2. For the correct class only, partial derivative: -(1 - alpha) * (1/p_correct)
-        # Make sure we don't add extra label-smoothing portion belonging to other class
-        correct_idx = (non_pad_idx, y_true[non_pad_idx])
-        grad_out[correct_idx] = -(1.0 - self.label_smoothing) / y_pred[correct_idx]
+        # Step 2: Correct class
+        correct_idx = (non_pad_idx, self.y_true[non_pad_idx])
+        grad_out[correct_idx] = -(1.0 - self.label_smoothing) / self.y_pred[correct_idx]
 
-        # 3. Multiply by upstream grad / #non_pad
-        grad_out *= grad.data / count_non_pad
+        # Multiply by upstream grad / #non_pad
+        grad_out *= grad.data / max(1, len(non_pad_idx))
 
         # Reshape to original shape if 3D
         grad_out = grad_out.reshape(self.original_shape)
@@ -397,13 +628,13 @@ def binary_cross_entropy_with_logits(
     y_pred: Tensor, y_true: Union[Tensor, np.ndarray], **kwargs: Any
 ) -> Tensor:
     """
-    Binary Cross Entropy Loss with logits input
+    Binary Cross Entropy Loss with logits input (more stable)
     Use binary_cross_entropy if y_pred contain probabilities
-    -(x * log(y)) + (1 - x) * log(1 - y)
+    -(y_true * log(y_pred)) + (1 - y_true) * log(1 - y_pred)
     """
     if not isinstance(y_true, Tensor):
         y_true = Tensor(y_true, requires_grad=False)
-    return binary_cross_entropy(sigmoid(y_pred), y_true, **kwargs)
+    return BinaryCrossEntropyWithLogits.apply(y_pred, y_true, **kwargs)
 
 
 def sparse_cross_entropy(
@@ -430,7 +661,7 @@ def sparse_cross_entropy_with_logits(
     """
     if not isinstance(y_true, Tensor):
         y_true = Tensor(y_true, requires_grad=False)
-    return sparse_cross_entropy(softmax(y_pred), y_true, pad_idx=pad_idx, **kwargs)
+    return SparseCrossEntropyWithLogits.apply(y_pred, y_true, pad_idx=pad_idx, **kwargs)
 
 
 def cross_entropy_with_logits(
