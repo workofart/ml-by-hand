@@ -1,6 +1,6 @@
 from autograd import nn, functional, optim
-from autograd.tools.trainer import Trainer
-from autograd.tools.data import train_test_split
+from autograd.tools.trainer import SimpleTrainer
+from autograd.tools.data import train_test_split, SimpleDataLoader
 from openml.datasets import get_dataset
 import logging
 
@@ -95,17 +95,15 @@ class CifarConvolutionalClassifier(nn.Module):
         return self.fc1(x)
 
 
-def train_cifar_multiclass_model(model: nn.Module, X_train, y_train, X_test, y_test):
-    trainer = Trainer(
+def train_cifar_multiclass_model(model: nn.Module, train_data_loader, test_data_loader):
+    trainer = SimpleTrainer(
         model=model,
         loss_fn=functional.cross_entropy,
         optimizer=optim.Adam(model.parameters, lr=1e-3),
         epochs=100,
-        batch_size=256,
         output_type="logits",
     )
-    trainer.fit(X_train, y_train.astype(int))
-    trainer.evaluate(X_test, y_test)
+    trainer.fit(train_data_loader, test_data_loader)
 
 
 if __name__ == "__main__":
@@ -122,20 +120,23 @@ if __name__ == "__main__":
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.1)
 
+    train_data_loader = SimpleDataLoader(X_train, y_train, batch_size=256, shuffle=True)
+    test_data_loader = SimpleDataLoader(X_test, y_test, batch_size=256, shuffle=False)
+
     logger.info("Training ResNet CIFAR-10 model")
     cifar10_model = CifarResNet(num_classes=10)
     logger.info(f"There are {cifar10_model.num_parameters()} parameters in the model")
-    train_cifar_multiclass_model(cifar10_model, X_train, y_train, X_test, y_test)
+    train_cifar_multiclass_model(cifar10_model, train_data_loader, test_data_loader)
 
     logger.info("Training Convolutional CIFAR-10 model")
     cifar10_model = CifarConvolutionalClassifier(num_classes=10)
     logger.info(f"There are {cifar10_model.num_parameters()} parameters in the model")
-    train_cifar_multiclass_model(cifar10_model, X_train, y_train, X_test, y_test)
+    train_cifar_multiclass_model(cifar10_model, train_data_loader, test_data_loader)
 
     logger.info("Training Dense CIFAR-10 model")
     cifar10_model = CifarMulticlassClassifier(num_classes=10)
     logger.info(f"There are {cifar10_model.num_parameters()} parameters in the model")
-    train_cifar_multiclass_model(cifar10_model, X_train, y_train, X_test, y_test)
+    train_cifar_multiclass_model(cifar10_model, train_data_loader, test_data_loader)
 
     logger.info("Fetching data for CIFAR-100")
     X, y, _, __ = get_dataset(dataset_id=41983, download_data=True).get_data(
@@ -147,18 +148,20 @@ if __name__ == "__main__":
     logger.info(f"{X.shape=}, {y.shape=}")
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.1)
+    train_data_loader = SimpleDataLoader(X_train, y_train, batch_size=256, shuffle=True)
+    test_data_loader = SimpleDataLoader(X_test, y_test, batch_size=256, shuffle=False)
 
     logger.info("Training ResNet CIFAR-100 model")
     cifar100_model = CifarResNet(num_classes=100)
     logger.info(f"There are {cifar100_model.num_parameters()} parameters in the model")
-    train_cifar_multiclass_model(cifar100_model, X_train, y_train, X_test, y_test)
+    train_cifar_multiclass_model(cifar100_model, train_data_loader, test_data_loader)
 
     logger.info("Training Convolutional CIFAR-100 model")
     cifar100_model = CifarConvolutionalClassifier(num_classes=100)
     logger.info(f"There are {cifar100_model.num_parameters()} parameters in the model")
-    train_cifar_multiclass_model(cifar100_model, X_train, y_train, X_test, y_test)
+    train_cifar_multiclass_model(cifar100_model, train_data_loader, test_data_loader)
 
     logger.info("Training Dense CIFAR-100 model")
     cifar100_model = CifarMulticlassClassifier(num_classes=100)
     logger.info(f"There are {cifar100_model.num_parameters()} parameters in the model")
-    train_cifar_multiclass_model(cifar100_model, X_train, y_train, X_test, y_test)
+    train_cifar_multiclass_model(cifar100_model, train_data_loader, test_data_loader)
