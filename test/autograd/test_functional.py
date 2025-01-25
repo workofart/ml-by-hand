@@ -6,23 +6,48 @@ from unittest import TestCase
 
 
 class TestActivationFunctions(TestCase):
-    # TODO: add backward pass tests
     def setUp(self) -> None:
         self.X = Tensor(data=np.array([[1, 1, 1], [2, 2, 2]]), requires_grad=True)
 
-    def test_sigmoid(self):
+    def test_sigmoid_forward(self):
         assert np.allclose(
             functional.sigmoid(self.X).data,
             torch.nn.functional.sigmoid(torch.Tensor(self.X.data)).detach().numpy(),
         )
 
-    def test_relu(self):
+    def test_sigmoid_backward(self):
+        out_custom = functional.sigmoid(self.X)
+        grad_dummy = np.ones_like(out_custom.data)
+        out_custom.backward(grad_dummy)
+
+        X_torch = torch.tensor(self.X.data, requires_grad=True)
+        out_ref = torch.sigmoid(X_torch)
+        out_ref.backward(torch.ones_like(out_ref))
+
+        assert np.allclose(
+            self.X.grad.data, X_torch.grad.detach().numpy(), atol=1e-6
+        ), "Sigmoid backward pass did not match PyTorch."
+
+    def test_relu_forward(self):
         assert np.allclose(
             functional.relu(self.X).data,
             torch.nn.functional.relu(torch.Tensor(self.X.data)).detach().numpy(),
         )
 
-    def test_softmax(self):
+    def test_relu_backward(self):
+        out_custom = functional.relu(self.X)
+        grad_dummy = np.ones_like(out_custom.data)
+        out_custom.backward(grad_dummy)
+
+        X_torch = torch.tensor(self.X.data, requires_grad=True)
+        out_ref = torch.relu(X_torch)
+        out_ref.backward(torch.ones_like(out_ref))
+
+        assert np.allclose(
+            self.X.grad.data, X_torch.grad.detach().numpy(), atol=1e-6
+        ), "ReLU backward pass did not match PyTorch."
+
+    def test_softmax_forward(self):
         assert np.allclose(
             functional.softmax(self.X).data,
             torch.nn.functional.softmax(torch.Tensor(self.X.data), dim=1)
@@ -31,11 +56,61 @@ class TestActivationFunctions(TestCase):
             atol=1e-6,
         )
 
-    def test_tanh(self):
+    def test_softmax_backward(self):
+        out_custom = functional.softmax(self.X)
+        grad_dummy = np.ones_like(out_custom.data)
+        out_custom.backward(grad_dummy)
+
+        X_torch = torch.tensor(self.X.data, requires_grad=True)
+        out_ref = torch.softmax(X_torch, dim=1)
+        out_ref.backward(torch.ones_like(out_ref))
+
+        assert np.allclose(
+            self.X.grad.data, X_torch.grad.detach().numpy(), atol=1e-6
+        ), "Softmax backward pass did not match PyTorch."
+
+    def test_tanh_forward(self):
         assert np.allclose(
             functional.tanh(self.X).data,
             torch.nn.functional.tanh(torch.Tensor(self.X.data)).detach().numpy(),
         )
+
+    def test_tanh_backward(self):
+        out_custom = functional.tanh(self.X)
+        grad_dummy = np.ones_like(out_custom.data)
+        out_custom.backward(grad_dummy)
+
+        X_torch = torch.tensor(self.X.data, requires_grad=True)
+        out_ref = torch.tanh(X_torch)
+        out_ref.backward(torch.ones_like(out_ref))
+
+        assert np.allclose(
+            self.X.grad.data, X_torch.grad.detach().numpy(), atol=1e-6
+        ), "Tanh backward pass did not match PyTorch."
+
+    def test_gelu_forward(self):
+        out_custom = functional.gelu(self.X).data
+
+        gelu_torch = torch.nn.GELU(approximate="tanh")
+        X_torch = torch.tensor(self.X.data, requires_grad=False)
+
+        assert np.allclose(
+            out_custom, gelu_torch(X_torch).detach().numpy(), atol=1e-6
+        ), "Approximate GELU forward pass did not match PyTorch GELU with approximate='tanh'."
+
+    def test_gelu_backward(self):
+        out_custom = functional.gelu(self.X)
+        grad_dummy = np.ones_like(out_custom.data)  # dL/dY = 1
+        out_custom.backward(grad_dummy)
+
+        gelu_torch = torch.nn.GELU(approximate="tanh")
+        X_torch = torch.tensor(self.X.data, dtype=torch.float32, requires_grad=True)
+        out_ref = gelu_torch(X_torch)
+        out_ref.backward(torch.ones_like(out_ref))
+
+        assert np.allclose(
+            self.X.grad.data, X_torch.grad.detach().numpy(), atol=1e-6
+        ), "Approximate GELU backward pass did not match PyTorch GELU with approximate='tanh'."
 
 
 class TestBinaryCrossEntropy(TestCase):

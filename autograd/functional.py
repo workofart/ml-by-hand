@@ -23,6 +23,10 @@ def tanh(x: Tensor) -> Tensor:
     return Tanh.apply(x)
 
 
+def gelu(x: Tensor) -> Tensor:
+    return Gelu.apply(x)
+
+
 class Relu(Function):
     """
     Retified Linear Unit (ReLU) activation function.
@@ -36,6 +40,48 @@ class Relu(Function):
     def backward(self, grad: Tensor) -> np.ndarray:
         # dL/dx = dL/dy * dy/dx
         return grad.data * (self.x > 0)
+
+
+class Gelu(Function):
+    """
+    Gaussian Error Linear Unit (GELU) activation function.
+    Paper: https://arxiv.org/abs/1606.08415
+
+    GELU(x) = x * P(X <= x) where P(X) ~ Gaussian Distribution with mean 0 and standard deviation 1
+    Approximately
+        0.5 * x * [1 + tanh( sqrt(2/pi)*(x + 0.044715*x^3) )]
+    """
+
+    def forward(self, x: np.ndarray) -> np.ndarray:
+        """
+        Forward pass of the approximate GELU.
+        """
+        self.x = x  # Save for backward
+        return 0.5 * x * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * x**3)))
+
+    def backward(self, grad: np.ndarray) -> np.ndarray:
+        """
+        dGELU/dx = 0.5 * (1 + tanh(alpha)) + 0.5 * x * (1 - tanh(alpha)^2) * alpha'
+        where alpha = sqrt(2/pi) * (x + 0.044715 * x^3)
+        and alpha' = sqrt(2/pi) * (1 + 3 * 0.044715 * x^2)
+        """
+        # Compute alpha(x) = sqrt(2/pi) * (x + 0.044715 * x^3)
+        alpha = np.sqrt(2.0 / np.pi) * (self.x + 0.044715 * self.x**3)
+
+        # Compute tanh(alpha)
+        tanh_alpha = np.tanh(alpha)
+
+        # Compute derivative of alpha: alpha'(x)
+        alpha_prime = np.sqrt(2.0 / np.pi) * (1.0 + 3.0 * 0.044715 * self.x**2)
+
+        # Derivative of GELU:
+        dgelu_dx = (
+            0.5 * (1.0 + tanh_alpha)
+            + 0.5 * self.x * (1.0 - tanh_alpha**2) * alpha_prime
+        )
+
+        # Chain rule: dL/dx = dL/dy * dy/dx
+        return grad * dgelu_dx
 
 
 class Sigmoid(Function):
