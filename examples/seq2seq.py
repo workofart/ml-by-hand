@@ -1,7 +1,7 @@
 import numpy as np
 from autograd import nn, optim, functional, tensor
-from autograd.tools.trainer import Trainer
-from autograd.tools.data import load_data
+from autograd.tools.trainer import SimpleTrainer
+from autograd.tools.data import load_data, SimpleDataLoader
 from autograd.text.utils import create_vocabulary, text_to_one_hot_and_sparse
 
 """
@@ -85,14 +85,13 @@ def main():
     train_filename = "examples/wikisum_train.parquet"
     test_filename = "examples/wikisum_test.parquet"
 
-    train_data = load_data(train_data_url, train_filename, max_rows=1024)
-    test_data = load_data(test_data_url, test_filename, max_rows=1024)
+    train_data = load_data(train_data_url, train_filename, max_rows=256)
+    test_data = load_data(test_data_url, test_filename, max_rows=256)
 
     train_X, train_y = parse_data_into_xy(train_data)
     test_X, test_y = parse_data_into_xy(test_data)
 
     vocab = create_vocabulary(train_X + train_y, max_features=10000)
-    idx_to_vocab = np.array(list(vocab.keys()))
     features, features_vocab_idx = text_to_one_hot_and_sparse(
         train_X, vocab, max_sequence_length=120
     )
@@ -107,16 +106,23 @@ def main():
         max_output_len=60,
     )
 
-    trainer = Trainer(
+    train_data_loader = SimpleDataLoader(
+        features,
+        labels_vocab_idx,
+        batch_size=128,
+        shuffle=True,
+    )
+
+    trainer = SimpleTrainer(
         model,
         loss_fn=functional.cross_entropy,
         optimizer=optim.Adam(model.parameters, lr=0.001),
         epochs=20,
-        batch_size=128,
         output_type="logits",
+        sample_predictions=True,
     )
 
-    trainer.fit(features, labels_vocab_idx, idx_to_vocab, weight=labels_vocab_idx != 0)
+    trainer.fit(train_data_loader, weight=labels_vocab_idx != 0)
 
 
 if __name__ == "__main__":
