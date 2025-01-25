@@ -74,7 +74,7 @@ class GPT1(nn.Module):
 
         output = self.layer_norm(h_0)
         output = output @ self.token_embedding.parameters["weight"].T
-        return functional.softmax(output)
+        return output
 
 
 class DecoderSublayer(nn.Module):
@@ -214,7 +214,7 @@ if __name__ == "__main__":
             )
             # y has shape (batch_size, seq_len) and is already a shifted sequence
             # compared to x
-            loss = functional.sparse_cross_entropy(
+            loss = functional.cross_entropy(
                 pred_prob, y, pad_idx=pad_idx, label_smoothing=0.1
             )
             loss.backward()
@@ -234,7 +234,7 @@ if __name__ == "__main__":
                     x,
                     causal_mask,
                 )
-                loss = functional.sparse_cross_entropy(
+                loss = functional.cross_entropy(
                     pred_prob, y, pad_idx=pad_idx, label_smoothing=0.0
                 )
                 test_loss += loss.detach().data

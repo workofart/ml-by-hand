@@ -28,7 +28,7 @@ class CifarMulticlassClassifier(nn.Module):
         x = self.dropout(x)
         x = functional.relu(self.h3(x))
         x = self.dropout(x)
-        return functional.softmax(self.h4(x))
+        return self.h4(x)
 
 
 class CifarResNet(nn.Module):
@@ -46,7 +46,7 @@ class CifarResNet(nn.Module):
         x = self.res_block1(x)
         x = self.res_block2(x)
         x = x.reshape(batch_size, -1)
-        return functional.softmax(self.fc1(x))
+        return self.fc1(x)
 
 
 class CifarConvolutionalClassifier(nn.Module):
@@ -92,17 +92,17 @@ class CifarConvolutionalClassifier(nn.Module):
 
         # Flatten and dense layers
         x = x.reshape(batch_size, -1)
-        return functional.softmax(self.fc1(x))
+        return self.fc1(x)
 
 
 def train_cifar_multiclass_model(model: nn.Module, X_train, y_train, X_test, y_test):
     trainer = Trainer(
         model=model,
-        loss_fn=functional.sparse_cross_entropy,
+        loss_fn=functional.cross_entropy,
         optimizer=optim.Adam(model.parameters, lr=1e-3),
         epochs=100,
         batch_size=256,
-        output_type="softmax",
+        output_type="logits",
     )
     trainer.fit(X_train, y_train.astype(int))
     trainer.evaluate(X_test, y_test)
