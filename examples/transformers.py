@@ -177,9 +177,7 @@ class Decoder(nn.Module):
             x = sublayer(x, encoder_output, source_mask, target_mask)
 
         x = self.layer_norm(x)
-        x = self.linear(x)
-        output = functional.softmax(x)
-        return output
+        return self.linear(x)
 
 
 class ResidualAddAndNorm(nn.Module):
@@ -424,7 +422,7 @@ def evaluate(
             source_mask,
             target_mask,
         )
-        loss = functional.sparse_cross_entropy(
+        loss = functional.cross_entropy(
             pred_prob, y, pad_idx=pad_idx, label_smoothing=0.0
         )
         test_loss += loss.detach().data
@@ -593,7 +591,7 @@ if __name__ == "__main__":
 
             # Compute predictions and loss
             pred_prob = model(x, y_inp, source_mask, target_mask)
-            loss = functional.sparse_cross_entropy(
+            loss = functional.cross_entropy(
                 pred_prob, y, pad_idx=pad_idx, label_smoothing=0.1
             )
             loss.backward()

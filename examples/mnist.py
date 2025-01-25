@@ -26,7 +26,7 @@ class MnistResNet(nn.Module):
         x = self.res_block1(x)
         x = self.res_block2(x)
         x = x.reshape(batch_size, -1)
-        return functional.softmax(self.fc1(x))
+        return self.fc1(x)
 
 
 class MnistMultiClassClassifier(nn.Module):
@@ -49,7 +49,7 @@ class MnistMultiClassClassifier(nn.Module):
         x = functional.relu(x)
 
         x = self.h3(x)
-        return functional.softmax(x)
+        return x
 
 
 class MnistConvolutionalClassifier(nn.Module):
@@ -94,7 +94,7 @@ class MnistConvolutionalClassifier(nn.Module):
 
         # Flatten and dense layers
         x = x.reshape(batch_size, -1)
-        return functional.softmax(self.fc1(x))
+        return self.fc1(x)
 
 
 class MnistOneVsRestBinaryClassifier(nn.Module):
@@ -198,7 +198,7 @@ def train_mnist_multiclass_model(
         optimizer=optimizer,
         epochs=epochs,
         batch_size=256,
-        output_type="softmax",
+        output_type="logits",
     )
     trainer.fit(X_train, y_train)
     trainer.evaluate(X_test, y_test)
@@ -227,7 +227,7 @@ if __name__ == "__main__":
         y_test,
         optimizer=optim.Adam(model.parameters, lr=1e-3),
         model=model,
-        loss_fn=functional.sparse_cross_entropy,
+        loss_fn=functional.cross_entropy,
         epochs=10,
         msg="Convolutional Neural Network (with batch norm, Adam optimizer)",
     )
@@ -240,7 +240,7 @@ if __name__ == "__main__":
         y_test,
         optimizer=optim.SGD(model.parameters, lr=1e-3),
         model=model,
-        loss_fn=functional.sparse_cross_entropy,
+        loss_fn=functional.cross_entropy,
         epochs=100,
         msg="(without batch norm, SGD optimizer)",
     )
@@ -253,7 +253,7 @@ if __name__ == "__main__":
         y_test,
         optimizer=optim.SGD(model.parameters, lr=1e-3),
         model=model,
-        loss_fn=functional.sparse_cross_entropy,
+        loss_fn=functional.cross_entropy,
         epochs=100,
         msg="(with batch norm, SGD optimizer)",
     )
@@ -266,7 +266,7 @@ if __name__ == "__main__":
         y_test,
         optimizer=optim.Adam(model.parameters, lr=1e-3),
         model=model,
-        loss_fn=functional.sparse_cross_entropy,
+        loss_fn=functional.cross_entropy,
         epochs=100,
         msg="(with batch norm, Adam optimizer)",
     )

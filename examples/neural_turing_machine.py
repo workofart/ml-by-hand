@@ -411,14 +411,12 @@ if __name__ == "__main__":
     # Generate dummy data
     X, y = generate_copy_data(n_samples=10, seq_len=seq_len, input_size=input_size)
     X = to_one_hot(X, input_size)
-    y = to_one_hot(y, input_size)
 
     # Generate a longer sequence to see if the model can generalize well
     X_val, y_val = generate_copy_data(
         n_samples=10, seq_len=seq_len * 5, input_size=input_size
     )
     X_val = to_one_hot(X_val, input_size)
-    y_val = to_one_hot(y_val, input_size)
 
     print("------------- Neural Turing Machine ---------------")
     ntm = NeuralTuringMachine(
@@ -430,7 +428,7 @@ if __name__ == "__main__":
     )
     t = trainer.Trainer(
         model=ntm,
-        loss_fn=functional.cross_entropy_with_logits,
+        loss_fn=functional.cross_entropy,
         optimizer=optim.Adam(ntm.parameters, lr=1e-3),
         epochs=epochs,
         batch_size=batch_size,
@@ -445,7 +443,7 @@ if __name__ == "__main__":
 
     t = trainer.Trainer(
         model=lstm,
-        loss_fn=functional.cross_entropy_with_logits,
+        loss_fn=functional.cross_entropy,
         optimizer=optim.Adam(lstm.parameters, lr=1e-3),
         epochs=epochs,
         batch_size=batch_size,

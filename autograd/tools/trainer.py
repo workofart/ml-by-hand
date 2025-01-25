@@ -236,7 +236,8 @@ class Trainer:
             # Multi-class logits => argmax(softmax(logits))
             # But we can just do an argmax of raw logits.
             # (The max of the logits is the same as the max after softmax.)
-            return np.argmax(y_pred, axis=-1), np.argmax(y_true, axis=-1)
+            # We assume y_true is class indices, not one-hot
+            return np.argmax(y_pred, axis=-1), y_true
 
         elif self.output_type == "softmax":
             # Already probabilities => argmax

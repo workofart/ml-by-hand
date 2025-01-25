@@ -85,8 +85,8 @@ def main():
     train_filename = "examples/wikisum_train.parquet"
     test_filename = "examples/wikisum_test.parquet"
 
-    train_data = load_data(train_data_url, train_filename, max_rows=512)
-    test_data = load_data(test_data_url, test_filename, max_rows=512)
+    train_data = load_data(train_data_url, train_filename, max_rows=1024)
+    test_data = load_data(test_data_url, test_filename, max_rows=1024)
 
     train_X, train_y = parse_data_into_xy(train_data)
     test_X, test_y = parse_data_into_xy(test_data)
@@ -94,29 +94,29 @@ def main():
     vocab = create_vocabulary(train_X + train_y, max_features=10000)
     idx_to_vocab = np.array(list(vocab.keys()))
     features, features_vocab_idx = text_to_one_hot_and_sparse(
-        train_X, vocab, max_sequence_length=150
+        train_X, vocab, max_sequence_length=120
     )
     labels, labels_vocab_idx = text_to_one_hot_and_sparse(
-        train_y, vocab, max_sequence_length=80
+        train_y, vocab, max_sequence_length=60
     )
 
     model = Seq2Seq(
         input_size=len(vocab),
         word_embed_size=512,
-        hidden_size=256,
-        max_output_len=80,
+        hidden_size=128,
+        max_output_len=60,
     )
 
     trainer = Trainer(
         model,
-        loss_fn=functional.cross_entropy_with_logits,
+        loss_fn=functional.cross_entropy,
         optimizer=optim.Adam(model.parameters, lr=0.001),
-        epochs=1,
+        epochs=20,
         batch_size=128,
         output_type="logits",
     )
 
-    trainer.fit(features, labels, idx_to_vocab, weight=labels_vocab_idx != 0)
+    trainer.fit(features, labels_vocab_idx, idx_to_vocab, weight=labels_vocab_idx != 0)
 
 
 if __name__ == "__main__":
