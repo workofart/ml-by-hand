@@ -1,6 +1,13 @@
 # ML By Hand
 
-We are creating a deep learning library from scratch (that evolved from a simple autograd engine). It was designed to demystify the inner workings of building deep learning models by exposing every mathematical detail and stripping down the abstractions shiny ML libraries (e.g. PyTorch/TensorFlow) have. This project tries to provide an opportunity to learn from first-principles.
+<div align="center">
+<img src="https://github.com/user-attachments/assets/0655f743-6bb0-46c8-9cdf-ec3a8c84058a" width="400" height="400">
+</div>
+
+
+
+We are creating a deep learning library from scratch (that evolved from a simple autograd engine). It was designed to demystify the inner workings of building deep learning models by exposing every mathematical detail and stripping down the abstractions shiny ML libraries (e.g. PyTorch/TensorFlow) have. **This project tries to provide an opportunity to learn deep learning from first-principles.**
+
 
 > “What I cannot create, I do not understand.”
 > — Richard Feynman
@@ -137,7 +144,7 @@ assert np.isclose(x.data @ weights + bias, y_true)
 
 ## **Technical Overview**
 
-Here’s a brief look at the major modules in this project: (API doc coming out soon)
+Here’s a brief look at the major modules in this project. This not exhaustive. API doc coming out soon.
 - **`tensor`**
   - Supports scalar, vector, and N-dimensional data
   - Arithmetic ops: add, mul, matmul, pow, sub, division, neg, max, mean
