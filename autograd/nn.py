@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import numpy as np
 
@@ -62,6 +62,15 @@ class Module:
         raise AttributeError(
             f"Module {self.__class__.__name__} has no attribute {name}"
         )
+
+    def apply(self, func: Callable):
+        """
+        Apply a certain operation to every submodule (recursively) in-place.
+        """
+        for module in self._modules.values():
+            module.apply(func)
+
+        func(self)
 
     @property
     def parameters(self) -> Dict[str, Any]:
