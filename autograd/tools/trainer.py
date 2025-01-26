@@ -1,10 +1,14 @@
 import logging
+import os
 import numpy as np
 from tqdm import tqdm
+from autograd.tools.data import LLMDataLoader
 from autograd.tools.metrics import accuracy, mean_squared_error
+from autograd.text import utils as text_utils
 from autograd.tensor import Tensor
-from autograd.tools.model import save_model
-from typing import Dict, Optional, Callable
+from autograd.tools.model import save_checkpoint, load_checkpoint
+from autograd.text.tokenizer import BytePairEncoder
+from typing import Dict, Optional, Callable, Any, Tuple
 from abc import ABC, abstractmethod
 
 logger = logging.getLogger(__name__)
@@ -16,36 +20,53 @@ class AbstractTrainer(ABC):
     delegates domain-specific steps to the subclasses.
     """
 
-    def __init__(self, model, optimizer, epochs=10, **kwargs):
+    def __init__(
+        self,
+        model,
+        optimizer,
+        total_epochs=10,
+        checkpoint: Optional[dict] = None,
+        **kwargs,
+    ):
         """
         Args:
             model: The model to train (generic object with a .train() and .eval() method).
             optimizer: Optimizer that knows how to update model parameters.
-            epochs (int): Number of epochs to train.
+            total_epochs (int): Number of epochs to train.
         """
         self.model = model
         self.optimizer = optimizer
-        self.epochs = epochs
-        self.step_count = 0
+        self.total_epochs = total_epochs
+        self.checkpoint = checkpoint if checkpoint is not None else {}
+        self.step_count = self.checkpoint.get("step_count", 0)
         self.kwargs = kwargs
 
     def fit(self, train_data_loader, val_data_loader=None, **kwargs):
         """
         The main training loop: calls on_epoch_start, train_epoch, optional eval, etc.
         """
-        for epoch in tqdm(range(self.epochs), desc="Training", leave=False):
+        logger.info(f"Model parameters: {self.model.num_parameters()}")
+
+        start_epoch = self.checkpoint.get("epoch", 0)
+        for epoch in tqdm(
+            range(start_epoch, self.total_epochs),
+            desc="Training",
+            leave=False,
+            initial=start_epoch,
+        ):
             self.on_epoch_start(epoch)
 
             if hasattr(train_data_loader, "on_epoch_start"):
                 train_data_loader.on_epoch_start()
 
+            self.model.train()
             train_loss = self._train_one_epoch(train_data_loader, **kwargs)
 
             val_loss = None
             if val_data_loader is not None:
                 if hasattr(val_data_loader, "on_epoch_start"):
                     val_data_loader.on_epoch_start()
-                val_loss = self.evaluate_and_log(val_data_loader)
+                val_loss = self.evaluate_and_log(train_data_loader, val_data_loader)
 
             self.on_epoch_end(epoch, train_loss, val_loss)
 
@@ -70,13 +91,13 @@ class AbstractTrainer(ABC):
         if epoch % self.kwargs.get("checkpoint_freq", 1) == 0:
             # Save checkpoint
             checkpoint = {
-                "epoch": epoch,
+                "epoch": epoch + 1,  # the next epoch to start from
                 "model_state_dict": self.model.state_dict(),
                 "optimizer_state_dict": self.optimizer.state_dict(),
                 "hyperparams": self.kwargs.get("hyperparams"),
                 "step_count": self.step_count,  # for learning rate scheduler
             }
-            save_model(
+            save_checkpoint(
                 checkpoint,
                 json_path=f"checkpoints/{self.model.__class__.__name__}_{epoch}.json",
                 npz_path=f"checkpoints/{self.model.__class__.__name__}_{epoch}.npz",
@@ -98,7 +119,11 @@ class AbstractTrainer(ABC):
 
     @abstractmethod
     def evaluate_and_log(
-        self, val_loader, sample_predictions=False, num_samples_to_show=4
+        self,
+        train_data_loader,
+        val_data_loader,
+        sample_predictions=False,
+        num_samples_to_show=4,
     ):
         """
         Must return a scalar loss or metric (e.g. average val loss).
@@ -162,7 +187,8 @@ class SimpleTrainer(AbstractTrainer):
 
     def evaluate_and_log(
         self,
-        val_loader,
+        train_data_loader,
+        val_data_loader,
     ) -> float:
         """
         1) Computes avg validation loss.
@@ -176,7 +202,7 @@ class SimpleTrainer(AbstractTrainer):
         total_val_loss = 0.0
         batch_count = 0
 
-        for batch_data in val_loader:
+        for batch_data in val_data_loader:
             batch_X, batch_y = batch_data
             y_pred = self.model(batch_X)
             loss = self.loss_fn(y_pred, batch_y)
@@ -258,6 +284,7 @@ class LLMTrainer(AbstractTrainer):
         optimizer,
         loss_fn,
         warmup_steps: int,
+        tokenizer: BytePairEncoder,
         epochs=10,
         label_smoothing=0.0,
         forward_fn: Optional[Callable] = None,
@@ -269,6 +296,7 @@ class LLMTrainer(AbstractTrainer):
         self.label_smoothing = label_smoothing
         self.d_model = model.hidden_size  # needed for LR scheduelr TODO: ensure this interface is consistent for all LLM models
         self.forward_fn = forward_fn or self.default_forward_fn
+        self.tokenizer = tokenizer
 
     def on_epoch_start(self, epoch):
         # Could adjust learning rate, log epoch number, etc.
@@ -279,20 +307,16 @@ class LLMTrainer(AbstractTrainer):
         batch_data = (X, dec_inp, y, src_mask, tgt_mask, causal_mask)
         """
         self.step_count += 1
-
         self.optimizer.lr = get_lr(
             self.step_count,
             self.d_model,
             warmup_steps=self.warmup_steps,
         )
-        # X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_data
 
         self.optimizer.zero_grad()
 
-        # Forward pass (model signature might differ)
-        # pred_probs = self.model(X, dec_inp, src_mask, tgt_mask)
-        pred_probs, y = self.forward_fn(self.model, batch_data, **kwargs)
-        # Compute cross-entropy ignoring pad tokens, etc.
+        pred_probs, y = self.forward_fn(self.model, batch_data, mode="train", **kwargs)
+
         loss = self.loss_fn(
             pred_probs,
             y,
@@ -313,13 +337,14 @@ class LLMTrainer(AbstractTrainer):
 
     def evaluate_and_log(
         self,
-        val_data_loader,
+        train_data_loader: LLMDataLoader,
+        val_data_loader: LLMDataLoader,
     ) -> float:
         self.model.eval()
         total_val_loss = 0.0
 
         for batch_data in tqdm(val_data_loader, desc="Evaluation", leave=False):
-            pred_probs, y = self.forward_fn(self.model, batch_data)
+            pred_probs, y = self.forward_fn(self.model, batch_data, mode="train")
             # X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_data
             # pred_probs = self.model(X, dec_inp, src_mask, tgt_mask)
             loss = self.loss_fn(pred_probs, y, pad_idx=val_data_loader.pad_idx)
@@ -332,22 +357,15 @@ class LLMTrainer(AbstractTrainer):
             f"| Learning Rate: {self.optimizer.lr:.4f}"
         )
 
-        # TODO: add in inference code
-        # if teacher_enforcing:
-        # text_utils.teacher_forcing_inference(
-        #     lambda x: transformer_predict(model, x),
-        #     bpe,
-        #     train_data[:seq_len],
-        #     vocab_idx2word=idx2word,
-        # )
-        # else:
-        #     text_utils.inference(
-        #         lambda x: transformer_predict(model, x),
-        #         bpe,
-        #         start_tokens=["<SOS>"],
-        #         max_length=seq_len,
-        #         temperature=1.0,
-        #     )
+        if self.kwargs.get("teacher_enforcing", False):
+            text_utils.teacher_forcing_inference(
+                prediction_func=lambda seq_so_far: self.forward_fn(
+                    self.model, seq_so_far, mode="inference"
+                ),
+                bpe=self.tokenizer,
+                groundtruth_data=train_data_loader.data[: train_data_loader.seq_len],
+                max_length=train_data_loader.seq_len // 4,
+            )
 
         self.model.train()
 
@@ -356,8 +374,8 @@ class LLMTrainer(AbstractTrainer):
     def default_forward_fn(self, model, batch_data, **kwargs):
         # e.g. the 6-tuple approach
         X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_data
-        pred_probs = model(X, dec_inp, src_mask, tgt_mask)
-        return pred_probs, y
+        logits = model(X, dec_inp, src_mask, tgt_mask)
+        return logits, y
 
 
 def get_lr(step: int, model_dim: int, warmup_steps: int) -> float:
@@ -382,3 +400,68 @@ def grad_l2_norm(parameters: Dict[str, Tensor]) -> float:
         if p.grad is not None:
             grad_norm += (p.grad.data**2).sum()
     return grad_norm**0.5
+
+
+def load_model_and_optimizer(
+    model_class,
+    optimizer_class,
+    model_kwargs: Dict[str, Any],
+    optimizer_kwargs: Dict[str, Any],
+    resume_epoch: Optional[int] = None,
+    checkpoint_dir: str = "checkpoints",
+) -> Tuple[Any, Any, dict]:
+    """
+    Loads model & optimizer states from checkpoint if resume_epoch is given.
+    Otherwise, initializes them from scratch.
+
+    Args:
+        model_class: The class object for your model (e.g. Transformer).
+        optimizer_class: The class object for your optimizer (e.g. optim.Adam).
+        model_kwargs: Dictionary of kwargs to pass when constructing the model_class.
+        optimizer_kwargs: Dictionary of kwargs to pass when constructing the optimizer_class.
+        resume_epoch (int, optional): If provided, attempts to load from checkpoint
+        checkpoint_dir (str): Directory where checkpoints are saved.
+
+    Returns:
+        (model, optimizer, checkpoint_dict)
+    """
+    if resume_epoch is not None:
+        # Look for checkpoint files
+        ckpt_json = os.path.join(
+            checkpoint_dir, f"{model_class.__name__}_{resume_epoch}.json"
+        )
+        ckpt_npz = os.path.join(
+            checkpoint_dir, f"{model_class.__name__}_{resume_epoch}.npz"
+        )
+
+        logger.info(f"Attempting to load from checkpoint: {ckpt_json}, {ckpt_npz}")
+        loaded_ckpt = load_checkpoint(ckpt_json, ckpt_npz)
+
+        # If your checkpoint has hyperparams or constructor kwargs,
+        # you can either override model_kwargs or do a partial merge:
+        #  e.g. model_kwargs.update(loaded_ckpt["hyperparams"].get("model_kwargs", {}))
+        hyperparams = loaded_ckpt.get("hyperparams", {})
+        model_init_kwargs = hyperparams.get("model_kwargs", model_kwargs)
+        optimizer_init_kwargs = hyperparams.get("optimizer_kwargs", optimizer_kwargs)
+
+        # Instantiate model & optimizer
+        model = model_class(**model_init_kwargs)
+        optimizer = optimizer_class(model.parameters, **optimizer_init_kwargs)
+
+        # Load model/optimizer state
+        model.load_state_dict(loaded_ckpt["model_state_dict"])
+        optimizer.load_state_dict(loaded_ckpt["optimizer_state_dict"])
+
+        logger.info(
+            f"Loaded {model_class.__name__} from epoch {loaded_ckpt.get('epoch', '?')} "
+            f"with step_count={loaded_ckpt.get('step_count', 0)}"
+        )
+        return model, optimizer, loaded_ckpt
+
+    else:
+        logger.info(
+            "No resume_epoch given; initializing model & optimizer from scratch."
+        )
+        model = model_class(**model_kwargs)
+        optimizer = optimizer_class(model.parameters, **optimizer_kwargs)
+        return model, optimizer, {}

@@ -1,13 +1,12 @@
 import numpy as np
 
 from autograd.tools.data import load_data, LLMDataLoader
-from autograd.tools.model import load_model
-from autograd.tools.trainer import LLMTrainer
-from autograd.text import tokenizer
+from autograd.tools.trainer import LLMTrainer, load_model_and_optimizer
+from autograd.text.tokenizer import BytePairEncoder
+from autograd.text import utils as text_utils
 from autograd.tensor import Tensor
 from autograd import nn, functional, optim
 import logging
-import os
 from typing import Optional, Any
 
 
@@ -373,167 +372,118 @@ class FeedForward(nn.Module):
         return x
 
 
-# ------------------ Training Helper Functions --------------------------#
-
-
-def evaluate(
-    model: nn.Module,
-    bpe: tokenizer.BytePairEncoder,
-    seq_len: int,
-    teacher_enforcing: bool = False,
-):
-    # def transformer_predict(model: nn.Module, encoded_input: np.ndarray):
-    #     source_mask = Tensor(
-    #         text_utils.create_padding_mask(encoded_input, pad_idx=pad_idx),
-    #         requires_grad=False,
-    #     )
-    #     # Create causal + pad mask for this partial sequence
-    #     # Then run model(...) with encoder_output if necessary
-    #     pad_mask = text_utils.create_padding_mask(encoded_input, pad_idx=pad_idx)
-    #     causal_mask = text_utils.create_causal_mask(
-    #         seq_len=encoded_input.shape[1], batch_size=1
-    #     )
-    #     target_mask = Tensor(pad_mask + causal_mask, requires_grad=False)
-    #     return model(encoded_input, encoded_input, source_mask, target_mask)
-
-    # TODO: Integrate this into the trainer class
-    # if teacher_enforcing:
-    #     text_utils.teacher_forcing_inference(
-    #         lambda x: transformer_predict(model, x),
-    #         bpe,
-    #         train_data[:seq_len],
-    #         vocab_idx2word=idx2word,
-    #     )
-    # else:
-    #     text_utils.inference(
-    #         lambda x: transformer_predict(model, x),
-    #         bpe,
-    #         start_tokens=["<SOS>"],
-    #         max_length=seq_len,
-    #         temperature=1.0,
-    #     )
-
-    model.train()
-
-
-def initialize(hyperparams: dict, vocab: dict):
-    model = Transformer(
-        vocab_size=len(vocab),
-        hidden_size=hyperparams["d_model"],
-        num_attention_heads=hyperparams["num_attention_heads"],
-    )
-    optimizer = optim.Adam(model.parameters, lr=0)
-    train_data_loader = LLMDataLoader(
-        data=train_data,
-        vocab=vocab,
-        batch_size=hyperparams["batch_size"],
-        seq_len=hyperparams["seq_len"],
-        shuffle=True,
-        include_decoder_input=True,  # By default, create (dec_inp) as well
-        sos_token=b"<SOS>",
-        pad_token=b"<PAD>",
-    )
-
-    test_data_loader = LLMDataLoader(
-        data=test_data,
-        vocab=vocab,
-        batch_size=hyperparams["batch_size"] // 4,
-        seq_len=hyperparams["seq_len"],
-        shuffle=False,
-        include_decoder_input=True,
-        sos_token=b"<SOS>",
-        pad_token=b"<PAD>",
-    )
-
-    return model, optimizer, train_data_loader, test_data_loader
-
-
 if __name__ == "__main__":
+
+    def transformer_forward(
+        model: Transformer, batch_or_tokens, mode="train", **kwargs
+    ):
+        if mode == "train":
+            X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_or_tokens
+            logits = model(X, dec_inp, src_mask, tgt_mask)
+            return logits, y
+        elif mode == "inference":
+            tokens = batch_or_tokens
+            logits = model(tokens, tokens, None, None)
+            return logits
+        else:
+            raise ValueError(f"mode must be either 'train' or 'inference', got {mode}")
+
     logger = logging.getLogger(__name__)
 
-    url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
-    filename = "examples/tinyshakespeare.txt"
-    resume_epoch = None  # determine whether to read from checkpoint. TODO: change this to CLI args later
-
-    data = load_data(url, filename)
-    logger.info(f"Length of entire dataset: {len(data)}")
-
-    # Create the vocabulary
-    bpe = tokenizer.BytePairEncoder(num_merges=3000, vocab_file_path="vocab.pkl")
-    vocab, idx2word = bpe.train_vocabulary(data, overwrite_saved_file=False)
-
-    # Encode a subset of the data
-    data = data.split("\n\n")
-
-    if os.path.exists("bpe_mini_shakespeare.npz"):
-        logger.info("Found existing encoded data, loading it...")
-        with np.load("bpe_mini_shakespeare.npz", allow_pickle=True) as npz_data:
-            encoded_data = npz_data.get("arr_0")[:10000]
-    else:
-        logger.info("Encoding the new data...")
-        encoded_data = np.array(bpe.encode("<|endoftext|>".join(data)))
-        np.savez_compressed("bpe_mini_shakespeare.npz", encoded_data)
-        logger.info("Saved encoded data to bpe_mini_shakespeare.npz")
-
-    logger.info(
-        f"Vocabulary size: {len(vocab)}, encoded_data length: {len(encoded_data)}"
+    data = load_data(
+        "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt",
+        "examples/tinyshakespeare.txt",
     )
-    logger.info(f"Data: {data[:3]}, Encoded_Data: {encoded_data[:50]}")
+    logger.info(f"{len(data)} characters in the entire dataset")
 
-    # Split data into train and test sets
+    # Create the vocabulary first
+    bpe = BytePairEncoder(num_merges=3000, vocab_file_path="vocab.pkl")
+    encoded_data = bpe.prepare_data(
+        raw_text_list=data.split("\n\n"),
+        npz_file_path="bpe_mini_shakespeare.npz",
+        overwrite_saved_file=False,
+        split_token="<|endoftext|>",
+    )[:5000]
+
+    # encoded_data is a list of integers without the concept of samples
     n = int(len(encoded_data) * 0.9)
     train_data, test_data = encoded_data[:n], encoded_data[n:]
 
-    if resume_epoch is not None:
-        ckpt_json = f"checkpoints/transformer_{resume_epoch}.json"
-        ckpt_npz = f"checkpoints/transformer_{resume_epoch}.npz"
-        loaded_ckpt = load_model(ckpt_json, ckpt_npz)
-        HYPERPARAMS = loaded_ckpt["hyperparams"]
-        model, optimizer, train_data_loader, test_data_loader = initialize(
-            HYPERPARAMS, vocab
-        )
+    CONFIG = {
+        "model_kwargs": {
+            "vocab_size": len(bpe._unicode_to_int_vocab),
+            "num_attention_heads": 4,  # 12
+            "hidden_size": 128,  # 768, must be divisible by num_attention_heads
+            "dropout_prob": 0.1,
+            "num_decoder_layers": 6,
+        },
+        "optimizer_kwargs": {
+            "lr": 0.0  # We may schedule it later with warmup
+        },
+        "num_epochs": 90,
+        "warmup_steps": 100,
+        "eval_iters": 16,
+        "seq_len": 80,
+        "batch_size": 16,  # 64
+        # Whether to check the model performance by feeding the groundtruth tokens to compare whether the model can predict the next token correctly.
+        "teacher_enforcing": True,
+        # Whether to load from a checkpoint
+        "resume_epoch": None,
+    }
+    model, optimizer, checkpoint = load_model_and_optimizer(
+        Transformer,
+        optim.Adam,
+        model_kwargs=CONFIG["model_kwargs"],
+        optimizer_kwargs=CONFIG["optimizer_kwargs"],
+        resume_epoch=CONFIG["resume_epoch"],
+    )
 
-        model.load_state_dict(loaded_ckpt["model_state_dict"])
-        optimizer.load_state_dict(loaded_ckpt["optimizer_state_dict"])
-        step_count = loaded_ckpt["step_count"]
-        start_epoch = loaded_ckpt["epoch"] + 1
-        logger.info(
-            f"Loaded model from checkpoint, resuming at epoch {start_epoch}, step {step_count}"
-        )
-    else:
-        # Note: The current hyperparameters are not optimal, they are just used
-        # for overfitting the model quickly to test the model architecture and training
-        # loop are free of bugs.
-        # TODO: parse the hyperparams from CLI
-        HYPERPARAMS = {
-            "NUM_EPOCHS": 90,
-            "seq_len": 80,
-            "batch_size": 16,
-            "warmup_steps": 100,
-            "d_model": 128,  # must be divisible by num_attention_heads
-            "num_attention_heads": 4,
-            "eval_iters": 20,
-        }
-        model, optimizer, train_data_loader, test_data_loader = initialize(
-            HYPERPARAMS, vocab
-        )
-        start_epoch = 0
-        step_count = 0
+    hparams = checkpoint.get("hyperparams", CONFIG)
 
-    logger.info(f"Model parameters: {model.num_parameters()}")
+    train_data_loader = LLMDataLoader(
+        data=train_data,
+        vocab=bpe._unicode_to_int_vocab,
+        seq_len=hparams["seq_len"],
+        batch_size=hparams["batch_size"],
+        shuffle=True,
+        include_decoder_input=True,
+    )
+    test_data_loader = LLMDataLoader(
+        data=test_data,
+        vocab=bpe._unicode_to_int_vocab,
+        seq_len=hparams["seq_len"],
+        batch_size=hparams["batch_size"] // 4,
+        shuffle=False,
+    )
 
     trainer = LLMTrainer(
         model=model,
         optimizer=optimizer,
-        warmup_steps=HYPERPARAMS["warmup_steps"],
+        warmup_steps=hparams["warmup_steps"],
         loss_fn=functional.cross_entropy,
-        epochs=HYPERPARAMS["NUM_EPOCHS"],
+        epochs=hparams["num_epochs"],
         label_smoothing=0.1,
-        checkpoint_freq=1,
+        checkpoint_freq=5,
+        tokenizer=bpe,
+        teacher_enforcing=hparams["teacher_enforcing"],
+        checkpoint=checkpoint,
+        hyperparams=hparams,
+        forward_fn=transformer_forward,
     )
 
     trainer.fit(
         train_data_loader=train_data_loader,
         val_data_loader=test_data_loader,
         pad_idx=train_data_loader.pad_idx,
+    )
+
+    text_utils.inference(
+        prediction_func=lambda seq_so_far: transformer_forward(
+            model, seq_so_far, mode="inference"
+        ),
+        bpe=bpe,
+        start_tokens=["<SOS>"],  # Dummy token to start the generation
+        max_length=int(hparams["seq_len"] * 1.1),
+        temperature=1.0,
+        top_k=10,
     )
