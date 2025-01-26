@@ -8,7 +8,7 @@ from typing import Dict, Any
 SerializedMeta = Dict[str, Any]
 
 
-def save_model(
+def save_checkpoint(
     obj: Any, json_path: str = "checkpoint.json", npz_path: str = "checkpoint.npz"
 ) -> None:
     """
@@ -79,7 +79,7 @@ def save_model(
     np.savez_compressed(npz_path, **arrays_dict)
 
 
-def load_model(
+def load_checkpoint(
     json_path: str = "checkpoint.json",
     npz_path: str = "checkpoint.npz",
     weights_only: bool = False,

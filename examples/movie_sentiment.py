@@ -68,7 +68,7 @@ def main(
         f"Training {model.__class__.__name__} Neural Network for movie sentiment analysis..."
     )
 
-    trainer.fit(train_loader=train_data_loader, test_loader=test_data_loader)
+    trainer.fit(train_data_loader=train_data_loader, test_data_loader=test_data_loader)
 
     # print("Evaluating model...")
     for X_test, y_test in test_data_loader:

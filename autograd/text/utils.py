@@ -321,8 +321,8 @@ def teacher_forcing_inference(
         # Feed tokens up to i (inclusive) => model tries to predict token i+1
         cur_input = np.array([groundtruth_data[: i + 1]])  # shape (1, i+1)
 
-        probs = prediction_func(cur_input)  # shape: (1, i+1, vocab_size)
-        dist = probs.data[0, -1]  # distribution for next token i+1
+        logits = prediction_func(cur_input)  # shape: (1, i+1, vocab_size)
+        dist = logits.data[0, -1]  # distribution for next token i+1
 
         # (Optional) you could do argmax or sampling.  For teacher forcing debugging,
         # typically we just do argmax to see how close the model is to the ground truth.
