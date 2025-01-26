@@ -1,10 +1,9 @@
 import numpy as np
-from tqdm import tqdm
 
-from autograd.tools.data import load_data, DataLoader
-from autograd.tools.model import save_model, load_model
-from autograd.tools.trainer import get_lr, grad_l2_norm
-from autograd.text import utils as text_utils, tokenizer
+from autograd.tools.data import load_data, LLMDataLoader
+from autograd.tools.model import load_model
+from autograd.tools.trainer import LLMTrainer
+from autograd.text import tokenizer
 from autograd.tensor import Tensor
 from autograd import nn, functional, optim
 import logging
@@ -377,122 +376,75 @@ class FeedForward(nn.Module):
 # ------------------ Training Helper Functions --------------------------#
 
 
-def transformer_predict(model: nn.Module, encoded_input: np.ndarray):
-    source_mask = Tensor(
-        text_utils.create_padding_mask(encoded_input, pad_idx=pad_idx),
-        requires_grad=False,
-    )
-    # Create causal + pad mask for this partial sequence
-    # Then run model(...) with encoder_output if necessary
-    pad_mask = text_utils.create_padding_mask(encoded_input, pad_idx=pad_idx)
-    causal_mask = text_utils.create_causal_mask(
-        seq_len=encoded_input.shape[1], batch_size=1
-    )
-    target_mask = Tensor(pad_mask + causal_mask, requires_grad=False)
-    return model(encoded_input, encoded_input, source_mask, target_mask)
-
-
 def evaluate(
     model: nn.Module,
-    test_data_loader: DataLoader,
-    vocab: dict,
-    pad_idx: int,
     bpe: tokenizer.BytePairEncoder,
-    epoch: int,
-    hyperparams: dict,
     seq_len: int,
     teacher_enforcing: bool = False,
 ):
+    # def transformer_predict(model: nn.Module, encoded_input: np.ndarray):
+    #     source_mask = Tensor(
+    #         text_utils.create_padding_mask(encoded_input, pad_idx=pad_idx),
+    #         requires_grad=False,
+    #     )
+    #     # Create causal + pad mask for this partial sequence
+    #     # Then run model(...) with encoder_output if necessary
+    #     pad_mask = text_utils.create_padding_mask(encoded_input, pad_idx=pad_idx)
+    #     causal_mask = text_utils.create_causal_mask(
+    #         seq_len=encoded_input.shape[1], batch_size=1
+    #     )
+    #     target_mask = Tensor(pad_mask + causal_mask, requires_grad=False)
+    #     return model(encoded_input, encoded_input, source_mask, target_mask)
+
     # TODO: Integrate this into the trainer class
-    model.eval()
-    test_data_loader.on_epoch_start()
-    test_loss = 0
-
-    for _ in tqdm(
-        range(hyperparams["eval_iters"]), desc="Test Evaluation", leave=False
-    ):
-        x, y, source_mask, target_mask, _ = next(iter(test_data_loader))
-        y_inp = np.zeros_like(y)
-        y_inp[:, 0] = vocab[b"<SOS>"]  # prepend <SOS> for decoder input
-        y_inp[:, 1:] = y[:, :-1]
-
-        pred_prob = model(
-            x,
-            y_inp,
-            source_mask,
-            target_mask,
-        )
-        loss = functional.cross_entropy(
-            pred_prob, y, pad_idx=pad_idx, label_smoothing=0.0
-        )
-        test_loss += loss.detach().data
-
-    logger.warning(
-        f"\nEpoch {epoch}\n"
-        f"| Train Loss: {epoch_loss / len(train_data_loader):.2f}\n"
-        f"| Gradient L2 Norm: {grad_l2_norm(model.parameters):.2f}\n"
-        f"| Test Loss: {test_loss / hyperparams['eval_iters']:.2f}\n"
-        f"| Test Perplexity: {np.exp(test_loss / hyperparams['eval_iters']):.2f} vs {len(vocab)} (vocab size)\n"
-        f"| Learning Rate: {lr:.4f}"
-    )
-
-    if teacher_enforcing:
-        text_utils.teacher_forcing_inference(
-            lambda x: transformer_predict(model, x),
-            bpe,
-            train_data[:seq_len],
-            vocab_idx2word=idx2word,
-        )
-    else:
-        text_utils.inference(
-            lambda x: transformer_predict(model, x),
-            bpe,
-            start_tokens=["<SOS>"],
-            max_length=seq_len,
-            temperature=1.0,
-        )
+    # if teacher_enforcing:
+    #     text_utils.teacher_forcing_inference(
+    #         lambda x: transformer_predict(model, x),
+    #         bpe,
+    #         train_data[:seq_len],
+    #         vocab_idx2word=idx2word,
+    #     )
+    # else:
+    #     text_utils.inference(
+    #         lambda x: transformer_predict(model, x),
+    #         bpe,
+    #         start_tokens=["<SOS>"],
+    #         max_length=seq_len,
+    #         temperature=1.0,
+    #     )
 
     model.train()
 
-    # Save checkpoint
-    checkpoint = {
-        "epoch": epoch,
-        "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "hyperparams": hyperparams,
-        "step_count": step_count,  # for learning rate scheduler
-    }
-    save_model(
-        checkpoint,
-        json_path=f"checkpoints/transformer_{epoch}.json",
-        npz_path=f"checkpoints/transformer_{epoch}.npz",
-    )
-    logger.info(f"Saving checkpoint to checkpoints/transformer_{epoch}.json and .npz")
 
-
-def initialize(hyperparams: dict, vocab: dict, pad_idx: int):
+def initialize(hyperparams: dict, vocab: dict):
     model = Transformer(
         vocab_size=len(vocab),
         hidden_size=hyperparams["d_model"],
         num_attention_heads=hyperparams["num_attention_heads"],
     )
     optimizer = optim.Adam(model.parameters, lr=0)
-    train_data_loader = DataLoader(
-        train_data,
-        vocab,
-        hyperparams["batch_size"],
-        hyperparams["seq_len"],
+    train_data_loader = LLMDataLoader(
+        data=train_data,
+        vocab=vocab,
+        batch_size=hyperparams["batch_size"],
+        seq_len=hyperparams["seq_len"],
         shuffle=True,
-        pad_idx=pad_idx,
+        include_decoder_input=True,  # By default, create (dec_inp) as well
+        sos_token=b"<SOS>",
+        pad_token=b"<PAD>",
     )
-    test_data_loader = DataLoader(
-        test_data,
-        vocab,
-        hyperparams["batch_size"] // 4,
-        hyperparams["seq_len"],
-        shuffle=True,
-        pad_idx=pad_idx,
+
+    test_data_loader = LLMDataLoader(
+        data=test_data,
+        vocab=vocab,
+        batch_size=hyperparams["batch_size"] // 4,
+        seq_len=hyperparams["seq_len"],
+        shuffle=False,
+        include_decoder_input=True,
+        sos_token=b"<SOS>",
+        pad_token=b"<PAD>",
     )
+
     return model, optimizer, train_data_loader, test_data_loader
 
 
@@ -523,7 +475,6 @@ if __name__ == "__main__":
         np.savez_compressed("bpe_mini_shakespeare.npz", encoded_data)
         logger.info("Saved encoded data to bpe_mini_shakespeare.npz")
 
-    pad_idx = vocab[b"<PAD>"]
     logger.info(
         f"Vocabulary size: {len(vocab)}, encoded_data length: {len(encoded_data)}"
     )
@@ -539,7 +490,7 @@ if __name__ == "__main__":
         loaded_ckpt = load_model(ckpt_json, ckpt_npz)
         HYPERPARAMS = loaded_ckpt["hyperparams"]
         model, optimizer, train_data_loader, test_data_loader = initialize(
-            HYPERPARAMS, vocab, pad_idx
+            HYPERPARAMS, vocab
         )
 
         model.load_state_dict(loaded_ckpt["model_state_dict"])
@@ -564,49 +515,25 @@ if __name__ == "__main__":
             "eval_iters": 20,
         }
         model, optimizer, train_data_loader, test_data_loader = initialize(
-            HYPERPARAMS, vocab, pad_idx
+            HYPERPARAMS, vocab
         )
         start_epoch = 0
         step_count = 0
 
     logger.info(f"Model parameters: {model.num_parameters()}")
 
-    for epoch in range(start_epoch, HYPERPARAMS["NUM_EPOCHS"]):
-        epoch_loss = 0.0
-        train_data_loader.on_epoch_start()
-        model.train()
+    trainer = LLMTrainer(
+        model=model,
+        optimizer=optimizer,
+        warmup_steps=HYPERPARAMS["warmup_steps"],
+        loss_fn=functional.cross_entropy,
+        epochs=HYPERPARAMS["NUM_EPOCHS"],
+        label_smoothing=0.1,
+        checkpoint_freq=1,
+    )
 
-        for x, y, source_mask, target_mask, _ in tqdm(
-            train_data_loader, desc="Step", leave=False
-        ):
-            step_count += 1
-            lr = get_lr(step_count, HYPERPARAMS["d_model"], HYPERPARAMS["warmup_steps"])
-            optimizer.lr = lr
-            optimizer.zero_grad()
-
-            # Prepare decoder input
-            y_inp = np.zeros_like(y)
-            y_inp[:, 0] = vocab[b"<SOS>"]
-            y_inp[:, 1:] = y[:, :-1]
-
-            # Compute predictions and loss
-            pred_prob = model(x, y_inp, source_mask, target_mask)
-            loss = functional.cross_entropy(
-                pred_prob, y, pad_idx=pad_idx, label_smoothing=0.1
-            )
-            loss.backward()
-            optimizer.step()
-            epoch_loss += loss.detach().data
-
-        if epoch % max(1, (HYPERPARAMS["NUM_EPOCHS"] // 10)) == 0:
-            evaluate(
-                model,
-                test_data_loader,
-                vocab,
-                pad_idx,
-                bpe,
-                epoch,
-                HYPERPARAMS,
-                seq_len=HYPERPARAMS["seq_len"],
-                teacher_enforcing=True,
-            )
+    trainer.fit(
+        train_data_loader=train_data_loader,
+        val_data_loader=test_data_loader,
+        pad_idx=train_data_loader.pad_idx,
+    )
