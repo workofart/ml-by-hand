@@ -162,3 +162,75 @@ class TestTokenizer(TestCase):
         decoded_text = self.bpe.decode(encoded_tokens)
 
         assert decoded_text == input_text, f"Expected {input_text}, got {decoded_text}"
+
+    def test_prepare_data(self):
+        """
+        Test the high-level prepare_data(...) method of BytePairEncoder.
+        Ensures it:
+        1) Creates (or uses) the vocabulary.
+        2) Splits text into blocks.
+        3) Encodes text and saves the result to a .npz file.
+        4) Respects overwrite_saved_file argument.
+        """
+        # 1) Create a small test text (with repeated words for merges)
+        test_text = (
+            "Hello Hello world\n\n"
+            "This is a test <|endoftext|>\n\n"
+            "Another paragraph <PAD>"
+        )
+
+        # 2) Choose a .npz path for this test
+        npz_test_path = "test_bpe_data.npz"
+
+        # Make sure the file doesn't exist from a previous run
+        if os.path.exists(npz_test_path):
+            os.remove(npz_test_path)
+
+        # 3) Call prepare_data for the first time (no existing .npz or vocab)
+        encoded_data = self.bpe.prepare_data(
+            raw_text_list=test_text.split("\n\n"),
+            npz_file_path=npz_test_path,
+            overwrite_saved_file=True,
+            split_token="<|endoftext|>",
+        )
+
+        # Assertions:
+        #    - The .npz file should be created
+        self.assertTrue(
+            os.path.exists(npz_test_path),
+            f".npz file was not created at {npz_test_path}",
+        )
+        #    - Encoded data should be non-empty
+        self.assertGreater(
+            len(encoded_data), 0, "Encoded data should not be empty after prepare_data"
+        )
+
+        # 4) Call prepare_data again with overwrite_saved_file=False
+        #    - It should load existing .npz file instead of re-encoding
+        with self.assertLogs(level="INFO") as log_context:
+            encoded_data_2 = self.bpe.prepare_data(
+                raw_text_list=test_text.split("\n\n"),
+                npz_file_path=npz_test_path,
+                overwrite_saved_file=False,
+                split_token="<|endoftext|>",
+            )
+        # Check that we see a log message about loading existing encoded data
+        relevant_logs = [
+            msg
+            for msg in log_context.output
+            if "loading it instead of re-encoding" in msg
+        ]
+        self.assertTrue(
+            any(relevant_logs),
+            "Expected a log message indicating we loaded existing encoded data instead of re-encoding.",
+        )
+        # The encoded data from the second call should match the first call
+        self.assertListEqual(
+            encoded_data.tolist(),
+            encoded_data_2.tolist(),
+            "Encoded data from the second call should match the first call when not overwriting.",
+        )
+
+        # Clean up the .npz file for future test runs
+        if os.path.exists(npz_test_path):
+            os.remove(npz_test_path)
