@@ -1,6 +1,6 @@
 from autograd.tensor import Tensor
 from autograd import nn, functional, optim
-from autograd.tools import trainer
+from autograd.tools import trainer, data
 import numpy as np
 
 """
@@ -402,11 +402,11 @@ if __name__ == "__main__":
     batch_size = 2
     seq_len = 40
     input_size = 24
-    memory_length = 80
-    memory_dim = 80
+    memory_length = 60
+    memory_dim = 60
     hidden_size = 10
     output_size = 24  # one-hot dimension size
-    epochs = 100
+    epochs = 30
 
     # Generate dummy data
     X, y = generate_copy_data(n_samples=10, seq_len=seq_len, input_size=input_size)
@@ -426,30 +426,28 @@ if __name__ == "__main__":
         output_size=output_size,
         hidden_size=hidden_size,
     )
-    t = trainer.Trainer(
+    train_data_loader = data.SimpleDataLoader(X, y, batch_size=batch_size, shuffle=True)
+    val_data_loader = data.SimpleDataLoader(
+        X_val, y_val, batch_size=batch_size, shuffle=True
+    )
+    t = trainer.SimpleTrainer(
         model=ntm,
         loss_fn=functional.cross_entropy,
-        optimizer=optim.Adam(ntm.parameters, lr=1e-3),
+        optimizer=optim.Adam(ntm.parameters, lr=5e-3),
         epochs=epochs,
-        batch_size=batch_size,
-        shuffle_each_epoch=True,
         output_type="logits",
     )
-    t.fit(X, y)
-    t.evaluate(X_val, y_val, num_samples_to_show=1)
+    t.fit(train_data_loader, val_data_loader)
 
     print("------------- Long-Short Memory Network ---------------")
     lstm = LSTM(input_size=input_size, hidden_size=hidden_size, output_size=output_size)
 
-    t = trainer.Trainer(
+    t = trainer.SimpleTrainer(
         model=lstm,
         loss_fn=functional.cross_entropy,
-        optimizer=optim.Adam(lstm.parameters, lr=1e-3),
+        optimizer=optim.Adam(lstm.parameters, lr=5e-3),
         epochs=epochs,
-        batch_size=batch_size,
-        shuffle_each_epoch=True,
         output_type="logits",
     )
 
-    t.fit(X, y)
-    t.evaluate(X_val, y_val, num_samples_to_show=1)
+    t.fit(train_data_loader, val_data_loader)

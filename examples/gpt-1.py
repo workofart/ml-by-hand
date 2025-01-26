@@ -8,13 +8,11 @@ from examples.transformers import (
     FeedForward,
 )
 from autograd.text.tokenizer import BytePairEncoder
-from autograd.tools.data import load_data, DataLoader
-from autograd.tools.trainer import get_lr, grad_l2_norm
+from autograd.tools.data import load_data, LLMDataLoader
+from autograd.tools.trainer import LLMTrainer, load_model_and_optimizer
 from autograd.text import utils as text_utils
 import logging
-import os
 import numpy as np
-from tqdm import tqdm
 
 
 class GPT1(nn.Module):
@@ -35,6 +33,8 @@ class GPT1(nn.Module):
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
+        self.hidden_size = hidden_size
+        self.max_seq_len = max_seq_len
         self.token_embedding = nn.Embedding(vocab_size, hidden_size)
         self.position_embedding = nn.Embedding(max_seq_len, hidden_size)
         self.dropout = nn.Dropout(dropout_prob)
@@ -107,168 +107,119 @@ class DecoderSublayer(nn.Module):
 
 
 if __name__ == "__main__":
+
+    def gpt_1_forward(model, batch_or_tokens, mode="train"):
+        if mode == "train":
+            X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_or_tokens
+            logits = model(X, causal_mask)
+            return logits, y
+        elif mode == "inference":
+            tokens = batch_or_tokens
+            logits = model(tokens, None)
+            return logits
+        else:
+            raise ValueError(f"Unknown mode {mode}, must be 'train' or 'inference'")
+
     logger = logging.getLogger(__name__)
 
-    # Based on the paper
-    # Section 4.1 Setup - Model Specifications
-    # Note: The current hyperparameters are not optimal, they are just used
-    # for overfitting the model quickly to test the model architecture and training
-    # loop are free of bugs.
-    # TODO: parse the hyperparams from CLI
-    HYPERPARAMS = {
-        "num_epochs": 90,
-        "warmup_steps": 100,
-        "num_attention_heads": 6,  # 12
-        "d_model": 144,  # 768, must be divisible by num_attention_heads
-        "batch_size": 64,  # 64
-        "dropout_prob": 0.1,
-        "seq_len": 128,  # 512
-        "num_decoder_layers": 6,
-        "eval_iters": 16,
-    }
-    # Whether to check the model performance by feeding the groundtruth tokens to compare whether the model can predict the next token correctly.
-    teacher_enforcing = True
-
-    url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
-    filename = "examples/tinyshakespeare.txt"
-
-    data = load_data(url, filename)
+    data = load_data(
+        "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt",
+        "examples/tinyshakespeare.txt",
+    )
     logger.info(f"{len(data)} characters in the entire dataset")
 
     # Create the vocabulary first
     bpe = BytePairEncoder(num_merges=3000, vocab_file_path="vocab.pkl")
-    vocab, idx2word = bpe.train_vocabulary(data, overwrite_saved_file=False)
-
-    # Now encode the subset of data
-    logger.info("Encoding the new data...")
-    data = data.split("\n\n")
-
-    if os.path.exists("bpe_mini_shakespeare.npz"):
-        logger.info("Found existing encoded data, loading it...")
-        with np.load("bpe_mini_shakespeare.npz", allow_pickle=True) as npz_data:
-            encoded_data = npz_data.get("arr_0")[:50000]
-    else:
-        logger.info("Encoding the new data...")
-        encoded_data = np.array(bpe.encode("<|endoftext|>".join(data)))
-        np.savez_compressed("bpe_mini_shakespeare.npz", encoded_data)
-        logger.info("Saved encoded data to bpe_mini_shakespeare.npz")
-
-    pad_idx = vocab[b"<PAD>"]
-    logger.info(
-        f"Vocabulary size: {len(vocab)}, encoded_data length: {len(encoded_data)}"
-    )
-    logger.info(f"Data: {data[:3]}, Encoded_Data: {encoded_data[:50]}")
+    encoded_data = bpe.prepare_data(
+        raw_text_list=data.split("\n\n"),
+        npz_file_path="bpe_mini_shakespeare.npz",
+        overwrite_saved_file=False,
+        split_token="<|endoftext|>",
+    )[:50000]
 
     # encoded_data is a list of integers without the concept of samples
     n = int(len(encoded_data) * 0.9)
     train_data, test_data = encoded_data[:n], encoded_data[n:]
 
-    model = GPT1(
-        vocab_size=len(vocab),
-        hidden_size=HYPERPARAMS["d_model"],
-        num_attention_heads=HYPERPARAMS["num_attention_heads"],
-        dropout_prob=HYPERPARAMS["dropout_prob"],
-        max_seq_len=int(HYPERPARAMS["seq_len"] * 1.1),
-        num_decoder_layers=HYPERPARAMS["num_decoder_layers"],
-    )
-    model.train()
-    logger.info(f"Model parameters: {model.num_parameters()}")
+    # TODO: parse the hyperparams from CLI
+    # Based on the paper
+    # Section 4.1 Setup - Model Specifications
+    # Note: The current hyperparameters are not optimal, they are just used
+    # for overfitting the model quickly to test the model architecture and training
+    # loop are free of bugs.
+    CONFIG = {
+        "model_kwargs": {
+            "vocab_size": len(bpe._unicode_to_int_vocab),
+            "num_attention_heads": 6,  # 12
+            "hidden_size": 144,  # 768, must be divisible by num_attention_heads
+            "dropout_prob": 0.1,
+            "max_seq_len": 128,  # 512
+            "num_decoder_layers": 6,
+        },
+        "optimizer_kwargs": {
+            "lr": 0.0  # We may schedule it later with warmup
+        },
+        "num_epochs": 90,
+        "warmup_steps": 100,
+        "eval_iters": 16,
+        "batch_size": 64,  # 64
+        # Whether to check the model performance by feeding the groundtruth tokens to compare whether the model can predict the next token correctly.
+        "teacher_enforcing": True,
+        # Whether to load from a checkpoint
+        "resume_epoch": None,
+    }
 
-    optimizer = optim.Adam(model.parameters, lr=0)
-    train_data_loader = DataLoader(
-        train_data,
-        vocab,
-        HYPERPARAMS["batch_size"],
-        HYPERPARAMS["seq_len"],
+    model, optimizer, checkpoint = load_model_and_optimizer(
+        GPT1,
+        optim.Adam,
+        model_kwargs=CONFIG["model_kwargs"],
+        optimizer_kwargs=CONFIG["optimizer_kwargs"],
+        resume_epoch=CONFIG["resume_epoch"],
+    )
+
+    hparams = checkpoint.get("hyperparams", CONFIG)
+
+    train_data_loader = LLMDataLoader(
+        data=train_data,
+        vocab=bpe._unicode_to_int_vocab,
+        batch_size=hparams["batch_size"],
+        seq_len=model.max_seq_len,
         shuffle=True,
-        pad_idx=pad_idx,
+        include_decoder_input=False,
     )
-    test_data_loader = DataLoader(
-        test_data,
-        vocab,
-        HYPERPARAMS["batch_size"] // 4,
-        HYPERPARAMS["seq_len"],
-        shuffle=True,
-        pad_idx=pad_idx,
+    test_data_loader = LLMDataLoader(
+        data=test_data,
+        vocab=bpe._unicode_to_int_vocab,
+        batch_size=hparams["batch_size"] // 4,
+        seq_len=model.max_seq_len,
+        shuffle=False,
+        include_decoder_input=False,
     )
-    step_count = 0
-    lr = 0
 
-    for epoch in range(HYPERPARAMS["num_epochs"]):
-        epoch_loss = 0.0
-        train_data_loader.on_epoch_start()
+    trainer = LLMTrainer(
+        model=model,
+        optimizer=optimizer,
+        loss_fn=functional.cross_entropy,
+        epochs=hparams["num_epochs"],
+        warmup_steps=hparams["warmup_steps"],
+        label_smoothing=0.1,
+        checkpoint_freq=1,
+        forward_fn=gpt_1_forward,
+        tokenizer=bpe,
+        teacher_enforcing=hparams["teacher_enforcing"],
+        hyperparams=hparams,
+        checkpoint=checkpoint,
+    )
 
-        for x, y, _, __, causal_mask in tqdm(
-            train_data_loader, desc="Step", leave=False
-        ):
-            step_count += 1
-            lr = get_lr(step_count, HYPERPARAMS["d_model"], HYPERPARAMS["warmup_steps"])
-            optimizer.lr = lr
-            optimizer.zero_grad()
+    trainer.fit(train_data_loader, test_data_loader)
 
-            # pred_probs is (batch_size, sequence_len, vocabulary_size)
-            # No need the initial <SOS> token for the decoder input
-            pred_prob = model(
-                x,
-                causal_mask,
-            )
-            # y has shape (batch_size, seq_len) and is already a shifted sequence
-            # compared to x
-            loss = functional.cross_entropy(
-                pred_prob, y, pad_idx=pad_idx, label_smoothing=0.1
-            )
-            loss.backward()
-            optimizer.step()
-            epoch_loss += loss.detach().data
-
-        if epoch % max(1, (HYPERPARAMS["num_epochs"] // 10)) == 0:
-            model.eval()
-            test_data_loader.on_epoch_start()
-            test_loss = 0
-
-            for _ in tqdm(
-                range(HYPERPARAMS["eval_iters"]), desc="Test Evaluation", leave=False
-            ):
-                x, y, _, __, causal_mask = next(iter(test_data_loader))
-                pred_prob = model(
-                    x,
-                    causal_mask,
-                )
-                loss = functional.cross_entropy(
-                    pred_prob, y, pad_idx=pad_idx, label_smoothing=0.0
-                )
-                test_loss += loss.detach().data
-
-            logger.warning(
-                f"\nEpoch {epoch}\n"
-                f"| Train Loss: {epoch_loss / len(train_data_loader):.2f}\n"
-                f"| Gradient L2 Norm: {grad_l2_norm(model.parameters):.2f}\n"
-                f"| Test Loss: {test_loss / HYPERPARAMS['eval_iters']:.2f}\n"
-                f"| Test Perplexity: {np.exp(test_loss / HYPERPARAMS['eval_iters']):.2f} vs {len(vocab)} (vocab size)\n"
-                f"| Learning Rate: {lr:.4f}"
-            )
-
-            if teacher_enforcing:
-                text_utils.teacher_forcing_inference(
-                    lambda x: model(
-                        x,
-                        text_utils.create_causal_mask(seq_len=x.shape[1], batch_size=1),
-                    ),  # shape: (1, seq_len, vocab_size)
-                    bpe,
-                    train_data[: HYPERPARAMS["seq_len"]],
-                    vocab_idx2word=idx2word,
-                )
-            else:
-                text_utils.inference(
-                    lambda x: model(
-                        x,
-                        text_utils.create_causal_mask(seq_len=x.shape[1], batch_size=1),
-                    ),  # shape: (1, seq_len, vocab_size)
-                    bpe,
-                    start_tokens=["All"],  # Dummy token to start the generation
-                    max_length=int(HYPERPARAMS["seq_len"] * 1.1),
-                    temperature=1.0,
-                    top_k=10,
-                )
-
-            model.train()
+    text_utils.inference(
+        prediction_func=lambda seq_so_far: gpt_1_forward(
+            model, seq_so_far, mode="inference"
+        ),
+        bpe=bpe,
+        start_tokens=["All"],  # Dummy token to start the generation
+        max_length=int(model.max_seq_len * 1.1),
+        temperature=1.0,
+        top_k=10,
+    )

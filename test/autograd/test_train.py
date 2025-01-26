@@ -4,7 +4,8 @@ from sklearn.datasets import load_breast_cancer, load_diabetes
 from unittest import TestCase
 import logging
 
-from autograd.tools.trainer import Trainer
+from autograd.tools.trainer import SimpleTrainer
+from autograd.tools.data import SimpleDataLoader
 from autograd.tools.metrics import accuracy, mean_squared_error
 
 logger = logging.getLogger(__name__)
@@ -52,14 +53,15 @@ class TestTrain(TestCase):
 
         loss_fn = functional.binary_cross_entropy
         optimizer = optim.SGD(model.parameters, lr=1e-3)
-        trainer = Trainer(
+        train_data_loader = SimpleDataLoader(X, y, batch_size=32, shuffle=True)
+        trainer = SimpleTrainer(
             model,
             loss_fn,
             optimizer,
             epochs=1000,
             output_type="sigmoid",
         )
-        trainer.fit(X, y)
+        trainer.fit(train_data_loader)
 
         model.eval()
         y_pred = model(X).data
@@ -78,17 +80,19 @@ class TestTrain(TestCase):
         X = (X - X.mean(axis=0)) / (X.std(axis=0) + eps)
         y = (y - y.mean()) / (y.std() + eps)
 
+        train_data_loader = SimpleDataLoader(X, y, batch_size=32, shuffle=True)
+
         model = RegressionModel(
             input_size=X.shape[-1], hidden_size=32, output_size=1
         )  # Smaller network
-        trainer = Trainer(
+        trainer = SimpleTrainer(
             model,
             functional.mean_squared_loss,
-            optim.Adam(model.parameters, lr=1e-5),  # Smaller learning rate
+            optim.Adam(model.parameters, lr=1e-4),  # Smaller learning rate
             epochs=100,
             output_type=None,
         )
-        trainer.fit(X, y)
+        trainer.fit(train_data_loader)
 
         model.eval()
         y_pred = model(X).data

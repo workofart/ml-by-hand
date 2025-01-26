@@ -1,14 +1,10 @@
 from collections import Counter
 import os
 import regex
-from typing import (
-    ByteString,
-    Dict,
-    List,
-    Tuple,
-)
+from typing import ByteString, Dict, List, Tuple
 import logging
 import pickle
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +31,63 @@ class BytePairEncoder:
 
         # start merged token ids from the first unused index after the base vocabulary
         self.new_idx = max(self._unicode_to_int_vocab.values()) + 1
+
+    def prepare_data(
+        self,
+        raw_text_list: List[str],
+        npz_file_path: str = "bpe_encoded.npz",
+        overwrite_saved_file: bool = False,
+        split_token: str = "<|endoftext|>",
+    ) -> Tuple[np.ndarray]:
+        """
+        High-level method that:
+          1) Trains (or loads) the BPE vocabulary on the given raw_text_list.
+          2) Encodes the text into a NumPy array of token IDs.
+          3) Caches the result to an npz file (unless it already exists and we're not overwriting).
+
+        You can choose to use this or the individual methods below for fine-grain control:
+        - train_vocabulary()
+        - encode_text()
+
+        Args:
+        - raw_text_list: List[str]
+            The list of texts from which to train or apply BPE. If there is only one string, wrap it with [raw_text] before calling this method.
+        - npz_file_path: str
+            File path to store (or load) the encoded .npz data.
+        - overwrite_saved_file: bool
+            Whether to overwrite an existing .npz file with newly encoded data.
+        - split_token: str, optional
+            Delimiter to insert between data blocks.
+
+        Returns:
+        - encoded_data : np.ndarray
+            The encoded tokens as a NumPy array.
+        """
+        joined_text = split_token.join(raw_text_list)
+
+        # 1) Train the vocabulary if needed
+        self.train_vocabulary(joined_text, overwrite_saved_file=overwrite_saved_file)
+
+        # 2) Check if we already have an encoded .npz file
+        if os.path.exists(npz_file_path) and not overwrite_saved_file:
+            logger.info(
+                f"Found existing encoded data at '{npz_file_path}', "
+                "loading it instead of re-encoding."
+            )
+            with np.load(npz_file_path, allow_pickle=True) as npz_data:
+                encoded_data = npz_data["arr_0"]
+        else:
+            # Re-encode from raw blocks
+            encoded_data = np.array(self.encode(joined_text))
+
+            # Save to disk
+            np.savez_compressed(npz_file_path, encoded_data)
+            logger.info(f"Saved newly encoded data to {npz_file_path}")
+
+        logger.info(f"Vocabulary size: {len(self._unicode_to_int_vocab)}")
+        logger.info(f"Encoded data length: {len(encoded_data)}")
+        logger.debug(f"Sample encoded data (first 50 tokens): {encoded_data[:50]}")
+        return encoded_data
 
     def _load_dictionary(self) -> None:
         if not os.path.exists(self.vocab_file_path):
@@ -82,7 +135,12 @@ class BytePairEncoder:
     def train_vocabulary(
         self, input_text: str, overwrite_saved_file: bool = False
     ) -> Tuple[Dict[ByteString, int], Dict[int, ByteString]]:
+        """
+        Train the BPE vocabulary on `input_text`. Saves the results to disk
+        unless the vocab is already loaded and `overwrite_saved_file` is False.
+        """
         if self._unicode_to_int_vocab and not overwrite_saved_file:
+            # Already loaded a vocab from file
             return self._unicode_to_int_vocab, self._int_to_unicode_vocab
 
         text_chunks = self._pretokenize(input_text)
@@ -133,11 +191,14 @@ class BytePairEncoder:
 
             if (i + 1) % 100 == 0:
                 logger.info(
-                    f"[{i+1}/{self.num_merges} merge] Best Pair Merged with {pair_counts[best_pair]} occurrences and {len(self._unicode_to_int_vocab)} tokens in vocab"
+                    f"[{i+1}/{self.num_merges} merge] Best Pair Merged "
+                    f"({pair_counts[best_pair]} occurrences). "
+                    f"Vocab size: {len(self._unicode_to_int_vocab)}"
                 )
 
+        # Save the newly learned vocab
         with open(self.vocab_file_path, "wb") as f:
-            logger.info("Saving the vocabulary to disk")
+            logger.info(f"Saving the vocabulary to {self.vocab_file_path}")
             pickle.dump(
                 (
                     self._unicode_to_int_vocab,
@@ -153,9 +214,12 @@ class BytePairEncoder:
         """
         We need to perform the merges that appear in the vocabulary
         Merge the highest-frequency pair of tokens in the text, then repeat
+
+        Break `input_text` into tokens (characters plus merges), then return
+        a list of token IDs.
         """
         text_chunks = self._pretokenize(input_text)
-        logger.info(f"Text chunks: {text_chunks[:20]}")
+        logger.debug(f"Text chunks: {text_chunks[:20]}")
 
         # Convert a list of strings to a list of integers,
         # where each integer is the index of the character in the vocabulary
@@ -168,6 +232,7 @@ class BytePairEncoder:
             else:
                 for b_int in list(chunk.encode("utf-8")):
                     single_byte = bytes([b_int])  # e.g. b"\x46"
+                    # Convert single_byte -> int ID from base vocab
                     byte_encoded_chars.append(self._unicode_to_int_vocab[single_byte])
         logger.info(f"Byte encoded chars: {byte_encoded_chars[:10]}")
 
@@ -192,9 +257,11 @@ class BytePairEncoder:
         Returns a dict: char -> int, for 0..255, plus expansions for non-printable control characters
         """
         unicode_to_int_vocab: Dict[ByteString, int] = {}
+        # Base 256
         for i in range(256):
             # Each i is mapped to the single byte b"\x00" ... b"\xff"
             unicode_to_int_vocab[bytes([i])] = i
+        # Add special tokens
         for i, special_char in enumerate(self.SPECIAL_TOKENS):
             unicode_to_int_vocab[special_char.encode("utf-8")] = 256 + i
         return unicode_to_int_vocab
@@ -272,22 +339,36 @@ class BytePairEncoder:
 
 
 if __name__ == "__main__":
-    from autograd.tools.data import load_data
+    # Example usage
+    from autograd.tools.data import (
+        load_data,
+    )  # your custom data loader, adjust as needed
 
     url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
     filename = "examples/tinyshakespeare.txt"
 
-    data = load_data(url, filename)
+    # 1) Load raw text
+    data = load_data(url, filename)[:50]
 
+    # 2) Create BPE instance
     bpe = BytePairEncoder(num_merges=50, vocab_file_path="tiny_shakespeare_vocab.pkl")
-    with open("examples/tinyshakespeare.txt", "r", encoding="utf-8") as f:
-        original_text = f.read()[:10000]
-    bpe.train_vocabulary(original_text, overwrite_saved_file=True)
 
-    subset_text = original_text[:100]
-    encoded_tokens = bpe.encode(subset_text)
-    decoded_tokens = bpe.decode(encoded_tokens)
-    logger.info(f"Size of vocabulary: {len(bpe._int_to_unicode_vocab)}")
-    logger.info(f"Original text: {subset_text}")
-    logger.info(f"Encoded text: {encoded_tokens}")
-    logger.info(f"Decoded text: {decoded_tokens}")
+    # 3) Prepare data:
+    #    - This trains the vocab if not already loaded or if overwrite=True
+    #    - Encodes the text
+    #    - Saves (or loads) from 'bpe_mini_shakespeare.npz'
+    encoded_data = bpe.prepare_data(
+        raw_text_list=data.split("\n\n"),
+        npz_file_path="bpe_tokenizer_demo.npz",
+        overwrite_saved_file=True,
+        split_token="<|endoftext|>",
+    )
+
+    # 4) Try a small decode test
+    logger.info(f"Size of final vocabulary: {len(bpe._int_to_unicode_vocab)}")
+    logger.info(f"Encoded data length: {len(encoded_data)}")
+
+    decoded_subset = bpe.decode(encoded_data)
+    logger.info(f"Original text: {data}")
+    logger.info(f"Encoded text: {encoded_data}")
+    logger.info(f"Decoded text: {decoded_subset}")

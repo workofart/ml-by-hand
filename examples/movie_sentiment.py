@@ -5,8 +5,9 @@ from autograd.tools.data import (
     train_test_split,
 )
 from autograd.text.utils import create_vocabulary, text_to_one_hot_and_sparse
+from autograd.tools.data import SimpleDataLoader
 from autograd.tools.metrics import accuracy
-from autograd.tools.trainer import Trainer
+from autograd.tools.trainer import SimpleTrainer
 from autograd import nn, optim, functional
 
 
@@ -44,14 +45,18 @@ class LSTM(nn.Module):
         self.fc = nn.Linear(hidden_size, output_size)
 
     def forward(self, x):
-        x = self.rnn(x)
+        x, C_t = self.rnn(x)  # hidden_state, last_cell_state
         x = self.batchnorm(x)
         x = self.fc(x)
         return functional.sigmoid(x)
 
 
-def main(model: nn.Module):
-    trainer = Trainer(
+def main(
+    model: nn.Module,
+    train_data_loader: SimpleDataLoader,
+    test_data_loader: SimpleDataLoader,
+):
+    trainer = SimpleTrainer(
         model,
         loss_fn=functional.binary_cross_entropy,
         optimizer=optim.Adam(model.parameters, lr=0.001),
@@ -62,14 +67,16 @@ def main(model: nn.Module):
     print(
         f"Training {model.__class__.__name__} Neural Network for movie sentiment analysis..."
     )
-    trainer.fit(X_train, y_train)
 
-    print("Evaluating model...")
-    model.eval()
-    y_pred = model(X_test).data
-    # convert sigmoid to binary
-    y_pred = (y_pred > 0.5).astype(int).squeeze()
-    print(f"Test Accuracy: {accuracy(y_pred, y_test)}")
+    trainer.fit(train_data_loader=train_data_loader, test_data_loader=test_data_loader)
+
+    # print("Evaluating model...")
+    for X_test, y_test in test_data_loader:
+        model.eval()
+        y_pred = model(X_test).data
+        # convert sigmoid to binary
+        y_pred = (y_pred > 0.5).astype(int).squeeze()
+        print(f"Test Accuracy: {accuracy(y_pred, y_test)}")
 
 
 if __name__ == "__main__":
@@ -83,9 +90,11 @@ if __name__ == "__main__":
 
     data = pd.read_csv("examples/IMDB Dataset.csv").to_numpy()
     X_train, X_test, y_train, y_test, vocab = process_data(data)
+    train_data_loader = SimpleDataLoader(X_train, y_train, batch_size=32, shuffle=True)
+    test_data_loader = SimpleDataLoader(X_test, y_test, batch_size=32, shuffle=False)
 
     model = RNN(input_size=len(vocab), hidden_size=32, output_size=1)
-    main(model)
+    main(model, train_data_loader, test_data_loader)
 
     model = LSTM(input_size=len(vocab), hidden_size=64, output_size=1)
-    main(model)
+    main(model, train_data_loader, test_data_loader)

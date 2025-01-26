@@ -6,7 +6,7 @@ import numpy as np
 from autograd.nn import Module
 from autograd.init import xavier_uniform
 from autograd.tensor import Tensor
-from autograd.tools.model import load_model, save_model
+from autograd.tools.model import load_checkpoint, save_checkpoint
 
 
 class MockModule(Module):
@@ -40,7 +40,7 @@ class TestModel(TestCase):
         # 1. Save the original parameters
         original_params = deepcopy(self.model.parameters)
 
-        save_model(
+        save_checkpoint(
             self.model.state_dict(), json_path=self.json_path, npz_path=self.npz_path
         )
 
@@ -68,7 +68,7 @@ class TestModel(TestCase):
         )
 
         # 3. Load the previously saved parameters (and states) from checkpoint
-        loaded_sd = load_model(json_path=self.json_path, npz_path=self.npz_path)
+        loaded_sd = load_checkpoint(json_path=self.json_path, npz_path=self.npz_path)
         self.model.load_state_dict(loaded_sd)
 
         # Check that parameters are back to original
@@ -88,7 +88,7 @@ class TestModel(TestCase):
         new_model = MockModule(999, kwarg0="testing_kwarg0")
         original_params = deepcopy(new_model.parameters)
         # Save the model including the states
-        save_model(
+        save_checkpoint(
             self.model.state_dict(), json_path=self.json_path, npz_path=self.npz_path
         )
 
@@ -96,7 +96,7 @@ class TestModel(TestCase):
         new_model.stateful_states = np.array([999, 999, 999])
 
         # 2. Load only weights (parameters) from the checkpoint, ignoring states
-        weights_only_data = load_model(
+        weights_only_data = load_checkpoint(
             json_path=self.json_path, npz_path=self.npz_path, weights_only=True
         )
         new_model.load_state_dict(weights_only_data)

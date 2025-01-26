@@ -1,14 +1,15 @@
-from autograd import nn, optim, functional
-from openml.datasets import get_dataset
 import logging
 import numpy as np
-
-from autograd.tools.data import train_test_split
-from autograd.tools.trainer import Trainer
+from autograd import nn, optim, functional
+from openml.datasets import get_dataset
+from autograd.tools.data import train_test_split, SimpleDataLoader
+from autograd.tools.trainer import SimpleTrainer
 from autograd.tools.metrics import accuracy, precision
 
 logger = logging.getLogger(__name__)
 np.random.seed(1337)
+
+# --- Model Definitions ---
 
 
 class MnistResNet(nn.Module):
@@ -45,11 +46,8 @@ class MnistMultiClassClassifier(nn.Module):
             x = self.bn1(x)
         x = functional.relu(x)
 
-        x = self.h2(x)
-        x = functional.relu(x)
-
-        x = self.h3(x)
-        return x
+        x = functional.relu(self.h2(x))
+        return self.h3(x)
 
 
 class MnistConvolutionalClassifier(nn.Module):
@@ -109,99 +107,153 @@ class MnistOneVsRestBinaryClassifier(nn.Module):
         x = functional.relu(self.h1(x))
         x = functional.relu(self.h2(x))
         x = self.h3(x)
-        if not self.output_logits:
-            return functional.sigmoid(x)
-        return x
+        return x if self.output_logits else functional.sigmoid(x)
 
 
-def train_mnist_with_hinge_loss(X_train, y_train, X_test, y_test):
+# --- Training Functions ---
+
+
+def train_mnist_with_hinge_loss(
+    X_train, y_train, X_test, y_test, batch_size=32, epochs=10
+):
+    """
+    Trains 10 one-vs-rest binary classifiers using hinge loss:
+      For each digit d in [0..9], label the data as +1 if y=d, else -1.
+      Then train a separate MnistOneVsRestBinaryClassifier for each digit.
+
+    Args:
+      X_train, y_train: Full training data/labels (numpy arrays).
+      X_test, y_test: Full test data/labels (numpy arrays).
+      batch_size (int): Batch size for the SimpleDataLoader.
+      epochs (int): Number of epochs for each binary classifier.
+    """
     logger.info("=" * 50)
-    logger.info("Starting to train One vs Rest MNIST model")
+    logger.info("Starting to train One vs Rest MNIST model (Hinge Loss)")
     logger.info("=" * 50)
+
     one_vs_rest_models = []
-    for digit in range(10):
-        logger.info(f"Training {digit=}")
-        y_binary = (y_train == digit).astype(int)
-        y_binary = 2 * y_binary - 1  # Convert from {0,1} to {-1,1}
-        model = MnistOneVsRestBinaryClassifier(output_logits=True)
 
-        trainer = Trainer(
+    def preprocess_for_digit(x, y, digit):
+        # Convert y into {+1, -1}
+        y_bin = 2 * (y == digit).astype(int) - 1
+        return x, y_bin
+
+    for digit in range(10):
+        logger.info(f"Training digit={digit}")
+        train_data_loader = SimpleDataLoader(
+            X_train.copy(), y_train.copy(), batch_size, shuffle=True
+        )
+        test_data_loader = SimpleDataLoader(
+            X_test.copy(), y_test.copy(), batch_size, shuffle=False
+        )
+
+        train_data_loader.preprocess(lambda x, y: preprocess_for_digit(x, y, digit))
+        test_data_loader.preprocess(lambda x, y: preprocess_for_digit(x, y, digit))
+
+        model = MnistOneVsRestBinaryClassifier(output_logits=True)
+        trainer = SimpleTrainer(
             model=model,
-            loss_fn=lambda pred, true: functional.hinge_loss(
-                pred, true, reduction="mean"
-            ),
+            loss_fn=lambda p, t: functional.hinge_loss(p, t, reduction="mean"),
             optimizer=optim.Adam(model.parameters, lr=1e-3),
-            epochs=10,
+            epochs=epochs,
             output_type="logits",
         )
-        trainer.fit(X_train, np.expand_dims(y_binary, axis=-1).astype(int))
+        trainer.fit(train_data_loader, test_data_loader)
         one_vs_rest_models.append(model)
 
-    logger.info("Training complete")
-    # 10 models, each model predicts probability of digit 0-9
-    # predictions_by_digit[i][j] is the probability that the ith test example is the jth digit
-    predictions_by_digit = np.array(
-        [model(X_test).data for model in one_vs_rest_models]
-    ).T
+    logger.info("Training complete! Now evaluating on the original test set...")
+    predictions_by_digit = np.array([m(X_test).data for m in one_vs_rest_models])
+    predictions_by_digit = np.transpose(predictions_by_digit, (1, 0, 2)).squeeze(-1)
+    pred_digits = predictions_by_digit.argmax(axis=1)
+    acc_val = accuracy(pred_digits, y_test.astype(int))
+    prec_val = precision(pred_digits, y_test.astype(int))
 
-    logger.info(
-        f"Test Accuracy: {accuracy(predictions_by_digit.argmax(axis=2).squeeze(), y_test.astype(int))}"
-    )
-    logger.info(
-        f"Test Precision: {precision(predictions_by_digit.argmax(axis=2).squeeze(), y_test.astype(int))}"
-    )
+    logger.info(f"Final Test Accuracy: {acc_val:.4f}")
+    logger.info(f"Final Test Precision: {prec_val:.4f}")
 
 
-def train_mnist_one_vs_rest_model(X_train, y_train, X_test, y_test):
+def train_mnist_one_vs_rest_model(
+    X_train, y_train, X_test, y_test, batch_size=32, epochs=10
+):
+    """
+    Trains 10 one-vs-rest binary classifiers using binary cross-entropy:
+      For each digit d in [0..9], label the data as 1 if y=d, else 0.
+    """
     logger.info("=" * 50)
-    logger.info("Starting to train One vs Rest MNIST model")
+    logger.info("Starting to train One vs Rest MNIST model (Binary Cross Entropy)")
     logger.info("=" * 50)
+
     one_vs_rest_models = []
+
+    def preprocess_for_digit(x, y, digit):
+        """
+        Convert y from {0,1,2,...,9} into {0,1},
+        where 1 means 'this sample is digit == d', else 0.
+        """
+        y_bin = (y == digit).astype(int)
+        return x, y_bin
+
     for digit in range(10):
-        logger.info(f"Training {digit=}")
-        y_binary = (y_train == digit).astype(int)
+        logger.info(f"Training digit={digit}")
+        train_data_loader = SimpleDataLoader(
+            X_train.copy(), y_train.copy(), batch_size, shuffle=True
+        )
+        test_data_loader = SimpleDataLoader(
+            X_test.copy(), y_test.copy(), batch_size, shuffle=False
+        )
+
+        train_data_loader.preprocess(lambda x, y: preprocess_for_digit(x, y, digit))
+        test_data_loader.preprocess(lambda x, y: preprocess_for_digit(x, y, digit))
+
         model = MnistOneVsRestBinaryClassifier(output_logits=False)
-        trainer = Trainer(
+        trainer = SimpleTrainer(
             model=model,
             loss_fn=functional.binary_cross_entropy,
             optimizer=optim.Adam(model.parameters, lr=1e-3),
-            epochs=10,
+            epochs=epochs,
             output_type="sigmoid",
         )
-        trainer.fit(X_train, y_binary.astype(int))
+        trainer.fit(train_data_loader, test_data_loader)
         one_vs_rest_models.append(model)
 
-    logger.info("Training complete")
-    # 10 models, each model predicts probability of digit 0-9
-    # predictions_by_digit[i][j] is the probability that the ith test example is the jth digit
-    predictions_by_digit = np.array(
-        [model(X_test).data for model in one_vs_rest_models]
-    ).T
+    logger.info("Training complete! Now evaluating on the original test set...")
+    predictions_by_digit = np.array([m(X_test).data for m in one_vs_rest_models])
+    predictions_by_digit = np.transpose(predictions_by_digit, (1, 0, 2)).squeeze(-1)
+    pred_digits = predictions_by_digit.argmax(axis=1)
 
-    logger.info(
-        f"Test Accuracy: {accuracy(predictions_by_digit.argmax(axis=2).squeeze(), y_test.astype(int))}"
-    )
-    logger.info(
-        f"Test Precision: {precision(predictions_by_digit.argmax(axis=2).squeeze(), y_test.astype(int))}"
-    )
+    acc_val = accuracy(pred_digits, y_test.astype(int))
+    prec_val = precision(pred_digits, y_test.astype(int))
+    logger.info(f"Final Test Accuracy: {acc_val:.4f}")
+    logger.info(f"Final Test Precision: {prec_val:.4f}")
 
 
 def train_mnist_multiclass_model(
-    X_train, y_train, X_test, y_test, optimizer, model, loss_fn, epochs=50, msg=""
+    train_data_loader, test_data_loader, optimizer, model, loss_fn, epochs=50, msg=""
 ):
     logger.info("=" * 66)
-    logger.info(f"Starting to train Multi-class MNIST model {msg}")
+    logger.info(f"Starting Multi-class MNIST model {msg}")
     logger.info("=" * 66)
-    trainer = Trainer(
+    trainer = SimpleTrainer(
         model=model,
         loss_fn=loss_fn,
         optimizer=optimizer,
         epochs=epochs,
-        batch_size=256,
         output_type="logits",
     )
-    trainer.fit(X_train, y_train)
-    trainer.evaluate(X_test, y_test)
+    trainer.fit(train_data_loader, test_data_loader)
+
+    # ---- Make predictions on a small sample from test_data_loader ----
+    x_sample, y_sample = next(iter(test_data_loader))  # get first batch
+    model.eval()
+    y_pred = model(x_sample)
+    pred_labels = np.argmax(y_pred.data, axis=1)
+
+    accuracy_val = accuracy(pred_labels, y_sample)
+    logger.info(f"Accuracy on Test Batch: {accuracy_val:.4f}")
+
+    logger.info("Sample Predictions on Test Batch:")
+    for i in range(min(5, len(pred_labels))):
+        logger.info(f"  Predicted: {pred_labels[i]}, Actual: {y_sample[i]}")
 
 
 if __name__ == "__main__":
@@ -213,62 +265,56 @@ if __name__ == "__main__":
 
     X = X[:3000]
     y = y[:3000]
-    logger.info(f"X shape: {X.shape}")
-    logger.info(f"y shape: {y.shape}")
+    logger.info(f"X shape: {X.shape}, y shape: {y.shape}")
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.1)
+
+    train_data_loader = SimpleDataLoader(X_train, y_train, batch_size=256, shuffle=True)
+    val_data_loader = SimpleDataLoader(X_test, y_test, batch_size=256, shuffle=False)
 
     model = MnistResNet()
     logger.info(f"Number of parameters: {model.num_parameters()}")
     train_mnist_multiclass_model(
-        X_train,
-        y_train,
-        X_test,
-        y_test,
-        optimizer=optim.Adam(model.parameters, lr=1e-3),
-        model=model,
-        loss_fn=functional.cross_entropy,
+        train_data_loader,
+        val_data_loader,
+        optim.Adam(model.parameters, lr=1e-3),
+        model,
+        functional.cross_entropy,
         epochs=10,
-        msg="Convolutional Neural Network (with batch norm, Adam optimizer)",
+        msg="ResNet-based",
     )
 
     model = MnistMultiClassClassifier(batch_norm=False)
     train_mnist_multiclass_model(
-        X_train,
-        y_train,
-        X_test,
-        y_test,
-        optimizer=optim.SGD(model.parameters, lr=1e-3),
-        model=model,
-        loss_fn=functional.cross_entropy,
+        train_data_loader,
+        val_data_loader,
+        optim.SGD(model.parameters, lr=1e-3),
+        model,
+        functional.cross_entropy,
         epochs=100,
-        msg="(without batch norm, SGD optimizer)",
+        msg="(MLP, no batch norm, SGD)",
     )
 
     model = MnistMultiClassClassifier(batch_norm=True)
     train_mnist_multiclass_model(
-        X_train,
-        y_train,
-        X_test,
-        y_test,
-        optimizer=optim.SGD(model.parameters, lr=1e-3),
-        model=model,
-        loss_fn=functional.cross_entropy,
+        train_data_loader,
+        val_data_loader,
+        optim.SGD(model.parameters, lr=1e-3),
+        model,
+        functional.cross_entropy,
         epochs=100,
-        msg="(with batch norm, SGD optimizer)",
+        msg="(MLP, batch norm, SGD)",
     )
 
     model = MnistMultiClassClassifier(batch_norm=True)
     train_mnist_multiclass_model(
-        X_train,
-        y_train,
-        X_test,
-        y_test,
-        optimizer=optim.Adam(model.parameters, lr=1e-3),
-        model=model,
-        loss_fn=functional.cross_entropy,
+        train_data_loader,
+        val_data_loader,
+        optim.Adam(model.parameters, lr=1e-3),
+        model,
+        functional.cross_entropy,
         epochs=100,
-        msg="(with batch norm, Adam optimizer)",
+        msg="(MLP, batch norm, Adam)",
     )
 
     train_mnist_one_vs_rest_model(X_train, y_train, X_test, y_test)
