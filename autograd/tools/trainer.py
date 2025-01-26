@@ -362,7 +362,7 @@ class LLMTrainer(AbstractTrainer):
         if self.kwargs.get("teacher_enforcing", False):
             text_utils.teacher_forcing_inference(
                 prediction_func=lambda seq_so_far: self.forward_fn(
-                    self.model, seq_so_far, mode="inference"
+                    self.model, seq_so_far, mode="sample"
                 ),
                 bpe=self.tokenizer,
                 groundtruth_data=train_data_loader.data[: train_data_loader.seq_len],

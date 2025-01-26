@@ -115,12 +115,12 @@ if __name__ == "__main__":
             X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_or_tokens
             logits = model(X, causal_mask)
             return logits, y
-        elif mode == "inference":
+        elif mode == "sample":
             tokens = batch_or_tokens
             logits = model(tokens, None)
             return logits
         else:
-            raise ValueError(f"Unknown mode {mode}, must be 'train' or 'inference'")
+            raise ValueError(f"Unknown mode {mode}, must be 'train' or 'sample'")
 
     logger = logging.getLogger(__name__)
 
