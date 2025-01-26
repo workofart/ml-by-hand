@@ -1,6 +1,5 @@
 from collections import defaultdict
 from typing import (
-    ByteString,
     List,
     Dict,
     Optional,
@@ -293,8 +292,7 @@ def inference(
 def teacher_forcing_inference(
     prediction_func: Callable,
     bpe: BytePairEncoder,
-    reference_ids: np.ndarray,
-    vocab_idx2word: Dict[int, ByteString],
+    groundtruth_data: np.ndarray,
     max_length: Optional[int] = None,
 ) -> str:
     """
@@ -305,7 +303,7 @@ def teacher_forcing_inference(
     Args:
         prediction_func (Callable): The function that takes in a list of tokens, runs model() and returns a list of tokens
         bpe (BytePairEncoder): BPE tokenizer
-        reference_ids (np.ndarray): Ground-truth tokens to use for teacher forcing. These should
+        groundtruth_data (np.ndarray): Ground-truth tokens to use for teacher forcing. These should
         be in integer ids that are already encoded
         vocab_idx2word (Dict[int, ByteString]): Mapping from token ids to words
         max_length (int, optional): If set, we only run up to this many tokens in reference_text.
@@ -314,14 +312,14 @@ def teacher_forcing_inference(
         str: A "predicted" string (though it will closely match `reference_text`
              if the model has memorized or can overfit).
     """
-    if max_length is None or max_length > len(reference_ids):
-        max_length = len(reference_ids)
+    if max_length is None or max_length > len(groundtruth_data):
+        max_length = len(groundtruth_data)
 
     predictions = []  # We'll store the model's predicted *next token* at each step
 
     for i in range(max_length - 1):
         # Feed tokens up to i (inclusive) => model tries to predict token i+1
-        cur_input = np.array([reference_ids[: i + 1]])  # shape (1, i+1)
+        cur_input = np.array([groundtruth_data[: i + 1]])  # shape (1, i+1)
 
         probs = prediction_func(cur_input)  # shape: (1, i+1, vocab_size)
         dist = probs.data[0, -1]  # distribution for next token i+1
@@ -335,7 +333,7 @@ def teacher_forcing_inference(
     # Convert predicted IDs back to text
     predicted_text = bpe.decode(predictions)
     groundtruth_text = "".join(
-        [str(vocab_idx2word[t].decode("utf-8")) for t in reference_ids]
+        [str(bpe._int_to_unicode_vocab[t].decode("utf-8")) for t in groundtruth_data]
     )
     groundtruth_text = "\n".join(groundtruth_text.split("<|endoftext|>"))
     teach_force_pred = "\n".join(predicted_text.split("<|endoftext|>"))
