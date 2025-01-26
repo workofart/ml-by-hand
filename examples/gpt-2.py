@@ -107,7 +107,9 @@ class GPT2(nn.Module):
     def _scale_weights(self, module: nn.Module, number_of_layers: int):
         """
         Scale the weights of the model by the square root of the number of layers.
-        This is done to prevent the variance of the activations from exploding.
+        Each residual block (decoder sublayer) in a deep stack might add up large signals,
+        especially as the stack gets deeper. This is especially true at the start of training,
+        so we want to prevent outputs from blowing up in magnitude early in training.
         """
         if module.__class__.__name__ == "Linear":
             module.parameters["weight"] /= np.sqrt(number_of_layers)
@@ -118,7 +120,7 @@ class DecoderSublayer(nn.Module):
     """
     A single GPT-2 Decoder block, using pre-layernorm.
     Notice that each sub-layer does a layernorm before the actual
-    attention (or MLP). GPT-1 often used post-norm instead.
+    attention (or feedforward). GPT-1 often used post-layernorm instead.
 
     Section 2.3 "Model" of the Paper.
     """
