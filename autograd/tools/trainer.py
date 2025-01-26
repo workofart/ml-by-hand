@@ -4,7 +4,7 @@ from tqdm import tqdm
 from autograd.tools.metrics import accuracy, mean_squared_error
 from autograd.tensor import Tensor
 from autograd.tools.model import save_model
-from typing import Dict
+from typing import Dict, Optional, Callable
 from abc import ABC, abstractmethod
 
 logger = logging.getLogger(__name__)
@@ -260,6 +260,7 @@ class LLMTrainer(AbstractTrainer):
         warmup_steps: int,
         epochs=10,
         label_smoothing=0.0,
+        forward_fn: Optional[Callable] = None,
         **kwargs,
     ):
         super().__init__(model, optimizer, epochs, **kwargs)
@@ -267,6 +268,7 @@ class LLMTrainer(AbstractTrainer):
         self.warmup_steps = warmup_steps
         self.label_smoothing = label_smoothing
         self.d_model = model.hidden_size  # needed for LR scheduelr TODO: ensure this interface is consistent for all LLM models
+        self.forward_fn = forward_fn or self.default_forward_fn
 
     def on_epoch_start(self, epoch):
         # Could adjust learning rate, log epoch number, etc.
@@ -283,12 +285,13 @@ class LLMTrainer(AbstractTrainer):
             self.d_model,
             warmup_steps=self.warmup_steps,
         )
-        X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_data
+        # X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_data
 
         self.optimizer.zero_grad()
 
         # Forward pass (model signature might differ)
-        pred_probs = self.model(X, dec_inp, src_mask, tgt_mask)
+        # pred_probs = self.model(X, dec_inp, src_mask, tgt_mask)
+        pred_probs, y = self.forward_fn(self.model, batch_data, **kwargs)
         # Compute cross-entropy ignoring pad tokens, etc.
         loss = self.loss_fn(
             pred_probs,
@@ -316,8 +319,9 @@ class LLMTrainer(AbstractTrainer):
         total_val_loss = 0.0
 
         for batch_data in tqdm(val_data_loader, desc="Evaluation", leave=False):
-            X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_data
-            pred_probs = self.model(X, dec_inp, src_mask, tgt_mask)
+            pred_probs, y = self.forward_fn(self.model, batch_data)
+            # X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_data
+            # pred_probs = self.model(X, dec_inp, src_mask, tgt_mask)
             loss = self.loss_fn(pred_probs, y, pad_idx=val_data_loader.pad_idx)
             total_val_loss += float(loss.detach().data)
 
@@ -348,6 +352,12 @@ class LLMTrainer(AbstractTrainer):
         self.model.train()
 
         return total_val_loss / len(val_data_loader)
+
+    def default_forward_fn(self, model, batch_data, **kwargs):
+        # e.g. the 6-tuple approach
+        X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_data
+        pred_probs = model(X, dec_inp, src_mask, tgt_mask)
+        return pred_probs, y
 
 
 def get_lr(step: int, model_dim: int, warmup_steps: int) -> float:

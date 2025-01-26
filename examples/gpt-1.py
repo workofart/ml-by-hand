@@ -6,15 +6,14 @@ from autograd import nn, functional, optim
 from examples.transformers import (
     ResidualAddAndNorm,
     FeedForward,
+    Transformer,
 )
 from autograd.text.tokenizer import BytePairEncoder
-from autograd.tools.data import load_data, DataLoader
-from autograd.tools.trainer import get_lr, grad_l2_norm
-from autograd.text import utils as text_utils
+from autograd.tools.data import load_data, LLMDataLoader
+from autograd.tools.trainer import LLMTrainer
 import logging
 import os
 import numpy as np
-from tqdm import tqdm
 
 
 class GPT1(nn.Module):
@@ -35,6 +34,7 @@ class GPT1(nn.Module):
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
+        self.hidden_size = hidden_size
         self.token_embedding = nn.Embedding(vocab_size, hidden_size)
         self.position_embedding = nn.Embedding(max_seq_len, hidden_size)
         self.dropout = nn.Dropout(dropout_prob)
@@ -106,6 +106,14 @@ class DecoderSublayer(nn.Module):
         return x
 
 
+def gpt_1_forward(model: Transformer, batch_data):
+    X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_data
+    pred_probs = model(X, causal_mask)
+    # Suppose the labels are inside X or we have a separate label array?
+    # Return (pred_probs, y). If needed, we might store y in batch_data[-1].
+    return pred_probs, y
+
+
 if __name__ == "__main__":
     logger = logging.getLogger(__name__)
 
@@ -153,7 +161,6 @@ if __name__ == "__main__":
         np.savez_compressed("bpe_mini_shakespeare.npz", encoded_data)
         logger.info("Saved encoded data to bpe_mini_shakespeare.npz")
 
-    pad_idx = vocab[b"<PAD>"]
     logger.info(
         f"Vocabulary size: {len(vocab)}, encoded_data length: {len(encoded_data)}"
     )
@@ -175,100 +182,58 @@ if __name__ == "__main__":
     logger.info(f"Model parameters: {model.num_parameters()}")
 
     optimizer = optim.Adam(model.parameters, lr=0)
-    train_data_loader = DataLoader(
+    train_data_loader = LLMDataLoader(
         train_data,
         vocab,
-        HYPERPARAMS["batch_size"],
-        HYPERPARAMS["seq_len"],
+        batch_size=HYPERPARAMS["batch_size"],
+        seq_len=HYPERPARAMS["seq_len"],
         shuffle=True,
-        pad_idx=pad_idx,
+        include_decoder_input=False,
     )
-    test_data_loader = DataLoader(
+    test_data_loader = LLMDataLoader(
         test_data,
         vocab,
-        HYPERPARAMS["batch_size"] // 4,
-        HYPERPARAMS["seq_len"],
-        shuffle=True,
-        pad_idx=pad_idx,
+        batch_size=HYPERPARAMS["batch_size"] // 4,
+        seq_len=HYPERPARAMS["seq_len"],
+        shuffle=False,
+        include_decoder_input=False,
     )
-    step_count = 0
-    lr = 0
 
-    for epoch in range(HYPERPARAMS["num_epochs"]):
-        epoch_loss = 0.0
-        train_data_loader.on_epoch_start()
+    trainer = LLMTrainer(
+        model=model,
+        optimizer=optimizer,
+        loss_fn=functional.cross_entropy,
+        epochs=HYPERPARAMS["num_epochs"],
+        warmup_steps=HYPERPARAMS["warmup_steps"],
+        label_smoothing=0.1,
+        checkpoint_freq=1,
+        forward_fn=gpt_1_forward,
+    )
 
-        for x, y, _, __, causal_mask in tqdm(
-            train_data_loader, desc="Step", leave=False
-        ):
-            step_count += 1
-            lr = get_lr(step_count, HYPERPARAMS["d_model"], HYPERPARAMS["warmup_steps"])
-            optimizer.lr = lr
-            optimizer.zero_grad()
+    trainer.fit(train_data_loader, test_data_loader)
 
-            # pred_probs is (batch_size, sequence_len, vocabulary_size)
-            # No need the initial <SOS> token for the decoder input
-            pred_prob = model(
-                x,
-                causal_mask,
-            )
-            # y has shape (batch_size, seq_len) and is already a shifted sequence
-            # compared to x
-            loss = functional.cross_entropy(
-                pred_prob, y, pad_idx=pad_idx, label_smoothing=0.1
-            )
-            loss.backward()
-            optimizer.step()
-            epoch_loss += loss.detach().data
+    # TODO: Remove the following after integrating the following with LLMTrainer
+    #         if teacher_enforcing:
+    #             text_utils.teacher_forcing_inference(
+    #                 lambda x: model(
+    #                     x,
+    #                     text_utils.create_causal_mask(seq_len=x.shape[1], batch_size=1),
+    #                 ),  # shape: (1, seq_len, vocab_size)
+    #                 bpe,
+    #                 train_data[: HYPERPARAMS["seq_len"]],
+    #                 vocab_idx2word=idx2word,
+    #             )
+    #         else:
+    #             text_utils.inference(
+    #                 lambda x: model(
+    #                     x,
+    #                     text_utils.create_causal_mask(seq_len=x.shape[1], batch_size=1),
+    #                 ),  # shape: (1, seq_len, vocab_size)
+    #                 bpe,
+    #                 start_tokens=["All"],  # Dummy token to start the generation
+    #                 max_length=int(HYPERPARAMS["seq_len"] * 1.1),
+    #                 temperature=1.0,
+    #                 top_k=10,
+    #             )
 
-        if epoch % max(1, (HYPERPARAMS["num_epochs"] // 10)) == 0:
-            model.eval()
-            test_data_loader.on_epoch_start()
-            test_loss = 0
-
-            for _ in tqdm(
-                range(HYPERPARAMS["eval_iters"]), desc="Test Evaluation", leave=False
-            ):
-                x, y, _, __, causal_mask = next(iter(test_data_loader))
-                pred_prob = model(
-                    x,
-                    causal_mask,
-                )
-                loss = functional.cross_entropy(
-                    pred_prob, y, pad_idx=pad_idx, label_smoothing=0.0
-                )
-                test_loss += loss.detach().data
-
-            logger.warning(
-                f"\nEpoch {epoch}\n"
-                f"| Train Loss: {epoch_loss / len(train_data_loader):.2f}\n"
-                f"| Gradient L2 Norm: {grad_l2_norm(model.parameters):.2f}\n"
-                f"| Test Loss: {test_loss / HYPERPARAMS['eval_iters']:.2f}\n"
-                f"| Test Perplexity: {np.exp(test_loss / HYPERPARAMS['eval_iters']):.2f} vs {len(vocab)} (vocab size)\n"
-                f"| Learning Rate: {lr:.4f}"
-            )
-
-            if teacher_enforcing:
-                text_utils.teacher_forcing_inference(
-                    lambda x: model(
-                        x,
-                        text_utils.create_causal_mask(seq_len=x.shape[1], batch_size=1),
-                    ),  # shape: (1, seq_len, vocab_size)
-                    bpe,
-                    train_data[: HYPERPARAMS["seq_len"]],
-                    vocab_idx2word=idx2word,
-                )
-            else:
-                text_utils.inference(
-                    lambda x: model(
-                        x,
-                        text_utils.create_causal_mask(seq_len=x.shape[1], batch_size=1),
-                    ),  # shape: (1, seq_len, vocab_size)
-                    bpe,
-                    start_tokens=["All"],  # Dummy token to start the generation
-                    max_length=int(HYPERPARAMS["seq_len"] * 1.1),
-                    temperature=1.0,
-                    top_k=10,
-                )
-
-            model.train()
+    #         model.train()
