@@ -1,8 +1,10 @@
-from autograd import nn, functional, optim
-from autograd.tools.trainer import SimpleTrainer
-from autograd.tools.data import train_test_split, SimpleDataLoader
-from openml.datasets import get_dataset
 import logging
+
+from openml.datasets import get_dataset
+
+from autograd import functional, nn, optim
+from autograd.tools.data import SimpleDataLoader, train_test_split
+from autograd.tools.trainer import SimpleTrainer
 
 logger = logging.getLogger(__name__)
 # np.random.seed(1337) # need to comment out for dropout to work

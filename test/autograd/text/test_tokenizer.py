@@ -1,5 +1,5 @@
-from unittest import TestCase
 import os
+from unittest import TestCase
 
 from autograd.text.tokenizer import BytePairEncoder
 

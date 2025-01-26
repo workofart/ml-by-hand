@@ -1,8 +1,10 @@
 import json
 import os
+from typing import Any, Dict
+
 import numpy as np
+
 from autograd.tensor import Tensor
-from typing import Dict, Any
 
 # Define a type for the serialized metadata structure
 SerializedMeta = Dict[str, Any]

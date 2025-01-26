@@ -1,9 +1,11 @@
-import numpy as np
-from typing import Union, Optional, Any, Dict, Tuple
-from .tensor import Tensor
 import logging
+from typing import Any, Dict, Optional, Tuple, Union
+
+import numpy as np
+
+from .functional import relu, sigmoid, softmax, tanh
 from .init import xavier_uniform
-from .functional import tanh, sigmoid, relu, softmax
+from .tensor import Tensor
 
 logger = logging.getLogger(__name__)
 

@@ -1,8 +1,10 @@
-import numpy as np
 import logging
-from autograd.tensor import Tensor
 from collections import defaultdict
 from typing import Any, Callable, Dict
+
+import numpy as np
+
+from autograd.tensor import Tensor
 
 logger = logging.getLogger(__name__)
 

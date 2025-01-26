@@ -1,9 +1,11 @@
 from copy import deepcopy
-from autograd.nn import Tensor
-from autograd.optim import Optimizer, SGD, Adam
 from unittest import TestCase
+
 import numpy as np
 import torch  # for test validation
+
+from autograd.nn import Tensor
+from autograd.optim import SGD, Adam, Optimizer
 
 
 class TestOptimizer(TestCase):

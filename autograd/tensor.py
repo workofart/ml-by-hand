@@ -1,13 +1,14 @@
-import numpy as np
 import logging
 from typing import (
-    Union,
-    Optional,
-    List,
-    Tuple,
-    Sequence,
     Any,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
 )
+
+import numpy as np
 
 logger = logging.getLogger(__name__)
 

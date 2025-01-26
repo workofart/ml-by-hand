@@ -1,9 +1,11 @@
-import numpy as np
 import os
-import requests
-import pyarrow.parquet as pq
-from typing import Tuple, Dict, Union, Optional, Iterator, Any
 from abc import ABC, abstractmethod
+from typing import Any, Dict, Iterator, Optional, Tuple, Union
+
+import numpy as np
+import pyarrow.parquet as pq
+import requests
+
 from autograd.text import utils as text_utils
 
 

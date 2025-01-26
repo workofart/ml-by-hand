@@ -3,6 +3,7 @@ Initialization methods for weights of the neural network
 """
 
 import numpy as np
+
 from autograd.tensor import Tensor
 
 

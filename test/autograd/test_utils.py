@@ -1,7 +1,9 @@
 from unittest import TestCase
+
+import numpy as np
+
 from autograd.tools.data import train_test_split
 from autograd.tools.metrics import accuracy, precision
-import numpy as np
 
 
 class TestUtils(TestCase):

@@ -1,7 +1,8 @@
-from autograd.tensor import Tensor
-from autograd import nn, functional, optim
-from autograd.tools import trainer, data
 import numpy as np
+
+from autograd import functional, nn, optim
+from autograd.tensor import Tensor
+from autograd.tools import data, trainer
 
 """
 Neural Turing Machines

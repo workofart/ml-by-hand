@@ -1,8 +1,10 @@
+from unittest import TestCase
+
 import numpy as np
 import torch  # for test comparisons
-from autograd.tensor import Tensor
+
 from autograd import functional
-from unittest import TestCase
+from autograd.tensor import Tensor
 
 
 class TestActivationFunctions(TestCase):

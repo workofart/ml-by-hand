@@ -1,7 +1,9 @@
-from typing import Union, Optional, Tuple, Any
-from autograd.tensor import Tensor, Function
-import numpy as np
 import logging
+from typing import Any, Optional, Tuple, Union
+
+import numpy as np
+
+from autograd.tensor import Function, Tensor
 
 logger = logging.getLogger(__name__)
 

@@ -1,10 +1,11 @@
-from collections import Counter
-import os
-import regex
-from typing import ByteString, Dict, List, Tuple
 import logging
+import os
 import pickle
+from collections import Counter
+from typing import ByteString, Dict, List, Tuple
+
 import numpy as np
+import regex
 
 logger = logging.getLogger(__name__)
 
