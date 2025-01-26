@@ -1,106 +1,194 @@
 # ML By Hand
 
-We are creating an autograd engine from scratch and use it to build/train more complex neural networks to learn from first principles.
+We are creating a deep learning library from scratch (that evolved from a simple autograd engine). It was designed to demystify the inner workings of building deep learning models by exposing every mathematical detail and stripping down the abstractions shiny ML libraries (e.g. PyTorch/TensorFlow) have. This project tries to provide an opportunity to learn from first-principles.
 
-- Focus on learning and transparency over optimization
-- API interface closely mirrors [Pytorch](https://github.com/pytorch/pytorch/tree/main) for validation and low usage overhead
-- Minimal third-party dependencies (e.g. only uses Pytorch to compare gradient correctness)
-- All mathematical operations explicitly derived for comprehensive understanding
+> “What I cannot create, I do not understand.”
+> — Richard Feynman
 
-> What I cannot create, I do not understand
->
-> -- Richard Feynman
+**Key Principles**
+  - **Learn By Doing:** All formulas and calculations are derived in code, so you see exactly how gradients (or derivatives) are computed—no hidden black boxes!
+  - **Learning Over Optimization:** Focus on understanding the underlying mathematics and algorithms, rather than optimizing for speed or memory usage (though we can still train GPT models on a single CPU)
+  - **PyTorch-Like API:** API interface closely mirrors [PyTorch](https://github.com/pytorch/pytorch/tree/main) for low adoption overhead
+  - **Minimal Dependencies:** Only uses `numpy` (and `pytorch` for gradient correctness checks in unit tests).
 
 <details>
-  <summary>Long version</summary>
+  <summary><strong>Why build a deep learning library from scratch?</strong></summary>
 
-  **Autograd** ([wikipedia](https://en.wikipedia.org/wiki/Automatic_differentiation)) computes exact derivatives by tracking computations and applying the chain rule systematically. It enables efficient backpropagation in neural networks, allowing them to learn from errors and adjust parameters automatically.
+  This project initially took inspiration from [Micrograd](https://github.com/karpathy/micrograd/tree/master), which was trying to build an **Autograd** ([Wikipedia](https://en.wikipedia.org/wiki/Automatic_differentiation)) engine from scratch for educational purposes. An autograd engine computes exact derivatives by tracking computations and applying the chain rule systematically. It enables neural networks to learn from errors and adjust parameters automatically. That's the core of deep learning. Then I started to add more features since everything seemed very straightforward after I had the initial building blocks (i.e. Tensor-level operations) implemented.
 
-  The primary motivation is to learn about neural networks from scratch and from first principles. There are many good ML libraries out there (e.g. Tensorflow, Pytorch, Scikit-learn, etc.) that are well-optimized and have a lot of features. But they often introduce lots of abstractions, which hides the underlying concepts and make it difficult to understand how they work. I believe, to better utilize those abstractions/libraries, we must first understand how everything works from ground up. This is the guiding princple for this project. All mathematical and calculus operations are explicitly derived in the code without abstraction. Also, debugging a neural network, especially the `backward()` implementations of various functions (e.g. loss, and activation), offers a rewarding learning experience.
+  The primary motivation is to learn about neural networks from scratch and from first principles. There are many good ML libraries out there (e.g. Tensorflow, PyTorch, Scikit-learn, etc.) that are well-optimized and have a lot of features. But they often introduce lots of abstractions, which hide the underlying concepts and make it difficult to understand how they work. I believe, to better utilize those abstractions/libraries, we must first understand how everything works from the ground up. This is the guiding principle for this project. All mathematical and calculus operations are explicitly derived in the code without abstraction. Also, debugging a neural network, especially the `backward()` implementations of various functions (e.g. loss, and activation), offers a rewarding learning experience.
 
-  This project took inspiration from [Micrograd](https://github.com/karpathy/micrograd/tree/master), and kept the API interface as close as possible to [Pytorch](https://github.com/pytorch/pytorch/tree/main) to reduce extra usage overhead and utilize it to validate correctness.
+  The goal is to keep the API interface as close as possible to PyTorch to reduce extra onboarding overhead and utilize it to validate correctness.
+
+
 </details>
 
-## Demo/Examples
+## **Demo/Examples**
 
-[`examples/`](https://github.com/workofart/ml-by-hand/tree/main/examples) contains various examples of neural networks built using the library that tackle some classical problems
+Explore the [`examples/`](https://github.com/workofart/ml-by-hand/tree/main/examples) directory for real-world demonstrations of how this engine can power neural network training on various tasks:
 
-- [x] Regression using Deep Neural Network
-  - [White Wine](https://github.com/workofart/ml-by-hand/blob/a2d55fdd9dc969f3848e0b15c3ac01a47736e655/test/autograd/test_train.py#L30)
-- [x] Binary Classification using Deep Logistic Regression
-  - [MNIST (One vs Rest)](https://github.com/workofart/ml-by-hand/blob/f4d3ab9e7903e2e675bdcd781695ab3e23908472/examples/mnist.py#L82)
-  - [Breast Cancer](https://github.com/workofart/ml-by-hand/blob/f4d3ab9e7903e2e675bdcd781695ab3e23908472/test/autograd/test_train.py#L12)
-- [x] Multi-class Classification using Deep Logistic Regression
-  - [MNIST](https://github.com/workofart/ml-by-hand/blob/f4d3ab9e7903e2e675bdcd781695ab3e23908472/examples/mnist.py#L14)
-  - [CIFAR-10/CIFAR-100](https://github.com/workofart/ml-by-hand/blob/f4d3ab9e7903e2e675bdcd781695ab3e23908472/examples/cifar.py#L13)
-- [x] Convolutional Neural Network
-  - [MNIST](https://github.com/workofart/ml-by-hand/blob/a2d55fdd9dc969f3848e0b15c3ac01a47736e655/examples/mnist.py#L37)
-  - [CIFAR-10/CIFAR-100](https://github.com/workofart/ml-by-hand/blob/f8dbe2454fa2b04fe2fe2a9bca02c584c9c7b54a/examples/cifar.py#L35)
-- [x] Residual Neural Network
-  - [MNIST](https://github.com/workofart/ml-by-hand/blob/09c680f9864c842f5e4d543f4cc837fd15dd5269/examples/mnist.py#L15)
-  - [CIFAR-10/CIFAR-100](https://github.com/workofart/ml-by-hand/blob/09c680f9864c842f5e4d543f4cc837fd15dd5269/examples/cifar.py#L36)
-- [x] Recurrent Neural Network (RNN) + Long Short-Term Memory Network (LSTM)
-  - [Movie Sentiment Analysis](https://github.com/workofart/ml-by-hand/blob/cedd9ef72a0b7d2c04958e5a7819e530efc87916/examples/movie_sentiment.py#L76)
-- [x] [Neural Turing Machine (with LSTM controller)](https://github.com/workofart/ml-by-hand/blob/main/examples/neural_turing_machine.py)
-  - Teach the model how to copy data from a source sequence to produce the same output sequence
-- [x] Sequence-to-Sequence
-  - [WikiSum](https://github.com/workofart/ml-by-hand/blob/c0ff3dd175ba3b94850dcad19ebdf4fd58c08973/examples/seq2seq.py#L21)
-- [x] (Original) Transformers
-  - [TinyShakespeare text generation](https://github.com/workofart/ml-by-hand/blob/724f5a7451be845c7efe6cc6c3f2c216283896a8/examples/transformers.py#L10)
-  - [Byte Pair Encoder (BPE)](https://github.com/workofart/ml-by-hand/blob/d6210422ac9c71016c53ce30e4e6517085f84226/autograd/text/tokenizer.py#L12) as a tokenizer
-- [x] [GPT-1](https://github.com/workofart/ml-by-hand/blob/9ef6cfb8b50d29dca108767ae19b6d0dcc0ae07c/examples/gpt-1.py#L20)
-## Technical Overview
-- `tensor` (base class)
-  - support scalar, vector, N-dimensional matrices
-  - arithmetic: add, mul, matmul, pow, sub, division, neg, max, mean
-  - core: forward, backward, reshape
-- `nn` (neural network components)
-  - Module (base class)
-  - Linear (basic building block for a perceptron/hidden layer)
-  - BatchNorm (batch normalization)
-  - Conv2d (convolutional layer)
-  - MaxPool2d (max pooling layer)
-  - Dropout (regularization)
-  - RNN (recurrent block for building RNNs)
-  - LSTM (long short-term memory block for building LSTM networks)
-- `functional` (including backprop derivation defined in `backward()`)
+📌 **Transformers & GPT (Newly added):**
+  - Original Transformers [(Code)](https://github.com/workofart/ml-by-hand/blob/main/examples/transformers.py)
+  - Byte Pair Encoder (BPE) Tokenizer [(Code)](https://github.com/workofart/ml-by-hand/blob/main/autograd/text/tokenizer.py)
+  - GPT-1 [(Code)](https://github.com/workofart/ml-by-hand/blob/main/examples/gpt-1.py)
+  - GPT-2 [(Code)](https://github.com/workofart/ml-by-hand/blob/main/examples/gpt-2.py)
+
+<details>
+  <summary><strong>Click to see all other examples</strong></summary>
+
+- **Regression** [(Code)](https://github.com/workofart/ml-by-hand/blob/c19a4a18349a4eec9084793cbdfca02195e594b6/test/autograd/test_train.py#L31)
+
+- **Binary Classification:**
+  - MNIST (One vs Rest) [(Code)](https://github.com/workofart/ml-by-hand/blob/c19a4a18349a4eec9084793cbdfca02195e594b6/examples/mnist.py#L100)
+  - Breast Cancer [(Code)](https://github.com/workofart/ml-by-hand/blob/c19a4a18349a4eec9084793cbdfca02195e594b6/test/autograd/test_train.py#L17)
+
+- **Multi-Class Classification:**
+  - MNIST [(Code)](https://github.com/workofart/ml-by-hand/blob/c19a4a18349a4eec9084793cbdfca02195e594b6/examples/mnist.py#L35)
+  - CIFAR-10/CIFAR-100 [(Code)](https://github.com/workofart/ml-by-hand/blob/c19a4a18349a4eec9084793cbdfca02195e594b6/examples/cifar.py#L14)
+
+- **Convolutional Neural Networks:**
+  - MNIST [(Code)](https://github.com/workofart/ml-by-hand/blob/c19a4a18349a4eec9084793cbdfca02195e594b6/examples/mnist.py#L55)
+  - CIFAR-10/CIFAR-100 [(Code)](https://github.com/workofart/ml-by-hand/blob/c19a4a18349a4eec9084793cbdfca02195e594b6/examples/cifar.py#L54)
+
+- **Residual Neural Networks:**
+  - MNIST [(Code)](https://github.com/workofart/ml-by-hand/blob/c19a4a18349a4eec9084793cbdfca02195e594b6/examples/mnist.py#L17)
+  - CIFAR-10/CIFAR-100 [(Code)](https://github.com/workofart/ml-by-hand/blob/c19a4a18349a4eec9084793cbdfca02195e594b6/examples/cifar.py#L36)
+
+- **RNN + LSTM:**
+  - Movie Sentiment Analysis [(Code)](https://github.com/workofart/ml-by-hand/blob/main/examples/movie_sentiment.py)
+
+- **Neural Turing Machine (LSTM Controller):**
+  - Copy Tasks [(Code)](https://github.com/workofart/ml-by-hand/blob/main/examples/neural_turing_machine.py)
+
+- **Sequence-to-Sequence:**
+  - WikiSum [(Code)](https://github.com/workofart/ml-by-hand/blob/main/examples/seq2seq.py)
+</details>
+
+
+## Toy Example
+<details>
+  <summary><strong>Click to expand</strong></summary>
+
+```python
+from autograd.tensor import Tensor
+from autograd.nn import Linear, Module
+from autograd.optim import SGD
+import numpy as np
+
+class SimpleNN(Module):
+    def __init__(self, input_dim, output_dim):
+        super().__init__()
+        # A single linear layer (input_dim -> output_dim).
+        # Mathematically: fc(x) = xW^T + b
+        # where W is weight and b is bias.
+        self.fc = Linear(input_dim, output_dim)
+
+    def forward(self, x):
+        # Simply compute xW^T + b without any additional activation.
+        return self.fc(x)
+
+# Create a sample input tensor x with shape (1, 3).
+# 'requires_grad=True' means we want to track gradients for x.
+x = Tensor([[-1.0, 0.0, 2.0]], requires_grad=True)
+
+# We want the output to get close to 1.0 over time.
+y_true = 1.0
+
+# Initialize the simple neural network.
+# This layer has a weight matrix W of shape (3, 1) and a bias of shape (1,).
+model = SimpleNN(input_dim=3, output_dim=1)
+
+# Use SGD with a learning rate of 0.03
+optimizer = SGD(model.parameters, lr=0.03)
+
+for epoch in range(20):
+    # Reset (zero out) all accumulated gradients before each update.
+    optimizer.zero_grad()
+
+    # --- Forward pass ---
+    # prediction = xW^T + b
+    y_pred = model(x)
+    print(f"Epoch {epoch}: {y_pred}")
+
+    # Define a simple mean squared error function
+    loss = ((y_pred - y_true) ** 2).mean()
+
+    # --- Backward pass ---
+    # Ultimately we need to compute the gradient of the loss with respect to the weights
+    # Specifically, if Loss = (pred - 1)^2, then:
+    #   dL/d(pred) = 2 * (pred - 1)
+    #   d(pred)/dW = d(xW^T + b) / dW = x^T
+    # By chain rule, dL/dW = dL/d(pred) * d(pred)/dW = [2 * (pred - 1)] * x^T
+    loss.backward()
+
+    # --- Update weights ---
+    optimizer.step()
+
+# See the computed gradients for the linear layer’s weight matrix:
+weights = model.fc.parameters["weight"].data
+bias = model.fc.parameters["bias"].data
+gradient = model.fc.parameters["weight"].grad
+print("[After Training] Gradients for fc weights:", gradient)
+print("[After Training] layer weights:", weights)
+print("[After Training] layer bias:", bias)
+assert np.isclose(x.data @ weights + bias, y_true)
+```
+</details>
+
+## **Technical Overview**
+
+Here’s a brief look at the major modules in this project: (API doc coming out soon)
+- **`tensor`**
+  - Supports scalar, vector, and N-dimensional data
+  - Arithmetic ops: add, mul, matmul, pow, sub, division, neg, max, mean
+  - Core methods: forward, backward, reshape
+
+- **`nn`**
+  - `Module` (base class)
+  - `Linear`, `BatchNorm`, `Conv2d`, `MaxPool2d`, `Dropout`
+  - Recurrent Layers: `RNN`, `LSTM`
+
+- **`functional`**
   - Activation functions: relu, sigmoid, softmax
-  - Loss: binary_cross_entropy, sparse_cross_entropy, hinge_loss
-- `optim`
-  - Optimizer (base class)
-  - SGD (stochastic gradient descent)
-  - Adam
-- `tools`
-  - `trainer.py` (end-to-end training runner to train a model on a given dataset)
-  - `data.py` (data loading, splitting, etc.)
-  - `metrics.py` (accuracy etc.)
-- `test/`
-  - All the unit tests for the above functionality
-  - End-to-end training run by combining all the components on a real dataset
+  - Losses: binary_cross_entropy, sparse_cross_entropy, hinge_loss
 
-## Environment Setup & Dependencies
-`./bootstrap.sh` will install all the necessary dependencies.
+- **`optim`**
+  - Optimizer (base)
+  - SGD, Adam
 
-Then you can activate the installed virtual environment by `source .venv/bin/activate`
+- **`tools`**
+  - `trainer.py` for end-to-end training
+  - `data.py` for data loading/splitting
+  - `metrics.py` for accuracy, etc.
 
-`numpy` is the main dependency. `pytorch` is only used for validating gradient calculation correctness in the tests.
+- **`test/`**
+  - Unit tests & integration tests for all modules
+  - Validation with PyTorch for gradient correctness
+
+## **Environment Setup**
+
+Run the bootstrap script to install dependencies:
+```bash
+./bootstrap.sh
+source .venv/bin/activate
+```
+This sets up your virtual environment.
 
 ## Tests
 Comprehensive unit tests and integration tests available in `test/autograd`
 
-Run `python -m pytest`
-
-## Performance Testing
-
-`memray` is used to track memory usage.
-
-Run:
-```
-rm -rf memray_output.bin && memray run -o memray_output.bin -m pytest test/autograd/performance_test.py && memray tree memray_output.bin
+```bash
+python -m pytest
 ```
 
 ## Future Work
-Potential use autograd engine to create and train state-of-the-art neural network architectures, prioritizing educational value over training efficiency.
+
+- Expanding the autograd engine to power cutting-edge neural architectures
+- Further performance tuning while maintaining clarity and educational value
+- Interactive tutorials for newcomers to ML and advanced topics alike
+
+## Contributing
+Contributions are welcome! If you find bugs, want to request features, or add examples, feel free to open an issue or submit a pull request.
 
 ## License
 MIT
