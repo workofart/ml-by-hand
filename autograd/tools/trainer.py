@@ -1,15 +1,17 @@
 import logging
 import os
+from abc import ABC, abstractmethod
+from typing import Any, Callable, Dict, Optional, Tuple
+
 import numpy as np
 from tqdm import tqdm
+
+from autograd.tensor import Tensor
+from autograd.text import utils as text_utils
+from autograd.text.tokenizer import BytePairEncoder
 from autograd.tools.data import LLMDataLoader
 from autograd.tools.metrics import accuracy, mean_squared_error
-from autograd.text import utils as text_utils
-from autograd.tensor import Tensor
-from autograd.tools.model import save_checkpoint, load_checkpoint
-from autograd.text.tokenizer import BytePairEncoder
-from typing import Dict, Optional, Callable, Any, Tuple
-from abc import ABC, abstractmethod
+from autograd.tools.model import load_checkpoint, save_checkpoint
 
 logger = logging.getLogger(__name__)
 

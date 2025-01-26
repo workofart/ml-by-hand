@@ -1,16 +1,18 @@
+import logging
+import re
 from collections import defaultdict
 from typing import (
-    List,
-    Dict,
-    Optional,
     Callable,
+    Dict,
+    List,
+    Optional,
     Tuple,
     Union,
 )
-from autograd.text.tokenizer import BytePairEncoder
+
 import numpy as np
-import re
-import logging
+
+from autograd.text.tokenizer import BytePairEncoder
 
 logger = logging.getLogger(__name__)
 

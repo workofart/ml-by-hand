@@ -1,14 +1,16 @@
 import os
+
 import numpy as np
 import pandas as pd
+
+from autograd import functional, nn, optim
+from autograd.text.utils import create_vocabulary, text_to_one_hot_and_sparse
 from autograd.tools.data import (
+    SimpleDataLoader,
     train_test_split,
 )
-from autograd.text.utils import create_vocabulary, text_to_one_hot_and_sparse
-from autograd.tools.data import SimpleDataLoader
 from autograd.tools.metrics import accuracy
 from autograd.tools.trainer import SimpleTrainer
-from autograd import nn, optim, functional
 
 
 def process_data(data: np.ndarray):

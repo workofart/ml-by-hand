@@ -1,7 +1,9 @@
-from autograd.tensor import Tensor
+from unittest import TestCase
+
 import numpy as np
 import torch  # for comparison
-from unittest import TestCase
+
+from autograd.tensor import Tensor
 
 
 class TestTensor(TestCase):

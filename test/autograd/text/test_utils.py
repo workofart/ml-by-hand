@@ -1,13 +1,14 @@
-from unittest import TestCase
-import numpy as np
 import re
+from unittest import TestCase
+
+import numpy as np
 
 from autograd.text.utils import (
+    clean_and_tokenize,
+    create_causal_mask,
+    create_padding_mask,
     create_vocabulary,
     text_to_one_hot_and_sparse,
-    create_padding_mask,
-    create_causal_mask,
-    clean_and_tokenize,
 )
 
 

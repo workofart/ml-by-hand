@@ -1,18 +1,20 @@
+import logging
 from typing import Optional
+
+import numpy as np
+
+from autograd import functional, nn, optim
 from autograd.tensor import Tensor
-from autograd import nn, functional, optim
+from autograd.text import utils as text_utils
+from autograd.text.tokenizer import BytePairEncoder
+from autograd.tools.data import LLMDataLoader, load_data
+from autograd.tools.trainer import LLMTrainer, load_model_and_optimizer
 
 # TODO: Extract the common modules out to nn.py module
 from examples.transformers import (
-    ResidualAddAndNorm,
     FeedForward,
+    ResidualAddAndNorm,
 )
-from autograd.text.tokenizer import BytePairEncoder
-from autograd.tools.data import load_data, LLMDataLoader
-from autograd.tools.trainer import LLMTrainer, load_model_and_optimizer
-from autograd.text import utils as text_utils
-import logging
-import numpy as np
 
 
 class GPT1(nn.Module):

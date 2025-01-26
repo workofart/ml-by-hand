@@ -1,21 +1,23 @@
-from unittest import TestCase
-from autograd.nn import (
-    Module,
-    Linear,
-    Embedding,
-    BatchNorm,
-    LayerNorm,
-    Dropout,
-    Conv2d,
-    MaxPool2d,
-    RecurrentBlock,
-    LongShortTermMemoryBlock,
-)
-from autograd.tensor import Tensor
-from copy import deepcopy
 import random
+from copy import deepcopy
+from unittest import TestCase
+
 import numpy as np
 import torch  # for comparison
+
+from autograd.nn import (
+    BatchNorm,
+    Conv2d,
+    Dropout,
+    Embedding,
+    LayerNorm,
+    Linear,
+    LongShortTermMemoryBlock,
+    MaxPool2d,
+    Module,
+    RecurrentBlock,
+)
+from autograd.tensor import Tensor
 
 random.seed(1337)
 np.random.seed(1337)

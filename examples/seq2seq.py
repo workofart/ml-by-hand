@@ -1,8 +1,9 @@
 import numpy as np
-from autograd import nn, optim, functional, tensor
-from autograd.tools.trainer import SimpleTrainer
-from autograd.tools.data import load_data, SimpleDataLoader
+
+from autograd import functional, nn, optim, tensor
 from autograd.text.utils import create_vocabulary, text_to_one_hot_and_sparse
+from autograd.tools.data import SimpleDataLoader, load_data
+from autograd.tools.trainer import SimpleTrainer
 
 """
 Sequence-to-sequence model

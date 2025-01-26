@@ -1,12 +1,13 @@
-import numpy as np
-from autograd import nn, optim, functional
-from sklearn.datasets import load_breast_cancer, load_diabetes
-from unittest import TestCase
 import logging
+from unittest import TestCase
 
-from autograd.tools.trainer import SimpleTrainer
+import numpy as np
+from sklearn.datasets import load_breast_cancer, load_diabetes
+
+from autograd import functional, nn, optim
 from autograd.tools.data import SimpleDataLoader
 from autograd.tools.metrics import accuracy, mean_squared_error
+from autograd.tools.trainer import SimpleTrainer
 
 logger = logging.getLogger(__name__)
 

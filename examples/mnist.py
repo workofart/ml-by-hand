@@ -1,10 +1,12 @@
 import logging
+
 import numpy as np
-from autograd import nn, optim, functional
 from openml.datasets import get_dataset
-from autograd.tools.data import train_test_split, SimpleDataLoader
-from autograd.tools.trainer import SimpleTrainer
+
+from autograd import functional, nn, optim
+from autograd.tools.data import SimpleDataLoader, train_test_split
 from autograd.tools.metrics import accuracy, precision
+from autograd.tools.trainer import SimpleTrainer
 
 logger = logging.getLogger(__name__)
 np.random.seed(1337)

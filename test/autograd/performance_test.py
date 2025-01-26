@@ -1,10 +1,12 @@
 import logging
 import os
 import time
+from unittest import TestCase
+
 import numpy as np
 import psutil
-from unittest import TestCase
-from autograd import nn, optim, functional
+
+from autograd import functional, nn, optim
 from autograd.tensor import Tensor
 
 logger = logging.getLogger(__name__)

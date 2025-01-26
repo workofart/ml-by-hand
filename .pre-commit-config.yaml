@@ -12,5 +12,9 @@ repos:
     # Run the linter.
     - id: ruff
       args: [ --fix ]
+    # Sort imports explicitly.
+    - id: ruff
+      name: ruff-import-sort
+      args: [ "--select", "I", "--fix" ]
     # Run the formatter.
     - id: ruff-format
