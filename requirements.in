@@ -1,14 +1,12 @@
 memray
 numpy
 psutil
-scikit-learn
+scikit-learn # for dataset
 pre-commit
 tqdm
 pyright
 pytest
-openml
+openml # for dataset
 regex
 torch
-torchvision
-torchaudio
 ruff
