@@ -13,4 +13,11 @@ fi
 uv python install $PYTHON_VERSION
 uv venv --python $PYTHON_VERSION
 
+
 echo "Setup complete. Virtual environment is ready."
+
+source .venv/bin/activate
+
+echo "Installing dependencies..."
+
+uv pip install -r requirements.txt

@@ -68,7 +68,6 @@ numpy==2.1.2
     #   pandas
     #   scikit-learn
     #   scipy
-    #   torchvision
 openml==0.15.0
     # via -r requirements.in
 packaging==24.1
@@ -77,8 +76,6 @@ packaging==24.1
     #   pytest
 pandas==2.2.3
     # via openml
-pillow==11.0.0
-    # via torchvision
 platformdirs==4.3.6
     # via
     #   textual
@@ -136,13 +133,6 @@ textual==1.0.0
 threadpoolctl==3.5.0
     # via scikit-learn
 torch==2.5.0
-    # via
-    #   -r requirements.in
-    #   torchaudio
-    #   torchvision
-torchaudio==2.5.0
-    # via -r requirements.in
-torchvision==0.20.0
     # via -r requirements.in
 tqdm==4.66.5
     # via
