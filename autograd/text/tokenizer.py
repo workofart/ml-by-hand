@@ -165,6 +165,7 @@ class BytePairEncoder:
                 break
 
             best_pair = max(pair_counts, key=pair_counts.get)
+            best_pair_count = pair_counts[best_pair]
 
             # if best pair is not frequent enough, stop merging
             if pair_counts[best_pair] < 2:
@@ -189,7 +190,7 @@ class BytePairEncoder:
             if (i + 1) % 100 == 0:
                 logger.info(
                     f"[{i+1}/{self.num_merges} merge] Best Pair Merged "
-                    f"({pair_counts[best_pair]} occurrences). "
+                    f"({best_pair_count} occurrences). "
                     f"Vocab size: {len(self._unicode_to_int_vocab)}"
                 )
 
@@ -236,7 +237,6 @@ class BytePairEncoder:
                     byte_encoded_chars.append(
                         self._unicode_to_int_vocab[bytes([b_int])]
                     )
-            logger.info(f"Byte encoded chars: {byte_encoded_chars[:10]}")
 
         # Apply merges in order (naive pass)
         for pair, new_id in tqdm(self.learned_merges, desc="Applying merges to encode"):

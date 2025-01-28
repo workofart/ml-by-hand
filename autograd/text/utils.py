@@ -248,11 +248,11 @@ def inference(
     Returns:
         str: The decoded string (joined tokens)
     """
-    generated = [bpe._unicode_to_int_vocab[t.encode("utf-8")] for t in start_tokens]
+    generated = [bpe.encode(t) for t in start_tokens]  # shape: (seq_len,)
 
     for _ in range(max_length):
         # "generated" is a list of integers, each int for each token
-        cur_input = np.array([generated])  # shape: (1, seq_len)
+        cur_input = np.array(generated)  # shape: (1, seq_len)
 
         probs = prediction_func(cur_input)
 
@@ -283,9 +283,9 @@ def inference(
             dist /= dist_sum
             next_token_id = np.random.choice(len(dist), p=dist)
 
-        generated.append(next_token_id)
+        generated[0].append(next_token_id)
 
-    pred_tokens = bpe.decode(generated)
+    pred_tokens = bpe.decode(generated[0])
     prediction_string = "\n".join(pred_tokens.split("<|endoftext|>"))
     logger.info(f"Prediction:\n{prediction_string}")
     return pred_tokens
