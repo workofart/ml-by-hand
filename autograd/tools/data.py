@@ -166,14 +166,19 @@ class LLMDataLoader(AbstractDataLoader):
 
     def __init__(
         self,
-        data: np.ndarray,
-        vocab: Dict[Any, Any],
+        data: np.ndarray,          # <-- CPU array, from standard NumPy
         batch_size: int,
         seq_len: int,
+        bpe,
+        # vocab: Dict[Any, Any],
         shuffle: bool = True,
         include_decoder_input: bool = True,
-        sos_token: Union[str, bytes] = b"<SOS>",
-        pad_token: Union[str, bytes] = b"<PAD>",
+        sos_token: Union[str, bytes] = "<SOS>",
+        pad_token: Union[str, bytes] = "<PAD>",
+        # sos_token: Union[str, bytes] = b"<SOS>",
+        # pad_token: Union[str, bytes] = b"<PAD>",
+        create_decoder_inp: bool = True,
+        create_masks: bool = True,
     ) -> None:
         """
         Args:
@@ -188,9 +193,10 @@ class LLMDataLoader(AbstractDataLoader):
         """
         super().__init__(batch_size=batch_size, shuffle=shuffle)
         self.data = data
-        self.vocab = vocab
+        self.bpe = bpe
+        # self.vocab = vocab
         self.seq_len = seq_len
-        self.pad_idx = vocab[pad_token]
+        self.pad_idx = bpe.encode(pad_token, allowed_special={pad_token})[0]
         self.include_decoder_input = include_decoder_input
 
         # If we need an <SOS> token, ensure it's in vocab
@@ -200,7 +206,7 @@ class LLMDataLoader(AbstractDataLoader):
                     f"SOS token {sos_token} not found in vocab. "
                     "Either add it or disable include_decoder_input."
                 )
-            self.sos_idx = vocab[sos_token]
+            self.sos_idx = bpe.encode(sos_token, allowed_special={sos_token})[0]
         else:
             self.sos_idx = None
 
@@ -239,7 +245,7 @@ class LLMDataLoader(AbstractDataLoader):
         total_tokens_per_epoch = (data_length // (self.batch_size * self.seq_len)) * (
             self.batch_size * self.seq_len
         )
-        truncated_data = self.data[:total_tokens_per_epoch]
+        truncated_data = np.array(self.data[:total_tokens_per_epoch])
 
         # Reshape to (batch_size, -1)
         reshaped = truncated_data.reshape(self.batch_size, -1)

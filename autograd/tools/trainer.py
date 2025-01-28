@@ -90,7 +90,7 @@ class AbstractTrainer(ABC):
 
     def on_epoch_end(self, epoch, train_loss, val_loss):
         # TODO: add support for loading model checkpoint
-        if epoch % self.kwargs.get("checkpoint_freq", 1) == 0:
+        if (epoch % self.kwargs.get("checkpoint_freq", 1) == 0) or (epoch == self.kwargs.get("num_epochs", 1) - 1):
             # Save checkpoint
             checkpoint = {
                 "epoch": epoch + 1,  # the next epoch to start from
@@ -355,7 +355,7 @@ class LLMTrainer(AbstractTrainer):
         logger.warning(
             f"\nGradient L2 Norm: {grad_l2_norm(self.model.parameters):.2f}\n"
             f"| Test Loss: {total_val_loss / len(val_data_loader):.2f}\n"
-            f"| Test Perplexity: {np.exp(total_val_loss / len(val_data_loader)):.2f} vs {len(val_data_loader.vocab)} (vocab size)\n"
+            f"| Test Perplexity: {np.exp(total_val_loss / len(val_data_loader)):.2f} vs {val_data_loader.bpe.n_vocab} (vocab size)\n"
             f"| Learning Rate: {self.optimizer.lr:.4f}"
         )
 

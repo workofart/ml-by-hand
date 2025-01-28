@@ -335,7 +335,8 @@ def teacher_forcing_inference(
     # Convert predicted IDs back to text
     predicted_text = bpe.decode(predictions)
     groundtruth_text = "".join(
-        [str(bpe._int_to_unicode_vocab[t.item()].decode("utf-8")) for t in groundtruth_data]
+        # [str(bpe._int_to_unicode_vocab[t.item()].decode("utf-8")) for t in groundtruth_data]
+        [str(bpe.decode(t.item())) for t in groundtruth_data]
     )
     groundtruth_text = "\n".join(groundtruth_text.split("<|endoftext|>"))
     teach_force_pred = "\n".join(predicted_text.split("<|endoftext|>"))

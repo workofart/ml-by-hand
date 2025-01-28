@@ -10,6 +10,7 @@ from autograd.text import utils as text_utils
 from autograd.text.tokenizer import BytePairEncoder
 from autograd.tools.data import LLMDataLoader, load_data
 from autograd.tools.trainer import LLMTrainer, load_model_and_optimizer
+import tiktoken
 
 # The feedforward layer is the same as the original transformers
 from examples.transformers import (
@@ -114,7 +115,6 @@ class GPT2(nn.Module):
         """
         if module.__class__.__name__ == "Linear":
             module.parameters["weight"] /= np.sqrt(number_of_layers)
-            logger.info("Down scaled weights of linear layer")
 
 
 class DecoderSublayer(nn.Module):
@@ -206,39 +206,61 @@ if __name__ == "__main__":
     )
     logger.info(f"{len(data)} characters in the entire dataset")
 
-    # Create a Byte Pair Encoder and prepare data
-    bpe = BytePairEncoder(
-        num_merges=4000, vocab_file_path="wikipedia_simpleenglish_vocab.pkl"
+    # # Create a Byte Pair Encoder and prepare data
+    # bpe = BytePairEncoder(
+    #     num_merges=12000, vocab_file_path="wikipedia_simpleenglish_vocab_all.pkl"
+    # )
+    
+    # print(f"Total length of data after split: {len(data.split("\n\n"))}")
+    # encoded_data = bpe.prepare_data_parallel(
+    #     raw_text_list=data.split("\n\n")[:200_000],
+    #     npz_file_path="bpe_wikipedia_simpleenglish_all.npz",
+    #     overwrite_saved_file=True,
+    #     split_token="<|endoftext|>",
+    # )
+    
+    # Using Tiktoken for tokenizer
+    data = data.split("\n\n")[:50_000]
+    bpe = tiktoken.get_encoding("gpt2")
+    bpe = tiktoken.Encoding(
+        # If you're changing the set of special tokens, make sure to use a different name
+        # It should be clear from the name what behaviour to expect.
+        name="gpt2_custom",
+        pat_str=bpe._pat_str,
+        mergeable_ranks=bpe._mergeable_ranks,
+        special_tokens={
+            **bpe._special_tokens,
+            "<SOS>": bpe.max_token_value + 1,
+            "<PAD>": bpe.max_token_value + 2,
+        }
     )
-    encoded_data = bpe.prepare_data(
-        raw_text_list=data.split("\n\n"),
-        npz_file_path="bpe_wikipedia_simpleenglish.npz",
-        overwrite_saved_file=False,
-        split_token="<|endoftext|>",
-    )[:200_000]
+    encoded_data = bpe.encode("\n\n".join(data))
 
     n = int(len(encoded_data) * 0.9)
     train_data, test_data = encoded_data[:n], encoded_data[n:]
+    
+    print(f"Train data length: {len(train_data)}")
 
     CONFIG = {
         "model_kwargs": {
-            "vocab_size": len(bpe._unicode_to_int_vocab),
+            "vocab_size": bpe.n_vocab,
+            # "vocab_size": len(bpe._unicode_to_int_vocab),
             "num_attention_heads": 12,  # GPT-2 small uses 12
             "hidden_size": 768,  # GPT-2 small uses 768, must be divisible by num_attention_heads
             "dropout_prob": 0.1,
-            "max_seq_len": 128,  # GPT-2 uses 1024
+            "max_seq_len": 96,  # GPT-2 uses 1024
             "num_decoder_layers": 12,  # GPT-2 uses 12
         },
         "optimizer_kwargs": {
             "lr": 0.0  # We can later schedule it with warmup
         },
         "num_epochs": 20,
-        "warmup_steps": 200,
+        "warmup_steps": 1000,
         "eval_iters": 16,
-        "batch_size": 64,  # GPT-2 uses 512
+        "batch_size": 128,  # GPT-2 uses 512
         # Whether to check the model performance by feeding the groundtruth tokens to compare whether the model can predict the next token correctly.
         "teacher_enforcing": False,
-        "resume_epoch": 15,  # Whether to load from a checkpoint
+        "resume_epoch": 5,  # Whether to load from a checkpoint
     }
 
     # Build GPT-2 model, reusing the same training logic
@@ -254,19 +276,25 @@ if __name__ == "__main__":
 
     train_data_loader = LLMDataLoader(
         data=train_data,
-        vocab=bpe._unicode_to_int_vocab,
+        bpe=bpe,
+        # vocab=bpe._unicode_to_int_vocab,
         batch_size=hparams["batch_size"],
         seq_len=model.max_seq_len,
         shuffle=True,
         include_decoder_input=False,
+        create_decoder_inp=False,
+        create_masks=False,
     )
     test_data_loader = LLMDataLoader(
         data=test_data,
-        vocab=bpe._unicode_to_int_vocab,
+        bpe=bpe,
+        # vocab=bpe._unicode_to_int_vocab,
         batch_size=hparams["batch_size"] // 4,
         seq_len=model.max_seq_len,
         shuffle=False,
         include_decoder_input=False,
+        create_decoder_inp=False,
+        create_masks=False,
     )
 
     trainer = LLMTrainer(
@@ -276,7 +304,7 @@ if __name__ == "__main__":
         epochs=hparams["num_epochs"],
         warmup_steps=hparams["warmup_steps"],
         label_smoothing=0.1,
-        checkpoint_freq=5,
+        checkpoint_freq=10,
         forward_fn=gpt_2_forward,
         tokenizer=bpe,
         teacher_enforcing=hparams["teacher_enforcing"],
