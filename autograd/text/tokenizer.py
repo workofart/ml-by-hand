@@ -2,6 +2,7 @@ import logging
 import os
 import pickle
 from collections import Counter
+from multiprocessing import Pool, cpu_count
 from typing import ByteString, Dict, List, Tuple
 
 import cupy as np
@@ -34,14 +35,16 @@ class BytePairEncoder:
         # start merged token ids from the first unused index after the base vocabulary
         self.new_idx = max(self._unicode_to_int_vocab.values()) + 1
 
-    def prepare_data(
+    def prepare_data_parallel(
         self,
         raw_text_list: List[str],
         npz_file_path: str = "bpe_encoded.npz",
         overwrite_saved_file: bool = False,
         split_token: str = "<|endoftext|>",
+        n_workers: int = None
     ) -> Tuple[np.ndarray]:
         """
+        **In parallel**
         High-level method that:
           1) Trains (or loads) the BPE vocabulary on the given raw_text_list.
           2) Encodes the text into a NumPy array of token IDs.
@@ -65,6 +68,10 @@ class BytePairEncoder:
         - encoded_data : np.ndarray
             The encoded tokens as a NumPy array.
         """
+
+        if n_workers is None:
+            n_workers = max(1, cpu_count() - 1)
+
         joined_text = split_token.join(raw_text_list)
 
         # 1) Train the vocabulary if needed
@@ -79,15 +86,27 @@ class BytePairEncoder:
             with np.load(npz_file_path, allow_pickle=True) as npz_data:
                 encoded_data = npz_data["arr_0"]
         else:
-            # Re-encode from raw blocks
-            encoded_data = np.array(self.encode(joined_text), dtype=np.int32)
-            # Save to disk
-            np.savez_compressed(npz_file_path, encoded_data)
-            logger.info(f"Saved newly encoded data to {npz_file_path}")
+            # 3) Parallel encoding
+            chunk_size = max(1, len(joined_text) // n_workers)
+            text_chunks = [
+                joined_text[i : i + chunk_size]
+                for i in range(0, len(joined_text), chunk_size)
+            ]
 
+            with Pool(n_workers) as pool:
+                partial_encoded = pool.map(self.encode, text_chunks)
+
+            encoded_data = np.array([], dtype=np.int32)
+            for part in partial_encoded:
+                encoded_data = np.concatenate((encoded_data, np.array(part, dtype=np.int32)))
+
+            # 4) Save to disk
+            np.savez_compressed(npz_file_path, encoded_data)
+            
         logger.info(f"Vocabulary size: {len(self._unicode_to_int_vocab)}")
         logger.info(f"Encoded data length: {len(encoded_data)}")
         logger.debug(f"Sample encoded data (first 50 tokens): {encoded_data[:50]}")
+
         return encoded_data
 
     def _load_dictionary(self) -> None:
@@ -154,7 +173,7 @@ class BytePairEncoder:
                 )
                 word_freq[base_ids] += 1
 
-        pair_counts = self._get_initial_pair_counts(word_freq)
+        pair_counts = self._get_initial_pair_counts_parallel(word_freq)
         # remove pairs involving special tokens so we don't merge them
         pair_counts = {
             p: c for p, c in pair_counts.items() if p[0] < 256 and p[1] < 256
@@ -183,7 +202,7 @@ class BytePairEncoder:
             self._unicode_to_int_vocab[merged_bytes] = new_id
 
             # Updates word_freq in-place
-            self._apply_merges_to_corpus(best_pair, new_id, word_freq, pair_counts)
+            self._apply_merges_to_corpus_parallel(best_pair, new_id, word_freq, pair_counts)
             # Record this for encoding step later
             self.learned_merges.append((best_pair, new_id))
 
@@ -301,6 +320,51 @@ class BytePairEncoder:
 
         return [tok for tok in final_chunks if tok]
 
+    def _worker_pair_counts(self, item_chunk):
+        """Worker to compute partial pair_counts from a chunk of word_freq items."""
+        partial_counts = Counter()
+        for w_tuple, freq in item_chunk:
+            for pair_ in zip(w_tuple, w_tuple[1:]):
+                partial_counts[pair_] += freq
+        return partial_counts
+    
+    def _chunked_iterable(self, iterable, chunk_size):
+        """Yield successive `chunk_size`-sized chunks from `iterable`."""
+        it = iter(iterable)
+        while True:
+            chunk = []
+            try:
+                for _ in range(chunk_size):
+                    chunk.append(next(it))
+            except StopIteration:
+                if chunk:
+                    yield chunk
+                break
+            yield chunk
+
+    def _get_initial_pair_counts_parallel(self, word_freq: Counter, n_workers=None) -> Dict[Tuple[int, int], int]:
+        if n_workers is None:
+            n_workers = max(1, cpu_count() - 1)
+
+        # Convert word_freq.items() into a list so that we can chunk it
+        items = list(word_freq.items())
+        chunk_size = max(1, len(items) // n_workers)
+
+        pool = Pool(n_workers)
+        chunked_items = list(self._chunked_iterable(items, chunk_size))
+
+        # Map each chunk to a worker
+        partial_results = pool.map(self._worker_pair_counts, chunked_items)
+        pool.close()
+        pool.join()
+
+        # Merge partial results
+        total_counts = Counter()
+        for c in partial_results:
+            total_counts.update(c)
+
+        return dict(total_counts)
+
     def _get_initial_pair_counts(
         self, word_freq: Counter
     ) -> Dict[Tuple[int, int], int]:
@@ -381,6 +445,61 @@ class BytePairEncoder:
                 merged_tokens.append(corpus[i])
                 i += 1
         return tuple(merged_tokens)
+    
+    def _worker_apply_merges(self, item_chunk, pair, new_id):
+        """Merge pair in a local chunk of (w_tuple, freq). Return new_tuples and updated bigrams."""
+        local_new_word_freq = Counter()
+        local_pair_counts = Counter()
+        for old_tuple, freq in item_chunk:
+            new_tuple = self._merge_pairs(pair, new_id, old_tuple)
+            local_new_word_freq[new_tuple] += freq
+            # Collect bigrams from new_tuple
+            for bg in zip(new_tuple, new_tuple[1:]):
+                local_pair_counts[bg] += freq
+        return local_new_word_freq, local_pair_counts
+
+
+    def _apply_merges_to_corpus_parallel(self, pair, new_id, corpus_word_freq, pair_counts, n_workers=None):
+        if n_workers is None:
+            n_workers = max(1, cpu_count() - 1)
+
+        # 1) Identify items to update
+        items_to_update = []
+        for w_tuple, freq in corpus_word_freq.items():
+            if pair in zip(w_tuple, w_tuple[1:]):
+                items_to_update.append((w_tuple, freq))
+
+        if not items_to_update:
+            return
+
+        # 2) Remove old bigrams from the global pair_counts
+        for old_tuple, freq in items_to_update:
+            for bg in zip(old_tuple, old_tuple[1:]):
+                pair_counts[bg] -= freq
+                if pair_counts[bg] <= 0:
+                    pair_counts.pop(bg, None)
+
+        # 3) Drop old tuples from corpus_word_freq
+        for w_tuple, _ in items_to_update:
+            del corpus_word_freq[w_tuple]
+
+        # 4) Chunk and parallel merge
+        items_chunked = list(self._chunked_iterable(items_to_update, max(1, len(items_to_update) // n_workers)))
+        with Pool(n_workers) as pool:
+            partial_results = pool.starmap(
+                self._worker_apply_merges,
+                [(chunk, pair, new_id) for chunk in items_chunked]
+            )
+
+        # 5) Merge partial results
+        for (local_new_word_freq, local_pair_counts) in partial_results:
+            # update corpus_word_freq
+            for tup, freq in local_new_word_freq.items():
+                corpus_word_freq[tup] += freq
+
+            # update pair_counts
+            for bg, freq in local_pair_counts.items():
+                pair_counts[bg] = pair_counts.get(bg, 0) + freq
 
     def _apply_merges_to_corpus(
         self,
