@@ -2,7 +2,11 @@
 Initialization methods for weights of the neural network
 """
 
-import numpy as np
+try:
+    # drop-in replacement for numpy for GPU acceleration
+    import cupy as np  # type: ignore
+except ImportError:
+    import numpy as np
 
 from autograd.tensor import Tensor
 

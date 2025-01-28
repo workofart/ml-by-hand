@@ -2,7 +2,11 @@ import re
 from unittest import TestCase
 from unittest.mock import MagicMock, patch
 
-import numpy as np
+try:
+    # drop-in replacement for numpy for GPU acceleration
+    import cupy as np  # type: ignore
+except ImportError:
+    import numpy as np
 
 from autograd.text.utils import (
     clean_and_tokenize,

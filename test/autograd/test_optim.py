@@ -1,7 +1,11 @@
 from copy import deepcopy
 from unittest import TestCase
 
-import numpy as np
+try:
+    # drop-in replacement for numpy for GPU acceleration
+    import cupy as np  # type: ignore
+except ImportError:
+    import numpy as np
 import torch  # for test validation
 
 from autograd.nn import Tensor

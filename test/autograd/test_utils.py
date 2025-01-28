@@ -1,6 +1,10 @@
 from unittest import TestCase
 
-import numpy as np
+try:
+    # drop-in replacement for numpy for GPU acceleration
+    import cupy as np  # type: ignore
+except ImportError:
+    import numpy as np
 
 from autograd.tools.data import train_test_split
 from autograd.tools.metrics import accuracy, precision

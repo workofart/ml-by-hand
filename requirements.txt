@@ -14,8 +14,12 @@ cfgv==3.4.0
     # via pre-commit
 charset-normalizer==3.4.0
     # via requests
+cupy-cuda12x==13.3.0
+    # via -r requirements.in
 distlib==0.3.9
     # via virtualenv
+fastrlock==0.8.3
+    # via cupy-cuda12x
 filelock==3.16.1
     # via
     #   torch
@@ -64,6 +68,7 @@ nodeenv==1.9.1
 numpy==2.1.2
     # via
     #   -r requirements.in
+    #   cupy-cuda12x
     #   openml
     #   pandas
     #   scikit-learn
@@ -107,9 +112,13 @@ pytz==2024.2
 pyyaml==6.0.2
     # via pre-commit
 regex==2024.11.6
-    # via -r requirements.in
+    # via
+    #   -r requirements.in
+    #   tiktoken
 requests==2.32.3
-    # via openml
+    # via
+    #   openml
+    #   tiktoken
 rich==13.9.4
     # via
     #   memray
@@ -124,6 +133,8 @@ scipy==1.14.1
     # via
     #   openml
     #   scikit-learn
+setuptools==75.8.0
+    # via torch
 six==1.16.0
     # via python-dateutil
 sympy==1.13.1
@@ -132,6 +143,8 @@ textual==1.0.0
     # via memray
 threadpoolctl==3.5.0
     # via scikit-learn
+tiktoken==0.8.0
+    # via -r requirements.in
 torch==2.5.0
     # via -r requirements.in
 tqdm==4.66.5

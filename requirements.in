@@ -1,3 +1,4 @@
+cupy-cuda12x; platform_system == "Linux"
 memray
 numpy
 psutil
@@ -10,3 +11,4 @@ openml # for dataset
 regex
 torch
 ruff
+tiktoken
