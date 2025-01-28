@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Optional
 
 import numpy as np
@@ -167,7 +168,7 @@ class DecoderSublayer(nn.Module):
 
 if __name__ == "__main__":
 
-    def gpt_2_forward(model, batch_or_tokens, mode="train"):
+    def gpt_2_forward(model, batch_or_tokens, mode="train", **kwargs):
         if mode == "train":
             # We assume the data loader returns:
             # X, dec_inp, y, src_mask, tgt_mask, causal_mask
@@ -184,20 +185,37 @@ if __name__ == "__main__":
     logger = logging.getLogger(__name__)
 
     # Load some data
+    # data = load_data(
+    #     "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt",
+    #     "examples/tinyshakespeare.txt",
+    # )
+
+    # Check if data exist
+    if not os.path.exists("examples/plain-text-wikipedia-simpleenglish.zip"):
+        print("Downloading data...")
+        os.system(
+            "curl -L -o examples/plain-text-wikipedia-simpleenglish.zip https://www.kaggle.com/api/v1/datasets/download/ffatty/plain-text-wikipedia-simpleenglish"
+        )
+        os.system("unzip examples/plain-text-wikipedia-simpleenglish.zip -d examples")
+        os.system("rm -rf examples/1of2")
+        os.system("rm -rf examples/2of2")
+
     data = load_data(
-        "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt",
-        "examples/tinyshakespeare.txt",
+        "examples/AllCombined.txt",
+        "examples/AllCombined.txt",
     )
     logger.info(f"{len(data)} characters in the entire dataset")
 
     # Create a Byte Pair Encoder and prepare data
-    bpe = BytePairEncoder(num_merges=3000, vocab_file_path="vocab.pkl")
+    bpe = BytePairEncoder(
+        num_merges=4000, vocab_file_path="wikipedia_simpleenglish_vocab.pkl"
+    )
     encoded_data = bpe.prepare_data(
         raw_text_list=data.split("\n\n"),
-        npz_file_path="bpe_mini_shakespeare.npz",
+        npz_file_path="bpe_wikipedia_simpleenglish.npz",
         overwrite_saved_file=False,
         split_token="<|endoftext|>",
-    )[:60000]
+    )[:200_000]
 
     n = int(len(encoded_data) * 0.9)
     train_data, test_data = encoded_data[:n], encoded_data[n:]
@@ -205,22 +223,22 @@ if __name__ == "__main__":
     CONFIG = {
         "model_kwargs": {
             "vocab_size": len(bpe._unicode_to_int_vocab),
-            "num_attention_heads": 8,  # GPT-2 small uses 12
-            "hidden_size": 512,  # GPT-2 small uses 768, must be divisible by num_attention_heads
+            "num_attention_heads": 12,  # GPT-2 small uses 12
+            "hidden_size": 768,  # GPT-2 small uses 768, must be divisible by num_attention_heads
             "dropout_prob": 0.1,
-            "max_seq_len": 256,  # GPT-2 uses 1024
-            "num_decoder_layers": 6,  # GPT-2 uses 12
+            "max_seq_len": 128,  # GPT-2 uses 1024
+            "num_decoder_layers": 12,  # GPT-2 uses 12
         },
         "optimizer_kwargs": {
             "lr": 0.0  # We can later schedule it with warmup
         },
         "num_epochs": 20,
-        "warmup_steps": 100,
+        "warmup_steps": 200,
         "eval_iters": 16,
-        "batch_size": 32,  # GPT-2 uses 512
+        "batch_size": 64,  # GPT-2 uses 512
         # Whether to check the model performance by feeding the groundtruth tokens to compare whether the model can predict the next token correctly.
-        "teacher_enforcing": True,
-        "resume_epoch": None,  # Whether to load from a checkpoint
+        "teacher_enforcing": False,
+        "resume_epoch": 15,  # Whether to load from a checkpoint
     }
 
     # Build GPT-2 model, reusing the same training logic
@@ -258,7 +276,7 @@ if __name__ == "__main__":
         epochs=hparams["num_epochs"],
         warmup_steps=hparams["warmup_steps"],
         label_smoothing=0.1,
-        checkpoint_freq=1,
+        checkpoint_freq=5,
         forward_fn=gpt_2_forward,
         tokenizer=bpe,
         teacher_enforcing=hparams["teacher_enforcing"],
@@ -266,7 +284,7 @@ if __name__ == "__main__":
         checkpoint=checkpoint,
     )
 
-    trainer.fit(train_data_loader, test_data_loader)
+    trainer.fit(train_data_loader, test_data_loader, pad_idx=train_data_loader.pad_idx)
 
     # Inference test
     text_utils.inference(
@@ -274,8 +292,8 @@ if __name__ == "__main__":
             model, seq_so_far, mode="sample"
         ),
         bpe=bpe,
-        start_tokens=["All"],  # Example start token
+        start_tokens=["The capital of China is"],  # Example start token
         max_length=int(model.max_seq_len * 0.9),
-        temperature=1.0,
+        temperature=0.5,
         top_k=10,
     )

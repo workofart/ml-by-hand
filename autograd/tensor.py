@@ -628,13 +628,13 @@ class Sqrt(Function):
     def forward(self, x: "Tensor") -> np.ndarray:
         # Store input for backward pass
         self.x = x
-        return np.sqrt(x.data)
+        return np.sqrt(x)
 
     def backward(self, grad: "Tensor") -> np.ndarray:
         # d/dx(sqrt(x)) = 1/(2*sqrt(x))
         # dL/dx = dL/dy * dy/dx = grad * 1/(2*sqrt(x))
         # where dL/dy is the current gradient
-        return grad.data * 0.5 / np.sqrt(self.x.data)
+        return grad.data * 0.5 / np.sqrt(self.x)
 
 
 """
@@ -809,7 +809,7 @@ class Mean(Function):
         grad_arr = grad_expanded.data
         # Scale gradient by number of elements
         num_elements = (
-            np.prod([self.tensors[0].shape[ax] for ax in self.axis])
+            np.prod(np.array([self.tensors[0].shape[ax] for ax in self.axis]))
             if self.axis is not None
             else self.tensors[0].shape
         )
@@ -825,7 +825,7 @@ class Gather(Function):
         return out
 
     def backward(self, grad: "Tensor") -> Tuple[np.ndarray, None]:
-        dx = np.zeros_like(self.x.data)
+        dx = np.zeros_like(self.x)
         flat_indices = self.index.ravel()
         flat_grads = grad.data.reshape(-1, dx.shape[1])
         np.add.at(dx, flat_indices, flat_grads)
@@ -853,7 +853,7 @@ class View(Function):
             # Calculate the size of the -1 dimension
             neg_idx = new_shape.index(-1)
             known_size = np.prod(
-                [d for i, d in enumerate(new_shape) if i != neg_idx and d != -1]
+                np.array([d for i, d in enumerate(new_shape) if i != neg_idx and d != -1])
             )
             # Compute the missing dimension
             inferred_size = int(x.size // known_size)

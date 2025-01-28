@@ -249,6 +249,8 @@ class BytePairEncoder:
     def decode(self, encoded_tokens: List[int]) -> str:
         result: List[ByteString] = []
         for t in encoded_tokens:
+            if isinstance(t, np.ndarray):
+                t = t.item()
             if t in self._int_to_unicode_vocab:
                 result.append(self._int_to_unicode_vocab[t])
             else:

@@ -281,7 +281,7 @@ def inference(
             next_token_id = np.argmax(dist)
         else:
             dist /= dist_sum
-            next_token_id = np.random.choice(len(dist), p=dist)
+            next_token_id = np.random.choice(len(dist), size=1, p=dist).item()
 
         generated[0].append(next_token_id)
 
@@ -335,7 +335,7 @@ def teacher_forcing_inference(
     # Convert predicted IDs back to text
     predicted_text = bpe.decode(predictions)
     groundtruth_text = "".join(
-        [str(bpe._int_to_unicode_vocab[t].decode("utf-8")) for t in groundtruth_data]
+        [str(bpe._int_to_unicode_vocab[t.item()].decode("utf-8")) for t in groundtruth_data]
     )
     groundtruth_text = "\n".join(groundtruth_text.split("<|endoftext|>"))
     teach_force_pred = "\n".join(predicted_text.split("<|endoftext|>"))
