@@ -1,3 +1,4 @@
+cupy-cuda12x; platform_system == "Linux"
 memray
 numpy
 psutil
