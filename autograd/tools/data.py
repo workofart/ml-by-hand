@@ -2,7 +2,7 @@ import os
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Iterator, Optional, Tuple, Union
 
-import numpy as np
+import cupy as np
 import pyarrow.parquet as pq
 import requests
 
@@ -17,11 +17,15 @@ def train_test_split(
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     if random_state is not None:
         np.random.seed(random_state)
-    num_samples = len(X)
-    num_test = int(num_samples * test_size)
-    indices = np.random.permutation(num_samples)
+    # Generate indices using CuPy
+    indices = np.arange(X.shape[0])  # Generate indices on GPU
+    np.random.shuffle(indices)  # Shuffle indices on GPU
+
+    num_test = int(len(indices) * test_size)
+    # Directly split using CuPy slicing
     X_train, X_test = X[indices[num_test:]], X[indices[:num_test]]
     y_train, y_test = y[indices[num_test:]], y[indices[:num_test]]
+
     return X_train, X_test, y_train, y_test
 
 
