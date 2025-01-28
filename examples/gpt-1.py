@@ -217,11 +217,11 @@ if __name__ == "__main__":
 
     text_utils.inference(
         prediction_func=lambda seq_so_far: gpt_1_forward(
-            model, seq_so_far, mode="inference"
+            model, seq_so_far, mode="sample"
         ),
         bpe=bpe,
         start_tokens=["All"],  # Dummy token to start the generation
-        max_length=int(model.max_seq_len * 1.1),
+        max_length=int(model.max_seq_len * 0.9),  # this should be shorter than context
         temperature=1.0,
         top_k=10,
     )
