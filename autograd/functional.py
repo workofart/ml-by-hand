@@ -1,7 +1,7 @@
 import logging
 from typing import Any, Optional, Tuple, Union
 
-import numpy as np
+import cupy as np
 
 from autograd.tensor import Function, Tensor
 

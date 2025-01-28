@@ -1,6 +1,6 @@
 from unittest import TestCase
 
-import numpy as np
+import cupy as np
 
 from autograd.tools.data import train_test_split
 from autograd.tools.metrics import accuracy, precision

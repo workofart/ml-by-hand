@@ -1,6 +1,6 @@
 import logging
 
-import numpy as np
+import cupy as np
 from openml.datasets import get_dataset
 
 from autograd import functional, nn, optim

@@ -1,6 +1,6 @@
 from unittest import TestCase
 
-import numpy as np
+import cupy as np
 import torch  # for test comparisons
 
 from autograd import functional

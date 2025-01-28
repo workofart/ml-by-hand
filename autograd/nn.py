@@ -1,7 +1,7 @@
 import logging
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
-import numpy as np
+import cupy as np
 
 from .functional import relu, sigmoid, softmax, tanh
 from .init import xavier_uniform

@@ -1,4 +1,4 @@
-import numpy as np
+import cupy as np
 
 from autograd import functional, nn, optim, tensor
 from autograd.text.utils import create_vocabulary, text_to_one_hot_and_sparse

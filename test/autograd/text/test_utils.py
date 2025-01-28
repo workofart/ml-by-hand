@@ -1,7 +1,7 @@
 import re
 from unittest import TestCase
 
-import numpy as np
+import cupy as np
 
 from autograd.text.utils import (
     clean_and_tokenize,

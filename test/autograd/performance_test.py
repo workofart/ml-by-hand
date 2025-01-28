@@ -3,7 +3,7 @@ import os
 import time
 from unittest import TestCase
 
-import numpy as np
+import cupy as np
 import psutil
 
 from autograd import functional, nn, optim

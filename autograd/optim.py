@@ -2,7 +2,7 @@ import logging
 from collections import defaultdict
 from typing import Any, Callable, Dict
 
-import numpy as np
+import cupy as np
 
 from autograd.tensor import Tensor
 

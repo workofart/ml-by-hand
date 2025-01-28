@@ -2,7 +2,7 @@ import os
 from copy import deepcopy
 from unittest import TestCase
 
-import numpy as np
+import cupy as np
 
 from autograd.init import xavier_uniform
 from autograd.nn import Module

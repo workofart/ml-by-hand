@@ -4,7 +4,7 @@ import pickle
 from collections import Counter
 from typing import ByteString, Dict, List, Tuple
 
-import numpy as np
+import cupy as np
 import regex
 from tqdm import tqdm
 

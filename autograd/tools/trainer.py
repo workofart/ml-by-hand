@@ -3,7 +3,7 @@ import os
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, Optional, Tuple
 
-import numpy as np
+import cupy as np
 from tqdm import tqdm
 
 from autograd.tensor import Tensor

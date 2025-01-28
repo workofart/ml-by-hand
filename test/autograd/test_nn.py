@@ -2,7 +2,7 @@ import random
 from copy import deepcopy
 from unittest import TestCase
 
-import numpy as np
+import cupy as np
 import torch  # for comparison
 
 from autograd.nn import (

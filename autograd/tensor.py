@@ -8,7 +8,7 @@ from typing import (
     Union,
 )
 
-import numpy as np
+import cupy as np
 
 logger = logging.getLogger(__name__)
 
@@ -860,7 +860,7 @@ class View(Function):
             # Replace -1 with inferred size
             new_shape = tuple(inferred_size if d == -1 else d for d in new_shape)
 
-        if x.size != np.prod(new_shape):
+        if x.size != np.prod(np.array(new_shape)):
             raise ValueError(
                 f"Size of new view must match size of original tensor: {x.size} != {np.prod(new_shape)}"
             )
@@ -1111,7 +1111,7 @@ class StridedWindows(Function):
                 x.strides[2],  # inside window vertical steps
                 x.strides[3],  # inside window horizontal steps
             ),
-            writeable=False,
+            # writeable=False,
         )
 
     def backward(self, grad: "Tensor") -> np.ndarray:

@@ -1,7 +1,7 @@
 import logging
 from unittest import TestCase
 
-import numpy as np
+import cupy as np
 from sklearn.datasets import load_breast_cancer, load_diabetes
 
 from autograd import functional, nn, optim

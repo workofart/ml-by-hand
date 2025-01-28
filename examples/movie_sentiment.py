@@ -1,6 +1,6 @@
 import os
 
-import numpy as np
+import cupy as np
 import pandas as pd
 
 from autograd import functional, nn, optim

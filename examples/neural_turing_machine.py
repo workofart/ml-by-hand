@@ -1,4 +1,4 @@
-import numpy as np
+import cupy as np
 
 from autograd import functional, nn, optim
 from autograd.tensor import Tensor

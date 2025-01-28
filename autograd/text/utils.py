@@ -10,7 +10,7 @@ from typing import (
     Union,
 )
 
-import numpy as np
+import cupy as np
 
 from autograd.text.tokenizer import BytePairEncoder
 

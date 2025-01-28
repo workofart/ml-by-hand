@@ -1,4 +1,4 @@
-import numpy as np
+import cupy as np
 
 
 def accuracy(y_pred, y_true):
