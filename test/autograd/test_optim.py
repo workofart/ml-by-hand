@@ -15,20 +15,18 @@ class TestOptimizer(TestCase):
             "param1": Tensor([1.0, 2.0, 3.0]),
             "param2": Tensor([4.0, 5.0, 6.0]),
         }
+        self.optimizer = Optimizer(self.params, lr=0.01)
 
     def test_base_optimizer_state_dict(self):
         """
         This test checks that the base Optimizer can properly
         save and load minimal state (hyperparams + _states).
         """
-        # Instantiate the base Optimizer
-        optimizer = Optimizer(self.params, lr=0.01)
-
         # If we want to store a custom "global" piece of data, let's put it in _hyperparams:
-        optimizer._hyperparams["some_state"] = {"extra_info": 123}
+        self.optimizer._hyperparams["some_state"] = {"extra_info": 123}
 
         # Save state
-        saved_state = optimizer.state_dict()
+        saved_state = self.optimizer.state_dict()
         # The new structure might look like:
         # {
         #   "hyperparams": { "lr": 0.01, "some_state": {"extra_info": 123} },
@@ -126,6 +124,128 @@ class TestOptimizer(TestCase):
 
         # Check timestep
         self.assertEqual(old_sd["states"]["timestep"], new_sd["states"]["timestep"])
+
+    def test_clip_grad_norm_l2_below_threshold(self):
+        g1 = np.array([0.1, 0.1, 0.1], dtype=np.float32)
+        g2 = np.array([0.2, 0.2, 0.2], dtype=np.float32)
+
+        # Assign these gradients to your parameters
+        self.params["param1"].grad = Tensor(g1.copy())
+        self.params["param2"].grad = Tensor(g2.copy())
+
+        # ------ Reference clip with PyTorch ------
+        # Convert to torch Tensors (with .grad also set)
+        t1 = torch.tensor(g1, dtype=torch.float32, requires_grad=True)
+        t1.grad = torch.tensor(g1, dtype=torch.float32)
+        t2 = torch.tensor(g2, dtype=torch.float32, requires_grad=True)
+        t2.grad = torch.tensor(g2, dtype=torch.float32)
+        torch.nn.utils.clip_grad_norm_([t1, t2], max_norm=1.0, norm_type=2.0)
+
+        # Record final PyTorch gradients
+        torch_final_g1 = t1.grad.detach().numpy()
+        torch_final_g2 = t2.grad.detach().numpy()
+
+        # ------ Custom clip ------
+        self.optimizer._clip_grad_norm(max_norm=1.0, norm_type=2.0)
+
+        # Compare final gradients
+        custom_final_g1 = self.params["param1"].grad.data
+        custom_final_g2 = self.params["param2"].grad.data
+
+        np.testing.assert_allclose(
+            custom_final_g1, torch_final_g1, rtol=1e-6, atol=1e-7
+        )
+        np.testing.assert_allclose(
+            custom_final_g2, torch_final_g2, rtol=1e-6, atol=1e-7
+        )
+
+    def test_clip_grad_norm_l2_above_threshold(self):
+        g1 = np.array([3.0, 4.0, 5.0], dtype=np.float32)
+        g2 = np.array([6.0, 7.0, 8.0], dtype=np.float32)
+
+        self.params["param1"].grad = Tensor(g1.copy())
+        self.params["param2"].grad = Tensor(g2.copy())
+
+        # PyTorch reference
+        t1 = torch.tensor(g1, dtype=torch.float32, requires_grad=True)
+        t1.grad = torch.tensor(g1, dtype=torch.float32)
+        t2 = torch.tensor(g2, dtype=torch.float32, requires_grad=True)
+        t2.grad = torch.tensor(g2, dtype=torch.float32)
+        torch.nn.utils.clip_grad_norm_([t1, t2], max_norm=5.0, norm_type=2.0)
+
+        torch_final_g1 = t1.grad.detach().numpy()
+        torch_final_g2 = t2.grad.detach().numpy()
+
+        # Custom
+        self.optimizer._clip_grad_norm(max_norm=5.0, norm_type=2.0)
+        custom_final_g1 = self.params["param1"].grad.data
+        custom_final_g2 = self.params["param2"].grad.data
+
+        np.testing.assert_allclose(
+            custom_final_g1, torch_final_g1, rtol=1e-6, atol=1e-7
+        )
+        np.testing.assert_allclose(
+            custom_final_g2, torch_final_g2, rtol=1e-6, atol=1e-7
+        )
+
+    def test_clip_grad_norm_l1(self):
+        g1 = np.array([10.0, 10.0, 10.0], dtype=np.float32)
+        g2 = np.array([5.0, 5.0, 5.0], dtype=np.float32)
+
+        self.params["param1"].grad = Tensor(g1.copy())
+        self.params["param2"].grad = Tensor(g2.copy())
+
+        # PyTorch reference
+        t1 = torch.tensor(g1, dtype=torch.float32, requires_grad=True)
+        t1.grad = torch.tensor(g1, dtype=torch.float32)
+        t2 = torch.tensor(g2, dtype=torch.float32, requires_grad=True)
+        t2.grad = torch.tensor(g2, dtype=torch.float32)
+        torch.nn.utils.clip_grad_norm_([t1, t2], max_norm=20.0, norm_type=1.0)
+
+        torch_final_g1 = t1.grad.detach().numpy()
+        torch_final_g2 = t2.grad.detach().numpy()
+
+        # Custom
+        self.optimizer._clip_grad_norm(max_norm=20.0, norm_type=1.0)
+        custom_final_g1 = self.params["param1"].grad.data
+        custom_final_g2 = self.params["param2"].grad.data
+
+        np.testing.assert_allclose(
+            custom_final_g1, torch_final_g1, rtol=1e-6, atol=1e-7
+        )
+        np.testing.assert_allclose(
+            custom_final_g2, torch_final_g2, rtol=1e-6, atol=1e-7
+        )
+
+    def test_clip_grad_norm_random(self):
+        np.random.seed(42)
+        g1 = (np.random.randn(3) * 10).astype(np.float32)
+        g2 = (np.random.randn(3) * 10).astype(np.float32)
+
+        self.params["param1"].grad = Tensor(g1.copy())
+        self.params["param2"].grad = Tensor(g2.copy())
+
+        # PyTorch reference
+        t1 = torch.tensor(g1, dtype=torch.float32, requires_grad=True)
+        t1.grad = torch.tensor(g1, dtype=torch.float32)
+        t2 = torch.tensor(g2, dtype=torch.float32, requires_grad=True)
+        t2.grad = torch.tensor(g2, dtype=torch.float32)
+        torch.nn.utils.clip_grad_norm_([t1, t2], max_norm=5.0, norm_type=2.0)
+
+        torch_final_g1 = t1.grad.detach().numpy()
+        torch_final_g2 = t2.grad.detach().numpy()
+
+        # Custom
+        self.optimizer._clip_grad_norm(max_norm=5.0, norm_type=2.0)
+        custom_final_g1 = self.params["param1"].grad.data
+        custom_final_g2 = self.params["param2"].grad.data
+
+        np.testing.assert_allclose(
+            custom_final_g1, torch_final_g1, rtol=1e-6, atol=1e-7
+        )
+        np.testing.assert_allclose(
+            custom_final_g2, torch_final_g2, rtol=1e-6, atol=1e-7
+        )
 
 
 class TestSGD(TestCase):
