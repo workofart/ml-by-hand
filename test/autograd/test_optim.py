@@ -310,6 +310,7 @@ class TestAdam(TestCase):
             beta1=0.9,
             beta2=0.999,
             epsilon=1e-8,
+            weight_decay=0.0,  # no decay
         )
         self.torch_optim = torch.optim.Adam(
             self.torch_params, lr=0.01, betas=(0.9, 0.999), eps=1e-8
@@ -393,3 +394,66 @@ class TestAdam(TestCase):
                 self.torch_params[1].detach().numpy(),
                 atol=1e-6,
             )
+
+    def test_weight_decay(self):
+        """
+        Verify that our custom Adam with weight_decay>0 matches PyTorch's AdamW
+        implementation (which also decouples weight decay).
+        """
+        wd = 0.01  # some non-zero weight decay
+
+        custom_params = {
+            "custom_module.weight": self.param1,
+            "custom_module.bias": self.param2,
+        }
+        custom_adam = Adam(
+            model_parameters=custom_params,
+            lr=0.01,
+            beta1=0.9,
+            beta2=0.999,
+            epsilon=1e-8,
+            weight_decay=wd,  # enable decoupled weight decay
+        )
+
+        # Create equivalent PyTorch AdamW
+        torch_p1 = torch.nn.Parameter(torch.tensor(self.param1.data))
+        torch_p2 = torch.nn.Parameter(torch.tensor(self.param2.data))
+        torch_adamw = torch.optim.AdamW(
+            [torch_p1, torch_p2], lr=0.01, betas=(0.9, 0.999), eps=1e-8, weight_decay=wd
+        )
+
+        num_steps = 5
+        for _ in range(num_steps):
+            # Set some gradient
+            grad1 = np.random.randn()  # or a fixed value
+            grad2 = np.random.randn()  # or a fixed value
+
+            # Assign to custom
+            self.param1.grad = grad1
+            self.param2.grad = grad2
+
+            # Assign to torch
+            torch_p1.grad = torch.tensor(grad1, dtype=torch.float32)
+            torch_p2.grad = torch.tensor(grad2, dtype=torch.float32)
+
+            # Step both optimizers
+            custom_adam.step()
+            torch_adamw.step()
+
+            # Zero grad for next iteration
+            custom_adam.zero_grad()
+            torch_adamw.zero_grad()
+
+        # Compare final parameter values
+        custom_final_p1 = self.param1.data
+        custom_final_p2 = self.param2.data
+        torch_final_p1 = torch_p1.detach().numpy()
+        torch_final_p2 = torch_p2.detach().numpy()
+
+        # Should match within a small tolerance
+        np.testing.assert_allclose(
+            custom_final_p1, torch_final_p1, atol=1e-6, rtol=1e-6
+        )
+        np.testing.assert_allclose(
+            custom_final_p2, torch_final_p2, atol=1e-6, rtol=1e-6
+        )
