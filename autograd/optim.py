@@ -169,6 +169,9 @@ class SGD(Optimizer):
         def update_fn(param: Any) -> None:
             param.data -= self.lr * param.grad.data
 
+        if "max_grad_norm" in self._hyperparams:
+            self._clip_grad_norm(self._hyperparams["max_grad_norm"], norm_type=2.0)
+
         self._recursive_param_op(self.model_parameters, update_fn)
 
 
@@ -177,6 +180,13 @@ class Adam(Optimizer):
     Adam Optimizer
     Stochastic gradient descent with first and second order momentum
     Paper: https://arxiv.org/abs/1412.6980
+
+    The `weight_decay` parameter is part of the AdamW implementation from the paper
+    Decoupled Weight Decay Regularization
+    Paper: https://arxiv.org/abs/1711.05101
+
+    We have decoupled the Adam-step and the weight-decay step.
+    When `weight_decay` is set to 0, AdamW is equivalent to Adam
     """
 
     def __init__(
@@ -186,6 +196,7 @@ class Adam(Optimizer):
         beta1: float = 0.9,
         beta2: float = 0.999,
         epsilon: float = 1e-7,
+        weight_decay: float = 0.0,
         **kwargs: Any,
     ) -> None:
         super(Adam, self).__init__(model_parameters, lr=lr, **kwargs)
@@ -193,7 +204,9 @@ class Adam(Optimizer):
         self._hyperparams["beta1"] = beta1
         self._hyperparams["beta2"] = beta2
         self._hyperparams["epsilon"] = epsilon
+        self._hyperparams["weight_decay"] = weight_decay
 
+        # Internal state
         self._states["m"] = defaultdict(float)  # first momentum estimate
         self._states["v"] = defaultdict(float)  # second momentum estimate
         self._states["timestep"] = defaultdict(
@@ -201,9 +214,14 @@ class Adam(Optimizer):
         )  # to keep track of the timestep, this will adapt our learning rate
 
     def step(self):
+        # Optional gradient clipping if needed
+        if "max_grad_norm" in self._hyperparams:
+            self._clip_grad_norm(self._hyperparams["max_grad_norm"], norm_type=2.0)
+
         beta1 = self._hyperparams["beta1"]
         beta2 = self._hyperparams["beta2"]
         epsilon = self._hyperparams["epsilon"]
+        weight_decay = self._hyperparams["weight_decay"]
 
         # Iterate over all parameters in the model by *name*
         for name, param in self.model_parameters.items():
@@ -231,5 +249,7 @@ class Adam(Optimizer):
             m_hat = new_m / (1 - beta1**t)
             v_hat = new_v / (1 - beta2**t)
 
-            # Update parameters
+            # Weight decay step (decoupled)
+            if weight_decay > 0.0:
+                param.data = param.data - self.lr * weight_decay * param.data
             param.data -= self.lr * m_hat / (np.sqrt(v_hat) + epsilon)
