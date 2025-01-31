@@ -63,6 +63,39 @@ class Optimizer:
         elif hasattr(params, "grad"):
             update_fn(params)
 
+    def _clip_grad_norm(self, max_norm: float, norm_type: float = 2.0) -> None:
+        r"""
+        Scales the gradients of all parameters (in-place) so that the norm of the
+        gradients is at most `max_norm`.
+        Implements Section 10.11.1 "Clipping Gradients" in Deep Learning Book by Goodfellow et al.
+
+        $$\frac{\text{max\_norm} \cdot g}{\|g\|_n}$$
+        where n is the nth norm
+
+        Args:
+           max_norm (float): The maximum norm of the gradients.
+           norm_type (float): The type of norm to use. Default is 2 (Euclidean norm).
+        """
+        # Compute the global norm of all gradients
+        total_norm = 0.0
+
+        for param in self.model_parameters.values():
+            if param.grad is not None:
+                grad_data = param.grad.data
+                total_norm += (np.abs(grad_data) ** norm_type).sum()
+
+        # Take the appropriate root of the total_norm
+        total_norm = total_norm ** (1.0 / norm_type)
+
+        # If total_norm is greater than max_norm, scale all gradients
+        if total_norm > max_norm:
+            scale_factor = max_norm / (
+                total_norm + 1e-10
+            )  # add small value for numerical stability
+            for param in self.model_parameters.values():
+                if param.grad is not None:
+                    param.grad.data *= scale_factor
+
     def zero_grad(self) -> None:
         """Set the gradients of all optimized tensors to zero."""
 
