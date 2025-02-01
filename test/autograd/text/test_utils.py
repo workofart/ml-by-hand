@@ -203,9 +203,9 @@ class TestTextUtils(TestCase):
         with a MagicMock that returns a dummy object with a proper 'data' attribute.
         """
 
-        def fake_prediction(x):
+        def fake_prediction(model, batch_data, mode):
             # Determine the current sequence length.
-            seq_len = x.shape[1]
+            seq_len = batch_data.shape[1]
             # Build a dummy array of shape (1, seq_len, vocab_size); the values don't matter
             # because np.random.choice is patched.
             dummy_arr = np.zeros((1, seq_len, 10))
@@ -220,6 +220,7 @@ class TestTextUtils(TestCase):
         # For predictability, use a small max_length.
         max_length = 3
         result = inference(
+            model=MagicMock(),
             prediction_func=prediction_func,
             bpe=self.bpe,  # type: ignore
             start_tokens="<SOS>",
@@ -245,9 +246,9 @@ class TestTextUtils(TestCase):
         """
         groundtruth = np.array([0, 1, 2, 3])
 
-        def fake_prediction_teacher(x):
+        def fake_prediction_teacher(model, batch_data, mode):
             # x is an array of shape (1, seq_len). The current seq_len tells us which token to predict.
-            seq_len = x.shape[1]
+            seq_len = batch_data.shape[1]
             # In teacher forcing, for iteration i (where i = seq_len - 1), we want to predict groundtruth[i+1].
             token = groundtruth[
                 seq_len
@@ -256,15 +257,17 @@ class TestTextUtils(TestCase):
             logits = np.full(10, -100.0)
             logits[token] = 100.0
             # Build an array of shape (1, seq_len, 10) and place logits at the last position.
-            dummy_arr = np.zeros((1, seq_len, 10))
-            dummy_arr[0, -1] = logits
-            dummy_obj = MagicMock()
-            dummy_obj.data = dummy_arr
-            return dummy_obj
+            pred_arr = np.zeros((1, seq_len, 10))
+            pred_arr[0, -1] = logits
+            mock_tensor = MagicMock()
+            mock_tensor.data = pred_arr
+            return mock_tensor
 
         prediction_func = MagicMock(side_effect=fake_prediction_teacher)
+
         # Even if max_length is larger, teacher forcing uses groundtruth length.
         result = inference(
+            model=MagicMock(),
             prediction_func=prediction_func,
             bpe=self.bpe,  # type: ignore
             groundtruth_data=groundtruth,
@@ -286,6 +289,7 @@ class TestTextUtils(TestCase):
         groundtruth = np.array([65])
         prediction_func = MagicMock()
         result = inference(
+            model=MagicMock(),
             prediction_func=prediction_func,
             bpe=self.bpe,  # type: ignore
             groundtruth_data=groundtruth,

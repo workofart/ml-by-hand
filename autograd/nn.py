@@ -1017,7 +1017,7 @@ class AbstractLLMForwardFn(ABC):
         if mode == "train":
             return self.train(model, batch_data)
         elif mode == "sample":
-            return self.sample(model, batch_data), None
+            return self.sample(model, batch_data)
         else:
             raise ValueError(f"mode must be either 'train' or 'sample', got {mode}")
 
