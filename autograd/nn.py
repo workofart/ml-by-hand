@@ -246,7 +246,7 @@ class Linear(Module):
         )
 
         # bias is always 1-dimensional
-        self._parameters["bias"] = Tensor(np.random.rand(output_size))
+        self._parameters["bias"] = Tensor(np.zeros(output_size, dtype=np.float32))
 
     def forward(self, x: Union[Tensor, np.ndarray]) -> Tensor:
         if not isinstance(x, Tensor):
@@ -888,8 +888,9 @@ class ScaledDotProductAttention(Module):
     Attention(Q,K,V) = softmax(Q transpose(K) / sqrt(key_dim)) V
     """
 
-    def __init__(self) -> None:
+    def __init__(self, dropout_prob: float = 0.1) -> None:
         super().__init__()
+        self.dropout = Dropout(p=dropout_prob)
 
     def forward(
         self, query: Tensor, key: Tensor, value: Tensor, mask: Optional[Tensor] = None
@@ -904,7 +905,7 @@ class ScaledDotProductAttention(Module):
         if mask is not None:
             # broadcast across heads
             att_score = att_score + (mask * -1e9)
-        att_score = softmax(att_score)
+        att_score = self.dropout(softmax(att_score))
         return att_score @ value
 
 
@@ -917,7 +918,9 @@ class MultiHeadAttention(Module):
     we project them "num_heads" times with different learned linear projects
     """
 
-    def __init__(self, num_heads: int, hidden_size: int) -> None:
+    def __init__(
+        self, num_heads: int, hidden_size: int, dropout_prob: float = 0.1
+    ) -> None:
         super().__init__()
         self.num_heads = num_heads
         self.attention_size = (
@@ -929,7 +932,7 @@ class MultiHeadAttention(Module):
         self.k_linear = Linear(hidden_size, hidden_size)
         self.v_linear = Linear(hidden_size, hidden_size)
 
-        self.attention = ScaledDotProductAttention()
+        self.attention = ScaledDotProductAttention(dropout_prob=dropout_prob)
         self.fc = Linear(hidden_size, hidden_size)
 
     def forward(
