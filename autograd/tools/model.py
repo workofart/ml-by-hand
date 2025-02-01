@@ -128,7 +128,7 @@ def load_checkpoint(
 
     # Load NPZ data
     with np.load(npz_path, allow_pickle=True) as npz_data:
-        data_dict: Dict[str, np.ndarray] = dict(npz_data.items())
+        data_dict = {key: np.array(npz_data[key]) for key in npz_data.files}
 
     deserialized_data = _deserialize(meta, data_dict)
 
