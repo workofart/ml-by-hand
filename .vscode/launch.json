@@ -1,0 +1,127 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Debug Tests",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "purpose": ["debug-test"],
+            "justMyCode": false
+        },
+        {
+            "name": "Mnist",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "examples.mnist"
+        },
+        {
+            "name": "Transpose",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": ["test/autograd/test_tensor.py::TestTensorTranspose::test_transpose_non_contiguous"]
+        },
+        {
+            "name": "Cifar",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "examples.cifar"
+        },
+        {
+            "name": "Neural Turing Machine",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "examples.neural_turing_machine"
+        },
+        {
+            "name": "Seq2Seq",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "examples.seq2seq"
+        },
+        {
+            "name": "Transformers",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "examples.transformers"
+        },
+        {
+            "name": "GPT-1",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "examples.gpt-1"
+        },
+        {
+            "name": "GPT-2",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "examples.gpt-2"
+        },
+        {
+            "name": "Tokenizer",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "autograd.text.tokenizer"
+        },
+        {
+            "name": "MaxPool2d",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": ["test/autograd/test_nn.py::TestMaxPool2d::test_forward"]
+        },
+        {
+            "name": "Tensor",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": ["test/autograd/test_tensor.py", "-k", "test_shift_invariance"]
+        },
+        {
+            "name": "Optim",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": ["test/autograd/test_optim.py::TestOptimizer"]
+        },
+        {
+            "name": "test_state_dict_and_load",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": ["test/autograd/test_nn.py::TestModule::test_state_dict_and_load"]
+        },
+        {
+            "name": "TestCrossEntropyWithLogits",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": ["test/autograd/test_functional.py::TestCrossEntropyWithLogits"]
+        },
+        {
+            "name": "TestConv2d",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": ["test/autograd/test_nn.py::TestConv2d::test_backward"]
+        },
+        {
+            "name": "TestEmbedding",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": ["test/autograd/test_nn.py::TestEmbedding::test_backward"]
+        },
+        {
+            "name": "TestLSTM",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": ["test/autograd/test_nn.py::TestLongShortTermMemoryBlock"]
+        }
+    ]
+}

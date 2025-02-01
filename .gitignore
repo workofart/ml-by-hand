@@ -2,6 +2,8 @@
 # Edit at https://www.toptal.com/developers/gitignore?templates=python
 
 checkpoints/
+training_data/
+training_runs/
 
 ### Python ###
 # Byte-compiled / optimized / DLL files

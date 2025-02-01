@@ -14,8 +14,12 @@ cfgv==3.4.0
     # via pre-commit
 charset-normalizer==3.4.0
     # via requests
+cupy-cuda12x==13.3.0
+    # via -r requirements.in
 distlib==0.3.9
     # via virtualenv
+fastrlock==0.8.3
+    # via cupy-cuda12x
 filelock==3.16.1
     # via
     #   torch
@@ -64,6 +68,7 @@ nodeenv==1.9.1
 numpy==2.1.2
     # via
     #   -r requirements.in
+    #   cupy-cuda12x
     #   openml
     #   pandas
     #   scikit-learn
@@ -124,6 +129,8 @@ scipy==1.14.1
     # via
     #   openml
     #   scikit-learn
+setuptools==75.8.0
+    # via torch
 six==1.16.0
     # via python-dateutil
 sympy==1.13.1

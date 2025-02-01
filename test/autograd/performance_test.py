@@ -3,7 +3,13 @@ import os
 import time
 from unittest import TestCase
 
-import numpy as np
+try:
+    # drop-in replacement for numpy for GPU acceleration
+    import cupy as np  # type: ignore
+
+    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
+except Exception:
+    import numpy as np
 import psutil
 
 from autograd import functional, nn, optim
@@ -149,8 +155,8 @@ class CIPipelinePerformanceTest(TestCase):
         """
         logger.info(f"\nPerformance Metrics for {model_name}:")
 
-        forward_stats = self._compute_stats(metrics["forward_times"])
-        backward_stats = self._compute_stats(metrics["backward_times"])
+        forward_stats = self._compute_stats(np.array(metrics["forward_times"]))
+        backward_stats = self._compute_stats(np.array(metrics["backward_times"]))
 
         logger.info("Timing (seconds):")
         logger.info("Forward Pass:")

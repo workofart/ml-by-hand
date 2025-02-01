@@ -1,6 +1,12 @@
 import logging
 
-import numpy as np
+try:
+    # drop-in replacement for numpy for GPU acceleration
+    import cupy as np  # type: ignore
+
+    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
+except Exception:
+    import numpy as np
 from openml.datasets import get_dataset
 
 from autograd import functional, nn, optim
