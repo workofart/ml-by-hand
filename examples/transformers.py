@@ -379,22 +379,23 @@ class FeedForward(nn.Module):
         return x
 
 
+class TransformerForwardFn(nn.AbstractLLMForwardFn):
+    """
+    A forward function for the Transformer model.
+    """
+
+    def train(self, model: Transformer, batch_data: Any, mode="train", **kwargs):
+        X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_data
+        logits = model(X, dec_inp, src_mask, tgt_mask)
+        return logits, y
+
+    def sample(self, model: Transformer, batch_data: Any, mode="train", **kwargs):
+        X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_data
+        logits = model(X, X, None, None)
+        return logits, y
+
+
 if __name__ == "__main__":
-
-    def transformer_forward(
-        model: Transformer, batch_or_tokens, mode="train", **kwargs
-    ):
-        if mode == "train":
-            X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_or_tokens
-            logits = model(X, dec_inp, src_mask, tgt_mask)
-            return logits, y
-        elif mode == "inference":
-            tokens = batch_or_tokens
-            logits = model(tokens, tokens, None, None)
-            return logits
-        else:
-            raise ValueError(f"mode must be either 'train' or 'inference', got {mode}")
-
     logger = logging.getLogger(__name__)
 
     data = load_data(
@@ -449,7 +450,7 @@ if __name__ == "__main__":
 
     train_data_loader = LLMDataLoader(
         data=train_data,
-        vocab=bpe._unicode_to_int_vocab,
+        bpe=bpe,
         seq_len=hparams["seq_len"],
         batch_size=hparams["batch_size"],
         shuffle=True,
@@ -457,7 +458,7 @@ if __name__ == "__main__":
     )
     test_data_loader = LLMDataLoader(
         data=test_data,
-        vocab=bpe._unicode_to_int_vocab,
+        bpe=bpe,
         seq_len=hparams["seq_len"],
         batch_size=hparams["batch_size"] // 4,
         shuffle=False,
@@ -475,21 +476,19 @@ if __name__ == "__main__":
         teacher_enforcing=hparams["teacher_enforcing"],
         checkpoint=checkpoint,
         hyperparams=hparams,
-        forward_fn=transformer_forward,
+        forward_fn=TransformerForwardFn(),
     )
 
     trainer.fit(
         train_data_loader=train_data_loader,
         val_data_loader=test_data_loader,
-        pad_idx=train_data_loader.pad_idx,
     )
 
     text_utils.inference(
-        prediction_func=lambda seq_so_far: transformer_forward(
-            model, seq_so_far, mode="inference"
-        ),
+        model=model,
+        prediction_func=TransformerForwardFn(),
         bpe=bpe,
-        start_tokens=["<SOS>"],  # Dummy token to start the generation
+        start_tokens="<SOS>",  # Dummy token to start the generation
         max_length=int(hparams["seq_len"] * 1.1),
         temperature=1.0,
         top_k=10,

@@ -1,7 +1,9 @@
 import logging
-from typing import Optional
+import os
+from typing import Any, Optional
 
 import numpy as np
+import tiktoken
 
 from autograd import functional, nn, optim
 from autograd.tensor import Tensor
@@ -113,7 +115,6 @@ class GPT2(nn.Module):
         """
         if module.__class__.__name__ == "Linear":
             module.parameters["weight"] /= np.sqrt(number_of_layers)
-            logger.info("Down scaled weights of linear layer")
 
 
 class DecoderSublayer(nn.Module):
@@ -139,7 +140,9 @@ class DecoderSublayer(nn.Module):
         self.layer_norm1 = nn.LayerNorm(hidden_size)
 
         self.multi_head_attention = nn.MultiHeadAttention(
-            hidden_size=hidden_size, num_heads=num_attention_heads
+            hidden_size=hidden_size,
+            num_heads=num_attention_heads,
+            dropout_prob=dropout_prob,
         )
 
         # Second LayerNorm (for the feed-forward sub-layer)
@@ -165,63 +168,161 @@ class DecoderSublayer(nn.Module):
         return x
 
 
-if __name__ == "__main__":
+def load_wiki_simple():
+    if not os.path.exists("training_data/wiki_simple_english.txt"):
+        print("Downloading data...")
+        os.system(
+            "curl -L -o examples/plain-text-wikipedia-simpleenglish.zip https://www.kaggle.com/api/v1/datasets/download/ffatty/plain-text-wikipedia-simpleenglish"
+        )
+        os.system("unzip examples/plain-text-wikipedia-simpleenglish.zip -d examples")
+        os.system("rm -rf examples/1of2")
+        os.system("rm -rf examples/2of2")
+        os.system("mv examples/AllCombined.txt training_data/wiki_simple_english.txt")
 
-    def gpt_2_forward(model, batch_or_tokens, mode="train"):
-        if mode == "train":
-            # We assume the data loader returns:
-            # X, dec_inp, y, src_mask, tgt_mask, causal_mask
-            X, _, y, _, _, causal_mask = batch_or_tokens
-            logits = model(X, causal_mask)
-            return logits, y
-        elif mode == "sample":
-            tokens = batch_or_tokens
-            logits = model(tokens, None)
-            return logits
-        else:
-            raise ValueError(f"Unknown mode {mode}, must be 'train' or 'sample'")
-
-    logger = logging.getLogger(__name__)
-
-    # Load some data
     data = load_data(
-        "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt",
-        "examples/tinyshakespeare.txt",
+        "training_data/wiki_simple_english.txt",
+        "training_data/wiki_simple_english.txt",
     )
-    logger.info(f"{len(data)} characters in the entire dataset")
+    return data
 
-    # Create a Byte Pair Encoder and prepare data
-    bpe = BytePairEncoder(num_merges=3000, vocab_file_path="vocab.pkl")
-    encoded_data = bpe.prepare_data(
-        raw_text_list=data.split("\n\n"),
-        npz_file_path="bpe_mini_shakespeare.npz",
-        overwrite_saved_file=False,
-        split_token="<|endoftext|>",
-    )[:60000]
 
-    n = int(len(encoded_data) * 0.9)
-    train_data, test_data = encoded_data[:n], encoded_data[n:]
+def load_shakespeare_mini():
+    return load_data(
+        "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt",
+        "training_data/tinyshakespeare.txt",
+    )
 
-    CONFIG = {
+
+class GPT2ForwardFn(nn.AbstractLLMForwardFn):
+    """
+    A forward function for the Transformer model.
+    """
+
+    def train(self, model: GPT2, batch_data: Any, mode="train", **kwargs):
+        X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_data
+        logits = model(X, causal_mask)
+        return logits, y
+
+    def sample(self, model: GPT2, batch_data: Any, mode="train", **kwargs):
+        X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_data
+        logits = model(X, None)
+        return logits, y
+
+
+if __name__ == "__main__":
+    SHAPESPEARE_CONFIG = {
+        "training_run_name": "shakespeare_mini",
         "model_kwargs": {
-            "vocab_size": len(bpe._unicode_to_int_vocab),
-            "num_attention_heads": 8,  # GPT-2 small uses 12
-            "hidden_size": 512,  # GPT-2 small uses 768, must be divisible by num_attention_heads
-            "dropout_prob": 0.1,
+            "num_attention_heads": 6,  # GPT-2 small uses 12
+            "hidden_size": 384,  # GPT-2 small uses 768, must be divisible by num_attention_heads
+            "dropout_prob": 0.2,
             "max_seq_len": 256,  # GPT-2 uses 1024
             "num_decoder_layers": 6,  # GPT-2 uses 12
         },
         "optimizer_kwargs": {
-            "lr": 0.0  # We can later schedule it with warmup
+            "lr": 1e-3,
+            "beta2": 0.99,
+            "max_grad_norm": 1.0,
+            "weight_decay": 0.1,
         },
-        "num_epochs": 20,
+        "num_epochs": 25,
         "warmup_steps": 100,
-        "eval_iters": 16,
-        "batch_size": 32,  # GPT-2 uses 512
+        "eval_iters": 100,
+        "steps_per_epoch": 250,
+        "checkpoint_freq": 2,
+        "batch_size": 64,  # GPT-2 uses 512
+        "label_smoothing": 0.1,
         # Whether to check the model performance by feeding the groundtruth tokens to compare whether the model can predict the next token correctly.
-        "teacher_enforcing": True,
-        "resume_epoch": None,  # Whether to load from a checkpoint
+        "teacher_enforcing": False,
+        "resume_epoch": 8,  # Whether to load from a checkpoint
+        # if True, we use our own BPE, otherwise we use TikToken library
+        "custom_bpe": {
+            "num_merges": 0,
+            "npz_file_path": "training_data/bpe_0_shakespeare_encoded_data",
+            "vocab_file_path": "training_data/shakespeare_vocab_0.pkl",
+        },
     }
+
+    WIKI_CONFIG = {
+        "training_run_name": "wiki",
+        "model_kwargs": {
+            "num_attention_heads": 12,  # GPT-2 small uses 12
+            "hidden_size": 768,  # GPT-2 small uses 768, must be divisible by num_attention_heads
+            "dropout_prob": 0.2,
+            "max_seq_len": 192,  # GPT-2 uses 1024
+            "num_decoder_layers": 12,  # GPT-2 uses 12
+        },
+        "optimizer_kwargs": {
+            "lr": 1e-3,
+            "beta2": 0.99,
+            "max_grad_norm": 1.0,
+        },
+        "num_epochs": 60,
+        "warmup_steps": 100,
+        "eval_iters": 100,
+        "steps_per_epoch": 200,
+        "checkpoint_freq": 2,
+        "batch_size": 64,  # GPT-2 uses 512
+        "label_smoothing": 0.1,
+        # Whether to check the model performance by feeding the groundtruth tokens to compare whether the model can predict the next token correctly.
+        "teacher_enforcing": False,
+        "resume_epoch": 29,  # Whether to load from a checkpoint
+        "custom_bpe": {
+            "num_merges": 12000,
+            "npz_file_path": "training_data/bpe_12000_wiki_simple_encoded_data",
+            "vocab_file_path": "training_data/wikipedia_simpleenglish_vocab_12000.pkl",
+        },  # if non-empty, we use our own BPE, otherwise we use TikToken library
+    }
+
+    CONFIG = WIKI_CONFIG
+
+    logger = logging.getLogger(__name__)
+
+    # Load some data
+    # data = load_shakespeare_mini()
+    data = load_wiki_simple()
+
+    logger.info(f"{len(data)} characters in the entire dataset")
+    # data = data[:50_000]
+    print(data[:100])
+
+    n = int(len(data) * 0.9)
+    train_data, test_data = data[:n], data[n:]
+
+    if CONFIG.get("custom_bpe"):
+        # Create a Byte Pair Encoder and prepare data
+        bpe = BytePairEncoder(
+            num_merges=CONFIG["custom_bpe"]["num_merges"],
+            vocab_file_path=CONFIG["custom_bpe"]["vocab_file_path"],
+        )
+        # Train the vocabulary on the entire dataset
+        bpe.train_vocabulary(
+            data,
+            overwrite_saved_file=False,
+        )
+        data_len = len(data.split("\n\n"))
+        print(f"Total length of data after split: {data_len}")
+        train_data = bpe.prepare_data_parallel(
+            raw_text_list=train_data.split("\n\n"),
+            npz_file_path=f"{CONFIG["custom_bpe"]["npz_file_path"]}_train.npz",
+            overwrite_saved_file=False,
+            split_token="<|endoftext|>",
+        )
+        test_data = bpe.prepare_data_parallel(
+            raw_text_list=test_data.split("\n\n"),
+            npz_file_path=f"{CONFIG["custom_bpe"]["npz_file_path"]}_test.npz",
+            overwrite_saved_file=False,
+            split_token="<|endoftext|>",
+        )
+    else:
+        # Using Tiktoken for tokenizer
+        bpe = tiktoken.get_encoding("gpt2")
+        train_data = bpe.encode(train_data)
+        test_data = bpe.encode(test_data)
+
+    print(f"Data length: {len(train_data)=} {len(test_data)=}")
+
+    CONFIG["model_kwargs"]["vocab_size"] = bpe.n_vocab
 
     # Build GPT-2 model, reusing the same training logic
     model, optimizer, checkpoint = load_model_and_optimizer(
@@ -235,47 +336,55 @@ if __name__ == "__main__":
     hparams = checkpoint.get("hyperparams", CONFIG)
 
     train_data_loader = LLMDataLoader(
-        data=train_data,
-        vocab=bpe._unicode_to_int_vocab,
+        data=np.array(train_data),
+        bpe=bpe,
         batch_size=hparams["batch_size"],
         seq_len=model.max_seq_len,
+        steps_per_epoch=hparams["steps_per_epoch"],
         shuffle=True,
         include_decoder_input=False,
+        create_decoder_inp=False,
+        create_masks=False,
     )
     test_data_loader = LLMDataLoader(
-        data=test_data,
-        vocab=bpe._unicode_to_int_vocab,
-        batch_size=hparams["batch_size"] // 4,
+        data=np.array(test_data),
+        bpe=bpe,
+        batch_size=hparams["batch_size"] // 2,
         seq_len=model.max_seq_len,
+        steps_per_epoch=hparams["eval_iters"],
         shuffle=False,
         include_decoder_input=False,
+        create_decoder_inp=False,
+        create_masks=False,
     )
 
     trainer = LLMTrainer(
         model=model,
         optimizer=optimizer,
         loss_fn=functional.cross_entropy,
-        epochs=hparams["num_epochs"],
+        epochs=60 or hparams["num_epochs"],
         warmup_steps=hparams["warmup_steps"],
-        label_smoothing=0.1,
-        checkpoint_freq=1,
-        forward_fn=gpt_2_forward,
+        label_smoothing=hparams["label_smoothing"],
+        checkpoint_freq=hparams["checkpoint_freq"],
+        forward_fn=GPT2ForwardFn(),
         tokenizer=bpe,
         teacher_enforcing=hparams["teacher_enforcing"],
         hyperparams=hparams,
         checkpoint=checkpoint,
+        start_tokens="First",
     )
 
-    trainer.fit(train_data_loader, test_data_loader)
+    trainer.fit(train_data_loader, test_data_loader, pad_idx=train_data_loader.pad_idx)
 
     # Inference test
-    text_utils.inference(
-        prediction_func=lambda seq_so_far: gpt_2_forward(
-            model, seq_so_far, mode="sample"
-        ),
-        bpe=bpe,
-        start_tokens=["All"],  # Example start token
-        max_length=int(model.max_seq_len * 0.9),
-        temperature=1.0,
-        top_k=10,
-    )
+    for k in range(10):
+        text_utils.inference(
+            model=model,
+            prediction_func=GPT2ForwardFn(),
+            bpe=bpe,
+            start_tokens="April is a charming day",  # Example start token
+            max_length=int(model.max_seq_len),
+            temperature=0.7,
+            # top_k=200,
+        )
+        print("\n------------------------\n")
