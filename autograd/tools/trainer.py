@@ -85,14 +85,6 @@ class AbstractTrainer(ABC):
             else:
                 val_loss = None
 
-            # val_loss = None
-            # if val_data_loader is not None:
-            #     if hasattr(val_data_loader, "on_epoch_start"):
-            #         val_data_loader.on_epoch_start()
-            #     val_loss = self.evaluate(
-            #         train_data_loader, val_data_loader, epoch
-            #     )
-
             self._on_epoch_end(epoch, train_loss, val_loss)
 
         self._save_metrics()
