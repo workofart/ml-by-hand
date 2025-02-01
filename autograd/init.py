@@ -5,7 +5,9 @@ Initialization methods for weights of the neural network
 try:
     # drop-in replacement for numpy for GPU acceleration
     import cupy as np  # type: ignore
-except ImportError:
+
+    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
+except Exception:
     import numpy as np
 
 from autograd.tensor import Tensor

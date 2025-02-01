@@ -4,7 +4,14 @@ import pickle
 from collections import Counter
 from typing import ByteString, Dict, List, Tuple
 
-import numpy as np
+try:
+    # drop-in replacement for numpy for GPU acceleration
+    import cupy as np  # type: ignore
+
+    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
+except Exception:
+    import numpy as np
+
 import regex
 from tqdm import tqdm
 

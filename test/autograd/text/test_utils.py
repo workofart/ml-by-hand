@@ -5,9 +5,10 @@ from unittest.mock import MagicMock, patch
 try:
     # drop-in replacement for numpy for GPU acceleration
     import cupy as np  # type: ignore
-except ImportError:
-    import numpy as np
 
+    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
+except Exception:
+    import numpy as np
 from autograd.text.utils import (
     clean_and_tokenize,
     create_causal_mask,

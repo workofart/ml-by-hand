@@ -5,9 +5,10 @@ from typing import Any, Callable, Dict, Optional, Tuple, Union
 try:
     # drop-in replacement for numpy for GPU acceleration
     import cupy as np  # type: ignore
-except ImportError:
-    import numpy as np
 
+    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
+except Exception:
+    import numpy as np
 from .functional import relu, sigmoid, softmax, tanh
 from .init import xavier_uniform
 from .tensor import Tensor
