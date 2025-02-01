@@ -4,7 +4,13 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import Any, Callable, Dict, Optional, Tuple
 
-import numpy as np
+try:
+    # drop-in replacement for numpy for GPU acceleration
+    import cupy as np  # type: ignore
+
+    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
+except Exception:
+    import numpy as np
 from tqdm import tqdm
 
 from autograd import nn, optim
@@ -93,7 +99,7 @@ class AbstractTrainer(ABC):
         total_loss = 0.0
         batch_count = 0
         for batch in tqdm(data_loader, desc="Training Batches", leave=False):
-            loss = self.train_step(batch)
+            loss = self.train_step(batch, data_loader)
             total_loss += loss
             batch_count += 1
         return total_loss / max(batch_count, 1)
@@ -334,7 +340,7 @@ class LLMTrainer(AbstractTrainer):
         super().__init__(model_cls, optimizer_cls, loss_fn, config=config, **kwargs)
         self.forward_fn = forward_fn
 
-    def train_step(self, batch_data) -> float:
+    def train_step(self, batch_data, data_loader) -> float:
         """
         batch_data: (X, dec_inp, y, src_mask, tgt_mask, causal_mask)
         """
@@ -343,7 +349,7 @@ class LLMTrainer(AbstractTrainer):
         loss = self.loss_fn(
             pred_probs,
             y,
-            pad_idx=getattr(batch_data, "pad_idx", None),
+            pad_idx=data_loader.pad_idx,
             label_smoothing=self.config.label_smoothing,  # type: ignore
         )
         loss.backward()
@@ -380,7 +386,7 @@ class LLMTrainer(AbstractTrainer):
                 prediction_func=self.forward_fn,
                 bpe=train_data_loader.bpe,
                 groundtruth_data=train_data_loader.data[: train_data_loader.seq_len],
-                max_length=train_data_loader.seq_len // 3,
+                max_length=train_data_loader.seq_len,
             )
 
         # Normal sampling
