@@ -26,10 +26,18 @@ class BytePairEncoder:
         self,
         num_merges: int = 500,
         vocab_file_path: str = "vocab.pkl",
+        encoded_data_path: str = "bpe_encoded_data.npz",
         n_workers: Optional[int] = None,
     ) -> None:
+        """
+        Args:
+            num_merges: Number of BPE merges to learn during training.
+            vocab_file_path: Path to store/load the pickled vocabulary.
+            n_workers: Number of processes to use for parallel operations.
+        """
         self.num_merges = num_merges
         self.vocab_file_path = vocab_file_path
+        self.encoded_data_path = encoded_data_path
 
         # For storing vocab: char -> int
         self._unicode_to_int_vocab: Dict[ByteString, int] = {}
@@ -40,59 +48,106 @@ class BytePairEncoder:
 
         self._load_dictionary()
 
-        # start merged token ids from the first unused index after the base vocabulary
+        # Start merged token IDs from the first unused index after the base vocabulary
         self.new_idx = max(self._unicode_to_int_vocab.values()) + 1
 
-        # For parallel processing
+        # Parallelism
         if n_workers is None:
             self.n_workers = max(1, cpu_count() - 1)
         else:
             self.n_workers = n_workers
 
+    @property
+    def n_vocab(self) -> int:
+        """Number of tokens (including special tokens) in the vocabulary."""
+        return len(self._unicode_to_int_vocab)
+
+    def _load_dictionary(self) -> None:
+        """
+        Loads the dictionary (vocab + merges) from disk if it exists;
+        otherwise, constructs a new base dictionary (all single-byte chars + special tokens).
+        """
+        if not os.path.exists(self.vocab_file_path):
+            logger.info(
+                "Vocabulary file does not exist. Creating new dictionary from scratch."
+            )
+            self._unicode_to_int_vocab = self._construct_unicode_to_int_vocab()
+            self._int_to_unicode_vocab = {
+                v: k for k, v in self._unicode_to_int_vocab.items()
+            }
+            self.learned_merges = []
+            return
+
+        # If the file exists, attempt to load; fallback to new dictionary if there's an error.
+        try:
+            with open(self.vocab_file_path, "rb") as f:
+                logger.info("Loading the vocabulary from disk.")
+                data = pickle.load(f)
+                (
+                    self._unicode_to_int_vocab,
+                    self._int_to_unicode_vocab,
+                    self.learned_merges,
+                ) = data
+        except (pickle.UnpicklingError, EOFError) as e:
+            logger.warning(
+                f"Failed to load the vocabulary from {self.vocab_file_path}. "
+                f"Reason: {e}. Creating new dictionary."
+            )
+            self._unicode_to_int_vocab = self._construct_unicode_to_int_vocab()
+            self._int_to_unicode_vocab = {
+                v: k for k, v in self._unicode_to_int_vocab.items()
+            }
+            self.learned_merges = []
+
+    def _construct_unicode_to_int_vocab(self) -> Dict[ByteString, int]:
+        """
+        Returns a dict mapping each byte value (0..255) to its own ID,
+        plus special tokens appended after the 256 base IDs.
+        """
+        unicode_to_int_vocab: Dict[ByteString, int] = {}
+        for i in range(256):
+            unicode_to_int_vocab[bytes([i])] = i
+        # Add special tokens
+        for i, special_char in enumerate(self.SPECIAL_TOKENS):
+            unicode_to_int_vocab[special_char.encode("utf-8")] = 256 + i
+        return unicode_to_int_vocab
+
     def prepare_data(
         self,
         raw_text_list: List[str],
-        npz_file_path: str = "bpe_encoded.npz",
-        overwrite_saved_file: bool = False,
+        overwrite_vocabulary_file: bool = False,
+        overwrite_encoded_data: bool = False,
         split_token: str = "<|endoftext|>",
     ) -> np.ndarray:
         """
-        **In parallel**
         High-level method that:
           1) Trains (or loads) the BPE vocabulary on the given raw_text_list.
-          2) Encodes the text into a NumPy array of token IDs.
-          3) Caches the result to an npz file (unless it already exists and we're not overwriting).
-
-        You can choose to use this or the individual methods below for fine-grain control:
-        - train_vocabulary()
-        - encode_text()
+          2) Encodes the text into a NumPy array of token IDs (in parallel).
+          3) Caches the result to an .npz file (unless it already exists and we're not overwriting).
 
         Args:
-        - raw_text_list: List[str]
-            The list of texts from which to train or apply BPE. If there is only one string, wrap it with [raw_text] before calling this method.
-        - npz_file_path: str
-            File path to store (or load) the encoded .npz data.
-        - overwrite_saved_file: bool
-            Whether to overwrite an existing .npz file with newly encoded data.
-        - split_token: str, optional
-            Delimiter to insert between data blocks.
+            raw_text_list: The list of texts from which to train or apply BPE.
+            npz_file_path: File path to store (or load) the encoded .npz data.
+            overwrite_saved_file: Whether to overwrite an existing .npz file with newly encoded data.
+            split_token: Delimiter to insert between data blocks.
 
         Returns:
-        - encoded_data : np.ndarray
-            The encoded tokens as a NumPy array.
+            A NumPy array of encoded tokens.
         """
         joined_text = split_token.join(raw_text_list)
 
         # 1) Train the vocabulary if needed
-        self.train_vocabulary(joined_text, overwrite_saved_file=overwrite_saved_file)
+        self.train_vocabulary(
+            joined_text, overwrite_saved_file=overwrite_vocabulary_file
+        )
 
         # 2) Check if we already have an encoded .npz file
-        if os.path.exists(npz_file_path) and not overwrite_saved_file:
+        if os.path.exists(self.encoded_data_path) and not overwrite_encoded_data:
             logger.info(
-                f"Found existing encoded data at '{npz_file_path}', "
+                f"Found existing encoded data at '{self.encoded_data_path}', "
                 "loading it instead of re-encoding."
             )
-            with np.load(npz_file_path, allow_pickle=True) as npz_data:
+            with np.load(self.encoded_data_path, allow_pickle=True) as npz_data:
                 encoded_data = npz_data["arr_0"]
         else:
             # 3) Parallel encoding
@@ -112,7 +167,7 @@ class BytePairEncoder:
                 )
 
             # 4) Save to disk
-            np.savez_compressed(npz_file_path, encoded_data)
+            np.savez_compressed(self.encoded_data_path, encoded_data)
 
         logger.info(f"Vocabulary size: {len(self._unicode_to_int_vocab)}")
         logger.info(f"Encoded data length: {len(encoded_data)}")
@@ -120,63 +175,28 @@ class BytePairEncoder:
 
         return encoded_data
 
-    @property
-    def n_vocab(self) -> int:
-        return len(self._unicode_to_int_vocab)
-
-    def _load_dictionary(self) -> None:
-        if not os.path.exists(self.vocab_file_path):
-            logger.info(
-                "Vocabulary file does not exist. Creating new dictionary from scratch."
-            )
-            self._unicode_to_int_vocab = self._construct_unicode_to_int_vocab()
-            self._int_to_unicode_vocab = {
-                v: k for k, v in self._unicode_to_int_vocab.items()
-            }
-            # We need to store the merges we've learned
-            # so we can apply them to new text during the encode step
-            self.learned_merges = []
-            return
-
-        # If the file exists, attempt to load. Fallback to a new dictionary if there's an error.
-        try:
-            with open(self.vocab_file_path, "rb") as f:
-                logger.info("Loading the vocabulary from disk.")
-                data = pickle.load(f)
-                (
-                    self._unicode_to_int_vocab,
-                    self._int_to_unicode_vocab,
-                    self.learned_merges,
-                ) = data
-        except (pickle.UnpicklingError, EOFError) as e:
-            logger.warning(
-                f"Failed to load the vocabulary from {self.vocab_file_path}. "
-                f"Reason: {e}. Creating new dictionary."
-            )
-            self._unicode_to_int_vocab = self._construct_unicode_to_int_vocab()
-            self._int_to_unicode_vocab = {
-                v: k for k, v in self._unicode_to_int_vocab.items()
-            }
-            # We need to store the merges we've learned
-            # so we can apply them to new text during the encode step
-            self.learned_merges = []
-
     def train_vocabulary(
         self, input_text: str, overwrite_saved_file: bool = False
     ) -> Tuple[Dict[ByteString, int], Dict[int, ByteString]]:
         """
         Train the BPE vocabulary on `input_text`. Saves the results to disk
-        unless the vocab is already loaded and `overwrite_saved_file` is False.
+        unless a vocab is already loaded and `overwrite_saved_file=False`.
+
+        Args:
+            input_text: The text to train on.
+            overwrite_saved_file: Whether to re-train and overwrite any existing vocabulary file.
+
+        Returns:
+            The forward and reverse vocab dictionaries.
         """
+        # If we already have a loaded vocab and don't want to overwrite, skip training
         if self._unicode_to_int_vocab and not overwrite_saved_file:
-            # Already loaded a vocab from file
             return self._unicode_to_int_vocab, self._int_to_unicode_vocab
 
         text_chunks = self._pretokenize(input_text)
         logger.debug(f"Text chunks: {text_chunks[:10]}")
 
         word_freq = Counter()
-
         for chunk in text_chunks:
             if chunk in self.SPECIAL_TOKENS:
                 special_id = self._unicode_to_int_vocab[chunk.encode("utf-8")]
@@ -188,12 +208,15 @@ class BytePairEncoder:
                 )
                 word_freq[base_ids] += 1
 
+        # Build initial pair counts
         pair_counts = self._get_initial_pair_counts(word_freq)
-        # remove pairs involving special tokens so we don't merge them
+
+        # Remove pairs involving special tokens so we don't merge them
         pair_counts = {
             p: c for p, c in pair_counts.items() if p[0] < 256 and p[1] < 256
         }
 
+        # Merge loop
         for i in tqdm(range(self.num_merges), desc="Merging pairs"):
             if not pair_counts:
                 break
@@ -201,14 +224,14 @@ class BytePairEncoder:
             best_pair = max(pair_counts, key=pair_counts.get)
             best_pair_count = pair_counts[best_pair]
 
-            # if best pair is not frequent enough, stop merging
-            if pair_counts[best_pair] < 2:
+            # If best pair is not frequent enough, stop merging
+            if best_pair_count < 2:
                 break
 
             new_id = self.new_idx
             self.new_idx += 1
 
-            # Store the merged pair into the vocab
+            # Create the merged token
             merged_bytes = (
                 self._int_to_unicode_vocab[best_pair[0]]
                 + self._int_to_unicode_vocab[best_pair[1]]
@@ -216,9 +239,8 @@ class BytePairEncoder:
             self._int_to_unicode_vocab[new_id] = merged_bytes
             self._unicode_to_int_vocab[merged_bytes] = new_id
 
-            # Updates word_freq in-place
+            # Apply merges throughout the corpus
             self._apply_merges_to_corpus(best_pair, new_id, word_freq, pair_counts)
-            # Record this for encoding step later
             self.learned_merges.append((best_pair, new_id))
 
             if (i + 1) % 100 == 0:
@@ -242,15 +264,19 @@ class BytePairEncoder:
 
         return self._unicode_to_int_vocab, self._int_to_unicode_vocab
 
-    def encode(
-        self, input_text: str, allowed_special: Optional[set] = None
-    ) -> List[int]:
+    def encode(self, input_text: str) -> List[int]:
         """
-        We need to perform the merges that appear in the vocabulary
-        Merge the highest-frequency pair of tokens in the text, then repeat
+        Encode `input_text` into a list of token IDs.
 
-        Break `input_text` into tokens (characters plus merges), then return
-        a list of token IDs.
+        1) Pre-tokenize into chunks (words, punctuation, special tokens).
+        2) Convert each chunk into base token IDs (single-byte or special).
+        3) Apply merges in the order they were learned.
+
+        Args:
+            input_text: The raw text to encode.
+
+        Returns:
+            A list of integer token IDs representing the encoded text.
         """
         text_chunks = self._pretokenize(input_text)
         logger.debug(f"Text chunks: {text_chunks[:20]}")
@@ -258,23 +284,19 @@ class BytePairEncoder:
         if not text_chunks:
             return []
 
-        # Convert a list of strings to a list of integers,
-        # where each integer is the index of the character in the vocabulary
+        # Convert chunks to a list of base token IDs
         byte_encoded_chars: List[int] = []
         for chunk in text_chunks:
             if chunk in self.SPECIAL_TOKENS:
-                # convert to single ID
                 special_id = self._unicode_to_int_vocab[chunk.encode("utf-8")]
                 byte_encoded_chars.append(special_id)
             else:
                 for b_int in chunk.encode("utf-8"):
-                    # e.g. b"\x46"
-                    # Convert single_byte -> int ID from base vocab
                     byte_encoded_chars.append(
                         self._unicode_to_int_vocab[bytes([b_int])]
                     )
 
-        # Apply merges in order (naive pass)
+        # Apply learned merges in a naive pass
         for pair, new_id in tqdm(self.learned_merges, desc="Applying merges to encode"):
             byte_encoded_chars = list(
                 self._merge_pairs(pair, new_id, byte_encoded_chars)
@@ -283,42 +305,32 @@ class BytePairEncoder:
         return byte_encoded_chars
 
     def decode(self, encoded_tokens: List[int]) -> str:
-        result: List[ByteString] = []
+        """
+        Decode a list of token IDs back into the original text string.
+
+        Args:
+            encoded_tokens: The list of integer token IDs to decode.
+
+        Returns:
+            The decoded text.
+        """
+        result_bytes = []
         for t in encoded_tokens:
-            if isinstance(t, np.ndarray):
+            if isinstance(t, np.ndarray):  # if it's a NumPy scalar
                 t = t.item()
             if t in self._int_to_unicode_vocab:
-                result.append(self._int_to_unicode_vocab[t])
+                result_bytes.append(self._int_to_unicode_vocab[t])
             else:
-                result.append(b"<UNK>")
-        # Remember our result contains bytes, so we need to join them and decode them
-        return b"".join(result).decode("utf-8", errors="replace")
-
-    def _construct_unicode_to_int_vocab(self) -> Dict[ByteString, int]:
-        """
-        Returns a dict: char -> int, for 0..255, plus expansions for non-printable control characters
-        """
-        unicode_to_int_vocab: Dict[ByteString, int] = {}
-        # letters 32 - 122, and \n character
-        # for idx, i in enumerate(list(list(range(32, 126)) + [10])):
-        # Base 256
-        for i in range(256):
-            # Each i is mapped to the single byte b"\x00" ... b"\xff"
-            unicode_to_int_vocab[bytes([i])] = i
-        # Add special tokens
-        for i, special_char in enumerate(self.SPECIAL_TOKENS):
-            # unicode_to_int_vocab[special_char.encode("utf-8")] = 126 - 32 + 2 + i
-            unicode_to_int_vocab[special_char.encode("utf-8")] = 256 + i
-        return unicode_to_int_vocab
+                result_bytes.append(b"<UNK>")
+        return b"".join(result_bytes).decode("utf-8", errors="replace")
 
     def _pretokenize(self, input_text: str) -> List[str]:
         r"""
-        From OpenAI GPT-2 regex pattern
-        https://github.com/openai/tiktoken/blob/63527649963def8c759b0f91f2eb69a40934e468/tiktoken_ext/openai_public.py#L9-L14
+        Breaks the input text into chunks (words, punctuation, special tokens).
 
-        - `?\p{L}+` grabs runs of letters (including Unicode letters) optionally preceded by a space.
-        - `?\p{N}+` similarly for digits (e.g. `" 2022"` becomes a token) optionally preceded by a space.
-        - `?[^\s\p{L}\p{N}]+` captures punctuation or other symbols optionally preceded by a space.
+        GPT-2 style regex:
+          - Splits out special tokens explicitly first,
+          - Then uses a pattern to find sequences of letters, digits, punctuation, etc.
         """
         special_pattern = (
             "(" + "|".join(regex.escape(k) for k in self.SPECIAL_TOKENS) + ")"
@@ -340,161 +352,46 @@ class BytePairEncoder:
 
         return [tok for tok in final_chunks if tok]
 
-    def _worker_pair_counts(self, item_chunk):
-        """Worker to compute partial pair_counts from a chunk of word_freq items."""
-        partial_counts = Counter()
-        for w_tuple, freq in item_chunk:
-            for pair_ in zip(w_tuple, w_tuple[1:]):
-                partial_counts[pair_] += freq
-        return partial_counts
-
-    def _chunked_iterable(self, iterable, chunk_size):
-        """Yield successive `chunk_size`-sized chunks from `iterable`."""
-        it = iter(iterable)
-        while True:
-            chunk = []
-            try:
-                for _ in range(chunk_size):
-                    chunk.append(next(it))
-            except StopIteration:
-                if chunk:
-                    yield chunk
-                break
-            yield chunk
-
     def _get_initial_pair_counts(
         self, word_freq: Counter
     ) -> Dict[Tuple[int, int], int]:
         """
         Builds a global frequency dictionary of adjacent token pairs (bigrams)
-        across the entire corpus, which is represented by `word_freq`.
+        across the corpus `word_freq`.
 
         Args:
-            word_freq (Counter[Tuple[int, ...]]):
-                A mapping of distinct word tuples (each a sequence of token IDs)
-                to their frequency in the corpus.
+            word_freq: A mapping of word tuples to their frequency.
 
         Returns:
-            Dict[Tuple[int, int], int]:
-                A dictionary mapping each distinct bigram (pair of token IDs)
-                to the total number of times it appears across all word tuples
-                in `word_freq`.
-
-        Example:
-            Suppose word_freq = {
-                (10, 11, 12): 3,     # appears 3 times
-                (11, 12, 12): 2      # appears 2 times
-            }
-            Then _get_initial_pair_counts(...) might return:
-            {
-                (10, 11): 3,
-                (11, 12): 5,  # (3 + 2) across both words
-                (12, 12): 2
-            }
+            A dict mapping each bigram (pair of token IDs) to its frequency across the corpus.
         """
-        # Convert word_freq.items() into a list so that we can chunk it
         items = list(word_freq.items())
         chunk_size = max(1, len(items) // self.n_workers)
 
-        pool = Pool(self.n_workers)
-        chunked_items = list(self._chunked_iterable(items, chunk_size))
+        with Pool(self.n_workers) as pool:
+            chunked_items = [
+                items[i : i + chunk_size] for i in range(0, len(items), chunk_size)
+            ]
+            partial_results = pool.map(
+                BytePairEncoder._local_pair_counts, chunked_items
+            )
 
-        # Map each chunk to a worker
-        partial_results = pool.map(self._worker_pair_counts, chunked_items)
-        pool.close()
-        pool.join()
-
-        # Merge partial results
         total_counts = Counter()
         for c in partial_results:
             total_counts.update(c)
-
         return dict(total_counts)
 
-    def _merge_pairs(
-        self, pair: Tuple[int, int], new_idx: int, corpus: List[int]
-    ) -> Tuple[int, ...]:
+    def _apply_merges_to_corpus(
+        self,
+        pair: Tuple[int, int],
+        new_id: int,
+        corpus_word_freq: Counter,
+        pair_counts: Dict[Tuple[int, int], int],
+    ) -> None:
         """
-        Merges a specified pair of token IDs in a single pass over a list of token IDs.
-
-        This function is primarily used at encoding time or in a naive approach,
-        rather than the frequency-based approach used during BPE training.
-
-        Args:
-            pair (Tuple[int, int]):
-                The token pair to be merged (e.g., (10, 11)).
-            new_idx (int):
-                The new token ID that replaces each occurrence of `pair`.
-            corpus (List[int]):
-                A list of token IDs representing a single sequence of text.
-
-        Returns:
-            List[int]:
-                A new list of token IDs, where each adjacent occurrence of `pair`
-                has been replaced by `new_idx`.
-
-        Example:
-            corpus = [10, 11, 11, 12]
-            pair = (10, 11)
-            new_idx = 256
-
-            => Output: [256, 11, 12]
+        Merges a given bigram `pair` across `corpus_word_freq` and updates `pair_counts` accordingly.
         """
-        merged_tokens: List[int] = []
-        i = 0
-
-        # Use while loop instead of for loop
-        # to avoid skipping merges
-        while i < len(corpus):
-            if i < len(corpus) - 1 and (corpus[i], corpus[i + 1]) == pair:
-                merged_tokens.append(new_idx)
-                i += 2  # merged so we skip next token
-            else:
-                merged_tokens.append(corpus[i])
-                i += 1
-        return tuple(merged_tokens)
-
-    def _worker_apply_merges(self, item_chunk, pair, new_id):
-        """Merge pair in a local chunk of (w_tuple, freq). Return new_tuples and updated bigrams."""
-        local_new_word_freq = Counter()
-        local_pair_counts = Counter()
-        for old_tuple, freq in item_chunk:
-            new_tuple = self._merge_pairs(pair, new_id, old_tuple)
-            local_new_word_freq[new_tuple] += freq
-            # Collect bigrams from new_tuple
-            for bg in zip(new_tuple, new_tuple[1:]):
-                local_pair_counts[bg] += freq
-        return local_new_word_freq, local_pair_counts
-
-    def _apply_merges_to_corpus(self, pair, new_id, corpus_word_freq, pair_counts):
-        """
-        Merges a given bigram pair in-place throughout the entire corpus
-        (represented by `corpus_word_freq`) and updates the global `pair_counts` accordingly.
-
-        Args:
-            pair (Tuple[int, int]):
-                The token pair to merge (e.g., (32, 101)).
-            new_id (int):
-                The new token ID that replaces each occurrence of `pair`.
-            corpus_word_freq (Counter[Tuple[int, ...]]):
-                A mapping of word tuples -> frequency for the entire corpus.
-                This will be modified in-place to reflect the merged pair.
-            pair_counts (Dict[Tuple[int, int], int]):
-                A global dictionary mapping pairs -> frequency.
-                Will be updated to remove old bigrams and add new ones formed by the merge.
-
-        Returns:
-            None. (Modifies `corpus_word_freq` and `pair_counts` in-place.)
-
-        Example:
-            If `corpus_word_freq` has (10, 11, 11, 12) occurring 2 times,
-            and `pair` is (10, 11) -> new_id=256,
-            then all (10,11) occurrences in that word tuple will be replaced by [256],
-            resulting in (256, 11, 12).
-            Frequencies in `pair_counts` are updated to reflect the removal
-            of (10,11) and the addition of (256,11).
-        """
-        # 1) Identify items to update
+        # 1) Gather all items (word tuples) that contain the pair
         items_to_update = []
         for w_tuple, freq in corpus_word_freq.items():
             if pair in zip(w_tuple, w_tuple[1:]):
@@ -503,71 +400,75 @@ class BytePairEncoder:
         if not items_to_update:
             return
 
-        # 2) Remove old bigrams from the global pair_counts
+        # 2) Decrement old bigrams from global pair_counts
         for old_tuple, freq in items_to_update:
             for bg in zip(old_tuple, old_tuple[1:]):
                 pair_counts[bg] -= freq
                 if pair_counts[bg] <= 0:
                     pair_counts.pop(bg, None)
 
-        # 3) Drop old tuples from corpus_word_freq
+        # 3) Remove old tuples from corpus_word_freq
         for w_tuple, _ in items_to_update:
             del corpus_word_freq[w_tuple]
 
-        # 4) Chunk and parallel merge
-        items_chunked = list(
-            self._chunked_iterable(
-                items_to_update, max(1, len(items_to_update) // self.n_workers)
-            )
-        )
+        # 4) Parallel merge in chunks
+        chunk_size = max(1, len(items_to_update) // self.n_workers)
+
         with Pool(self.n_workers) as pool:
-            partial_results = pool.starmap(
-                self._worker_apply_merges,
-                [(chunk, pair, new_id) for chunk in items_chunked],
+            chunked_items = [
+                items_to_update[i : i + chunk_size]
+                for i in range(0, len(items_to_update), chunk_size)
+            ]
+            partial_results = pool.map(
+                BytePairEncoder._local_merge_chunk,
+                [(chunk, pair, new_id) for chunk in chunked_items],
             )
 
-        # 5) Merge partial results
+        # 5) Aggregate updates into corpus_word_freq and pair_counts
         for local_new_word_freq, local_pair_counts in partial_results:
-            # update corpus_word_freq
             for tup, freq in local_new_word_freq.items():
                 corpus_word_freq[tup] += freq
-
-            # update pair_counts
             for bg, freq in local_pair_counts.items():
                 pair_counts[bg] = pair_counts.get(bg, 0) + freq
 
+    # ------------- Some helper functions for building vocabulary and encoding data ----------
+    @staticmethod
+    def _merge_pairs(
+        pair: Tuple[int, int], new_idx: int, corpus: List[int]
+    ) -> Tuple[int, ...]:
+        """
+        Merges all adjacent occurrences of `pair` in a single pass of `corpus`.
 
-if __name__ == "__main__":
-    # Example usage
-    from autograd.tools.data import (
-        load_data,
-    )  # your custom data loader, adjust as needed
+        Returns a new sequence of token IDs with the merges replaced by `new_idx`.
+        """
+        merged_tokens: List[int] = []
+        i = 0
+        while i < len(corpus):
+            # If we see the pair, merge them
+            if i < len(corpus) - 1 and (corpus[i], corpus[i + 1]) == pair:
+                merged_tokens.append(new_idx)
+                i += 2
+            else:
+                merged_tokens.append(corpus[i])
+                i += 1
+        return tuple(merged_tokens)
 
-    url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
-    filename = "examples/tinyshakespeare.txt"
+    @staticmethod
+    def _local_pair_counts(chunk):
+        partial_counts = Counter()
+        for w_tuple, freq in chunk:
+            for pair_ in zip(w_tuple, w_tuple[1:]):
+                partial_counts[pair_] += freq
+        return partial_counts
 
-    # 1) Load raw text
-    data = load_data(url, filename)[:50]
-
-    # 2) Create BPE instance
-    bpe = BytePairEncoder(num_merges=50, vocab_file_path="tiny_shakespeare_vocab.pkl")
-
-    # 3) Prepare data:
-    #    - This trains the vocab if not already loaded or if overwrite=True
-    #    - Encodes the text
-    #    - Saves (or loads) from 'bpe_mini_shakespeare.npz'
-    encoded_data = bpe.prepare_data(
-        raw_text_list=data.split("\n\n"),
-        npz_file_path="bpe_tokenizer_demo.npz",
-        overwrite_saved_file=False,
-        split_token="<|endoftext|>",
-    )
-
-    # 4) Try a small decode test
-    logger.info(f"Size of final vocabulary: {len(bpe._int_to_unicode_vocab)}")
-    logger.info(f"Encoded data length: {len(encoded_data)}")
-
-    decoded_subset = bpe.decode(encoded_data)
-    logger.info(f"Original text: {data}")
-    logger.info(f"Encoded text: {encoded_data}")
-    logger.info(f"Decoded text: {decoded_subset}")
+    @staticmethod
+    def _local_merge_chunk(args):
+        chunk, pair, new_id = args
+        local_new_word_freq = Counter()
+        local_pair_counts = Counter()
+        for old_tuple, freq in chunk:
+            new_tuple = BytePairEncoder._merge_pairs(pair, new_id, old_tuple)
+            local_new_word_freq[new_tuple] += freq
+            for bg in zip(new_tuple, new_tuple[1:]):
+                local_pair_counts[bg] += freq
+        return dict(local_new_word_freq), dict(local_pair_counts)

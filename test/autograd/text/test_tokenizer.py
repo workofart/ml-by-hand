@@ -90,5 +90,3 @@ class TestTokenizer(TestCase):
         encoded = self.bpe.encode(input_text)
         self.assertIn(st_id, encoded)
         self.assertEqual(self.bpe.decode(encoded), input_text)
-
-    # ... etc. (include or adapt other tests similarly)
