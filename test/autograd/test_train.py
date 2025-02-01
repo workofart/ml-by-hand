@@ -1,4 +1,5 @@
 import logging
+import os
 from unittest import TestCase
 
 try:
@@ -49,6 +50,18 @@ class RegressionModel(nn.Module):
 
 
 class TestTrain(TestCase):
+    def tearDown(self) -> None:
+        reg_metrics_path = (
+            f"{SimpleTrainer.METRICS_DIR}/{RegressionModel.__name__}_default.npz"
+        )
+        classifier_metrics_path = (
+            f"{SimpleTrainer.METRICS_DIR}/{Classifier.__name__}_default.npz"
+        )
+        if os.path.exists(reg_metrics_path):
+            os.remove(reg_metrics_path)
+        if os.path.exists(classifier_metrics_path):
+            os.remove(classifier_metrics_path)
+
     def test_binary_classification(self):
         X, y = load_breast_cancer(return_X_y=True)
         logger.info(f"Dataset: {X.shape=}, {y.shape=}")

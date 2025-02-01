@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -57,6 +58,13 @@ class BaseTrainerTest(unittest.TestCase):
 
         # A mock loss function returning a constant scalar
         self.loss_fn = MagicMock(return_value=Tensor(1.23))
+
+    def tearDown(self) -> None:
+        metrics_path = (
+            f"{SimpleTrainer.METRICS_DIR}/{self.model.__class__.__name__}_default.npz"
+        )
+        if os.path.exists(metrics_path):
+            os.remove(metrics_path)
 
 
 class TestSimpleTrainer(BaseTrainerTest):
