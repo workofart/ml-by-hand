@@ -2,7 +2,6 @@ import logging
 from typing import Any, Optional
 
 import numpy as np
-import tiktoken
 
 from autograd import functional, nn, optim
 from autograd.tensor import Tensor
@@ -290,7 +289,10 @@ if __name__ == "__main__":
             split_token=CONFIG.custom_bpe.split_token,
         )
     else:
-        # Using Tiktoken for tokenizer
+        # TODO: Experimental to debug whether the model learning is poorly due to
+        # the tokenizer. Need to install the python package manually via `uv pip install tiktoken`
+        import tiktoken
+
         bpe = tiktoken.get_encoding("gpt2")
         encoded_data = bpe.encode(data)
 
