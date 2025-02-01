@@ -5,7 +5,7 @@ import numpy as np
 import torch  # for test validation
 
 from autograd.nn import Tensor
-from autograd.optim import SGD, Adam, Optimizer
+from autograd.optim import SGD, Adam, CosineScheduler, Optimizer
 
 
 class TestOptimizer(TestCase):
@@ -15,6 +15,7 @@ class TestOptimizer(TestCase):
             "param1": Tensor([1.0, 2.0, 3.0]),
             "param2": Tensor([4.0, 5.0, 6.0]),
         }
+        # Instantiate the base optimizer without a scheduler.
         self.optimizer = Optimizer(self.params, lr=0.01)
 
     def test_base_optimizer_state_dict(self):
@@ -22,10 +23,9 @@ class TestOptimizer(TestCase):
         This test checks that the base Optimizer can properly
         save and load minimal state (hyperparams + _states).
         """
-        # If we want to store a custom "global" piece of data, let's put it in _hyperparams:
+        # Store a custom state and check that the default timestep is 0.
         self.optimizer._hyperparams["some_state"] = {"extra_info": 123}
 
-        # Save state
         saved_state = self.optimizer.state_dict()
         # The new structure might look like:
         # {
@@ -33,27 +33,28 @@ class TestOptimizer(TestCase):
         #   "states": {}  # No per-parameter states if we haven't done a step
         # }
 
-        # Create a new instance and load state
+        # Since no step has been taken, the global timestep should be 0.
+        self.assertEqual(saved_state["states"]["timestep"], 0)
+
         new_optimizer = Optimizer(
             self.params, lr=999.0
         )  # use a different LR to confirm overwrite
         new_optimizer.load_state_dict(saved_state)
 
-        # Check that LR was restored from hyperparams
         self.assertEqual(new_optimizer._hyperparams["lr"], 0.01)
-
-        # Check that the custom "some_state" was also restored
         self.assertIn("some_state", new_optimizer._hyperparams)
         self.assertEqual(new_optimizer._hyperparams["some_state"]["extra_info"], 123)
+        # Also check that the loaded timestep is 0.
+        self.assertEqual(new_optimizer.timestep, 0)
 
     def test_adam_state_dict(self):
         """
-        This test checks that Adam's internal momentum buffers (m, v) and
-        hyperparams (timestep, etc.) are properly saved and loaded.
+        This test checks that Adam's internal momentum buffers (m, v)
+        and the global timestep are properly saved and loaded.
         """
         adam = Adam(self.params, lr=0.001, beta1=0.8, beta2=0.9, epsilon=1e-5)
 
-        # Simulate one step to populate internal momentum buffers
+        # Simulate one step to populate momentum buffers and update timestep.
         for p in self.params.values():
             p.grad = Tensor([0.1, 0.2, 0.3]).data
         adam.step()
@@ -62,6 +63,7 @@ class TestOptimizer(TestCase):
         self.assertIn("m", adam._states)
         self.assertIn("v", adam._states)
         self.assertIn("timestep", adam._states)
+        self.assertEqual(adam.timestep, 1)
 
         # 2) Save the state
         saved_state_dict = deepcopy(adam.state_dict())
@@ -95,9 +97,7 @@ class TestOptimizer(TestCase):
             np.testing.assert_allclose(
                 new_adam._states["v"][pid], adam._states["v"][pid]
             )
-            np.testing.assert_allclose(
-                new_adam._states["timestep"][pid], adam._states["timestep"][pid]
-            )
+            self.assertEqual(new_adam.timestep, adam.timestep)
 
         # 8) Verify if the entire dict matches
         old_sd = adam.state_dict()
@@ -121,9 +121,12 @@ class TestOptimizer(TestCase):
             np.testing.assert_allclose(
                 old_sd["states"]["v"][pid], new_sd["states"]["v"][pid]
             )
-
-        # Check timestep
         self.assertEqual(old_sd["states"]["timestep"], new_sd["states"]["timestep"])
+
+    def test_timestep_increment(self):
+        initial_ts = self.optimizer.timestep
+        self.optimizer.step()
+        self.assertEqual(self.optimizer.timestep, initial_ts + 1)
 
     def test_clip_grad_norm_l2_below_threshold(self):
         g1 = np.array([0.1, 0.1, 0.1], dtype=np.float32)
@@ -457,3 +460,76 @@ class TestAdam(TestCase):
         np.testing.assert_allclose(
             custom_final_p2, torch_final_p2, atol=1e-6, rtol=1e-6
         )
+
+
+class TestCosineScheduler(TestCase):
+    def setUp(self):
+        self.warmup_steps = 100
+        self.lr_decay_iters = 5000
+        self.min_lr = 1e-4
+        self.initial_lr = 0.01
+        self.scheduler = CosineScheduler(
+            warmup_steps=self.warmup_steps,
+            lr_decay_iters=self.lr_decay_iters,
+            min_lr=self.min_lr,
+        )
+
+    def test_warmup_phase(self):
+        # During warmup, expected LR = initial_lr * (step + 1) / (warmup_steps + 1)
+        for step in [0, 10, 50, self.warmup_steps - 1]:
+            expected_lr = self.initial_lr * (step + 1) / (self.warmup_steps + 1)
+            actual_lr = self.scheduler(step, self.initial_lr, self.initial_lr)
+            self.assertAlmostEqual(actual_lr, expected_lr, places=7)
+
+    def test_cosine_decay_phase(self):
+        step = 2500
+        decay_ratio = (step - self.warmup_steps) / (
+            self.lr_decay_iters - self.warmup_steps
+        )
+        coeff = 0.5 * (1.0 + np.cos(np.pi * decay_ratio))
+        expected_lr = self.min_lr + coeff * (self.initial_lr - self.min_lr)
+        actual_lr = self.scheduler(step, self.initial_lr, self.initial_lr)
+        self.assertAlmostEqual(actual_lr, expected_lr, places=7)
+
+    def test_post_decay_phase(self):
+        step = self.lr_decay_iters + 10
+        expected_lr = self.min_lr
+        actual_lr = self.scheduler(step, self.initial_lr, self.initial_lr)
+        self.assertAlmostEqual(actual_lr, expected_lr, places=7)
+
+    def test_against_pytorch_cosine_annealing(self):
+        """
+        Compare our CosineScheduler (after warmup) to PyTorch's CosineAnnealingLR.
+        We'll skip our warmup region so that the two schedules align.
+        """
+        # We'll set T_max to the number of steps *after* warmup in our scheduler
+        T_max = self.lr_decay_iters - self.warmup_steps
+
+        # Set up a dummy model + optimizer in PyTorch
+        model = torch.nn.Linear(1, 1)
+        optimizer = torch.optim.SGD(model.parameters(), lr=self.initial_lr)
+        # PyTorch's CosineAnnealingLR: we begin "after warmup" at T_max steps
+        scheduler_torch = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=T_max, eta_min=self.min_lr
+        )
+
+        # We want to test steps in the post-warmup region:
+        for local_step in range(T_max + 1):
+            # Our scheduler expects the global step as (warmup + local_step)
+            global_step = self.warmup_steps + local_step
+
+            # Manually compute our scheduler's LR
+            our_lr = self.scheduler(global_step, self.initial_lr, self.initial_lr)
+
+            # For PyTorch, each call to scheduler.step() moves one iteration forward.
+            # We'll read *current* LR first, then step to match the iteration logic.
+            torch_lr_before_step = scheduler_torch.get_last_lr()[0]
+
+            self.assertAlmostEqual(
+                our_lr,
+                torch_lr_before_step,
+                places=5,
+                msg=f"Mismatch at step={global_step}",
+            )
+
+            scheduler_torch.step()

@@ -11,7 +11,10 @@ from typing import (
 )
 
 import numpy as np
+from tqdm import tqdm
 
+from autograd import nn
+from autograd.functional import Softmax
 from autograd.text.tokenizer import BytePairEncoder
 
 logger = logging.getLogger(__name__)
@@ -222,124 +225,80 @@ def token_batch_to_indices(
 
 
 def inference(
-    prediction_func: Callable,
+    model: nn.Module,
+    prediction_func: nn.AbstractLLMForwardFn,
     bpe: BytePairEncoder,
-    start_tokens: List[str],
+    start_tokens: Optional[str] = None,
+    groundtruth_data: Optional[np.ndarray] = None,
     max_length: int = 50,
     temperature: float = 1.0,
     top_k: Optional[int] = None,
 ) -> str:
     """
-    Perform model inference, usually for evaluation purposes.
-    We will continuously feed the model's generated tokens back to the model
-    to generate the next token (i.e. next token is conditioned on all previously
-    generated tokens).
+    Perform model inference in one of two modes:
+
+    - Auto-regressive inference (normal) if `groundtruth_data` is None.
+        We will continuously feed the model's generated tokens back to the model
+        to generate the next token (i.e. next token is conditioned on all previously
+        generated tokens).
+    - Teacher forcing inference if `groundtruth_data` is provided.
+        - In teacher forcing mode, temperature is overridden to 0.0 and top_k to 1 to
+        yield argmax behavior.
+        - Generates text by teacher forcing on `groundtruth_data`. At each time step, we feed the model the ground truth tokens up to that point, and measure or collect the predicted next token.
 
     Args:
-        prediction_func (Callable): The function that takes in a list of tokens, runs model() and returns a list of tokens
+        model (nn.Module): The model to run inference on
+        prediction_func (nn.AbstractLLMForwardFn): The forward function that implements the AbstractLLMForwardFn interface
         bpe (BytePairEncoder): BPE tokenizer
-        start_tokens (List[str]): The list of initial tokens (e.g. ["<SOS>"])
+        start_tokens (Optional[str]): The initial token string (e.g. "<SOS>")
         max_length (int): The maximum length of tokens to run
         temperature (float): The amount of randomness in sampling
             > 1.0 => more random
             < 1.0 => less random
-        top_k (int, optional): If set, only keep the top_k tokens from the distribution
-
-    Returns:
-        str: The decoded string (joined tokens)
+        top_k (Optional[int]): If set, only keep the top_k tokens from the distribution
     """
-    generated = [bpe.encode(t) for t in start_tokens]  # shape: (seq_len,)
 
-    for _ in range(max_length):
-        # "generated" is a list of integers, each int for each token
-        cur_input = np.array(generated)  # shape: (1, seq_len)
+    def sample_next_token(logits: np.ndarray, temp: float, k: Optional[int]) -> int:
+        # If temp <= 0 (teacher forcing), use argmax.
+        if temp <= 0:
+            return int(np.argmax(logits))
+        # Otherwise, apply temperature scaling and top-k filtering.
+        scaled_logits = logits / temp
+        if k is not None and k < len(scaled_logits):
+            top_indices = np.argpartition(scaled_logits, -k)[-k:]
+            filtered_logits = np.full_like(scaled_logits, -np.inf)
+            filtered_logits[top_indices] = scaled_logits[top_indices]
+            scaled_logits = filtered_logits
+        probabilities = Softmax().forward(scaled_logits)
+        return int(np.random.choice(len(probabilities), p=probabilities))
 
-        probs = prediction_func(cur_input)
+    # Determine mode and set up initial values.
+    teacher_forcing = groundtruth_data is not None
+    if teacher_forcing:
+        temperature, top_k = 0.0, 1
+        # We only run for as many steps as there are ground-truth tokens minus one.
+        num_steps = max(0, min(max_length, len(groundtruth_data)) - 1)
+        output_ids = [int(groundtruth_data[0])]
+    else:
+        start_tokens = start_tokens or "<SOS>"
+        output_ids = list(bpe.encode(start_tokens))
+        num_steps = max_length
 
-        # We only care about the distribution for the last token:
-        dist = probs.data[0, -1]  # shape: (vocab_size,)
+    # Main loop: decide input tokens based on the mode.
+    for i in tqdm(range(num_steps), desc="Inference", leave=False):
+        current_input = groundtruth_data[: i + 1] if teacher_forcing else output_ids
+        logits = prediction_func(
+            model=model, batch_data=np.array([current_input]), mode="sample"
+        )[0].data[0, -1]
+        output_ids.append(sample_next_token(logits, temperature, top_k))
 
-        # 1. Apply temperature scaling
-        if temperature != 1.0:
-            # If temperature > 1, distribution flattens
-            # If temperature < 1, distribution becomes sharper
-            dist = dist ** (1.0 / temperature)
+    if teacher_forcing:
+        groundtruth_text = "\n".join(
+            bpe.decode(groundtruth_data.tolist()).split("<|endoftext|>")
+        )
+        logger.info(f"Teacher forcing groundtruth:\n{groundtruth_text}")
 
-        # 2. (Optional) Top-k filtering
-        if top_k is not None and top_k < len(dist):
-            # Get indices of top_k tokens
-            top_k_indices = np.argpartition(dist, -top_k)[-top_k:]
-            # Create a zero array and fill it only for the top_k indices
-            top_dist = np.zeros_like(dist)
-            top_dist[top_k_indices] = dist[top_k_indices]
-            dist = top_dist
+    prediction_text = "\n\n".join(bpe.decode(output_ids).split("<|endoftext|>"))
+    logger.info(f"Prediction:\n\n{prediction_text}")
 
-        # 3. Re-normalize distribution
-        dist_sum = np.sum(dist)
-        if dist_sum <= 1e-15:
-            # If the distribution collapses numerically, fall back to argmax
-            next_token_id = np.argmax(dist)
-        else:
-            dist /= dist_sum
-            next_token_id = np.random.choice(len(dist), p=dist)
-
-        generated[0].append(next_token_id)
-
-    pred_tokens = bpe.decode(generated[0])
-    prediction_string = "\n".join(pred_tokens.split("<|endoftext|>"))
-    logger.info(f"Prediction:\n{prediction_string}")
-    return pred_tokens
-
-
-def teacher_forcing_inference(
-    prediction_func: Callable,
-    bpe: BytePairEncoder,
-    groundtruth_data: np.ndarray,
-    max_length: Optional[int] = None,
-) -> str:
-    """
-    Generates text by teacher forcing on `reference_text`.
-    That is, at each time step, we feed the model the *ground truth* tokens
-    up to that point, and measure or collect the *predicted* next token.
-
-    Args:
-        prediction_func (Callable): The function that takes in a list of tokens, runs model() and returns a list of tokens
-        bpe (BytePairEncoder): BPE tokenizer
-        groundtruth_data (np.ndarray): Ground-truth tokens to use for teacher forcing. These should
-        be in integer ids that are already encoded
-        vocab_idx2word (Dict[int, ByteString]): Mapping from token ids to words
-        max_length (int, optional): If set, we only run up to this many tokens in reference_text.
-
-    Returns:
-        str: A "predicted" string (though it will closely match `reference_text`
-             if the model has memorized or can overfit).
-    """
-    if max_length is None or max_length > len(groundtruth_data):
-        max_length = len(groundtruth_data)
-
-    predictions = []  # We'll store the model's predicted *next token* at each step
-
-    for i in range(max_length - 1):
-        # Feed tokens up to i (inclusive) => model tries to predict token i+1
-        cur_input = np.array([groundtruth_data[: i + 1]])  # shape (1, i+1)
-
-        logits = prediction_func(cur_input)  # shape: (1, i+1, vocab_size)
-        dist = logits.data[0, -1]  # distribution for next token i+1
-
-        # (Optional) you could do argmax or sampling.  For teacher forcing debugging,
-        # typically we just do argmax to see how close the model is to the ground truth.
-        next_token_id = np.argmax(dist)
-
-        predictions.append(next_token_id)
-
-    # Convert predicted IDs back to text
-    predicted_text = bpe.decode(predictions)
-    groundtruth_text = "".join(
-        [str(bpe._int_to_unicode_vocab[t].decode("utf-8")) for t in groundtruth_data]
-    )
-    groundtruth_text = "\n".join(groundtruth_text.split("<|endoftext|>"))
-    teach_force_pred = "\n".join(predicted_text.split("<|endoftext|>"))
-    logger.info(f"Teacher forcing groundtruth:\n{groundtruth_text}")
-    logger.info(f"Teacher forcing inference:\n{teach_force_pred}")
-
-    return predicted_text
+    return prediction_text

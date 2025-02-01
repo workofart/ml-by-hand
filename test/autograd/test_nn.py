@@ -24,7 +24,7 @@ np.random.seed(1337)
 torch.manual_seed(1337)
 
 
-class TestMainModule(Module):
+class MockMainModule(Module):
     def __init__(self):
         super().__init__()
         # Top-level parameter
@@ -33,13 +33,13 @@ class TestMainModule(Module):
         self.top_level_state = np.array([99, 99, 99])
 
         # Submodule
-        self.submodule1 = TestSubModule()
+        self.submodule1 = MockSubModule()
 
     def forward(self, x: Tensor) -> Tensor:
         return x @ self.main_weight
 
 
-class TestSubModule(Module):
+class MockSubModule(Module):
     def __init__(self):
         super().__init__()
         # Parameter
@@ -53,7 +53,7 @@ class TestSubModule(Module):
 
 class TestModule(TestCase):
     def setUp(self) -> None:
-        self.model = TestMainModule()
+        self.model = MockMainModule()
 
     def test_parameters_and_states(self):
         # 1) Check top-level parameter

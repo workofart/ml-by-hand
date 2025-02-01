@@ -1,6 +1,6 @@
 import os
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Iterator, Optional, Tuple, Union
+from typing import Any, Iterator, Optional, Tuple, Union
 
 import numpy as np
 import pyarrow.parquet as pq
@@ -17,9 +17,10 @@ def train_test_split(
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     if random_state is not None:
         np.random.seed(random_state)
-    num_samples = len(X)
-    num_test = int(num_samples * test_size)
-    indices = np.random.permutation(num_samples)
+    indices = np.arange(X.shape[0])
+    np.random.shuffle(indices)
+
+    num_test = int(len(indices) * test_size)
     X_train, X_test = X[indices[num_test:]], X[indices[:num_test]]
     y_train, y_test = y[indices[num_test:]], y[indices[:num_test]]
     return X_train, X_test, y_train, y_test
@@ -51,13 +52,15 @@ def load_data(
         data = pq.read_table(filename).to_pandas().to_numpy()
         return data[:max_rows] if max_rows else data
     else:
-        with open(filename, "r") as f:
+        with open(filename, "r", encoding="utf-8") as f:
             return f.read()
 
 
 class AbstractDataLoader(ABC):
     """
+    An abstract base class for DataLoaders.
     A base interface for DataLoaders that yield batches of data for training.
+    With an optional per-epoch hook.
     """
 
     def __init__(self, batch_size: int, shuffle: bool = True) -> None:
@@ -69,41 +72,40 @@ class AbstractDataLoader(ABC):
         self.batch_size = batch_size
         self.shuffle = shuffle
 
-    @abstractmethod
     def on_epoch_start(self) -> None:
         """
-        Hook that can be called at the start of each epoch.
-        (e.g., for shuffling or resetting any internal state).
+        Optional hook to perform actions at the start of an epoch.
+        The default implementation does nothing.
+        Subclasses (e.g. for shuffling) can override this method.
         """
         pass
 
-    @abstractmethod
     def __len__(self) -> int:
         """
-        Returns the number of batches per epoch.
-        For instance, if we have N data points and batch_size = B,
-        this might return N // B (or ceil of it).
+        Returns the number of batches per epoch if defined,
+        otherwise raises an error.
         """
-        pass
+        raise NotImplementedError(
+            "This DataLoader does not support __len__ by default."
+        )
 
     @abstractmethod
     def __iter__(self) -> Iterator[Any]:
         """
         Should yield one batch at a time.
-        The batch format can vary depending on the type of data
-        (e.g. (X, y) for classification, or (X, y, masks) for text tasks).
+        The batch format can vary depending on the type of data.
+        Please implement this method in the subclasses
         """
         pass
 
 
 class SimpleDataLoader(AbstractDataLoader):
     """
-    A basic DataLoader for supervised tasks, e.g. classification or regression.
+    A basic DataLoader for supervised tasks (e.g., classification or regression).
     It handles:
-      - storing X and y in memory
-      - optional shuffling each epoch
-      - batching by batch_size
-      - yielding (batch_X, batch_y) each iteration
+      - In-memory storage of X and y
+      - Optional shuffling at the start of each epoch
+      - Batching data into (batch_X, batch_y) pairs
     """
 
     def __init__(
@@ -117,189 +119,169 @@ class SimpleDataLoader(AbstractDataLoader):
         self.X = X
         self.y = y
         self.num_samples = len(X)
-        self._index_array = np.arange(self.num_samples)
-
-        # We'll compute how many steps per epoch (rounding down by default)
-        self.num_batches = (self.num_samples + self.batch_size - 1) // self.batch_size
+        self.indices = np.arange(self.num_samples)
 
     def on_epoch_start(self) -> None:
-        """Shuffle the index array if needed."""
+        # Shuffle the index array if needed
         if self.shuffle:
-            np.random.shuffle(self._index_array)
-
-    def preprocess(self, preprocess_func) -> None:
-        """Preprocess the data if needed."""
-        self.X, self.y = preprocess_func(self.X, self.y)
-
-    def __len__(self) -> int:
-        """Return the number of batches per epoch."""
-        return self.num_batches
+            np.random.shuffle(self.indices)
 
     def __iter__(self) -> Iterator[Tuple[np.ndarray, np.ndarray]]:
-        """
-        Yields (batch_X, batch_y).
-        """
-        for batch_idx in range(self.num_batches):
-            start_idx = batch_idx * self.batch_size
-            end_idx = min((batch_idx + 1) * self.batch_size, self.num_samples)
-            indices = self._index_array[start_idx:end_idx]
+        for start in range(0, self.num_samples, self.batch_size):
+            batch_indices = self.indices[start : start + self.batch_size]
+            yield self.X[batch_indices], self.y[batch_indices]
 
-            batch_X = self.X[indices]
-            batch_y = self.y[indices]
-            yield batch_X, batch_y
+    def __len__(self) -> int:
+        # We'll compute how many steps per epoch (rounding down by default)
+        return (self.num_samples + self.batch_size - 1) // self.batch_size
+
+    def preprocess(self, preprocess_func) -> None:
+        """
+        Optionally preprocess the data using the provided function.
+        """
+        self.X, self.y = preprocess_func(self.X, self.y)
 
 
 class LLMDataLoader(AbstractDataLoader):
     """
-    A specialized DataLoader for language modeling or sequence-to-sequence tasks.
+    A specialized DataLoader for language modeling or next-token tasks,
+    where it samples random chunks of contiguous sequences of data.
     It handles:
       - A single tokenized array (e.g. integer IDs of text).
-      - Contiguous chunking into (X, y) (with optional shifting).
+      - Random chunk sampling: each batch picks 'batch_size' random slices
+        of length (seq_len+1).
       - Optional creation of decoder_input by prepending a special <SOS> token.
-      - Mask creation: source_mask, target_mask, etc.
-      - Shuffling at row-level if desired (if we reshape to (batch_size, -1)).
+      - Optional creation of a causal mask or other masks.
+      - If a finite 'steps_per_epoch' is provided, we treat each epoch as
+        'steps_per_epoch' random batches. Otherwise we can yield batches infinitely.
     """
 
     def __init__(
         self,
-        data: np.ndarray,
-        vocab: Dict[Any, Any],
+        data: np.ndarray,  # array of token IDs
+        bpe,
         batch_size: int,
         seq_len: int,
         shuffle: bool = True,
+        steps_per_epoch: Optional[int] = 1000,
         include_decoder_input: bool = True,
-        sos_token: Union[str, bytes] = b"<SOS>",
-        pad_token: Union[str, bytes] = b"<PAD>",
+        create_decoder_inp: bool = True,
+        create_masks: bool = True,
+        sos_token: Union[str, bytes] = "<SOS>",
+        pad_token: Union[str, bytes] = "<PAD>",
     ) -> None:
         """
         Args:
-            data (np.ndarray): Tokenized and encoded data (list of token IDs)
-            vocab (dict): A mapping from token -> ID
-            batch_size (int): Number of sequences in each batch.
-            seq_len (int): Length of each sequence.
-            shuffle (bool): Whether to shuffle row order at the start of each epoch (i.e., shuffle contiguous chunks).
-            pad_token (str, bytes): The padding token to use.
-            include_decoder_input (bool): Whether to include decoder input.
-            sos_token (str, bytes): The start-of-sequence token to use.
+            data (np.ndarray): Tokenized integer IDs of the entire dataset.
+            bpe: BytePairEncoder or other tokenizer with .encode() / .decode().
+            batch_size (int): Number of sequences per batch.
+            seq_len (int): Length of each sequence (X) we feed the model.
+                           We'll actually slice out (seq_len+1) tokens so that
+                           position i can predict i+1.
+            shuffle (bool): Whether to randomize each epoch's sampling
+            steps_per_epoch (Optional[int]): If given, we produce exactly
+                'steps_per_epoch' batches each epoch. Otherwise you can
+                treat it as an infinite loader if you prefer.
+            include_decoder_input (bool): If True, we create a separate 'dec_inp'
+                array (common in seq2seq). If you just want normal GPT next-token,
+                you can ignore or set this false.
+            create_decoder_inp (bool): Similar flag controlling if we do that step.
+            create_masks (bool): If True, we create a causal_mask (and possibly other
+                masks). If you're doing standard GPT, you'd typically want a causal mask.
+            sos_token (str, bytes): The start-of-sequence token to use for the decoder input.
+            pad_token (str, bytes): The token for padding or ignoring if needed.
         """
         super().__init__(batch_size=batch_size, shuffle=shuffle)
-        self.data = data
-        self.vocab = vocab
-        self.seq_len = seq_len
-        self.pad_idx = vocab[pad_token]
-        self.include_decoder_input = include_decoder_input
 
-        # If we need an <SOS> token, ensure it's in vocab
-        if include_decoder_input:
-            if sos_token not in vocab:
-                raise ValueError(
-                    f"SOS token {sos_token} not found in vocab. "
-                    "Either add it or disable include_decoder_input."
-                )
-            self.sos_idx = vocab[sos_token]
+        self.data = np.array(data)
+        self.bpe = bpe
+        self.seq_len = seq_len
+        self.steps_per_epoch = steps_per_epoch
+        self.include_decoder_input = include_decoder_input
+        self.create_decoder_inp = create_decoder_inp
+        self.create_masks = create_masks
+
+        # For ignoring or masking out pad if needed:
+        self.pad_idx = bpe.encode(pad_token, allowed_special={pad_token})[0]
+        if self.include_decoder_input:
+            self.sos_idx = bpe.encode(sos_token, allowed_special={sos_token})[0]
         else:
             self.sos_idx = None
 
-        # We'll prepare caches for each epoch
-        self.batches_X = []
-        self.batches_y = []
-        self.batches_decoder_inp = []
-        self.source_masks = []
-        self.target_masks = []
-        self.causal_masks = []
-
-        self.num_batches = 0
+        self.data_size = len(self.data)
 
     def on_epoch_start(self) -> None:
         """
-        Called at the start of each epoch: shuffle at row level (if desired) after reshaping,
-        then create contiguous chunks for each batch.
+        Called at the start of each 'epoch'. For random chunking, we can optionally
+        re-seed the RNG to ensure each epoch is different if shuffle=True.
         """
-        self._clear_cache()
-        self._create_batches()
-
-    def _clear_cache(self):
-        self.batches_X.clear()
-        self.batches_y.clear()
-        self.batches_decoder_inp.clear()
-        self.source_masks.clear()
-        self.target_masks.clear()
-        self.causal_masks.clear()
-
-    def _create_batches(self) -> None:
-        """
-        Reshape data into (batch_size, -1), shuffle row order if needed,
-        then chunk each row by seq_len.
-        """
-        data_length = len(self.data)
-        total_tokens_per_epoch = (data_length // (self.batch_size * self.seq_len)) * (
-            self.batch_size * self.seq_len
-        )
-        truncated_data = self.data[:total_tokens_per_epoch]
-
-        # Reshape to (batch_size, -1)
-        reshaped = truncated_data.reshape(self.batch_size, -1)
-
         if self.shuffle:
-            np.random.shuffle(reshaped)
+            # Re-seeding ensures different random offsets each epoch.
+            np.random.seed()
 
-        width = reshaped.shape[1]
-        num_steps = width // self.seq_len
-        self.num_batches = num_steps
+    def __iter__(
+        self,
+    ) -> Iterator[
+        Tuple[
+            np.ndarray,  # X_chunk: (batch_size, seq_len)
+            Optional[np.ndarray],  # dec_inp: (batch_size, seq_len) or None
+            np.ndarray,  # Y_chunk: (batch_size, seq_len)
+            Optional[np.ndarray],  # source mask (e.g., padding mask)
+            Optional[np.ndarray],  # target mask (e.g., causal + padding)
+            Optional[np.ndarray],  # causal mask
+        ]
+    ]:
+        step = 0
+        # Allow infinite iteration if steps_per_epoch is None.
+        while self.steps_per_epoch is None or step < self.steps_per_epoch:
+            step += 1
 
-        for step in range(num_steps):
-            X_chunk = reshaped[:, step * self.seq_len : (step + 1) * self.seq_len]
-            # Typically, for a next-token LM, y is the same as X but shifted by 1 token in time.
-            Y_chunk = X_chunk  # or some variant if you want a different target.
+            max_offset = self.data_size - (self.seq_len + 1)
+            if max_offset < 1:
+                raise ValueError(
+                    f"Dataset too small ({self.data_size} tokens) for seq_len={self.seq_len+1}"
+                )
 
-            if self.include_decoder_input:
+            # Randomly choose starting offsets for each sequence in the batch.
+            offsets = np.random.randint(low=0, high=max_offset, size=self.batch_size)
+            # Extract chunks of (seq_len+1) tokens.
+            batch_chunks = [self.data[o : o + self.seq_len + 1] for o in offsets]
+            # shape: (batch_size, seq_len+1), the + 1 is to give space for our X, y chunks to be shifted by 1.
+            batch = np.stack(batch_chunks, axis=0)
+
+            # Prepare input (X) and target (Y) by shifting the sequence.
+            X_chunk = batch[:, :-1]  # shape: (batch_size, seq_len)
+            Y_chunk = batch[:, 1:]  # shape: (batch_size, seq_len)
+
+            # Optionally create a decoder input by prepending the SOS token.
+            if self.include_decoder_input and self.create_decoder_inp:
                 dec_inp = np.zeros_like(Y_chunk)
                 dec_inp[:, 0] = self.sos_idx
                 dec_inp[:, 1:] = Y_chunk[:, :-1]
             else:
                 dec_inp = None
 
-            # Build masks (example placeholders -- replace with your own calls)
-            smask = text_utils.create_padding_mask(
-                X_chunk, self.pad_idx
-            )  # shape e.g. [batch_size, 1, 1, seq_len]
-            cmask = text_utils.create_causal_mask(
+            # Create a causal mask (e.g., for next-token prediction).
+            causal_mask = text_utils.create_causal_mask(
                 seq_len=self.seq_len, batch_size=self.batch_size
             )
-            pmask = text_utils.create_padding_mask(Y_chunk, self.pad_idx)
-            tmask = pmask + cmask
 
-            self.batches_X.append(X_chunk)
-            self.batches_y.append(Y_chunk)
-            self.batches_decoder_inp.append(dec_inp)
-            self.source_masks.append(smask)
-            self.target_masks.append(tmask)
-            self.causal_masks.append(cmask)
+            smask, tmask = None, None
+            if self.create_masks:
+                smask = text_utils.create_padding_mask(X_chunk, self.pad_idx)
+                pmask = text_utils.create_padding_mask(Y_chunk, self.pad_idx)
+                tmask = pmask + causal_mask if causal_mask is not None else pmask
+
+            yield (
+                X_chunk,  # (batch_size, seq_len)
+                dec_inp,  # (batch_size, seq_len) or None
+                Y_chunk,  # (batch_size, seq_len)
+                smask,  # source mask (batch_size, 1, 1, seq_len) or None
+                tmask,  # target mask (batch_size, 1, seq_len, seq_len) or None
+                causal_mask,  # causal mask (batch_size, 1, seq_len, seq_len) or None
+            )
 
     def __len__(self) -> int:
-        return self.num_batches
-
-    def __iter__(
-        self,
-    ) -> Iterator[
-        Tuple[
-            np.ndarray,
-            Optional[np.ndarray],
-            np.ndarray,
-            np.ndarray,
-            np.ndarray,
-            np.ndarray,
-        ]
-    ]:
-        """
-        Yields (X, decoder_inp, y, source_mask, target_mask, causal_mask).
-        """
-        for i in range(self.num_batches):
-            yield (
-                self.batches_X[i],
-                self.batches_decoder_inp[i],
-                self.batches_y[i],
-                self.source_masks[i],
-                self.target_masks[i],
-                self.causal_masks[i],
-            )
+        if self.steps_per_epoch is None:
+            raise NotImplementedError("Infinite DataLoader does not support __len__.")
+        return self.steps_per_epoch

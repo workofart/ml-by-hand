@@ -1,5 +1,6 @@
 import re
 from unittest import TestCase
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 
@@ -8,11 +9,26 @@ from autograd.text.utils import (
     create_causal_mask,
     create_padding_mask,
     create_vocabulary,
+    inference,
     text_to_one_hot_and_sparse,
 )
 
 
+class MockedBPE:
+    def encode(self, text: str):
+        if text == "<SOS>":
+            return [0]
+        # For simplicity, convert each uppercase letter to an integer (A=0, B=1, …)
+        return [ord(ch) - 65 for ch in text if ch.isupper()]
+
+    def decode(self, tokens: list) -> str:
+        return "".join(chr(t + 65) for t in tokens)
+
+
 class TestTextUtils(TestCase):
+    def setUp(self) -> None:
+        self.bpe = MockedBPE()
+
     def test_create_vocabulary_basic(self):
         texts = ["I love apples", "I love to eat apples every day", "Apples are great"]
         vocab = create_vocabulary(texts, max_features=5)
@@ -178,3 +194,108 @@ class TestTextUtils(TestCase):
         # punctuation like "," and "!" is included
         self.assertIn(",", tokens)
         self.assertIn("!", tokens)
+
+    @patch("numpy.random.choice")
+    def test_normal_inference(self, mock_choice):
+        """
+        In normal (auto-regressive) mode, we expect the inference loop to use sampling.
+        We patch np.random.choice to always return 1. Also, we simulate the prediction_func
+        with a MagicMock that returns a dummy object with a proper 'data' attribute.
+        """
+
+        def fake_prediction(model, batch_data, mode):
+            # Determine the current sequence length.
+            seq_len = batch_data.shape[1]
+            # Build a dummy array of shape (1, seq_len, vocab_size); the values don't matter
+            # because np.random.choice is patched.
+            dummy_arr = np.zeros((1, seq_len, 10))
+            dummy_obj = MagicMock()
+            dummy_obj.data = dummy_arr
+            return dummy_obj
+
+        # Always return 1 when sampling (so our token will be 1 → 'B').
+        mock_choice.return_value = 1
+        prediction_func = MagicMock(side_effect=fake_prediction)
+
+        # For predictability, use a small max_length.
+        max_length = 3
+        result = inference(
+            model=MagicMock(),
+            prediction_func=prediction_func,
+            bpe=self.bpe,  # type: ignore
+            start_tokens="<SOS>",
+            groundtruth_data=None,
+            max_length=max_length,
+            temperature=1.0,
+            top_k=5,
+        )
+        # bpe.encode("<SOS>") returns [0] → 'A'
+        # Then we append token 1 for each iteration → 'B'
+        # Final output: [0] + [1, 1, 1] decodes to "A" followed by "B" repeated 3 times: "ABBB"
+        expected = self.bpe.decode([0] + [1] * max_length)
+        self.assertEqual(result, expected)
+        # Ensure prediction_func was called exactly max_length times.
+        self.assertEqual(prediction_func.call_count, max_length)
+
+    def test_teacher_forcing_inference(self):
+        """
+        In teacher forcing mode, the inference function should use argmax (temperature=0).
+        We simulate a prediction function that returns dummy logits such that np.argmax
+        returns the next groundtruth token.
+        For groundtruth [0, 1, 2, 3], we expect the output tokens to be 0 then 1, 2, and 3.
+        """
+        groundtruth = np.array([0, 1, 2, 3])
+
+        def fake_prediction_teacher(model, batch_data, mode):
+            # x is an array of shape (1, seq_len). The current seq_len tells us which token to predict.
+            seq_len = batch_data.shape[1]
+            # In teacher forcing, for iteration i (where i = seq_len - 1), we want to predict groundtruth[i+1].
+            token = groundtruth[
+                seq_len
+            ]  # e.g., for seq_len=1, predict groundtruth[1] which is 1.
+            # Create logits with a high value at the desired token.
+            logits = np.full(10, -100.0)
+            logits[token] = 100.0
+            # Build an array of shape (1, seq_len, 10) and place logits at the last position.
+            pred_arr = np.zeros((1, seq_len, 10))
+            pred_arr[0, -1] = logits
+            mock_tensor = MagicMock()
+            mock_tensor.data = pred_arr
+            return mock_tensor, None
+
+        prediction_func = MagicMock(side_effect=fake_prediction_teacher)
+
+        # Even if max_length is larger, teacher forcing uses groundtruth length.
+        result = inference(
+            model=MagicMock(),
+            prediction_func=prediction_func,
+            bpe=self.bpe,  # type: ignore
+            groundtruth_data=groundtruth,
+            max_length=10,
+            temperature=1.0,  # overridden to 0 in teacher forcing
+            top_k=5,  # overridden to 1 in teacher forcing
+        )
+        # The output tokens should be: [groundtruth[0], groundtruth[1], groundtruth[2], groundtruth[3]]
+        expected = self.bpe.decode([0, 1, 2, 3])
+        self.assertEqual(result, expected)
+        # Teacher forcing should have made 3 calls (len(groundtruth) - 1)
+        self.assertEqual(prediction_func.call_count, 3)
+
+    def test_teacher_forcing_single_token(self):
+        """
+        If groundtruth_data contains only one token, the inference loop should not be entered.
+        The output should exactly match the decoded single token, and the prediction function should not be called.
+        """
+        groundtruth = np.array([65])
+        prediction_func = MagicMock()
+        result = inference(
+            model=MagicMock(),
+            prediction_func=prediction_func,
+            bpe=self.bpe,  # type: ignore
+            groundtruth_data=groundtruth,
+            max_length=10,
+        )
+        expected = self.bpe.decode([65])
+        self.assertEqual(result, expected)
+        # Verify that the prediction function was never called.
+        prediction_func.assert_not_called()

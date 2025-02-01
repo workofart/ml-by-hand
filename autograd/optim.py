@@ -1,6 +1,6 @@
 import logging
 from collections import defaultdict
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Optional
 
 import numpy as np
 
@@ -9,30 +9,76 @@ from autograd.tensor import Tensor
 logger = logging.getLogger(__name__)
 
 
+class LRScheduler:
+    """
+    Interface for a learning rate scheduler.
+    Subclasses should implement the __call__ method.
+    """
+
+    def __call__(self, step: int, initial_lr: float, current_lr: float) -> float:
+        raise NotImplementedError
+
+
+class CosineScheduler(LRScheduler):
+    """
+    Cosine learning rate scheduler with warmup.
+    Implements Section 3 in "SGDR: Stochastic Gradient Descent with Warm Restarts"
+    Paper: https://arxiv.org/abs/1608.03983
+    """
+
+    def __init__(
+        self, warmup_steps: int = 100, lr_decay_iters: int = 5000, min_lr: float = 1e-4
+    ):
+        self.warmup_steps = warmup_steps
+        self.lr_decay_iters = lr_decay_iters
+        self.min_lr = min_lr
+
+    def __call__(self, step: int, initial_lr: float, current_lr: float) -> float:
+        # The initial_lr is the min learning rate in the original paper
+        if step < self.warmup_steps:
+            return initial_lr * (step + 1) / (self.warmup_steps + 1)
+        if step > self.lr_decay_iters:
+            return self.min_lr
+        decay_ratio = (step - self.warmup_steps) / (
+            self.lr_decay_iters - self.warmup_steps
+        )
+        coeff = 0.5 * (1.0 + np.cos(np.pi * decay_ratio))
+        return self.min_lr + coeff * (initial_lr - self.min_lr)
+
+
 class Optimizer:
     """
     Base Optimizer Class
 
-    Below is a sample API usage for this class:
-    optimizer = optim.Optimizer(model.parameters(), lr=0.01)
-    for input, target in dataset:
-        optimizer.zero_grad()
-        output = model(input)
-        loss = loss_fn(output, target)
-        loss.backward()
-        optimizer.step()
+    Usage:
+      scheduler = CosineScheduler(warmup_steps=100, lr_decay_iters=5000)
+      optimizer = Optimizer(model.parameters(), lr=0.01, lr_scheduler=scheduler)
+      for input, target in dataset:
+          optimizer.zero_grad()
+          output = model(input)
+          loss = loss_fn(output, target)
+          loss.backward()
+          optimizer.step()
     """
 
     def __init__(
-        self, model_parameters: Dict[str, Tensor], lr: float, **kwargs: Any
+        self,
+        model_parameters: Dict[str, Tensor],
+        lr: float,
+        lr_scheduler: Optional[LRScheduler] = None,
+        **kwargs: Any,
     ) -> None:
-        self._states: Dict[Any, Any] = defaultdict(dict)
+        self._states: Dict[str, Any] = defaultdict(dict)
         self._hyperparams: Dict[str, Any] = {}
-
         # We assume this is a flattened named parameter dict
         # passed by calling Optimizer(model.parameters())
         self.model_parameters = model_parameters
         self._hyperparams["lr"] = lr
+        self.initial_lr = lr
+        self.lr_scheduler = lr_scheduler  # optional
+
+        # Store the global step within _states.
+        self._states["timestep"] = 0
 
         # Store additional hyperparams from kwargs:
         for k, v in kwargs.items():
@@ -45,6 +91,21 @@ class Optimizer:
     @lr.setter
     def lr(self, value):
         self._hyperparams["lr"] = value
+
+    @property
+    def timestep(self) -> int:
+        return self._states.get("timestep", 0)
+
+    @timestep.setter
+    def timestep(self, value: int):
+        self._states["timestep"] = value
+
+    def update_lr(self) -> None:
+        """
+        Update the learning rate using the provided scheduler and the global step.
+        """
+        if self.lr_scheduler is not None:
+            self.lr = self.lr_scheduler(self.timestep, self.initial_lr, self.lr)
 
     def _recursive_param_op(
         self, params: Any, update_fn: Callable[[Any], None]
@@ -121,7 +182,9 @@ class Optimizer:
         return {
             "hyperparams": dict(self._hyperparams),
             "states": {
-                key: dict(value)  # shallow copy of each sub-dict
+                key: dict(value)
+                if isinstance(value, dict)
+                else value  # shallow copy of each sub-dict
                 for key, value in self._states.items()
             },
         }
@@ -141,20 +204,24 @@ class Optimizer:
         # Now rebuild the internal _states dict
         self._states.clear()
         for state_key, name_dict in state_dict["states"].items():
-            for param_name, val in name_dict.items():
-                # Only load if param_name is still in our model
-                if param_name in self.model_parameters:
-                    self._states[state_key][param_name] = val
-                else:
-                    logger.warning(
-                        f"Skipping state for param {param_name} not found in current model"
-                    )
+            # For timestep, we directly set the value.
+            if state_key == "timestep":
+                self._states["timestep"] = name_dict
+            else:
+                for param_name, val in name_dict.items():
+                    if param_name in self.model_parameters:
+                        self._states[state_key][param_name] = val
+                    else:
+                        logger.warning(
+                            f"Skipping state for param {param_name} not found in current model"
+                        )
 
     def step(self) -> None:
         """
         Performs a single optimization step.
         """
-        raise NotImplementedError
+        self.timestep += 1
+        self.update_lr()
 
 
 class SGD(Optimizer):
@@ -166,6 +233,8 @@ class SGD(Optimizer):
         super(SGD, self).__init__(model_parameters, lr=lr, **kwargs)
 
     def step(self) -> None:
+        super().step()
+
         def update_fn(param: Any) -> None:
             param.data -= self.lr * param.grad.data
 
@@ -209,12 +278,10 @@ class Adam(Optimizer):
         # Internal state
         self._states["m"] = defaultdict(float)  # first momentum estimate
         self._states["v"] = defaultdict(float)  # second momentum estimate
-        self._states["timestep"] = defaultdict(
-            int
-        )  # to keep track of the timestep, this will adapt our learning rate
 
     def step(self):
-        # Optional gradient clipping if needed
+        super().step()
+
         if "max_grad_norm" in self._hyperparams:
             self._clip_grad_norm(self._hyperparams["max_grad_norm"], norm_type=2.0)
 
@@ -227,10 +294,6 @@ class Adam(Optimizer):
         for name, param in self.model_parameters.items():
             if param.grad is None:
                 continue
-
-            # Access momentum from the sub-dicts
-            self._states["timestep"][name] += 1
-            t = self._states["timestep"][name]
 
             m_old = self._states["m"][name]
             v_old = self._states["v"][name]
@@ -245,9 +308,9 @@ class Adam(Optimizer):
             self._states["m"][name] = new_m
             self._states["v"][name] = new_v
 
-            # bias correction
-            m_hat = new_m / (1 - beta1**t)
-            v_hat = new_v / (1 - beta2**t)
+            # Use the global step for bias correction.
+            m_hat = new_m / (1 - beta1**self.timestep)
+            v_hat = new_v / (1 - beta2**self.timestep)
 
             # Weight decay step (decoupled)
             if weight_decay > 0.0:

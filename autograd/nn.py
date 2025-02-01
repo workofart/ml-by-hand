@@ -1,4 +1,5 @@
 import logging
+from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import numpy as np
@@ -246,7 +247,7 @@ class Linear(Module):
         )
 
         # bias is always 1-dimensional
-        self._parameters["bias"] = Tensor(np.random.rand(output_size))
+        self._parameters["bias"] = Tensor(np.zeros(output_size, dtype=np.float32))
 
     def forward(self, x: Union[Tensor, np.ndarray]) -> Tensor:
         if not isinstance(x, Tensor):
@@ -888,8 +889,9 @@ class ScaledDotProductAttention(Module):
     Attention(Q,K,V) = softmax(Q transpose(K) / sqrt(key_dim)) V
     """
 
-    def __init__(self) -> None:
+    def __init__(self, dropout_prob: float = 0.1) -> None:
         super().__init__()
+        self.dropout = Dropout(p=dropout_prob)
 
     def forward(
         self, query: Tensor, key: Tensor, value: Tensor, mask: Optional[Tensor] = None
@@ -904,7 +906,7 @@ class ScaledDotProductAttention(Module):
         if mask is not None:
             # broadcast across heads
             att_score = att_score + (mask * -1e9)
-        att_score = softmax(att_score)
+        att_score = self.dropout(softmax(att_score))
         return att_score @ value
 
 
@@ -917,7 +919,9 @@ class MultiHeadAttention(Module):
     we project them "num_heads" times with different learned linear projects
     """
 
-    def __init__(self, num_heads: int, hidden_size: int) -> None:
+    def __init__(
+        self, num_heads: int, hidden_size: int, dropout_prob: float = 0.1
+    ) -> None:
         super().__init__()
         self.num_heads = num_heads
         self.attention_size = (
@@ -929,7 +933,7 @@ class MultiHeadAttention(Module):
         self.k_linear = Linear(hidden_size, hidden_size)
         self.v_linear = Linear(hidden_size, hidden_size)
 
-        self.attention = ScaledDotProductAttention()
+        self.attention = ScaledDotProductAttention(dropout_prob=dropout_prob)
         self.fc = Linear(hidden_size, hidden_size)
 
     def forward(
@@ -979,6 +983,47 @@ class MultiHeadAttention(Module):
 
 
 ########### Utility Functions ###########
+
+
+class AbstractLLMForwardFn(ABC):
+    """
+    An interface describing how to run a 'forward' pass for language modeling.
+    Subclasses implement the __call__ method, which returns (logits, labels).
+    """
+
+    @abstractmethod
+    def sample(
+        self, model: Any, batch_data: Any, mode: str = "train"
+    ) -> Tuple[Any, Any]:
+        pass
+
+    @abstractmethod
+    def train(
+        self, model: Any, batch_data: Any, mode: str = "train"
+    ) -> Tuple[Any, Any]:
+        pass
+
+    def __call__(
+        self, model: Any, batch_data: Any, mode: str = "train"
+    ) -> Tuple[Any, Any]:
+        """
+        Args:
+            model: The model to run a forward pass on.
+            batch_data: The data for the current batch, in any format.
+            mode (str): "train" or "sample"
+
+        Returns:
+            If train mode (prediction_logits, ground_truth_labels).
+            If sample mode (prediction_logits, None)
+        """
+        if mode == "train":
+            return self.train(model, batch_data)
+        elif mode == "sample":
+            return self.sample(model, batch_data)
+        else:
+            raise ValueError(f"mode must be either 'train' or 'sample', got {mode}")
+
+
 def extract_windows(
     x: Union[Tensor, np.ndarray],
     kernel_size: int,

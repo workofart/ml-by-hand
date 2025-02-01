@@ -23,7 +23,7 @@ class ColorFormatter(logging.Formatter):
     def format(self, record):
         color = self.FORMATS.get(record.levelno)
         formatter = logging.Formatter(
-            f"{color}%(asctime)s - %(name)s.%(funcName)s:%(lineno)d - %(levelname)s - %(message)s{self.reset}"
+            f"{color}%(asctime)s - %(levelname)s - %(message)s{self.reset}"
         )
         return formatter.format(record)
 
