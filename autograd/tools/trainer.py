@@ -323,7 +323,7 @@ class LLMTrainer(AbstractTrainer):
             prediction_func=self.forward_fn,
             bpe=self.tokenizer,
             start_tokens=self.start_tokens,
-            max_length=int(self.model.max_seq_len * 0.4),
+            max_length=int(train_data_loader.seq_len * 0.4),
             temperature=1.0,
             top_k=200,
         )

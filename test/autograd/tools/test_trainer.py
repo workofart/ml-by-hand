@@ -14,9 +14,10 @@ class MockDataLoader:
     Each time __iter__ is called, it yields those same batches again.
     """
 
-    def __init__(self, data, pad_idx=0):
+    def __init__(self, data, pad_idx=0, seq_len=1):
         self.data = data
         self.pad_idx = pad_idx
+        self.seq_len = seq_len
 
     def on_epoch_start(self):
         # If you want to shuffle or do something each epoch, do it here
@@ -39,9 +40,11 @@ class BaseTrainerTest(unittest.TestCase):
 
     def setUp(self):
         # Mock model with numeric num_parameters() and an override for __call__.
-        self.model = MagicMock()
+        self.model = Module()
         # model.num_parameters() must return a float so that format strings work (:.2f).
+        self.model.num_parameters = MagicMock()
         self.model.num_parameters.return_value = 1e6
+        self.model.state_dict = MagicMock()
         self.model.state_dict.return_value = {}
         # We'll leave self.model.__call__ to be defined in child classes (because shapes differ).
 
@@ -59,7 +62,6 @@ class TestSimpleTrainer(BaseTrainerTest):
     def setUp(self):
         super().setUp()
         # Make the model return a fake_pred
-        self.model = Module()
         self.fake_pred = np.zeros((2, 3), dtype=np.float32)
 
         # Build training data for 2 batches, validation data for 1 batch
@@ -91,27 +93,28 @@ class TestSimpleTrainer(BaseTrainerTest):
             self.assertEqual(self.optimizer.step.call_count, 4)
 
     def test_train_step_returns_loss(self):
-        batch = next(iter(self.train_data))
-        loss_val = self.trainer.train_step(batch)
-        self.assertAlmostEqual(loss_val, 1.23, places=5)
-        self.optimizer.step.assert_called_once()
+        with patch.object(self.model, "forward", return_value=Tensor(self.fake_pred)):
+            batch = next(iter(self.train_data))
+            loss_val = self.trainer.train_step(batch)
+            self.assertAlmostEqual(loss_val, 1.23, places=5)
+            self.optimizer.step.assert_called_once()
 
 
 class TestLLMTrainer(BaseTrainerTest):
     def setUp(self):
         super().setUp()
+        seq_len = 10
 
         # For LLM, define a shape like (batch_size, seq_len, vocab_size).
-        fake_pred = np.zeros((2, 10, 10), dtype=np.float32)
-        self.model.__call__ = MagicMock(return_value=Tensor(fake_pred))
+        self.fake_pred = np.zeros((2, seq_len, 10), dtype=np.float32)
         self.model.hidden_size = 128  # for the trainer's warmup logic
 
         # LLM data (just 2 batches for training, 1 batch for validation)
         self.train_data = [
             (
-                np.zeros((2, 10), dtype=np.int32),
-                np.ones((2, 10), dtype=np.int32),
-                np.full((2, 10), 2, dtype=np.int32),
+                np.zeros((2, seq_len), dtype=np.int32),
+                np.ones((2, seq_len), dtype=np.int32),
+                np.full((2, seq_len), 2, dtype=np.int32),
                 None,
                 None,
                 None,
@@ -120,9 +123,9 @@ class TestLLMTrainer(BaseTrainerTest):
         ]
         self.val_data = [
             (
-                np.zeros((2, 10), dtype=np.int32),
-                np.ones((2, 10), dtype=np.int32),
-                np.full((2, 10), 2, dtype=np.int32),
+                np.zeros((2, seq_len), dtype=np.int32),
+                np.ones((2, seq_len), dtype=np.int32),
+                np.full((2, seq_len), 2, dtype=np.int32),
                 None,
                 None,
                 None,
@@ -130,15 +133,15 @@ class TestLLMTrainer(BaseTrainerTest):
         ]
 
         # Replace MagicMock with a real in-memory loader
-        self.train_loader = MockDataLoader(self.train_data, pad_idx=0)
-        self.val_loader = MockDataLoader(self.val_data, pad_idx=0)
+        self.train_loader = MockDataLoader(self.train_data, pad_idx=0, seq_len=seq_len)
+        self.val_loader = MockDataLoader(self.val_data, pad_idx=0, seq_len=seq_len)
 
         # We'll mock forward_fn to skip real model logic
         self.forward_fn = MagicMock()
         # Suppose it returns (logits, y) => shape: (2,10,10) for logits, plus (2,10) for labels
         self.forward_fn.return_value = (
-            Tensor(fake_pred),
-            np.zeros((2, 10), dtype=np.int32),
+            Tensor(self.fake_pred),
+            np.zeros((2, seq_len), dtype=np.int32),
         )
 
         # Construct the trainer
@@ -153,15 +156,17 @@ class TestLLMTrainer(BaseTrainerTest):
         )
 
     def test_fit_calls_optimizer_step(self):
-        self.trainer.fit(self.train_loader, self.val_loader)
-        # 2 epochs * 2 train batches => 4 calls to optimizer.step
-        self.assertEqual(self.optimizer.step.call_count, 4)
+        with patch.object(self.model, "forward", return_value=Tensor(self.fake_pred)):
+            self.trainer.fit(self.train_loader, self.val_loader)
+            # 2 epochs * 2 train batches => 4 calls to optimizer.step
+            self.assertEqual(self.optimizer.step.call_count, 4)
 
     def test_train_step_returns_loss(self):
-        batch = next(iter(self.train_data))
-        loss_val = self.trainer.train_step(batch)
-        self.assertAlmostEqual(loss_val, 1.23, places=5)
-        self.optimizer.step.assert_called_once()
+        with patch.object(self.model, "forward", return_value=Tensor(self.fake_pred)):
+            batch = next(iter(self.train_data))
+            loss_val = self.trainer.train_step(batch)
+            self.assertAlmostEqual(loss_val, 1.23, places=5)
+            self.optimizer.step.assert_called_once()
 
     @patch("autograd.text.utils.inference")
     def test_perform_inference_called(self, mock_inference):

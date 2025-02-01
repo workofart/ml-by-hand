@@ -261,7 +261,7 @@ class TestTextUtils(TestCase):
             pred_arr[0, -1] = logits
             mock_tensor = MagicMock()
             mock_tensor.data = pred_arr
-            return mock_tensor
+            return mock_tensor, None
 
         prediction_func = MagicMock(side_effect=fake_prediction_teacher)
 

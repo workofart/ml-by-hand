@@ -289,7 +289,7 @@ def inference(
         current_input = groundtruth_data[: i + 1] if teacher_forcing else output_ids
         logits = prediction_func(
             model=model, batch_data=np.array([current_input]), mode="sample"
-        ).data[0, -1]
+        )[0].data[0, -1]
         output_ids.append(sample_next_token(logits, temperature, top_k))
 
     if teacher_forcing:

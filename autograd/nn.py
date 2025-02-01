@@ -992,7 +992,9 @@ class AbstractLLMForwardFn(ABC):
     """
 
     @abstractmethod
-    def sample(self, model: Any, batch_data: Any, mode: str = "train") -> Any:
+    def sample(
+        self, model: Any, batch_data: Any, mode: str = "train"
+    ) -> Tuple[Any, Any]:
         pass
 
     @abstractmethod

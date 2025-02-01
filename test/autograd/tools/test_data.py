@@ -88,8 +88,8 @@ class TestDataLoaders(unittest.TestCase):
         np.testing.assert_array_equal(loader.y, y_orig * 3)
 
     # Use decorators to patch the text_utils functions for LLMDataLoader tests.
-    @patch.object(text_utils, "mock_causal_mask", side_effect=mock_causal_mask)
-    @patch.object(text_utils, "mock_padding_mask", side_effect=mock_padding_mask)
+    @patch.object(text_utils, "create_causal_mask", side_effect=mock_causal_mask)
+    @patch.object(text_utils, "create_padding_mask", side_effect=mock_padding_mask)
     def test_llm_dataloader_length(self, mock_padding, mock_causal):
         loader = LLMDataLoader(
             self.data,
@@ -109,8 +109,8 @@ class TestDataLoaders(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             _ = len(loader_infinite)
 
-    @patch.object(text_utils, "mock_causal_mask", side_effect=mock_causal_mask)
-    @patch.object(text_utils, "mock_padding_mask", side_effect=mock_padding_mask)
+    @patch.object(text_utils, "create_causal_mask", side_effect=mock_causal_mask)
+    @patch.object(text_utils, "create_padding_mask", side_effect=mock_padding_mask)
     def test_llm_dataloader_small_data(self, mock_padding, mock_causal):
         data_small = np.arange(5)
         loader = LLMDataLoader(
@@ -120,8 +120,8 @@ class TestDataLoaders(unittest.TestCase):
         with self.assertRaises(ValueError):
             next(it)
 
-    @patch.object(text_utils, "mock_causal_mask", side_effect=mock_causal_mask)
-    @patch.object(text_utils, "mock_padding_mask", side_effect=mock_padding_mask)
+    @patch.object(text_utils, "create_causal_mask", side_effect=mock_causal_mask)
+    @patch.object(text_utils, "create_padding_mask", side_effect=mock_padding_mask)
     def test_llm_dataloader_output(self, mock_padding, mock_causal):
         loader = LLMDataLoader(
             self.data,
@@ -153,8 +153,8 @@ class TestDataLoaders(unittest.TestCase):
             self.assertIsNone(tmask)
             self.assertIsNone(causal_mask)
 
-    @patch.object(text_utils, "mock_causal_mask", side_effect=mock_causal_mask)
-    @patch.object(text_utils, "mock_padding_mask", side_effect=mock_padding_mask)
+    @patch.object(text_utils, "create_causal_mask", side_effect=mock_causal_mask)
+    @patch.object(text_utils, "create_padding_mask", side_effect=mock_padding_mask)
     def test_llm_dataloader_no_decoder_input(self, mock_padding, mock_causal):
         loader = LLMDataLoader(
             self.data,
