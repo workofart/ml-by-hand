@@ -230,7 +230,7 @@ class TestTextUtils(TestCase):
             bpe=self.bpe,  # type: ignore
             start_tokens="<SOS>",
             groundtruth_data=None,
-            max_length=max_length,
+            max_length=max_length + 1,  # +1 for the start_token
             temperature=1.0,
             top_k=5,
         )

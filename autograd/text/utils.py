@@ -1,4 +1,5 @@
 import logging
+import os
 import re
 from collections import defaultdict
 from typing import (
@@ -282,7 +283,7 @@ def inference(
     else:
         start_tokens = start_tokens or "<SOS>"
         output_ids = list(bpe.encode(start_tokens))
-        num_steps = max_length
+        num_steps = max_length - len(output_ids)
 
     # Main loop: decide input tokens based on the mode.
     for i in tqdm(range(num_steps), desc="Inference", leave=False):
@@ -302,3 +303,32 @@ def inference(
     logger.info(f"Prediction:\n\n{prediction_text}")
 
     return prediction_text
+
+
+def load_wiki_simple():
+    from autograd.tools.data import load_data
+
+    if not os.path.exists("training_data/wiki_simple_english.txt"):
+        print("Downloading data...")
+        os.system(
+            "curl -L -o examples/plain-text-wikipedia-simpleenglish.zip https://www.kaggle.com/api/v1/datasets/download/ffatty/plain-text-wikipedia-simpleenglish"
+        )
+        os.system("unzip examples/plain-text-wikipedia-simpleenglish.zip -d examples")
+        os.system("rm -rf examples/1of2")
+        os.system("rm -rf examples/2of2")
+        os.system("mv examples/AllCombined.txt training_data/wiki_simple_english.txt")
+
+    data = load_data(
+        "training_data/wiki_simple_english.txt",
+        "training_data/wiki_simple_english.txt",
+    )
+    return data
+
+
+def load_shakespeare_mini():
+    from autograd.tools.data import load_data
+
+    return load_data(
+        "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt",
+        "training_data/tinyshakespeare.txt",
+    )

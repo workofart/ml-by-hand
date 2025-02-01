@@ -1,5 +1,5 @@
 import logging
-from typing import Optional
+from typing import Any, Optional, Tuple
 
 try:
     # drop-in replacement for numpy for GPU acceleration
@@ -13,7 +13,7 @@ from autograd import functional, nn, optim
 from autograd.tensor import Tensor
 from autograd.text import utils as text_utils
 from autograd.text.tokenizer import BytePairEncoder
-from autograd.tools.data import LLMDataLoader, load_data
+from autograd.tools.data import LLMDataLoader
 from autograd.tools.trainer import LLMTrainer, load_model_and_optimizer
 
 # TODO: Extract the common modules out to nn.py module
@@ -114,41 +114,18 @@ class DecoderSublayer(nn.Module):
         return x
 
 
+class GPT1ForwardFn(nn.AbstractLLMForwardFn):
+    def train(self, model: GPT1, batch_data: Any, **kwargs) -> Tuple[Any, Any]:
+        X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_data
+        logits = model(X, causal_mask)
+        return logits, y
+
+    def sample(self, model: GPT1, batch_data: Any, **kwargs) -> Tuple[Any, Any]:
+        logits = model(batch_data, None)
+        return logits, None
+
+
 if __name__ == "__main__":
-
-    def gpt_1_forward(model, batch_or_tokens, mode="train"):
-        if mode == "train":
-            X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_or_tokens
-            logits = model(X, causal_mask)
-            return logits, y
-        elif mode == "sample":
-            tokens = batch_or_tokens
-            logits = model(tokens, None)
-            return logits
-        else:
-            raise ValueError(f"Unknown mode {mode}, must be 'train' or 'sample'")
-
-    logger = logging.getLogger(__name__)
-
-    data = load_data(
-        "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt",
-        "examples/tinyshakespeare.txt",
-    )
-    logger.info(f"{len(data)} characters in the entire dataset")
-
-    # Create the vocabulary first
-    bpe = BytePairEncoder(num_merges=3000, vocab_file_path="vocab.pkl")
-    encoded_data = bpe.prepare_data(
-        raw_text_list=data.split("\n\n"),
-        npz_file_path="bpe_mini_shakespeare.npz",
-        overwrite_saved_file=False,
-        split_token="<|endoftext|>",
-    )[:50000]
-
-    # encoded_data is a list of integers without the concept of samples
-    n = int(len(encoded_data) * 0.9)
-    train_data, test_data = encoded_data[:n], encoded_data[n:]
-
     # TODO: parse the hyperparams from CLI
     # Based on the paper
     # Section 4.1 Setup - Model Specifications
@@ -157,7 +134,6 @@ if __name__ == "__main__":
     # loop are free of bugs.
     CONFIG = {
         "model_kwargs": {
-            "vocab_size": len(bpe._unicode_to_int_vocab),
             "num_attention_heads": 6,  # 12
             "hidden_size": 144,  # 768, must be divisible by num_attention_heads
             "dropout_prob": 0.1,
@@ -165,17 +141,71 @@ if __name__ == "__main__":
             "num_decoder_layers": 6,
         },
         "optimizer_kwargs": {
-            "lr": 0.0  # We may schedule it later with warmup
+            "lr": 1e-3,
+            "beta2": 0.99,
+            "max_grad_norm": 1.0,
+            "weight_decay": 0.1,
         },
-        "num_epochs": 90,
+        "num_epochs": 25,
         "warmup_steps": 100,
         "eval_iters": 16,
+        "steps_per_epoch": 20,
+        "checkpoint_freq": 2,
         "batch_size": 64,  # 64
+        "label_smoothing": 0.1,
         # Whether to check the model performance by feeding the groundtruth tokens to compare whether the model can predict the next token correctly.
         "teacher_enforcing": True,
         # Whether to load from a checkpoint
         "resume_epoch": None,
+        "custom_bpe": {
+            "num_merges": 0,
+            "npz_file_path": "training_data/bpe_0_shakespeare_encoded_data",
+            "vocab_file_path": "training_data/shakespeare_vocab_0.pkl",
+        },
     }
+
+    logger = logging.getLogger(__name__)
+
+    data = text_utils.load_shakespeare_mini()
+    logger.info(f"{len(data)} characters in the entire dataset")
+
+    # encoded_data is a list of integers without the concept of samples
+    n = int(len(data) * 0.9)
+    train_data, test_data = data[:n], data[n:]
+
+    # Create a Byte Pair Encoder and prepare data
+    bpe = BytePairEncoder(
+        num_merges=CONFIG["custom_bpe"]["num_merges"],
+        vocab_file_path=CONFIG["custom_bpe"]["vocab_file_path"],
+        encoded_data_path=f"{CONFIG["custom_bpe"]["npz_file_path"]}.npz",
+    )
+    # Train the vocabulary on the entire dataset
+    bpe.train_vocabulary(
+        data,
+        overwrite_saved_file=False,
+    )
+    data_len = len(data.split("\n\n"))
+    print(f"Total length of data after split: {data_len}")
+    # Override the path with training path
+    bpe.encoded_data_path = f"{CONFIG["custom_bpe"]["npz_file_path"]}_train.npz"
+    train_data = bpe.prepare_data(
+        raw_text_list=train_data.split("\n\n"),
+        overwrite_encoded_data=False,
+        overwrite_vocabulary_file=False,
+        split_token="<|endoftext|>",
+    )
+    # Override the path with test path
+    bpe.encoded_data_path = f"{CONFIG["custom_bpe"]["npz_file_path"]}_test.npz"
+    test_data = bpe.prepare_data(
+        raw_text_list=test_data.split("\n\n"),
+        overwrite_encoded_data=False,
+        overwrite_vocabulary_file=False,
+        split_token="<|endoftext|>",
+    )
+
+    print(f"Data length: {len(train_data)=} {len(test_data)=}")
+
+    CONFIG["model_kwargs"]["vocab_size"] = bpe.n_vocab
 
     model, optimizer, checkpoint = load_model_and_optimizer(
         GPT1,
@@ -188,20 +218,26 @@ if __name__ == "__main__":
     hparams = checkpoint.get("hyperparams", CONFIG)
 
     train_data_loader = LLMDataLoader(
-        data=train_data,
-        vocab=bpe._unicode_to_int_vocab,
+        data=np.array(train_data),
+        bpe=bpe,
         batch_size=hparams["batch_size"],
         seq_len=model.max_seq_len,
+        steps_per_epoch=hparams["steps_per_epoch"],
         shuffle=True,
         include_decoder_input=False,
+        create_decoder_inp=False,
+        create_masks=False,
     )
     test_data_loader = LLMDataLoader(
-        data=test_data,
-        vocab=bpe._unicode_to_int_vocab,
-        batch_size=hparams["batch_size"] // 4,
+        data=np.array(test_data),
+        bpe=bpe,
+        batch_size=hparams["batch_size"] // 2,
         seq_len=model.max_seq_len,
+        steps_per_epoch=hparams["eval_iters"],
         shuffle=False,
         include_decoder_input=False,
+        create_decoder_inp=False,
+        create_masks=False,
     )
 
     trainer = LLMTrainer(
@@ -210,23 +246,22 @@ if __name__ == "__main__":
         loss_fn=functional.cross_entropy,
         epochs=hparams["num_epochs"],
         warmup_steps=hparams["warmup_steps"],
-        label_smoothing=0.1,
-        checkpoint_freq=1,
-        forward_fn=gpt_1_forward,
-        tokenizer=bpe,
+        label_smoothing=hparams["label_smoothing"],
+        checkpoint_freq=hparams["checkpoint_freq"],
+        forward_fn=GPT1ForwardFn(),
         teacher_enforcing=hparams["teacher_enforcing"],
         hyperparams=hparams,
         checkpoint=checkpoint,
+        start_tokens="First",
     )
 
     trainer.fit(train_data_loader, test_data_loader)
 
     text_utils.inference(
-        prediction_func=lambda seq_so_far: gpt_1_forward(
-            model, seq_so_far, mode="sample"
-        ),
+        model=model,
+        prediction_func=GPT1ForwardFn(),
         bpe=bpe,
-        start_tokens=["All"],  # Dummy token to start the generation
+        start_tokens="All",  # Dummy token to start the generation
         max_length=int(model.max_seq_len * 0.9),  # this should be shorter than context
         temperature=1.0,
         top_k=10,

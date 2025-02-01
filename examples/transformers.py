@@ -401,15 +401,19 @@ if __name__ == "__main__":
     data = load_data(
         "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt",
         "examples/tinyshakespeare.txt",
-    )
+    )[:10000]
     logger.info(f"{len(data)} characters in the entire dataset")
 
     # Create the vocabulary first
-    bpe = BytePairEncoder(num_merges=3000, vocab_file_path="vocab.pkl")
+    bpe = BytePairEncoder(
+        num_merges=3000,
+        vocab_file_path="vocab.pkl",
+        encoded_data_path="bpe_mini_shakespeare.npz",
+    )
     encoded_data = bpe.prepare_data(
         raw_text_list=data.split("\n\n"),
-        npz_file_path="bpe_mini_shakespeare.npz",
-        overwrite_saved_file=False,
+        overwrite_encoded_data=False,
+        overwrite_vocabulary_file=False,
         split_token="<|endoftext|>",
     )[:5000]
 

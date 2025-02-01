@@ -18,6 +18,7 @@ class MockDataLoader:
         self.data = data
         self.pad_idx = pad_idx
         self.seq_len = seq_len
+        self.bpe = MagicMock()
 
     def on_epoch_start(self):
         # If you want to shuffle or do something each epoch, do it here

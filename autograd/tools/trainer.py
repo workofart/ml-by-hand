@@ -10,7 +10,6 @@ from tqdm import tqdm
 from autograd import nn, optim
 from autograd.tensor import Tensor
 from autograd.text import utils as text_utils
-from autograd.text.tokenizer import BytePairEncoder
 from autograd.tools.metrics import accuracy, mean_squared_error
 from autograd.tools.model import load_checkpoint, save_checkpoint
 
@@ -99,7 +98,7 @@ class AbstractTrainer(ABC):
         Save a checkpoint if the validation loss improves.
         """
         if val_loss is not None and epoch % self.kwargs.get("checkpoint_freq", 1) == 0:
-            if not self.metrics["val_loss"] or val_loss < min(self.metrics["val_loss"]):
+            if self.metrics["val_loss"] and val_loss < min(self.metrics["val_loss"]):
                 checkpoint = {
                     "epoch": epoch + 1,
                     "model_state_dict": self.model.state_dict(),
@@ -139,11 +138,15 @@ class AbstractTrainer(ABC):
         logger.info(
             f"[Epoch {epoch}] Train Loss = {train_loss:.4f}"
             + (f", Val Loss = {val_loss:.4f}" if val_loss is not None else "")
+            + f", LR = {self.optimizer.lr:.4f}"
         )
+        # The checkpoint needs to come first because it compares
+        # against historical metrics to determine whether to save
+        # the checkpoint
+        self._save_checkpoint(epoch, val_loss)
         self.metrics["epoch"].append(epoch)
         self.metrics["train_loss"].append(train_loss)
         self.metrics["val_loss"].append(val_loss)
-        self._save_checkpoint(epoch, val_loss)
 
     @abstractmethod
     def evaluate_and_log(self, train_data_loader, val_data_loader, epoch) -> float:
@@ -249,7 +252,6 @@ class LLMTrainer(AbstractTrainer):
         optimizer,
         loss_fn,
         warmup_steps: int,
-        tokenizer: BytePairEncoder,
         forward_fn: nn.AbstractLLMForwardFn,
         epochs: int = 10,
         label_smoothing: float = 0.0,
@@ -261,7 +263,6 @@ class LLMTrainer(AbstractTrainer):
         self.loss_fn = loss_fn
         self.warmup_steps = warmup_steps
         self.label_smoothing = label_smoothing
-        self.tokenizer = tokenizer
         self.forward_fn = forward_fn
         self.start_tokens = start_tokens
 
@@ -291,9 +292,6 @@ class LLMTrainer(AbstractTrainer):
             total_loss += float(loss.detach().data)
             batch_count += 1
         avg_val_loss = total_loss / max(batch_count, 1)
-        logger.info(
-            f"Epoch {epoch}: Val Loss = {avg_val_loss:.4f}, LR = {self.optimizer.lr:.4f}"
-        )
 
         # Optional inference every few epochs:
         if epoch % 2 == 0:
@@ -312,7 +310,7 @@ class LLMTrainer(AbstractTrainer):
             text_utils.inference(
                 model=self.model,
                 prediction_func=self.forward_fn,
-                bpe=self.tokenizer,
+                bpe=train_data_loader.bpe,
                 groundtruth_data=train_data_loader.data[: train_data_loader.seq_len],
                 max_length=train_data_loader.seq_len // 4,
             )
@@ -321,7 +319,7 @@ class LLMTrainer(AbstractTrainer):
         text_utils.inference(
             model=self.model,
             prediction_func=self.forward_fn,
-            bpe=self.tokenizer,
+            bpe=train_data_loader.bpe,
             start_tokens=self.start_tokens,
             max_length=int(train_data_loader.seq_len * 0.4),
             temperature=1.0,

@@ -1,5 +1,4 @@
 import logging
-import os
 from typing import Any, Optional
 
 import numpy as np
@@ -9,7 +8,7 @@ from autograd import functional, nn, optim
 from autograd.tensor import Tensor
 from autograd.text import utils as text_utils
 from autograd.text.tokenizer import BytePairEncoder
-from autograd.tools.data import LLMDataLoader, load_data
+from autograd.tools.data import LLMDataLoader
 from autograd.tools.trainer import LLMTrainer, load_model_and_optimizer
 
 # The feedforward layer is the same as the original transformers
@@ -168,45 +167,19 @@ class DecoderSublayer(nn.Module):
         return x
 
 
-def load_wiki_simple():
-    if not os.path.exists("training_data/wiki_simple_english.txt"):
-        print("Downloading data...")
-        os.system(
-            "curl -L -o examples/plain-text-wikipedia-simpleenglish.zip https://www.kaggle.com/api/v1/datasets/download/ffatty/plain-text-wikipedia-simpleenglish"
-        )
-        os.system("unzip examples/plain-text-wikipedia-simpleenglish.zip -d examples")
-        os.system("rm -rf examples/1of2")
-        os.system("rm -rf examples/2of2")
-        os.system("mv examples/AllCombined.txt training_data/wiki_simple_english.txt")
-
-    data = load_data(
-        "training_data/wiki_simple_english.txt",
-        "training_data/wiki_simple_english.txt",
-    )
-    return data
-
-
-def load_shakespeare_mini():
-    return load_data(
-        "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt",
-        "training_data/tinyshakespeare.txt",
-    )
-
-
 class GPT2ForwardFn(nn.AbstractLLMForwardFn):
     """
     A forward function for the Transformer model.
     """
 
-    def train(self, model: GPT2, batch_data: Any, mode="train", **kwargs):
+    def train(self, model: GPT2, batch_data: Any, **kwargs):
         X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_data
         logits = model(X, causal_mask)
         return logits, y
 
-    def sample(self, model: GPT2, batch_data: Any, mode="train", **kwargs):
-        X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_data
-        logits = model(X, None)
-        return logits, y
+    def sample(self, model: GPT2, batch_data: Any, **kwargs):
+        logits = model(batch_data, None)
+        return logits, None
 
 
 if __name__ == "__main__":
@@ -214,9 +187,9 @@ if __name__ == "__main__":
         "training_run_name": "shakespeare_mini",
         "model_kwargs": {
             "num_attention_heads": 6,  # GPT-2 small uses 12
-            "hidden_size": 384,  # GPT-2 small uses 768, must be divisible by num_attention_heads
+            "hidden_size": 72,  # GPT-2 small uses 768, must be divisible by num_attention_heads
             "dropout_prob": 0.2,
-            "max_seq_len": 256,  # GPT-2 uses 1024
+            "max_seq_len": 64,  # GPT-2 uses 1024
             "num_decoder_layers": 6,  # GPT-2 uses 12
         },
         "optimizer_kwargs": {
@@ -227,14 +200,14 @@ if __name__ == "__main__":
         },
         "num_epochs": 25,
         "warmup_steps": 100,
-        "eval_iters": 100,
-        "steps_per_epoch": 250,
+        "eval_iters": 10,
+        "steps_per_epoch": 20,
         "checkpoint_freq": 2,
         "batch_size": 64,  # GPT-2 uses 512
         "label_smoothing": 0.1,
         # Whether to check the model performance by feeding the groundtruth tokens to compare whether the model can predict the next token correctly.
         "teacher_enforcing": False,
-        "resume_epoch": 8,  # Whether to load from a checkpoint
+        "resume_epoch": 24,  # Whether to load from a checkpoint
         # if True, we use our own BPE, otherwise we use TikToken library
         "custom_bpe": {
             "num_merges": 0,
@@ -274,13 +247,13 @@ if __name__ == "__main__":
         },  # if non-empty, we use our own BPE, otherwise we use TikToken library
     }
 
-    CONFIG = WIKI_CONFIG
+    CONFIG = SHAPESPEARE_CONFIG
 
     logger = logging.getLogger(__name__)
 
     # Load some data
-    # data = load_shakespeare_mini()
-    data = load_wiki_simple()
+    data = text_utils.load_shakespeare_mini()
+    # data = text_utils.load_wiki_simple()
 
     logger.info(f"{len(data)} characters in the entire dataset")
     # data = data[:50_000]
@@ -294,6 +267,7 @@ if __name__ == "__main__":
         bpe = BytePairEncoder(
             num_merges=CONFIG["custom_bpe"]["num_merges"],
             vocab_file_path=CONFIG["custom_bpe"]["vocab_file_path"],
+            encoded_data_path=f"{CONFIG["custom_bpe"]["npz_file_path"]}.npz",
         )
         # Train the vocabulary on the entire dataset
         bpe.train_vocabulary(
@@ -302,16 +276,20 @@ if __name__ == "__main__":
         )
         data_len = len(data.split("\n\n"))
         print(f"Total length of data after split: {data_len}")
-        train_data = bpe.prepare_data_parallel(
+        # Override the path with training path
+        bpe.encoded_data_path = f"{CONFIG["custom_bpe"]["npz_file_path"]}_train.npz"
+        train_data = bpe.prepare_data(
             raw_text_list=train_data.split("\n\n"),
-            npz_file_path=f"{CONFIG["custom_bpe"]["npz_file_path"]}_train.npz",
-            overwrite_saved_file=False,
+            overwrite_encoded_data=False,
+            overwrite_vocabulary_file=False,
             split_token="<|endoftext|>",
         )
-        test_data = bpe.prepare_data_parallel(
+        # Override the path with test path
+        bpe.encoded_data_path = f"{CONFIG["custom_bpe"]["npz_file_path"]}_test.npz"
+        test_data = bpe.prepare_data(
             raw_text_list=test_data.split("\n\n"),
-            npz_file_path=f"{CONFIG["custom_bpe"]["npz_file_path"]}_test.npz",
-            overwrite_saved_file=False,
+            overwrite_encoded_data=False,
+            overwrite_vocabulary_file=False,
             split_token="<|endoftext|>",
         )
     else:
@@ -362,19 +340,18 @@ if __name__ == "__main__":
         model=model,
         optimizer=optimizer,
         loss_fn=functional.cross_entropy,
-        epochs=60 or hparams["num_epochs"],
+        epochs=hparams["num_epochs"],
         warmup_steps=hparams["warmup_steps"],
         label_smoothing=hparams["label_smoothing"],
         checkpoint_freq=hparams["checkpoint_freq"],
         forward_fn=GPT2ForwardFn(),
-        tokenizer=bpe,
         teacher_enforcing=hparams["teacher_enforcing"],
         hyperparams=hparams,
         checkpoint=checkpoint,
         start_tokens="First",
     )
 
-    trainer.fit(train_data_loader, test_data_loader, pad_idx=train_data_loader.pad_idx)
+    trainer.fit(train_data_loader, test_data_loader)
 
     # Inference test
     for k in range(10):
@@ -383,7 +360,7 @@ if __name__ == "__main__":
             prediction_func=GPT2ForwardFn(),
             bpe=bpe,
             start_tokens="April is a charming day",  # Example start token
-            max_length=int(model.max_seq_len),
+            max_length=int(model.max_seq_len * 0.9),
             temperature=0.7,
             # top_k=200,
         )

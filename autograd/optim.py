@@ -33,7 +33,7 @@ class CosineScheduler(LRScheduler):
     """
 
     def __init__(
-        self, warmup_steps: int = 100, lr_decay_iters: int = 5000, min_lr: float = 1e-4
+        self, warmup_steps: int = 100, lr_decay_iters: int = 200, min_lr: float = 1e-4
     ):
         self.warmup_steps = warmup_steps
         self.lr_decay_iters = lr_decay_iters

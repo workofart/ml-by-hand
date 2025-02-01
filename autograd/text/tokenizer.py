@@ -264,7 +264,7 @@ class BytePairEncoder:
 
         return self._unicode_to_int_vocab, self._int_to_unicode_vocab
 
-    def encode(self, input_text: str) -> List[int]:
+    def encode(self, input_text: str, **kwargs) -> List[int]:
         """
         Encode `input_text` into a list of token IDs.
 
