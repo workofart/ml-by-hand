@@ -7,21 +7,20 @@ from autograd.text import utils as text_utils
 from autograd.tools.data import LLMDataLoader, SimpleDataLoader
 
 
-def create_causal_mask(seq_len, batch_size):
+def mock_causal_mask(seq_len, batch_size):
     # Create a lower-triangular mask of ones with shape (seq_len, seq_len)
     mask = np.tril(np.ones((seq_len, seq_len)))
     # Broadcast to (batch_size, 1, seq_len, seq_len)
     return np.broadcast_to(mask, (batch_size, 1, seq_len, seq_len))
 
 
-def create_padding_mask(X_chunk, pad_idx):
+def mock_padding_mask(X_chunk, pad_idx):
     # For testing, assume no actual padding occurs.
     # Return a zero mask of shape (batch_size, 1, 1, seq_len)
     batch_size, seq_len = X_chunk.shape
     return np.zeros((batch_size, 1, 1, seq_len))
 
 
-# Dummy BPE class with minimal functionality.
 class MockBPE:
     def encode(self, token, allowed_special=set()):
         if token in allowed_special:
@@ -89,8 +88,8 @@ class TestDataLoaders(unittest.TestCase):
         np.testing.assert_array_equal(loader.y, y_orig * 3)
 
     # Use decorators to patch the text_utils functions for LLMDataLoader tests.
-    @patch.object(text_utils, "create_causal_mask", side_effect=create_causal_mask)
-    @patch.object(text_utils, "create_padding_mask", side_effect=create_padding_mask)
+    @patch.object(text_utils, "mock_causal_mask", side_effect=mock_causal_mask)
+    @patch.object(text_utils, "mock_padding_mask", side_effect=mock_padding_mask)
     def test_llm_dataloader_length(self, mock_padding, mock_causal):
         loader = LLMDataLoader(
             self.data,
@@ -110,8 +109,8 @@ class TestDataLoaders(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             _ = len(loader_infinite)
 
-    @patch.object(text_utils, "create_causal_mask", side_effect=create_causal_mask)
-    @patch.object(text_utils, "create_padding_mask", side_effect=create_padding_mask)
+    @patch.object(text_utils, "mock_causal_mask", side_effect=mock_causal_mask)
+    @patch.object(text_utils, "mock_padding_mask", side_effect=mock_padding_mask)
     def test_llm_dataloader_small_data(self, mock_padding, mock_causal):
         data_small = np.arange(5)
         loader = LLMDataLoader(
@@ -121,8 +120,8 @@ class TestDataLoaders(unittest.TestCase):
         with self.assertRaises(ValueError):
             next(it)
 
-    @patch.object(text_utils, "create_causal_mask", side_effect=create_causal_mask)
-    @patch.object(text_utils, "create_padding_mask", side_effect=create_padding_mask)
+    @patch.object(text_utils, "mock_causal_mask", side_effect=mock_causal_mask)
+    @patch.object(text_utils, "mock_padding_mask", side_effect=mock_padding_mask)
     def test_llm_dataloader_output(self, mock_padding, mock_causal):
         loader = LLMDataLoader(
             self.data,
@@ -154,8 +153,8 @@ class TestDataLoaders(unittest.TestCase):
             self.assertIsNone(tmask)
             self.assertIsNone(causal_mask)
 
-    @patch.object(text_utils, "create_causal_mask", side_effect=create_causal_mask)
-    @patch.object(text_utils, "create_padding_mask", side_effect=create_padding_mask)
+    @patch.object(text_utils, "mock_causal_mask", side_effect=mock_causal_mask)
+    @patch.object(text_utils, "mock_padding_mask", side_effect=mock_padding_mask)
     def test_llm_dataloader_no_decoder_input(self, mock_padding, mock_causal):
         loader = LLMDataLoader(
             self.data,

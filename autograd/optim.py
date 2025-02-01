@@ -22,6 +22,8 @@ class LRScheduler:
 class CosineScheduler(LRScheduler):
     """
     Cosine learning rate scheduler with warmup.
+    Implements Section 3 in "SGDR: Stochastic Gradient Descent with Warm Restarts"
+    Paper: https://arxiv.org/abs/1608.03983
     """
 
     def __init__(
@@ -32,6 +34,7 @@ class CosineScheduler(LRScheduler):
         self.min_lr = min_lr
 
     def __call__(self, step: int, initial_lr: float, current_lr: float) -> float:
+        # The initial_lr is the min learning rate in the original paper
         if step < self.warmup_steps:
             return initial_lr * (step + 1) / (self.warmup_steps + 1)
         if step > self.lr_decay_iters:
