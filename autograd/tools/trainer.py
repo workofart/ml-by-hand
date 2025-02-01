@@ -161,6 +161,7 @@ class AbstractTrainer(ABC):
             if key != "epoch" and self.metrics[key][-1] is not None:
                 log_msg += f"\n{key} = {self.metrics[key][-1]:.4f}"
         log_msg += f"\nLR = {self.optimizer.lr:.4f}"
+        log_msg += f"\nGrad L2 Norm = {grad_l2_norm(self.model.parameters):.2f}"
         logger.info(log_msg)
 
     @abstractmethod
@@ -387,7 +388,7 @@ class LLMTrainer(AbstractTrainer):
                 prediction_func=self.forward_fn,
                 bpe=train_data_loader.bpe,
                 groundtruth_data=train_data_loader.data[: train_data_loader.seq_len],
-                max_length=train_data_loader.seq_len // 4,
+                max_length=train_data_loader.seq_len // 3,
             )
 
         # Normal sampling

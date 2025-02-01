@@ -4,7 +4,7 @@ It's optional to use, but may provide some quality of life improvements
 """
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Union
 
 
 @dataclass
@@ -50,7 +50,7 @@ class CustomBpeConfig:
 class TransformerTrainingConfig(GenericTrainingConfig):
     # Whether to check the model performance by feeding the groundtruth tokens to compare whether the model can predict the next token correctly.
     teacher_enforcing: bool
-    custom_bpe: Optional[CustomBpeConfig] = None
+    custom_bpe: Union[CustomBpeConfig, None] = None
     # If True, we create a separate 'dec_inp'
     # array (common in seq2seq). If you just want normal GPT next-token,
     # you can set this false.

@@ -13,8 +13,9 @@ from autograd import functional, nn, optim
 from autograd.tensor import Tensor
 from autograd.text import utils as text_utils
 from autograd.text.tokenizer import BytePairEncoder
-from autograd.tools.data import LLMDataLoader, load_data
-from autograd.tools.trainer import LLMTrainer, load_model_and_optimizer
+from autograd.tools.config_schema import CustomBpeConfig, TransformerTrainingConfig
+from autograd.tools.data import LLMDataLoader
+from autograd.tools.trainer import LLMTrainer
 
 
 class Transformer(nn.Module):
@@ -44,6 +45,7 @@ class Transformer(nn.Module):
         super().__init__(**kwargs)
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
+        self.max_seq_len = kwargs.get("max_seq_len")
 
         self.embedding = nn.Embedding(vocab_size, hidden_size)
 
@@ -384,116 +386,126 @@ class TransformerForwardFn(nn.AbstractLLMForwardFn):
     A forward function for the Transformer model.
     """
 
-    def train(self, model: Transformer, batch_data: Any, mode="train", **kwargs):
+    def train(self, model: Transformer, batch_data: Any, **kwargs):
         X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_data
         logits = model(X, dec_inp, src_mask, tgt_mask)
         return logits, y
 
-    def sample(self, model: Transformer, batch_data: Any, mode="train", **kwargs):
-        X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_data
-        logits = model(X, X, None, None)
-        return logits, y
+    def sample(self, model: Transformer, batch_data: Any, **kwargs):
+        logits = model(batch_data, batch_data, None, None)
+        return logits, None
 
 
 if __name__ == "__main__":
-    logger = logging.getLogger(__name__)
-
-    data = load_data(
-        "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt",
-        "examples/tinyshakespeare.txt",
-    )[:10000]
-    logger.info(f"{len(data)} characters in the entire dataset")
-
-    # Create the vocabulary first
-    bpe = BytePairEncoder(
-        num_merges=3000,
-        vocab_file_path="vocab.pkl",
-        encoded_data_path="bpe_mini_shakespeare.npz",
+    CONFIG = TransformerTrainingConfig(
+        training_run_name="shakespeare_mini",
+        dataset_name="shakespeare_mini",
+        batch_size=16,
+        total_epochs=25,
+        eval_iters=16,
+        steps_per_epoch=20,
+        checkpoint_freq=2,
+        model_kwargs={
+            "num_attention_heads": 4,
+            "hidden_size": 128,
+            "dropout_prob": 0.1,
+            "max_seq_len": 96,
+            "num_decoder_layers": 4,
+        },
+        optimizer_kwargs={
+            "lr": 1e-3,
+            "beta2": 0.99,
+            "max_grad_norm": 1.0,
+            "weight_decay": 0.1,
+            "lr_scheduler_kwargs": {
+                "lr_scheduler_cls": optim.CosineScheduler,
+                "warmup_steps": 100,
+                "lr_decay_iters": 500,
+            },
+        },
+        resume_epoch=None,
+        teacher_enforcing=True,
+        include_decoder_input=True,
+        create_padding_masks=True,
+        label_smoothing=0.1,
+        eval_start_string="First",
+        custom_bpe=CustomBpeConfig(
+            num_merges=0,
+            encoded_data_path="training_data/bpe_0_shakespeare_encoded_data.npz",
+            vocab_path="training_data/shakespeare_vocab_0.pkl",
+            overwrite_encoded_data=False,
+            overwrite_vocabulary_file=False,
+            split_token="<|endoftext|>",
+        ),
     )
-    encoded_data = bpe.prepare_data(
-        raw_text_list=data.split("\n\n"),
-        overwrite_encoded_data=False,
-        overwrite_vocabulary_file=False,
-        split_token="<|endoftext|>",
-    )[:5000]
+
+    logger = logging.getLogger(__name__)
+    data = text_utils.load_shakespeare_mini()
+
+    # Create a Byte Pair Encoder and prepare data
+    if CONFIG.custom_bpe:
+        bpe = BytePairEncoder(
+            num_merges=CONFIG.custom_bpe.num_merges,
+            vocab_file_path=CONFIG.custom_bpe.vocab_path,
+            encoded_data_path=CONFIG.custom_bpe.encoded_data_path,
+        )
+
+        encoded_data = bpe.prepare_data(
+            raw_text=data,
+            overwrite_encoded_data=CONFIG.custom_bpe.overwrite_encoded_data,
+            overwrite_vocabulary_file=CONFIG.custom_bpe.overwrite_vocabulary_file,
+            split_token=CONFIG.custom_bpe.split_token,
+        )
+    else:
+        raise ValueError(
+            "Currently this original Transformers model can only be trained with the custom BytePairEncoder, please specify the custom_bpe config"
+        )
 
     # encoded_data is a list of integers without the concept of samples
     n = int(len(encoded_data) * 0.9)
     train_data, test_data = encoded_data[:n], encoded_data[n:]
+    print(f"Data length: {len(train_data)=} {len(test_data)=}")
 
-    CONFIG = {
-        "model_kwargs": {
-            "vocab_size": len(bpe._unicode_to_int_vocab),
-            "num_attention_heads": 4,  # 12
-            "hidden_size": 128,  # 768, must be divisible by num_attention_heads
-            "dropout_prob": 0.1,
-            "num_decoder_layers": 6,
-        },
-        "optimizer_kwargs": {
-            "lr": 0.0  # We may schedule it later with warmup
-        },
-        "num_epochs": 90,
-        "warmup_steps": 100,
-        "eval_iters": 16,
-        "seq_len": 80,
-        "batch_size": 16,  # 64
-        # Whether to check the model performance by feeding the groundtruth tokens to compare whether the model can predict the next token correctly.
-        "teacher_enforcing": True,
-        # Whether to load from a checkpoint
-        "resume_epoch": None,
-    }
-    model, optimizer, checkpoint = load_model_and_optimizer(
-        Transformer,
-        optim.Adam,
-        model_kwargs=CONFIG["model_kwargs"],
-        optimizer_kwargs=CONFIG["optimizer_kwargs"],
-        resume_epoch=CONFIG["resume_epoch"],
-    )
-
-    hparams = checkpoint.get("hyperparams", CONFIG)
-
-    train_data_loader = LLMDataLoader(
-        data=train_data,
-        bpe=bpe,
-        seq_len=hparams["seq_len"],
-        batch_size=hparams["batch_size"],
-        shuffle=True,
-        include_decoder_input=True,
-    )
-    test_data_loader = LLMDataLoader(
-        data=test_data,
-        bpe=bpe,
-        seq_len=hparams["seq_len"],
-        batch_size=hparams["batch_size"] // 4,
-        shuffle=False,
-    )
+    CONFIG.model_kwargs["vocab_size"] = bpe.n_vocab
 
     trainer = LLMTrainer(
-        model=model,
-        optimizer=optimizer,
-        warmup_steps=hparams["warmup_steps"],
+        model_cls=Transformer,
+        optimizer_cls=optim.Adam,
         loss_fn=functional.cross_entropy,
-        epochs=hparams["num_epochs"],
-        label_smoothing=0.1,
-        checkpoint_freq=5,
-        tokenizer=bpe,
-        teacher_enforcing=hparams["teacher_enforcing"],
-        checkpoint=checkpoint,
-        hyperparams=hparams,
+        config=CONFIG,
         forward_fn=TransformerForwardFn(),
     )
 
-    trainer.fit(
-        train_data_loader=train_data_loader,
-        val_data_loader=test_data_loader,
+    train_data_loader = LLMDataLoader(
+        data=np.array(train_data),
+        bpe=bpe,
+        batch_size=CONFIG.batch_size,
+        seq_len=trainer.model.max_seq_len,
+        steps_per_epoch=CONFIG.steps_per_epoch,
+        shuffle=True,
+        include_decoder_input=CONFIG.include_decoder_input,
+        create_padding_masks=CONFIG.create_padding_masks,
+    )
+    test_data_loader = LLMDataLoader(
+        data=np.array(test_data),
+        bpe=bpe,
+        batch_size=CONFIG.batch_size // 2,
+        seq_len=trainer.model.max_seq_len,
+        steps_per_epoch=CONFIG.eval_iters,
+        shuffle=False,
+        include_decoder_input=CONFIG.include_decoder_input,
+        create_padding_masks=CONFIG.create_padding_masks,
     )
 
+    trainer.fit(train_data_loader, test_data_loader)
+
     text_utils.inference(
-        model=model,
+        model=trainer.model,
         prediction_func=TransformerForwardFn(),
         bpe=bpe,
-        start_tokens="<SOS>",  # Dummy token to start the generation
-        max_length=int(hparams["seq_len"] * 1.1),
+        start_tokens="All",  # Dummy token to start the generation
+        max_length=int(
+            trainer.model.max_seq_len * 0.9
+        ),  # this should be shorter than context
         temperature=1.0,
-        top_k=10,
     )

@@ -297,7 +297,7 @@ def inference(
         groundtruth_text = "\n".join(
             bpe.decode(groundtruth_data.tolist()).split("<|endoftext|>")
         )
-        logger.info(f"Teacher forcing groundtruth:\n{groundtruth_text}")
+        logger.info(f"Teacher forcing mode on!!\nGroundtruth:\n{groundtruth_text}")
 
     prediction_text = "\n\n".join(bpe.decode(output_ids).split("<|endoftext|>"))
     logger.info(f"Prediction:\n\n{prediction_text}")
@@ -322,7 +322,7 @@ def load_wiki_simple() -> str:
         "training_data/wiki_simple_english.txt",
         "training_data/wiki_simple_english.txt",
     )
-    logger.info(f"{len(data)} characters in the entire dataset. Sample: {data[:100]}")
+    logger.info(f"{len(data)} characters in the entire dataset. Sample: \n{data[:100]}")
     return data
 
 
@@ -333,5 +333,5 @@ def load_shakespeare_mini() -> str:
         "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt",
         "training_data/tinyshakespeare.txt",
     )
-    logger.info(f"{len(data)} characters in the entire dataset. Sample: {data[:100]}")
+    logger.info(f"{len(data)} characters in the entire dataset. Sample: \n{data[:100]}")
     return data
