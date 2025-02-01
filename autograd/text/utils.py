@@ -305,7 +305,7 @@ def inference(
     return prediction_text
 
 
-def load_wiki_simple():
+def load_wiki_simple() -> str:
     from autograd.tools.data import load_data
 
     if not os.path.exists("training_data/wiki_simple_english.txt"):
@@ -322,13 +322,16 @@ def load_wiki_simple():
         "training_data/wiki_simple_english.txt",
         "training_data/wiki_simple_english.txt",
     )
+    logger.info(f"{len(data)} characters in the entire dataset. Sample: {data[:100]}")
     return data
 
 
-def load_shakespeare_mini():
+def load_shakespeare_mini() -> str:
     from autograd.tools.data import load_data
 
-    return load_data(
+    data = load_data(
         "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt",
         "training_data/tinyshakespeare.txt",
     )
+    logger.info(f"{len(data)} characters in the entire dataset. Sample: {data[:100]}")
+    return data

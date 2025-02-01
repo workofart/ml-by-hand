@@ -114,19 +114,19 @@ class BytePairEncoder:
 
     def prepare_data(
         self,
-        raw_text_list: List[str],
+        raw_text: str,
         overwrite_vocabulary_file: bool = False,
         overwrite_encoded_data: bool = False,
         split_token: str = "<|endoftext|>",
     ) -> np.ndarray:
         """
         High-level method that:
-          1) Trains (or loads) the BPE vocabulary on the given raw_text_list.
+          1) Trains (or loads) the BPE vocabulary on the given raw_text.
           2) Encodes the text into a NumPy array of token IDs (in parallel).
           3) Caches the result to an .npz file (unless it already exists and we're not overwriting).
 
         Args:
-            raw_text_list: The list of texts from which to train or apply BPE.
+            raw_text: The raw texts from which to train or apply BPE.
             npz_file_path: File path to store (or load) the encoded .npz data.
             overwrite_saved_file: Whether to overwrite an existing .npz file with newly encoded data.
             split_token: Delimiter to insert between data blocks.
@@ -134,12 +134,8 @@ class BytePairEncoder:
         Returns:
             A NumPy array of encoded tokens.
         """
-        joined_text = split_token.join(raw_text_list)
-
         # 1) Train the vocabulary if needed
-        self.train_vocabulary(
-            joined_text, overwrite_saved_file=overwrite_vocabulary_file
-        )
+        self.train_vocabulary(raw_text, overwrite_saved_file=overwrite_vocabulary_file)
 
         # 2) Check if we already have an encoded .npz file
         if os.path.exists(self.encoded_data_path) and not overwrite_encoded_data:
@@ -151,10 +147,10 @@ class BytePairEncoder:
                 encoded_data = npz_data["arr_0"]
         else:
             # 3) Parallel encoding
-            chunk_size = max(1, len(joined_text) // self.n_workers)
+            chunk_size = max(1, len(raw_text) // self.n_workers)
             text_chunks = [
-                joined_text[i : i + chunk_size]
-                for i in range(0, len(joined_text), chunk_size)
+                raw_text[i : i + chunk_size]
+                for i in range(0, len(raw_text), chunk_size)
             ]
 
             with Pool(self.n_workers) as pool:
