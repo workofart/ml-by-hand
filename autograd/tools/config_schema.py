@@ -23,12 +23,12 @@ class GenericTrainingConfig:
     # The above configs can be changed, and don't need to be loaded from the checkpoint
     model_kwargs: dict
     optimizer_kwargs: dict
-    steps_per_epoch: Optional[int] = 16
-    eval_iters: Optional[int] = 16
-    batch_size: Optional[int] = 32
+    steps_per_epoch: int = 16
+    eval_iters: int = 16
+    batch_size: int = 32
     # Whether to load from a checkpoint
     resume_epoch: Optional[int] = None
-    training_run_name: Optional[str] = "default"
+    training_run_name: str = "default"
     dataset_name: Optional[str] = ""
 
 
