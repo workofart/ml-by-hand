@@ -88,7 +88,7 @@ class BytePairEncoder:
                     self._int_to_unicode_vocab,
                     self.learned_merges,
                 ) = data
-        except (pickle.UnpicklingError, EOFError) as e:
+        except (pickle.UnpicklingError, EOFError, ValueError) as e:
             logger.warning(
                 f"Failed to load the vocabulary from {self.vocab_file_path}. "
                 f"Reason: {e}. Creating new dictionary."

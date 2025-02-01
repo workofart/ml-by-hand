@@ -12,8 +12,8 @@ class TestTokenizer(TestCase):
             self.original_text = f.read()
 
     def tearDown(self) -> None:
-        if os.path.exists("test_vocab.pkl"):
-            os.remove("test_vocab.pkl")
+        if os.path.exists(self.bpe.vocab_file_path):
+            os.remove(self.bpe.vocab_file_path)
 
     def test_construct_unicode_to_int_vocab(self):
         vocab = self.bpe._construct_unicode_to_int_vocab()
@@ -90,3 +90,25 @@ class TestTokenizer(TestCase):
         encoded = self.bpe.encode(input_text)
         self.assertIn(st_id, encoded)
         self.assertEqual(self.bpe.decode(encoded), input_text)
+
+    def test_load_dictionary_fallback(self):
+        with open(self.bpe.vocab_file_path, "wb") as f:
+            f.write(b"\x80\x03}q\x00.")  # incomplete or invalid pickle data
+        # Now re-initialize the BytePairEncoder; it should catch the error and rebuild
+        bpe_new = BytePairEncoder(
+            num_merges=50, vocab_file_path=self.bpe.vocab_file_path
+        )
+        self.assertGreater(len(bpe_new._unicode_to_int_vocab), 0)
+
+    def test_train_vocabulary_skip_if_loaded_and_no_overwrite(self):
+        # First train
+        self.bpe.train_vocabulary(self.original_text, overwrite_saved_file=True)
+        # Now call again with different text but overwrite_saved_file=False
+        old_size = self.bpe.n_vocab
+        self.bpe.train_vocabulary("some different text", overwrite_saved_file=False)
+        # Check that nothing changed
+        self.assertEqual(self.bpe.n_vocab, old_size)
+
+    def test_decode_unknown_token(self):
+        decoded = self.bpe.decode([999999])  # a token ID that doesn't exist
+        self.assertIn("<UNK>", decoded)
