@@ -2,7 +2,7 @@ import logging
 import os
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 from tqdm import tqdm
@@ -34,6 +34,7 @@ class AbstractTrainer(ABC):
         total_epochs: int = 10,
         checkpoint: Optional[dict] = None,
         config: Optional[Dict] = None,
+        **kwargs,
     ):
         """
         Args:
@@ -51,6 +52,7 @@ class AbstractTrainer(ABC):
         self.start_epoch = self.checkpoint.get("epoch", 0)
         # Store metrics as lists for easy conversion later.
         self.metrics = defaultdict(list)
+        self.kwargs = kwargs
 
     def fit(self, train_data_loader, val_data_loader=None):
         """
@@ -96,7 +98,7 @@ class AbstractTrainer(ABC):
         """
         Save a checkpoint if the validation loss improves.
         """
-        if val_loss is not None:
+        if val_loss is not None and epoch % self.kwargs.get("checkpoint_freq", 1) == 0:
             if not self.metrics["val_loss"] or val_loss < min(self.metrics["val_loss"]):
                 checkpoint = {
                     "epoch": epoch + 1,
@@ -248,18 +250,19 @@ class LLMTrainer(AbstractTrainer):
         loss_fn,
         warmup_steps: int,
         tokenizer: BytePairEncoder,
+        forward_fn: nn.AbstractLLMForwardFn,
         epochs: int = 10,
         label_smoothing: float = 0.0,
-        forward_fn: Optional[Callable] = None,
         start_tokens: Optional[str] = "\n",
         config: Optional[Dict] = None,
+        **kwargs,
     ):
-        super().__init__(model, optimizer, epochs, config=config)
+        super().__init__(model, optimizer, epochs, config=config, **kwargs)
         self.loss_fn = loss_fn
         self.warmup_steps = warmup_steps
         self.label_smoothing = label_smoothing
         self.tokenizer = tokenizer
-        self.forward_fn = forward_fn or self.default_forward_fn
+        self.forward_fn = forward_fn
         self.start_tokens = start_tokens
 
     def train_step(self, batch_data) -> float:
@@ -298,11 +301,6 @@ class LLMTrainer(AbstractTrainer):
         self.model.train()
         return avg_val_loss
 
-    def default_forward_fn(self, model, batch_data, **kwargs):
-        X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_data
-        logits = model(X, dec_inp, src_mask, tgt_mask)
-        return logits, y
-
     def _perform_inference(self, train_data_loader):
         """
         Optionally perform teacher-forcing or sampling.
@@ -312,9 +310,8 @@ class LLMTrainer(AbstractTrainer):
             train_data_loader, "data"
         ):
             text_utils.inference(
-                prediction_func=lambda seq: self.forward_fn(
-                    self.model, seq, mode="sample"
-                ),
+                model=self.model,
+                prediction_func=self.forward_fn,
                 bpe=self.tokenizer,
                 groundtruth_data=train_data_loader.data[: train_data_loader.seq_len],
                 max_length=train_data_loader.seq_len // 4,
@@ -322,7 +319,8 @@ class LLMTrainer(AbstractTrainer):
 
         # Normal sampling
         text_utils.inference(
-            prediction_func=lambda seq: self.forward_fn(self.model, seq, mode="sample"),
+            model=self.model,
+            prediction_func=self.forward_fn,
             bpe=self.tokenizer,
             start_tokens=self.start_tokens,
             max_length=int(self.model.max_seq_len * 0.4),

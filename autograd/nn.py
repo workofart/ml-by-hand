@@ -1,4 +1,5 @@
 import logging
+from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import numpy as np
@@ -982,6 +983,45 @@ class MultiHeadAttention(Module):
 
 
 ########### Utility Functions ###########
+
+
+class AbstractLLMForwardFn(ABC):
+    """
+    An interface describing how to run a 'forward' pass for language modeling.
+    Subclasses implement the __call__ method, which returns (logits, labels).
+    """
+
+    @abstractmethod
+    def sample(self, model: Any, batch_data: Any, mode: str = "train") -> Any:
+        pass
+
+    @abstractmethod
+    def train(
+        self, model: Any, batch_data: Any, mode: str = "train"
+    ) -> Tuple[Any, Any]:
+        pass
+
+    def __call__(
+        self, model: Any, batch_data: Any, mode: str = "train"
+    ) -> Tuple[Any, Any]:
+        """
+        Args:
+            model: The model to run a forward pass on.
+            batch_data: The data for the current batch, in any format.
+            mode (str): "train" or "sample"
+
+        Returns:
+            If train mode (prediction_logits, ground_truth_labels).
+            If sample mode (prediction_logits, None)
+        """
+        if mode == "train":
+            return self.train(model, batch_data)
+        elif mode == "sample":
+            return self.sample(model, batch_data), None
+        else:
+            raise ValueError(f"mode must be either 'train' or 'sample', got {mode}")
+
+
 def extract_windows(
     x: Union[Tensor, np.ndarray],
     kernel_size: int,

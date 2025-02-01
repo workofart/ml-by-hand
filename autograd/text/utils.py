@@ -13,6 +13,7 @@ from typing import (
 import numpy as np
 from tqdm import tqdm
 
+from autograd import nn
 from autograd.functional import Softmax
 from autograd.text.tokenizer import BytePairEncoder
 
@@ -224,7 +225,8 @@ def token_batch_to_indices(
 
 
 def inference(
-    prediction_func: Callable,
+    model: nn.Module,
+    prediction_func: nn.AbstractLLMForwardFn,
     bpe: BytePairEncoder,
     start_tokens: Optional[str] = None,
     groundtruth_data: Optional[np.ndarray] = None,
@@ -245,7 +247,8 @@ def inference(
         - Generates text by teacher forcing on `groundtruth_data`. At each time step, we feed the model the ground truth tokens up to that point, and measure or collect the predicted next token.
 
     Args:
-        prediction_func (Callable): The function that takes in a list of tokens, runs model() and returns a list of tokens
+        model (nn.Module): The model to run inference on
+        prediction_func (nn.AbstractLLMForwardFn): The forward function that implements the AbstractLLMForwardFn interface
         bpe (BytePairEncoder): BPE tokenizer
         start_tokens (Optional[str]): The initial token string (e.g. "<SOS>")
         max_length (int): The maximum length of tokens to run
@@ -284,7 +287,9 @@ def inference(
     # Main loop: decide input tokens based on the mode.
     for i in tqdm(range(num_steps), desc="Inference", leave=False):
         current_input = groundtruth_data[: i + 1] if teacher_forcing else output_ids
-        logits = prediction_func(np.array([current_input])).data[0, -1]
+        logits = prediction_func(
+            model=model, batch_data=np.array([current_input]), mode="sample"
+        )[0].data[0, -1]
         output_ids.append(sample_next_token(logits, temperature, top_k))
 
     if teacher_forcing:
