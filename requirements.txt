@@ -112,13 +112,9 @@ pytz==2024.2
 pyyaml==6.0.2
     # via pre-commit
 regex==2024.11.6
-    # via
-    #   -r requirements.in
-    #   tiktoken
+    # via -r requirements.in
 requests==2.32.3
-    # via
-    #   openml
-    #   tiktoken
+    # via openml
 rich==13.9.4
     # via
     #   memray
@@ -143,8 +139,6 @@ textual==1.0.0
     # via memray
 threadpoolctl==3.5.0
     # via scikit-learn
-tiktoken==0.8.0
-    # via -r requirements.in
 torch==2.5.0
     # via -r requirements.in
 tqdm==4.66.5

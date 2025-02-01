@@ -11,4 +11,3 @@ openml # for dataset
 regex
 torch
 ruff
-tiktoken
