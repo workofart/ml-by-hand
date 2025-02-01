@@ -135,12 +135,12 @@ class TestDataLoaders(unittest.TestCase):
         X_chunk, dec_inp, Y_chunk, smask, tmask, causal_mask = batch
         self.assertEqual(X_chunk.shape, (self.batch_size_llm, self.seq_len))
         self.assertEqual(Y_chunk.shape, (self.batch_size_llm, self.seq_len))
-        if loader.include_decoder_input and loader.create_decoder_inp:
+        if loader.include_decoder_input:
             self.assertEqual(dec_inp.shape, (self.batch_size_llm, self.seq_len))
             self.assertTrue(np.all(dec_inp[:, 0] == loader.sos_idx))
         else:
             self.assertIsNone(dec_inp)
-        if loader.create_masks:
+        if loader.create_padding_masks:
             self.assertEqual(smask.shape, (self.batch_size_llm, 1, 1, self.seq_len))
             self.assertEqual(
                 tmask.shape, (self.batch_size_llm, 1, self.seq_len, self.seq_len)

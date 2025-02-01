@@ -1,10 +1,16 @@
+import os
 import unittest
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 
 from autograd.nn import Module
+from autograd.optim import Optimizer
 from autograd.tensor import Tensor
+from autograd.tools.config_schema import (
+    GenericTrainingConfig,
+    TransformerTrainingConfig,
+)
 from autograd.tools.trainer import LLMTrainer, SimpleTrainer
 
 
@@ -18,6 +24,7 @@ class MockDataLoader:
         self.data = data
         self.pad_idx = pad_idx
         self.seq_len = seq_len
+        self.bpe = MagicMock()
 
     def on_epoch_start(self):
         # If you want to shuffle or do something each epoch, do it here
@@ -32,6 +39,67 @@ class MockDataLoader:
         return iter(self.data)
 
 
+class MockModelClass(Module):
+    """
+    A minimal mock model class conforming to nn.Module that returns
+    a constant prediction and tracks calls to num_parameters().
+    """
+
+    def __init__(self, hidden_size=128, **kwargs):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self._num_params = 1e6  # pretend we have 1 million params
+
+    def num_parameters(self):
+        return self._num_params
+
+    def __call__(self, x):
+        # Return a consistent shape for classification (e.g. batch_size x num_classes)
+        # Or adapt to your needs.
+        batch_size = x.shape[0]
+        return Tensor(np.zeros((batch_size, 3), dtype=np.float32))
+
+    def train(self):
+        pass
+
+    def eval(self):
+        pass
+
+    def load_state_dict(self, state_dict):
+        pass
+
+    def state_dict(self):
+        # Return something that can be saved as checkpoint
+        return {}
+
+
+class MockOptimizerClass(Optimizer):
+    """
+    A minimal mock optimizer that tracks step calls and has a .lr property.
+    """
+
+    def __init__(self, parameters, lr=1e-3, **kwargs):
+        super().__init__(parameters, lr=lr)
+        self._lr = lr
+        self.step_call_count = 0
+
+    @property
+    def lr(self):
+        return self._lr
+
+    def step(self):
+        self.step_call_count += 1
+
+    def zero_grad(self):
+        pass
+
+    def load_state_dict(self, state_dict):
+        pass
+
+    def state_dict(self):
+        return {}
+
+
 class BaseTrainerTest(unittest.TestCase):
     """
     A base test class that provides common setUp logic for any trainer.
@@ -39,28 +107,30 @@ class BaseTrainerTest(unittest.TestCase):
     """
 
     def setUp(self):
-        # Mock model with numeric num_parameters() and an override for __call__.
-        self.model = Module()
-        # model.num_parameters() must return a float so that format strings work (:.2f).
-        self.model.num_parameters = MagicMock()
-        self.model.num_parameters.return_value = 1e6
-        self.model.state_dict = MagicMock()
-        self.model.state_dict.return_value = {}
-        # We'll leave self.model.__call__ to be defined in child classes (because shapes differ).
-
-        # Mock optimizer with a numeric .lr property
-        self.optimizer = MagicMock()
-        self.optimizer.lr = 0.01
-        self.optimizer.zero_grad = MagicMock()
-        self.optimizer.step = MagicMock()
-
         # A mock loss function returning a constant scalar
         self.loss_fn = MagicMock(return_value=Tensor(1.23))
+
+    def tearDown(self) -> None:
+        metrics_path = (
+            f"{SimpleTrainer.METRICS_DIR}/{MockModelClass.__name__}_default.npz"
+        )
+        if os.path.exists(metrics_path):
+            os.remove(metrics_path)
 
 
 class TestSimpleTrainer(BaseTrainerTest):
     def setUp(self):
         super().setUp()
+
+        # Build a GenericTrainingConfig
+        self.config = GenericTrainingConfig(
+            total_epochs=2,
+            checkpoint_freq=1,
+            model_kwargs={"hidden_size": 256},
+            optimizer_kwargs={"lr": 0.01},
+            resume_epoch=None,
+        )
+
         # Make the model return a fake_pred
         self.fake_pred = np.zeros((2, 3), dtype=np.float32)
 
@@ -79,25 +149,25 @@ class TestSimpleTrainer(BaseTrainerTest):
 
         # Create the trainer
         self.trainer = SimpleTrainer(
-            model=self.model,
+            model_cls=MockModelClass,
+            optimizer_cls=MockOptimizerClass,
             loss_fn=self.loss_fn,
-            optimizer=self.optimizer,
-            epochs=2,
+            config=self.config,
             output_type="logits",
         )
 
     def test_fit_calls_optimizer_step(self):
-        with patch.object(self.model, "forward", return_value=Tensor(self.fake_pred)):
-            self.trainer.fit(self.train_loader, self.val_loader)
-            # We have 2 epochs * 2 train batches => 4 calls to optimizer.step
-            self.assertEqual(self.optimizer.step.call_count, 4)
+        """Check that fit() results in the correct number of optimizer steps."""
+        self.trainer.fit(self.train_loader, self.val_loader)
+        # 2 epochs * 2 train batches = 4 steps
+        self.assertEqual(self.trainer.optimizer.step_call_count, 4)
 
     def test_train_step_returns_loss(self):
-        with patch.object(self.model, "forward", return_value=Tensor(self.fake_pred)):
-            batch = next(iter(self.train_data))
-            loss_val = self.trainer.train_step(batch)
-            self.assertAlmostEqual(loss_val, 1.23, places=5)
-            self.optimizer.step.assert_called_once()
+        """Check that the train_step returns the expected scalar loss."""
+        batch = next(iter(self.train_data))
+        loss_val = self.trainer.train_step(batch)
+        self.assertAlmostEqual(loss_val, 1.23, places=5)
+        self.assertEqual(self.trainer.optimizer.step_call_count, 1)
 
 
 class TestLLMTrainer(BaseTrainerTest):
@@ -107,7 +177,6 @@ class TestLLMTrainer(BaseTrainerTest):
 
         # For LLM, define a shape like (batch_size, seq_len, vocab_size).
         self.fake_pred = np.zeros((2, seq_len, 10), dtype=np.float32)
-        self.model.hidden_size = 128  # for the trainer's warmup logic
 
         # LLM data (just 2 batches for training, 1 batch for validation)
         self.train_data = [
@@ -144,29 +213,39 @@ class TestLLMTrainer(BaseTrainerTest):
             np.zeros((2, seq_len), dtype=np.int32),
         )
 
+        self.config = TransformerTrainingConfig(
+            total_epochs=2,
+            checkpoint_freq=1,
+            model_kwargs={"hidden_size": 128},
+            optimizer_kwargs={"lr": 0.01},
+            resume_epoch=None,
+            label_smoothing=0.0,
+            teacher_enforcing=False,
+            include_decoder_input=True,
+            create_padding_masks=False,
+        )
+
         # Construct the trainer
         self.trainer = LLMTrainer(
-            model=self.model,
-            optimizer=self.optimizer,
-            forward_fn=self.forward_fn,
+            model_cls=MockModelClass,
+            optimizer_cls=MockOptimizerClass,
             loss_fn=self.loss_fn,
-            warmup_steps=100,
-            tokenizer=MagicMock(),
-            epochs=2,
+            forward_fn=self.forward_fn,
+            config=self.config,
         )
 
     def test_fit_calls_optimizer_step(self):
-        with patch.object(self.model, "forward", return_value=Tensor(self.fake_pred)):
-            self.trainer.fit(self.train_loader, self.val_loader)
-            # 2 epochs * 2 train batches => 4 calls to optimizer.step
-            self.assertEqual(self.optimizer.step.call_count, 4)
+        """Check that fit() calls optimizer.step the correct number of times."""
+        self.trainer.fit(self.train_loader, self.val_loader)
+        # 2 epochs * 2 train batches = 4 steps
+        self.assertEqual(self.trainer.optimizer.step_call_count, 4)
 
     def test_train_step_returns_loss(self):
-        with patch.object(self.model, "forward", return_value=Tensor(self.fake_pred)):
-            batch = next(iter(self.train_data))
-            loss_val = self.trainer.train_step(batch)
-            self.assertAlmostEqual(loss_val, 1.23, places=5)
-            self.optimizer.step.assert_called_once()
+        """Check that a single train step returns the constant scalar loss."""
+        batch = next(iter(self.train_data))
+        loss_val = self.trainer.train_step(batch)
+        self.assertAlmostEqual(loss_val, 1.23, places=5)
+        self.assertEqual(self.trainer.optimizer.step_call_count, 1)
 
     @patch("autograd.text.utils.inference")
     def test_perform_inference_called(self, mock_inference):

@@ -997,15 +997,11 @@ class AbstractLLMForwardFn(ABC):
     """
 
     @abstractmethod
-    def sample(
-        self, model: Any, batch_data: Any, mode: str = "train"
-    ) -> Tuple[Any, Any]:
+    def sample(self, model: Any, batch_data: Any) -> Tuple[Any, Any]:
         pass
 
     @abstractmethod
-    def train(
-        self, model: Any, batch_data: Any, mode: str = "train"
-    ) -> Tuple[Any, Any]:
+    def train(self, model: Any, batch_data: Any) -> Tuple[Any, Any]:
         pass
 
     def __call__(

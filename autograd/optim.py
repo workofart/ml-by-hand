@@ -33,7 +33,7 @@ class CosineScheduler(LRScheduler):
     """
 
     def __init__(
-        self, warmup_steps: int = 100, lr_decay_iters: int = 5000, min_lr: float = 1e-4
+        self, warmup_steps: int = 100, lr_decay_iters: int = 200, min_lr: float = 1e-4
     ):
         self.warmup_steps = warmup_steps
         self.lr_decay_iters = lr_decay_iters
@@ -71,7 +71,7 @@ class Optimizer:
         self,
         model_parameters: Dict[str, Tensor],
         lr: float,
-        lr_scheduler: Optional[LRScheduler] = None,
+        lr_scheduler_kwargs: Optional[dict] = None,
         **kwargs: Any,
     ) -> None:
         self._states: Dict[str, Any] = defaultdict(dict)
@@ -81,7 +81,11 @@ class Optimizer:
         self.model_parameters = model_parameters
         self._hyperparams["lr"] = lr
         self.initial_lr = lr
-        self.lr_scheduler = lr_scheduler  # optional
+        if lr_scheduler_kwargs:
+            lr_scheduler_cls = lr_scheduler_kwargs.pop("lr_scheduler_cls")
+            self.lr_scheduler = lr_scheduler_cls(**lr_scheduler_kwargs)
+        else:
+            self.lr_scheduler = None
 
         # Store the global step within _states.
         self._states["timestep"] = 0

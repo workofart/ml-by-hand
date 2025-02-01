@@ -165,8 +165,7 @@ class LLMDataLoader(AbstractDataLoader):
         shuffle: bool = True,
         steps_per_epoch: Optional[int] = 1000,
         include_decoder_input: bool = True,
-        create_decoder_inp: bool = True,
-        create_masks: bool = True,
+        create_padding_masks: bool = True,
         sos_token: Union[str, bytes] = "<SOS>",
         pad_token: Union[str, bytes] = "<PAD>",
     ) -> None:
@@ -185,9 +184,10 @@ class LLMDataLoader(AbstractDataLoader):
             include_decoder_input (bool): If True, we create a separate 'dec_inp'
                 array (common in seq2seq). If you just want normal GPT next-token,
                 you can ignore or set this false.
-            create_decoder_inp (bool): Similar flag controlling if we do that step.
-            create_masks (bool): If True, we create a causal_mask (and possibly other
-                masks). If you're doing standard GPT, you'd typically want a causal mask.
+            create_padding_masks (bool): If True, we create a padding for cases where
+            we have sequences of different lengths across the training samples.
+            If you're doing standard GPT, you'd typically want a causal mask, which is created
+            by default, and isn't controlled by this flag.
             sos_token (str, bytes): The start-of-sequence token to use for the decoder input.
             pad_token (str, bytes): The token for padding or ignoring if needed.
         """
@@ -198,8 +198,7 @@ class LLMDataLoader(AbstractDataLoader):
         self.seq_len = seq_len
         self.steps_per_epoch = steps_per_epoch
         self.include_decoder_input = include_decoder_input
-        self.create_decoder_inp = create_decoder_inp
-        self.create_masks = create_masks
+        self.create_padding_masks = create_padding_masks
 
         # For ignoring or masking out pad if needed:
         self.pad_idx = bpe.encode(pad_token, allowed_special={pad_token})[0]
@@ -254,7 +253,7 @@ class LLMDataLoader(AbstractDataLoader):
             Y_chunk = batch[:, 1:]  # shape: (batch_size, seq_len)
 
             # Optionally create a decoder input by prepending the SOS token.
-            if self.include_decoder_input and self.create_decoder_inp:
+            if self.include_decoder_input:
                 dec_inp = np.zeros_like(Y_chunk)
                 dec_inp[:, 0] = self.sos_idx
                 dec_inp[:, 1:] = Y_chunk[:, :-1]
@@ -267,7 +266,7 @@ class LLMDataLoader(AbstractDataLoader):
             )
 
             smask, tmask = None, None
-            if self.create_masks:
+            if self.create_padding_masks:
                 smask = text_utils.create_padding_mask(X_chunk, self.pad_idx)
                 pmask = text_utils.create_padding_mask(Y_chunk, self.pad_idx)
                 tmask = pmask + causal_mask if causal_mask is not None else pmask
