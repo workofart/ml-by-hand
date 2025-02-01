@@ -1,15 +1,16 @@
 import logging
 import os
 from abc import ABC, abstractmethod
+from collections import defaultdict
 from typing import Any, Callable, Dict, Optional, Tuple
 
 import numpy as np
 from tqdm import tqdm
 
+from autograd import nn, optim
 from autograd.tensor import Tensor
 from autograd.text import utils as text_utils
 from autograd.text.tokenizer import BytePairEncoder
-from autograd.tools.data import LLMDataLoader
 from autograd.tools.metrics import accuracy, mean_squared_error
 from autograd.tools.model import load_checkpoint, save_checkpoint
 
@@ -18,124 +19,141 @@ logger = logging.getLogger(__name__)
 
 class AbstractTrainer(ABC):
     """
-    A base class that defines the high-level training loop but
-    delegates domain-specific steps to the subclasses.
+    A base trainer class that defines the high-level training loop.
+    Domain-specific steps (forward pass, loss computation, evaluation)
+    are delegated to subclasses.
     """
+
+    CHECKPOINT_DIR = "checkpoints"
+    METRICS_DIR = "training_runs"
 
     def __init__(
         self,
-        model,
-        optimizer,
-        total_epochs=10,
+        model: nn.Module,
+        optimizer: optim.Optimizer,
+        total_epochs: int = 10,
         checkpoint: Optional[dict] = None,
-        **kwargs,
+        config: Optional[Dict] = None,
     ):
         """
         Args:
-            model: The model to train (generic object with a .train() and .eval() method).
-            optimizer: Optimizer that knows how to update model parameters.
-            total_epochs (int): Number of epochs to train.
+            model: The model to train (must have .train() and .eval() methods).
+            optimizer: Optimizer that updates the model parameters.
+            total_epochs (int): Number of epochs.
+            checkpoint (dict): (Optional) Checkpoint to resume training.
+            config (dict): (Optional) A config dictionary (e.g., training_run_name).
         """
         self.model = model
         self.optimizer = optimizer
         self.total_epochs = total_epochs
-        self.checkpoint = checkpoint if checkpoint is not None else {}
-        self.step_count = self.checkpoint.get("step_count", 0)
-        self.kwargs = kwargs
+        self.config = config or {}
+        self.checkpoint = checkpoint or {}
+        self.start_epoch = self.checkpoint.get("epoch", 0)
+        # Store metrics as lists for easy conversion later.
+        self.metrics = defaultdict(list)
 
-    def fit(self, train_data_loader, val_data_loader=None, **kwargs):
+    def fit(self, train_data_loader, val_data_loader=None):
         """
-        The main training loop: calls on_epoch_start, train_epoch, optional eval, etc.
+        The main training loop. Automatically calls DataLoader.on_epoch_start() if present.
         """
-        logger.info(f"Model parameters: {self.model.num_parameters()}")
-
-        start_epoch = self.checkpoint.get("epoch", 0)
+        logger.info(
+            f"Training {self.model.__class__.__name__} with {(self.model.num_parameters()/1e6):.2f}M parameters."
+        )
         for epoch in tqdm(
-            range(start_epoch, self.total_epochs),
+            range(self.start_epoch, self.total_epochs),
             desc="Training",
             leave=False,
-            initial=start_epoch,
+            initial=self.start_epoch,
         ):
-            self.on_epoch_start(epoch)
-
             if hasattr(train_data_loader, "on_epoch_start"):
                 train_data_loader.on_epoch_start()
 
             self.model.train()
-            train_loss = self._train_one_epoch(train_data_loader, **kwargs)
+            train_loss = self._train_one_epoch(train_data_loader)
 
             val_loss = None
             if val_data_loader is not None:
                 if hasattr(val_data_loader, "on_epoch_start"):
                     val_data_loader.on_epoch_start()
-                val_loss = self.evaluate_and_log(train_data_loader, val_data_loader)
+                val_loss = self.evaluate_and_log(
+                    train_data_loader, val_data_loader, epoch
+                )
 
-            self.on_epoch_end(epoch, train_loss, val_loss)
+            self._on_epoch_end(epoch, train_loss, val_loss)
 
-    @abstractmethod
-    def on_epoch_start(self, epoch):
-        pass
+        self._save_metrics()
 
-    @abstractmethod
-    def train_step(self, batch_data):
-        """
-        Must do:
-          - zero_grad
-          - forward pass
-          - compute loss
-          - backward + optimizer step
-          - return float loss
-        """
-        pass
-
-    def on_epoch_end(self, epoch, train_loss, val_loss):
-        # TODO: add support for loading model checkpoint
-        if epoch % self.kwargs.get("checkpoint_freq", 1) == 0:
-            # Save checkpoint
-            checkpoint = {
-                "epoch": epoch + 1,  # the next epoch to start from
-                "model_state_dict": self.model.state_dict(),
-                "optimizer_state_dict": self.optimizer.state_dict(),
-                "hyperparams": self.kwargs.get("hyperparams"),
-                "step_count": self.step_count,  # for learning rate scheduler
-            }
-            save_checkpoint(
-                checkpoint,
-                json_path=f"checkpoints/{self.model.__class__.__name__}_{epoch}.json",
-                npz_path=f"checkpoints/{self.model.__class__.__name__}_{epoch}.npz",
-            )
-            logger.info(
-                f"Saving checkpoint to checkpoints/{self.model.__class__.__name__}_{epoch}.json and .npz"
-            )
-
-    def _train_one_epoch(self, train_data_loader, **kwargs):
-        self.model.train()
+    def _train_one_epoch(self, data_loader) -> float:
         total_loss = 0.0
+        batch_count = 0
+        for batch in tqdm(data_loader, desc="Training Batches", leave=False):
+            loss = self.train_step(batch)
+            total_loss += loss
+            batch_count += 1
+        return total_loss / max(batch_count, 1)
 
-        for batch_data in tqdm(train_data_loader, desc="Training Batches", leave=False):
-            self.step_count += 1
-            loss_val = self.train_step(batch_data, **kwargs)
-            total_loss += loss_val
+    def _save_checkpoint(self, epoch: int, val_loss: Optional[float]):
+        """
+        Save a checkpoint if the validation loss improves.
+        """
+        if val_loss is not None:
+            if not self.metrics["val_loss"] or val_loss < min(self.metrics["val_loss"]):
+                checkpoint = {
+                    "epoch": epoch + 1,
+                    "model_state_dict": self.model.state_dict(),
+                    "optimizer_state_dict": self.optimizer.state_dict(),
+                    "config": self.config,
+                }
+                os.makedirs(self.CHECKPOINT_DIR, exist_ok=True)
+                cp_path_json = os.path.join(
+                    self.CHECKPOINT_DIR, f"{self.model.__class__.__name__}_{epoch}.json"
+                )
+                cp_path_npz = os.path.join(
+                    self.CHECKPOINT_DIR, f"{self.model.__class__.__name__}_{epoch}.npz"
+                )
+                save_checkpoint(
+                    checkpoint, json_path=cp_path_json, npz_path=cp_path_npz
+                )
+                logger.info(f"Saved checkpoint to {cp_path_json} and {cp_path_npz}")
 
-        return total_loss / max(len(train_data_loader), 1)
+    def _save_metrics(self):
+        os.makedirs(self.METRICS_DIR, exist_ok=True)
+        run_name = self.config.get("training_run_name", "default")
+        filename = f"{self.model.__class__.__name__}_{run_name}.npz"
+        path = os.path.join(self.METRICS_DIR, filename)
+        # Convert metrics lists to NumPy arrays.
+        metrics_np = {k: np.array(v) for k, v in self.metrics.items()}
+        np.savez_compressed(path, **metrics_np)
+        logger.info(f"Saved training metrics to {path}")
 
     @abstractmethod
-    def evaluate_and_log(
-        self,
-        train_data_loader,
-        val_data_loader,
-        sample_predictions=False,
-        num_samples_to_show=4,
-    ):
+    def train_step(self, batch_data) -> float:
         """
-        Must return a scalar loss or metric (e.g. average val loss).
+        Perform a single training step and return the loss as a float.
+        """
+        pass
+
+    def _on_epoch_end(self, epoch: int, train_loss: float, val_loss: Optional[float]):
+        logger.info(
+            f"[Epoch {epoch}] Train Loss = {train_loss:.4f}"
+            + (f", Val Loss = {val_loss:.4f}" if val_loss is not None else "")
+        )
+        self.metrics["epoch"].append(epoch)
+        self.metrics["train_loss"].append(train_loss)
+        self.metrics["val_loss"].append(val_loss)
+        self._save_checkpoint(epoch, val_loss)
+
+    @abstractmethod
+    def evaluate_and_log(self, train_data_loader, val_data_loader, epoch) -> float:
+        """
+        Evaluate on the validation set, log metrics, and return average loss.
         """
         pass
 
 
 class SimpleTrainer(AbstractTrainer):
     """
-    A trainer for standard supervised tasks where each batch is (X, y).
+    Trainer for standard supervised tasks where each batch is (X, y).
     """
 
     def __init__(
@@ -143,141 +161,84 @@ class SimpleTrainer(AbstractTrainer):
         model,
         loss_fn,
         optimizer,
-        epochs,
-        output_type=None,
-        sample_predictions=False,
+        epochs: int,
+        output_type: Optional[str] = None,
+        sample_predictions: bool = False,
+        config: Optional[Dict] = None,
     ):
-        super().__init__(model, optimizer, epochs)
+        super().__init__(model, optimizer, epochs, config=config)
         self.loss_fn = loss_fn
-        self.output_type = output_type
         self.sample_predictions = sample_predictions
+        self.output_type = output_type
+        # Infer problem type.
+        self.problem_type = (
+            "classification"
+            if output_type in ["logits", "sigmoid", "softmax"]
+            else "regression"
+        )
 
-        # Decide problem type based on output_type
-        if output_type in ["logits", "sigmoid", "softmax"]:
-            self.problem_type = "classification"
-        else:
-            self.problem_type = "regression"
-
-    def on_epoch_start(self, epoch):
-        pass
-
-    def train_step(self, batch_data, **kwargs):
-        """
-        batch_data = (batch_X, batch_y)
-        """
+    def train_step(self, batch_data) -> float:
         batch_X, batch_y = batch_data
         self.optimizer.zero_grad()
         y_pred = self.model(batch_X)
-        loss = self.loss_fn(
-            y_pred,
-            batch_y,
-            **(
-                {"weight": kwargs.get("weight")}
-                if kwargs.get("weight") is not None
-                else {}
-            ),
-        )
+        loss = self.loss_fn(y_pred, batch_y)
         loss.backward()
         self.optimizer.step()
         return float(loss.detach().data)
 
-    def on_epoch_end(self, epoch, train_loss, val_loss):
-        msg = f"[Epoch {epoch}] Train Loss = {train_loss:.4f}"
-        if val_loss is not None:
-            msg += f", Val Loss = {val_loss:.4f}"
-        print(msg)
-
-    def evaluate_and_log(
-        self,
-        train_data_loader,
-        val_data_loader,
-    ) -> float:
-        """
-        1) Computes avg validation loss.
-        2) Computes additional metrics (accuracy or MSE).
-        3) Optionally logs sample predictions.
-        4) Returns the average validation loss.
-        """
+    def evaluate_and_log(self, train_data_loader, val_data_loader, epoch) -> float:
         self.model.eval()
-        all_preds = []
-        all_targets = []
-        total_val_loss = 0.0
+        total_loss = 0.0
         batch_count = 0
-
+        all_preds, all_targets = [], []
         for batch_data in val_data_loader:
             batch_X, batch_y = batch_data
             y_pred = self.model(batch_X)
             loss = self.loss_fn(y_pred, batch_y)
-            total_val_loss += float(loss.detach().data)
+            total_loss += float(loss.detach().data)
             batch_count += 1
-
             all_preds.append(y_pred)
             all_targets.append(batch_y)
+        avg_val_loss = total_loss / max(batch_count, 1)
 
-        avg_val_loss = total_val_loss / max(batch_count, 1)
-
-        # Convert all_preds / all_targets to numpy
+        # Optionally compute additional metrics.
         y_pred_full = np.concatenate([p.data for p in all_preds], axis=0)
         y_true_full = np.concatenate([t.data for t in all_targets], axis=0)
-
-        metrics_str = ""
         if self.problem_type == "classification":
-            y_pred_processed, y_true_processed = self.post_process_classification(
+            y_pred_proc, y_true_proc = self._post_process_classification(
                 y_pred_full, y_true_full
             )
-            y_pred_flat = y_pred_processed.reshape(-1)
-            y_true_flat = y_true_processed.reshape(-1).astype(int)
-            acc_val = accuracy(y_pred_flat, y_true_flat)
-            metrics_str += f"\n\tAccuracy: {acc_val:.2f}"
+            acc_val = accuracy(
+                y_pred_proc.reshape(-1), y_true_proc.reshape(-1).astype(int)
+            )
+            logger.info(
+                f"Epoch {epoch}: Val Loss = {avg_val_loss:.4f}, Accuracy = {acc_val:.2f}"
+            )
         else:
             mse_val = mean_squared_error(y_pred_full, y_true_full)
-            metrics_str += f"\n\tMean Squared Error: {mse_val:.2f}"
-
-        logger.info(f"Val Loss: {avg_val_loss:.4f}{metrics_str}")
-
-        if self.sample_predictions and len(y_pred_full) > 0:
-            # Periodically log information
-            y_pred_processed, y_true_processed = self.post_process_classification(
-                y_pred, batch_y
+            logger.info(
+                f"Epoch {epoch}: Val Loss = {avg_val_loss:.4f}, MSE = {mse_val:.2f}"
             )
-            print("------- Ground Truth -------")
-            print(y_true_processed[0])
-            print("-------- Prediction --------")
-            print(y_pred_processed[0])
-            print("")
-
         self.model.train()
         return avg_val_loss
 
-    def post_process_classification(self, y_pred, y_true):
-        """
-        Convert model outputs to integer class predictions
-        based on self.output_type.
-        """
+    def _post_process_classification(self, y_pred, y_true):
         if isinstance(y_pred, Tensor):
             y_pred = y_pred.data
         if isinstance(y_true, Tensor):
             y_true = y_true.data
-
-        if self.output_type == "logits":
-            # Argmax over last dimension
-            return np.argmax(y_pred, axis=-1), y_true
-        elif self.output_type == "softmax":
-            # Argmax over last dimension (already probs)
+        if self.output_type in ["logits", "softmax"]:
             return np.argmax(y_pred, axis=-1), y_true
         elif self.output_type == "sigmoid":
-            # Multi-label => threshold at 0.5
             return (y_pred >= 0.5).astype(int), (y_true >= 0.5).astype(int)
         else:
-            # For unknown output types or regression, just return raw
             return y_pred, y_true
 
 
 class LLMTrainer(AbstractTrainer):
     """
-    A trainer specialized for language modeling or next-token tasks.
-    Expects that the DataLoader yields batches of the form:
-      (X, dec_inp, y, source_mask, target_mask, causal_mask)
+    Trainer specialized for language modeling or next-token tasks.
+    Expects DataLoader batches as: (X, dec_inp, y, src_mask, tgt_mask, causal_mask)
     """
 
     def __init__(
@@ -287,112 +248,87 @@ class LLMTrainer(AbstractTrainer):
         loss_fn,
         warmup_steps: int,
         tokenizer: BytePairEncoder,
-        epochs=10,
-        label_smoothing=0.0,
+        epochs: int = 10,
+        label_smoothing: float = 0.0,
         forward_fn: Optional[Callable] = None,
-        **kwargs,
+        start_tokens: Optional[str] = "\n",
+        config: Optional[Dict] = None,
     ):
-        super().__init__(model, optimizer, epochs, **kwargs)
+        super().__init__(model, optimizer, epochs, config=config)
         self.loss_fn = loss_fn
         self.warmup_steps = warmup_steps
         self.label_smoothing = label_smoothing
-        self.d_model = model.hidden_size  # needed for LR scheduelr TODO: ensure this interface is consistent for all LLM models
-        self.forward_fn = forward_fn or self.default_forward_fn
         self.tokenizer = tokenizer
+        self.forward_fn = forward_fn or self.default_forward_fn
+        self.start_tokens = start_tokens
 
-    def on_epoch_start(self, epoch):
-        # Could adjust learning rate, log epoch number, etc.
-        pass
-
-    def train_step(self, batch_data, **kwargs):
+    def train_step(self, batch_data) -> float:
         """
-        batch_data = (X, dec_inp, y, src_mask, tgt_mask, causal_mask)
+        batch_data: (X, dec_inp, y, src_mask, tgt_mask, causal_mask)
         """
-        self.step_count += 1
-        self.optimizer.lr = get_lr(
-            self.step_count,
-            self.d_model,
-            warmup_steps=self.warmup_steps,
-        )
-
         self.optimizer.zero_grad()
-
-        pred_probs, y = self.forward_fn(self.model, batch_data, mode="train", **kwargs)
-
+        pred_probs, y = self.forward_fn(self.model, batch_data, mode="train")
         loss = self.loss_fn(
             pred_probs,
             y,
-            pad_idx=kwargs.get("pad_idx", None),
+            pad_idx=getattr(batch_data, "pad_idx", None),
             label_smoothing=self.label_smoothing,
         )
         loss.backward()
-        self.optimizer.step()
-
+        self.optimizer.step()  # increments .timestep, applies LR scheduler if present
         return float(loss.detach().data)
 
-    def on_epoch_end(self, epoch, train_loss, val_loss):
-        msg = f"[Epoch {epoch}] Train Loss = {train_loss:.4f}"
-        if val_loss is not None:
-            msg += f", Val Loss = {val_loss:.4f}"
-        print(msg)
-        super().on_epoch_end(epoch, train_loss, val_loss)
-
-    def evaluate_and_log(
-        self,
-        train_data_loader: LLMDataLoader,
-        val_data_loader: LLMDataLoader,
-    ) -> float:
+    def evaluate_and_log(self, train_data_loader, val_data_loader, epoch) -> float:
         self.model.eval()
-        total_val_loss = 0.0
-
+        total_loss = 0.0
+        batch_count = 0
         for batch_data in tqdm(val_data_loader, desc="Evaluation", leave=False):
             pred_probs, y = self.forward_fn(self.model, batch_data, mode="train")
-            # X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_data
-            # pred_probs = self.model(X, dec_inp, src_mask, tgt_mask)
             loss = self.loss_fn(pred_probs, y, pad_idx=val_data_loader.pad_idx)
-            total_val_loss += float(loss.detach().data)
-
-        logger.warning(
-            f"\nGradient L2 Norm: {grad_l2_norm(self.model.parameters):.2f}\n"
-            f"| Test Loss: {total_val_loss / len(val_data_loader):.2f}\n"
-            f"| Test Perplexity: {np.exp(total_val_loss / len(val_data_loader)):.2f} vs {len(val_data_loader.vocab)} (vocab size)\n"
-            f"| Learning Rate: {self.optimizer.lr:.4f}"
+            total_loss += float(loss.detach().data)
+            batch_count += 1
+        avg_val_loss = total_loss / max(batch_count, 1)
+        logger.info(
+            f"Epoch {epoch}: Val Loss = {avg_val_loss:.4f}, LR = {self.optimizer.lr:.4f}"
         )
 
-        if self.kwargs.get("teacher_enforcing", False):
-            text_utils.teacher_forcing_inference(
-                prediction_func=lambda seq_so_far: self.forward_fn(
-                    self.model, seq_so_far, mode="sample"
+        # Optional inference every few epochs:
+        if epoch % 2 == 0:
+            self._perform_inference(train_data_loader)
+        self.model.train()
+        return avg_val_loss
+
+    def default_forward_fn(self, model, batch_data, **kwargs):
+        X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_data
+        logits = model(X, dec_inp, src_mask, tgt_mask)
+        return logits, y
+
+    def _perform_inference(self, train_data_loader):
+        """
+        Optionally perform teacher-forcing or sampling.
+        Make sure LLMDataLoader has `data` if you rely on `train_data_loader.data`.
+        """
+        if self.config.get("teacher_enforcing", False) and hasattr(
+            train_data_loader, "data"
+        ):
+            text_utils.inference(
+                prediction_func=lambda seq: self.forward_fn(
+                    self.model, seq, mode="sample"
                 ),
                 bpe=self.tokenizer,
                 groundtruth_data=train_data_loader.data[: train_data_loader.seq_len],
                 max_length=train_data_loader.seq_len // 4,
             )
 
-        self.model.train()
-
-        return total_val_loss / len(val_data_loader)
-
-    def default_forward_fn(self, model, batch_data, **kwargs):
-        # e.g. the 6-tuple approach
-        X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_data
-        logits = model(X, dec_inp, src_mask, tgt_mask)
-        return logits, y
-
-
-def get_lr(step: int, model_dim: int, warmup_steps: int) -> float:
-    """
-    Learning rate scheduler with warmup for transformers training. It will start with larger learning rate, then after the transition point sqrt(step) == step * warmup_steps^(-1.5), the learning rate will slowly decrease
-
-    Args:
-        step (int): The current timestep (not epoch), each batch will be 1 timestep
-        model_dim (int): The model dimension
-        warmup_steps (int): The number of timesteps to warm up (increase learning rate) before decreasing learning rate
-
-    Returns:
-        float: learning rate
-    """
-    return model_dim**-0.5 * min(step**-0.5, step * warmup_steps**-1.5)
+        # Normal sampling
+        text_utils.inference(
+            prediction_func=lambda seq: self.forward_fn(self.model, seq, mode="sample"),
+            bpe=self.tokenizer,
+            start_tokens=self.start_tokens,
+            max_length=int(self.model.max_seq_len * 0.4),
+            temperature=1.0,
+            top_k=200,
+        )
 
 
 def grad_l2_norm(parameters: Dict[str, Tensor]) -> float:
