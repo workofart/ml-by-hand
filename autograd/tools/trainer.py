@@ -2,7 +2,7 @@ import logging
 import os
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import numpy as np
 from tqdm import tqdm
@@ -10,6 +10,10 @@ from tqdm import tqdm
 from autograd import nn, optim
 from autograd.tensor import Tensor
 from autograd.text import utils as text_utils
+from autograd.tools.config_schema import (
+    GenericTrainingConfig,
+    TransformerTrainingConfig,
+)
 from autograd.tools.metrics import accuracy, mean_squared_error
 from autograd.tools.model import load_checkpoint, save_checkpoint
 
@@ -28,30 +32,32 @@ class AbstractTrainer(ABC):
 
     def __init__(
         self,
-        model: nn.Module,
-        optimizer: optim.Optimizer,
-        total_epochs: int = 10,
-        checkpoint: Optional[dict] = None,
-        config: Optional[Dict] = None,
+        model_cls: type[nn.Module],
+        optimizer_cls: type[optim.Optimizer],
+        loss_fn: Callable,
+        config: GenericTrainingConfig,
+        # total_epochs: int = 10,
         **kwargs,
     ):
         """
         Args:
             model: The model to train (must have .train() and .eval() methods).
             optimizer: Optimizer that updates the model parameters.
-            total_epochs (int): Number of epochs.
-            checkpoint (dict): (Optional) Checkpoint to resume training.
             config (dict): (Optional) A config dictionary (e.g., training_run_name).
         """
-        self.model = model
-        self.optimizer = optimizer
-        self.total_epochs = total_epochs
         self.config = config or {}
-        self.checkpoint = checkpoint or {}
-        self.start_epoch = self.checkpoint.get("epoch", 0)
-        # Store metrics as lists for easy conversion later.
-        self.metrics = defaultdict(list)
+        self.loss_fn = loss_fn
         self.kwargs = kwargs
+        # Load the model from checkpoint if configs specified
+        self.model, self.optimizer, self.checkpoint = self._load_model_and_optimizer(
+            model_class=model_cls,
+            optimizer_class=optimizer_cls,
+            model_kwargs=config.model_kwargs,
+            optimizer_kwargs=config.optimizer_kwargs,
+            resume_epoch=config.resume_epoch,
+        )
+        self.start_epoch = self.config.resume_epoch or 0
+        self.metrics = defaultdict(list)
 
     def fit(self, train_data_loader, val_data_loader=None):
         """
@@ -61,7 +67,7 @@ class AbstractTrainer(ABC):
             f"Training {self.model.__class__.__name__} with {(self.model.num_parameters()/1e6):.2f}M parameters."
         )
         for epoch in tqdm(
-            range(self.start_epoch, self.total_epochs),
+            range(self.start_epoch, self.config.total_epochs),
             desc="Training",
             leave=False,
             initial=self.start_epoch,
@@ -72,13 +78,20 @@ class AbstractTrainer(ABC):
             self.model.train()
             train_loss = self._train_one_epoch(train_data_loader)
 
-            val_loss = None
             if val_data_loader is not None:
                 if hasattr(val_data_loader, "on_epoch_start"):
                     val_data_loader.on_epoch_start()
-                val_loss = self.evaluate_and_log(
-                    train_data_loader, val_data_loader, epoch
-                )
+                val_loss = self.evaluate(train_data_loader, val_data_loader, epoch)
+            else:
+                val_loss = None
+
+            # val_loss = None
+            # if val_data_loader is not None:
+            #     if hasattr(val_data_loader, "on_epoch_start"):
+            #         val_data_loader.on_epoch_start()
+            #     val_loss = self.evaluate(
+            #         train_data_loader, val_data_loader, epoch
+            #     )
 
             self._on_epoch_end(epoch, train_loss, val_loss)
 
@@ -97,7 +110,7 @@ class AbstractTrainer(ABC):
         """
         Save a checkpoint if the validation loss improves.
         """
-        if val_loss is not None and epoch % self.kwargs.get("checkpoint_freq", 1) == 0:
+        if val_loss is not None and epoch % self.config.checkpoint_freq == 0:
             if self.metrics["val_loss"] and val_loss < min(self.metrics["val_loss"]):
                 checkpoint = {
                     "epoch": epoch + 1,
@@ -119,7 +132,7 @@ class AbstractTrainer(ABC):
 
     def _save_metrics(self):
         os.makedirs(self.METRICS_DIR, exist_ok=True)
-        run_name = self.config.get("training_run_name", "default")
+        run_name = self.config.training_run_name or "default"
         filename = f"{self.model.__class__.__name__}_{run_name}.npz"
         path = os.path.join(self.METRICS_DIR, filename)
         # Convert metrics lists to NumPy arrays.
@@ -135,11 +148,6 @@ class AbstractTrainer(ABC):
         pass
 
     def _on_epoch_end(self, epoch: int, train_loss: float, val_loss: Optional[float]):
-        logger.info(
-            f"[Epoch {epoch}] Train Loss = {train_loss:.4f}"
-            + (f", Val Loss = {val_loss:.4f}" if val_loss is not None else "")
-            + f", LR = {self.optimizer.lr:.4f}"
-        )
         # The checkpoint needs to come first because it compares
         # against historical metrics to determine whether to save
         # the checkpoint
@@ -148,12 +156,92 @@ class AbstractTrainer(ABC):
         self.metrics["train_loss"].append(train_loss)
         self.metrics["val_loss"].append(val_loss)
 
+        log_msg = f"[Epoch {epoch}]"
+        for key in self.metrics:
+            if key != "epoch" and self.metrics[key][-1] is not None:
+                log_msg += f"\n{key} = {self.metrics[key][-1]:.4f}"
+        log_msg += f"\nLR = {self.optimizer.lr:.4f}"
+        logger.info(log_msg)
+
     @abstractmethod
-    def evaluate_and_log(self, train_data_loader, val_data_loader, epoch) -> float:
+    def evaluate(self, train_data_loader, val_data_loader, epoch) -> float:
         """
-        Evaluate on the validation set, log metrics, and return average loss.
+        Evaluate on the validation set and return average validation loss.
         """
         pass
+
+    def _load_model_and_optimizer(
+        self,
+        model_class: type[nn.Module],
+        optimizer_class: type[optim.Optimizer],
+        model_kwargs: Dict[str, Any],
+        optimizer_kwargs: Dict[str, Any],
+        resume_epoch: Optional[int] = None,
+    ) -> Tuple[Any, Any, dict]:
+        """
+        Loads model & optimizer states from checkpoint if resume_epoch is given.
+        Otherwise, initializes them from scratch.
+
+        Note on configs in checkpoint:
+            When we load from checkpoint, the model and optimizer configs are restored from the
+            checkpoint and cannot be modified because they are inherently tied to the model and
+            optimizer state (e.g. hidden_size cannot be changed because the model artifact was
+            created using the previous checkpoint's hidden_size)
+            The other configs (e.g. eval_iters) can be changed, and can just be read from the
+            self.config attribute instead of checkpoint["hyperparams"].
+
+        Args:
+            model_class: The class object for your model (e.g. Transformer).
+            optimizer_class: The class object for your optimizer (e.g. optim.Adam).
+            model_kwargs: Dictionary of kwargs to pass when constructing the model_class.
+            optimizer_kwargs: Dictionary of kwargs to pass when constructing the optimizer_class.
+            resume_epoch (int, optional): If provided, attempts to load from checkpoint
+
+        Returns:
+            (model, optimizer, checkpoint_dict)
+        """
+        if resume_epoch is not None:
+            # Look for checkpoint files
+            ckpt_json = os.path.join(
+                self.CHECKPOINT_DIR, f"{model_class.__name__}_{resume_epoch}.json"
+            )
+            ckpt_npz = os.path.join(
+                self.CHECKPOINT_DIR, f"{model_class.__name__}_{resume_epoch}.npz"
+            )
+
+            logger.info(f"Attempting to load from checkpoint: {ckpt_json}, {ckpt_npz}")
+            loaded_ckpt = load_checkpoint(ckpt_json, ckpt_npz)
+
+            # If your checkpoint has hyperparams or constructor kwargs,
+            # you can either override model_kwargs or do a partial merge:
+            #  e.g. model_kwargs.update(loaded_ckpt["hyperparams"].get("model_kwargs", {}))
+            hyperparams = loaded_ckpt.get("hyperparams", {})
+            model_init_kwargs = hyperparams.get("model_kwargs", model_kwargs)
+            optimizer_init_kwargs = hyperparams.get(
+                "optimizer_kwargs", optimizer_kwargs
+            )
+
+            # Instantiate model & optimizer
+            model = model_class(**model_init_kwargs)
+            optimizer = optimizer_class(model.parameters, **optimizer_init_kwargs)
+
+            # Load model/optimizer state
+            model.load_state_dict(loaded_ckpt["model_state_dict"])
+            optimizer.load_state_dict(loaded_ckpt["optimizer_state_dict"])
+
+            logger.info(
+                f"Loaded {model_class.__name__} from epoch {loaded_ckpt.get('epoch', '?')} "
+                f"with step_count={loaded_ckpt.get('step_count', 0)}"
+            )
+            return model, optimizer, loaded_ckpt
+
+        else:
+            logger.info(
+                "No resume_epoch given; initializing model & optimizer from scratch."
+            )
+            model = model_class(**model_kwargs)
+            optimizer = optimizer_class(model.parameters, **optimizer_kwargs)
+            return model, optimizer, {}
 
 
 class SimpleTrainer(AbstractTrainer):
@@ -163,16 +251,15 @@ class SimpleTrainer(AbstractTrainer):
 
     def __init__(
         self,
-        model,
-        loss_fn,
-        optimizer,
-        epochs: int,
+        model_cls: type[nn.Module],
+        optimizer_cls: type[optim.Optimizer],
+        loss_fn: Callable,
+        config: GenericTrainingConfig,
         output_type: Optional[str] = None,
         sample_predictions: bool = False,
-        config: Optional[Dict] = None,
+        **kwargs,
     ):
-        super().__init__(model, optimizer, epochs, config=config)
-        self.loss_fn = loss_fn
+        super().__init__(model_cls, optimizer_cls, loss_fn, config=config, **kwargs)
         self.sample_predictions = sample_predictions
         self.output_type = output_type
         # Infer problem type.
@@ -191,7 +278,7 @@ class SimpleTrainer(AbstractTrainer):
         self.optimizer.step()
         return float(loss.detach().data)
 
-    def evaluate_and_log(self, train_data_loader, val_data_loader, epoch) -> float:
+    def evaluate(self, train_data_loader, val_data_loader, epoch) -> float:
         self.model.eval()
         total_loss = 0.0
         batch_count = 0
@@ -216,14 +303,10 @@ class SimpleTrainer(AbstractTrainer):
             acc_val = accuracy(
                 y_pred_proc.reshape(-1), y_true_proc.reshape(-1).astype(int)
             )
-            logger.info(
-                f"Epoch {epoch}: Val Loss = {avg_val_loss:.4f}, Accuracy = {acc_val:.2f}"
-            )
+            self.metrics["val_accuracy"].append(acc_val)
         else:
             mse_val = mean_squared_error(y_pred_full, y_true_full)
-            logger.info(
-                f"Epoch {epoch}: Val Loss = {avg_val_loss:.4f}, MSE = {mse_val:.2f}"
-            )
+            self.metrics["val_mse"].append(mse_val)
         self.model.train()
         return avg_val_loss
 
@@ -248,23 +331,15 @@ class LLMTrainer(AbstractTrainer):
 
     def __init__(
         self,
-        model,
-        optimizer,
-        loss_fn,
-        warmup_steps: int,
+        model_cls: type[nn.Module],
+        optimizer_cls: type[optim.Optimizer],
+        loss_fn: Callable,
         forward_fn: nn.AbstractLLMForwardFn,
-        epochs: int = 10,
-        label_smoothing: float = 0.0,
-        start_tokens: Optional[str] = "\n",
-        config: Optional[Dict] = None,
+        config: TransformerTrainingConfig,
         **kwargs,
     ):
-        super().__init__(model, optimizer, epochs, config=config, **kwargs)
-        self.loss_fn = loss_fn
-        self.warmup_steps = warmup_steps
-        self.label_smoothing = label_smoothing
+        super().__init__(model_cls, optimizer_cls, loss_fn, config=config, **kwargs)
         self.forward_fn = forward_fn
-        self.start_tokens = start_tokens
 
     def train_step(self, batch_data) -> float:
         """
@@ -276,13 +351,13 @@ class LLMTrainer(AbstractTrainer):
             pred_probs,
             y,
             pad_idx=getattr(batch_data, "pad_idx", None),
-            label_smoothing=self.label_smoothing,
+            label_smoothing=self.config.label_smoothing,  # type: ignore
         )
         loss.backward()
         self.optimizer.step()  # increments .timestep, applies LR scheduler if present
         return float(loss.detach().data)
 
-    def evaluate_and_log(self, train_data_loader, val_data_loader, epoch) -> float:
+    def evaluate(self, train_data_loader, val_data_loader, epoch) -> float:
         self.model.eval()
         total_loss = 0.0
         batch_count = 0
@@ -304,7 +379,7 @@ class LLMTrainer(AbstractTrainer):
         Optionally perform teacher-forcing or sampling.
         Make sure LLMDataLoader has `data` if you rely on `train_data_loader.data`.
         """
-        if self.config.get("teacher_enforcing", False) and hasattr(
+        if self.config.teacher_enforcing and hasattr(  # type: ignore
             train_data_loader, "data"
         ):
             text_utils.inference(
@@ -320,7 +395,7 @@ class LLMTrainer(AbstractTrainer):
             model=self.model,
             prediction_func=self.forward_fn,
             bpe=train_data_loader.bpe,
-            start_tokens=self.start_tokens,
+            start_tokens=self.config.eval_start_string,
             max_length=int(train_data_loader.seq_len * 0.4),
             temperature=1.0,
             top_k=200,
@@ -334,68 +409,3 @@ def grad_l2_norm(parameters: Dict[str, Tensor]) -> float:
         if p.grad is not None:
             grad_norm += (p.grad.data**2).sum()
     return grad_norm**0.5
-
-
-def load_model_and_optimizer(
-    model_class,
-    optimizer_class,
-    model_kwargs: Dict[str, Any],
-    optimizer_kwargs: Dict[str, Any],
-    resume_epoch: Optional[int] = None,
-    checkpoint_dir: str = "checkpoints",
-) -> Tuple[Any, Any, dict]:
-    """
-    Loads model & optimizer states from checkpoint if resume_epoch is given.
-    Otherwise, initializes them from scratch.
-
-    Args:
-        model_class: The class object for your model (e.g. Transformer).
-        optimizer_class: The class object for your optimizer (e.g. optim.Adam).
-        model_kwargs: Dictionary of kwargs to pass when constructing the model_class.
-        optimizer_kwargs: Dictionary of kwargs to pass when constructing the optimizer_class.
-        resume_epoch (int, optional): If provided, attempts to load from checkpoint
-        checkpoint_dir (str): Directory where checkpoints are saved.
-
-    Returns:
-        (model, optimizer, checkpoint_dict)
-    """
-    if resume_epoch is not None:
-        # Look for checkpoint files
-        ckpt_json = os.path.join(
-            checkpoint_dir, f"{model_class.__name__}_{resume_epoch}.json"
-        )
-        ckpt_npz = os.path.join(
-            checkpoint_dir, f"{model_class.__name__}_{resume_epoch}.npz"
-        )
-
-        logger.info(f"Attempting to load from checkpoint: {ckpt_json}, {ckpt_npz}")
-        loaded_ckpt = load_checkpoint(ckpt_json, ckpt_npz)
-
-        # If your checkpoint has hyperparams or constructor kwargs,
-        # you can either override model_kwargs or do a partial merge:
-        #  e.g. model_kwargs.update(loaded_ckpt["hyperparams"].get("model_kwargs", {}))
-        hyperparams = loaded_ckpt.get("hyperparams", {})
-        model_init_kwargs = hyperparams.get("model_kwargs", model_kwargs)
-        optimizer_init_kwargs = hyperparams.get("optimizer_kwargs", optimizer_kwargs)
-
-        # Instantiate model & optimizer
-        model = model_class(**model_init_kwargs)
-        optimizer = optimizer_class(model.parameters, **optimizer_init_kwargs)
-
-        # Load model/optimizer state
-        model.load_state_dict(loaded_ckpt["model_state_dict"])
-        optimizer.load_state_dict(loaded_ckpt["optimizer_state_dict"])
-
-        logger.info(
-            f"Loaded {model_class.__name__} from epoch {loaded_ckpt.get('epoch', '?')} "
-            f"with step_count={loaded_ckpt.get('step_count', 0)}"
-        )
-        return model, optimizer, loaded_ckpt
-
-    else:
-        logger.info(
-            "No resume_epoch given; initializing model & optimizer from scratch."
-        )
-        model = model_class(**model_kwargs)
-        optimizer = optimizer_class(model.parameters, **optimizer_kwargs)
-        return model, optimizer, {}

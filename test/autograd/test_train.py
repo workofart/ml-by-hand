@@ -12,6 +12,7 @@ except Exception:
 from sklearn.datasets import load_breast_cancer, load_diabetes
 
 from autograd import functional, nn, optim
+from autograd.tools.config_schema import GenericTrainingConfig
 from autograd.tools.data import SimpleDataLoader
 from autograd.tools.metrics import accuracy, mean_squared_error
 from autograd.tools.trainer import SimpleTrainer
@@ -68,23 +69,36 @@ class TestTrain(TestCase):
 
         X = (X - X.mean()) / X.std()
 
-        model = Classifier(input_size=X.shape[-1], hidden_size=64, output_size=1)
-        logger.info(f"Number of parameters: {model.num_parameters()}")
-
-        loss_fn = functional.binary_cross_entropy
-        optimizer = optim.SGD(model.parameters, lr=1e-3)
+        CONFIG = GenericTrainingConfig(
+            training_run_name="default",
+            dataset_name="breast_cancer",
+            eval_iters=10,
+            steps_per_epoch=10,
+            checkpoint_freq=10,
+            resume_epoch=None,
+            total_epochs=1000,
+            batch_size=32,
+            model_kwargs={
+                "input_size": X.shape[-1],
+                "hidden_size": 64,
+                "output_size": 1,
+            },
+            optimizer_kwargs={
+                "lr": 1e-3,
+            },
+        )
         train_data_loader = SimpleDataLoader(X, y, batch_size=32, shuffle=True)
         trainer = SimpleTrainer(
-            model,
-            loss_fn,
-            optimizer,
-            epochs=1000,
+            model_cls=Classifier,
+            optimizer_cls=optim.SGD,
+            loss_fn=functional.binary_cross_entropy,
+            config=CONFIG,
             output_type="sigmoid",
         )
         trainer.fit(train_data_loader)
 
-        model.eval()
-        y_pred = model(X).data
+        trainer.model.eval()
+        y_pred = trainer.model(X).data
 
         # compare y_pred and y on the classification accuracy
         acc = accuracy((y_pred > 0.5).astype(int).squeeze(), y)
@@ -96,26 +110,42 @@ class TestTrain(TestCase):
         logger.info(f"Dataset: {X.shape=}, {y.shape=}")
         logger.info(f"y unique values: {np.unique(y)}")
 
+        CONFIG = GenericTrainingConfig(
+            training_run_name="default",
+            dataset_name="diabetes",
+            eval_iters=10,
+            steps_per_epoch=10,
+            checkpoint_freq=10,
+            resume_epoch=None,
+            total_epochs=200,
+            batch_size=32,
+            model_kwargs={
+                "input_size": X.shape[-1],
+                "hidden_size": 32,
+                "output_size": 1,
+            },
+            optimizer_kwargs={
+                "lr": 1e-4,
+            },
+        )
+
         eps = 1e-8
         X = (X - X.mean(axis=0)) / (X.std(axis=0) + eps)
         y = (y - y.mean()) / (y.std() + eps)
 
         train_data_loader = SimpleDataLoader(X, y, batch_size=32, shuffle=True)
 
-        model = RegressionModel(
-            input_size=X.shape[-1], hidden_size=32, output_size=1
-        )  # Smaller network
         trainer = SimpleTrainer(
-            model,
-            functional.mean_squared_loss,
-            optim.Adam(model.parameters, lr=1e-4),  # Smaller learning rate
-            epochs=100,
+            model_cls=RegressionModel,
+            optimizer_cls=optim.Adam,
+            loss_fn=functional.mean_squared_loss,
+            config=CONFIG,
             output_type=None,
         )
         trainer.fit(train_data_loader)
 
-        model.eval()
-        y_pred = model(X).data
+        trainer.model.eval()
+        y_pred = trainer.model(X).data
 
         logger.info(f"Mean Squared Error: {mean_squared_error(y_pred, y):.2f}")
         assert mean_squared_error(y_pred, y) < 1.3
