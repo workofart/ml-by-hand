@@ -30,6 +30,8 @@ class GenericTrainingConfig:
     resume_epoch: Optional[int] = None
     training_run_name: str = "default"
     dataset_name: Optional[str] = ""
+    # This is to simulate larger batches by updating the weights once every N batches.
+    update_weights_every_n_steps: int = 1
 
 
 @dataclass

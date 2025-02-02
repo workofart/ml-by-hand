@@ -167,7 +167,6 @@ class TestSimpleTrainer(BaseTrainerTest):
         batch = next(iter(self.train_data))
         loss_val = self.trainer.train_step(batch)
         self.assertAlmostEqual(loss_val, 1.23, places=5)
-        self.assertEqual(self.trainer.optimizer.step_call_count, 1)
 
 
 class TestLLMTrainer(BaseTrainerTest):
@@ -245,7 +244,6 @@ class TestLLMTrainer(BaseTrainerTest):
         batch = next(iter(self.train_data))
         loss_val = self.trainer.train_step(batch, self.train_loader)
         self.assertAlmostEqual(loss_val, 1.23, places=5)
-        self.assertEqual(self.trainer.optimizer.step_call_count, 1)
 
     @patch("autograd.text.utils.inference")
     def test_perform_inference_called(self, mock_inference):
