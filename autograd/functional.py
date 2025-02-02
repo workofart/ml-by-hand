@@ -15,64 +15,165 @@ logger = logging.getLogger(__name__)
 
 ########### Activation Functions ###############
 def relu(x: Tensor) -> Tensor:
+    """
+    Applies the Rectified Linear Unit (ReLU) activation function.
+
+    Args:
+        x (Tensor): The input tensor.
+
+    Returns:
+        Tensor: The tensor after applying the ReLU function.
+    """
     return Relu.apply(x)
 
 
 def sigmoid(x: Tensor) -> Tensor:
+    """
+    Applies the sigmoid activation function.
+
+    Args:
+        x (Tensor): The input tensor.
+
+    Returns:
+        Tensor: The tensor after applying the sigmoid function.
+    """
     return Sigmoid.apply(x)
 
 
 def softmax(x: Tensor) -> Tensor:
+    """
+    Applies the softmax activation function.
+
+    Args:
+        x (Tensor): The input tensor containing logits.
+
+    Returns:
+        Tensor: The tensor with softmax probabilities.
+    """
     return Softmax.apply(x)
 
 
 def tanh(x: Tensor) -> Tensor:
+    """
+    Applies the hyperbolic tangent (tanh) activation function.
+
+    Args:
+        x (Tensor): The input tensor.
+
+    Returns:
+        Tensor: The tensor after applying the tanh function.
+    """
     return Tanh.apply(x)
 
 
 def gelu(x: Tensor) -> Tensor:
+    """
+    Applies the Gaussian Error Linear Unit (GELU) activation function.
+
+    This function uses the approximate formula:
+    $$
+    0.5 * x * (1 + tanh( sqrt(2/pi)*(x + 0.044715*x^3) ))
+    $$
+
+    Args:
+        x (Tensor): The input tensor.
+
+    Returns:
+        Tensor: The tensor after applying the GELU function.
+    """
     return Gelu.apply(x)
 
 
 class Relu(Function):
     """
-    Retified Linear Unit (ReLU) activation function.
-    ReLU(x) = max(0, x)
-    """
+    Rectified Linear Unit (ReLU) activation function.
 
-    def forward(self, x: np.ndarray) -> np.ndarray:
-        self.x = x
-        return np.maximum(x, 0)
+    The ReLU function is defined as:
+        $$
+        ReLU(x) = max(0, x)
+        $$
 
-    def backward(self, grad: Tensor) -> np.ndarray:
-        # dL/dx = dL/dy * dy/dx
-        return grad.data * (self.x > 0)
-
-
-class Gelu(Function):
-    """
-    Gaussian Error Linear Unit (GELU) activation function.
-    Paper: https://arxiv.org/abs/1606.08415
-
-    GELU(x) = x * P(X <= x) where P(X) ~ Gaussian Distribution with mean 0 and standard deviation 1
-    Approximately
-        0.5 * x * [1 + tanh( sqrt(2/pi)*(x + 0.044715*x^3) )]
+    Methods:
+        forward: Computes the forward pass.
+        backward: Computes the gradient with respect to the input.
     """
 
     def forward(self, x: np.ndarray) -> np.ndarray:
         """
-        Forward pass of the approximate GELU.
+        Computes the forward pass of the ReLU activation function.
+
+        Args:
+            x (np.ndarray): Input array.
+
+        Returns:
+            np.ndarray: The result of applying ReLU to the input.
+        """
+        self.x = x
+        return np.maximum(x, 0)
+
+    def backward(self, grad: Tensor) -> np.ndarray:
+        """
+        Computes the backward pass of the ReLU activation function.
+
+        Args:
+            grad (Tensor): Upstream gradient.
+
+        Returns:
+            np.ndarray: The gradient of the loss with respect to the input.
+        """
+        return grad.data * (self.x > 0)
+
+
+class Gelu(Function):
+    r"""
+    Gaussian Error Linear Unit (GELU) activation function.
+    GELU(x) = x * P(X <= x) where P(X) ~ Gaussian Distribution with mean 0 and standard deviation 1
+
+    This activation function approximates:
+    $$
+    0.5 * x * \left(1 + tanh\left(\sqrt{\frac{2}{\pi}} \left(x + 0.044715*x^3\right)\right)\right)
+    $$
+
+    Paper: https://arxiv.org/abs/1606.08415
+
+    """
+
+    def forward(self, x: np.ndarray) -> np.ndarray:
+        """
+        Computes the forward pass of the GELU activation function.
+
+        Args:
+            x (np.ndarray): Input array.
+
+        Returns:
+            np.ndarray: The output array after applying GELU.
         """
         self.x = x  # Save for backward
         return 0.5 * x * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * x**3)))
 
     def backward(self, grad: np.ndarray) -> np.ndarray:
+        r"""
+        Computes the backward pass of the GELU activation function.
+
+        The gradient is computed as:
+        $$
+        \frac{d\,GELU}{dx} = 0.5 \left(1 + tanh(\alpha)\right) + 0.5 \, x \, \left(1 - tanh^2(\alpha)\right) \alpha'
+        $$
+        where
+        $$
+        \alpha = \sqrt{\frac{2}{\pi}} (x + 0.044715*x^3)
+        $$
+        and
+        $$
+        \alpha' = \sqrt{\frac{2}{\pi}} \left(1 + 3*0.044715*x^2\right)
+        $$
+
+        Args:
+            grad (np.ndarray): Upstream gradient.
+
+        Returns:
+            np.ndarray: The gradient of the loss with respect to the input.
         """
-        dGELU/dx = 0.5 * (1 + tanh(alpha)) + 0.5 * x * (1 - tanh(alpha)^2) * alpha'
-        where alpha = sqrt(2/pi) * (x + 0.044715 * x^3)
-        and alpha' = sqrt(2/pi) * (1 + 3 * 0.044715 * x^2)
-        """
-        # Compute alpha(x) = sqrt(2/pi) * (x + 0.044715 * x^3)
         alpha = np.sqrt(2.0 / np.pi) * (self.x + 0.044715 * self.x**3)
 
         # Compute tanh(alpha)
@@ -92,29 +193,77 @@ class Gelu(Function):
 
 
 class Sigmoid(Function):
+    r"""
+    Sigmoid activation function.
+
+    The sigmoid function is defined as:
+        $$
+        sigmoid(x) = \frac{1}{1 + e^{-x}}
+        $$
+    """
+
     def forward(self, x: np.ndarray) -> np.ndarray:
-        # 709 is the maximum value that can be passed to np.exp without overflowing
+        """
+        Computes the forward pass of the sigmoid function.
+
+        Args:
+            x (np.ndarray): Input array.
+
+        Returns:
+            np.ndarray: The output after applying the sigmoid function.
+        """
         self.out = 1 / (1 + np.exp(np.clip(-x, -709, 709)))
         return self.out
 
     def backward(self, grad: Tensor) -> np.ndarray:
-        # d(sigmoid(x))/dx = sigmoid(x) * (1 - sigmoid(x))
+        """
+        Computes the backward pass of the sigmoid function.
+
+        Args:
+            grad (Tensor): Upstream gradient.
+
+        Returns:
+            np.ndarray: The gradient of the loss with respect to the input.
+        """
         return grad.data * self.out * (1 - self.out)
 
 
 class Softmax(Function):
-    """
-    Softmax activation function
-    softmax(x) = e^x / sum(e^x)
+    r"""
+    Softmax activation function.
+
+    The softmax function is defined as:
+        $$
+        softmax(x)_i = \frac{e^{x_i}}{\sum_j e^{x_j}}
+        $$
     """
 
     def forward(self, x: np.ndarray) -> np.ndarray:
-        # Subtract the maximum value for numerical stability
+        """
+        Computes the forward pass of the softmax activation function.
+
+        Args:
+            x (np.ndarray): Input array of logits.
+
+        Returns:
+            np.ndarray: The softmax probabilities.
+        """
         exp_x = np.exp(x - np.max(x, axis=-1, keepdims=True))
         self.probs = exp_x / np.sum(exp_x, axis=-1, keepdims=True)
         return self.probs
 
     def backward(self, grad: Tensor) -> np.ndarray:
+        """
+        Computes the backward pass of the softmax activation function.
+
+        This function computes the gradient of the softmax output with respect to the input logits.
+
+        Args:
+            grad (Tensor): Upstream gradient.
+
+        Returns:
+            np.ndarray: The gradient of the loss with respect to the input logits.
+        """
         # There are two cases for this gradient because each element in the matrix affects
         # every other elements' gradient due to the fact of sum(e^x) in the denominator.
         # Let's denote i, j as the ith and jth elements in the matrix.
@@ -130,12 +279,25 @@ class Softmax(Function):
 
 
 class Tanh(Function):
-    """
-    Tanh activation function
-    tanh(x) = (e^x - e^-x) / (e^x + e^-x)
+    r"""
+    Hyperbolic tangent (tanh) activation function.
+
+    The tanh function is defined as:
+        $$
+        tanh(x) = \frac{e^x - e^{-x}}{e^x + e^{-x}}
+        $$
     """
 
     def forward(self, x: np.ndarray) -> np.ndarray:
+        """
+        Computes the forward pass of the tanh activation function.
+
+        Args:
+            x (np.ndarray): Input array.
+
+        Returns:
+            np.ndarray: The output after applying the tanh function.
+        """
         # For numerical stability, use the fact that tanh(x) = 2*sigmoid(2x) - 1
         # This avoids computing large exponentials directly
         x = 2 * x
@@ -146,24 +308,48 @@ class Tanh(Function):
         return self.out
 
     def backward(self, grad: Tensor) -> np.ndarray:
-        # d(tanh(x))/dx = 1 - tanh(x)^2
+        """
+        Computes the backward pass of the tanh activation function.
+        $$
+        d(tanh(x))/dx = 1 - tanh(x)^2
+        $$
+
+        Args:
+            grad (Tensor): Upstream gradient.
+
+        Returns:
+            np.ndarray: The gradient of the loss with respect to the input.
+        """
         return grad.data * (1 - self.out**2)
 
 
 ###################### Loss Functions #####################
 class BinaryCrossEntropy(Function):
-    """
-    Binary Cross Entropy Loss
-    Note: We assume the input y_pred contain probabilities not logits.
-    - If you have logits, use `binary_cross_entropy_with_logits`, which applies a sigmoid before computing the loss.
+    r"""
+    Binary Cross Entropy (BCE) Loss.
 
-    Forward:
-        BCE = -(y_true * log(y_pred)) + (1 - y_true) * log(1 - y_pred)
+    This loss function assumes that $y_{pred}$ contains probabilities rather than logits.
+    If the input is logits, use :func:`binary_cross_entropy_with_logits`, which applies a sigmoid before computing the loss.
+
+    $$
+    BCE = -\left( y_{true} \cdot \log(y_{pred}) + (1 - y_{true}) \cdot \log(1 - y_{pred}) \right)
+    $$
     """
 
     def forward(
         self, y_pred: np.ndarray, y_true: np.ndarray, **kwargs: Any
     ) -> np.floating:
+        """
+        Computes the binary cross entropy loss.
+
+        Args:
+            y_pred (np.ndarray): Predicted probabilities.
+            y_true (np.ndarray): True binary labels.
+            **kwargs: Additional keyword arguments.
+
+        Returns:
+            float: The computed binary cross entropy loss.
+        """
         y_true = np.asarray(y_true, dtype=np.float32)
         y_pred = np.asarray(y_pred, dtype=np.float32)
 
@@ -185,13 +371,25 @@ class BinaryCrossEntropy(Function):
         return loss
 
     def backward(self, grad: Tensor) -> Tuple[np.ndarray, None]:
-        # $$ \frac{\partial{L}}{\partial{y_{pred}}} = -(\frac{y_{true}}{y_{pred}} - \frac{1-y_{true}}{1-y_{pred}})$$
-        y_true = self.y_true
-        y_pred_prob = self.y_pred_prob
+        r"""
+        Computes the gradient of the binary cross entropy loss with respect to $y_{pred}$.
 
+        The gradient is given by:
+        $$
+        \frac{\partial L}{\partial y_{pred}} = -\left(\frac{y_{true}}{y_{pred}} - \frac{1-y_{true}}{1-y_{pred}}\right)
+        $$
+
+        Args:
+            grad (Tensor): Upstream gradient.
+
+        Returns:
+            Tuple[np.ndarray, None]: A tuple containing the gradient with respect to $y_{pred}$ and None for $y_{true}$.
+        """
         # Avoid division by zero by clipping probabilities away from 0 and 1
-        y_pred_prob = np.clip(y_pred_prob, 1e-7, 1 - 1e-7)
-        grad_y_pred = -((y_true / y_pred_prob) - ((1 - y_true) / (1 - y_pred_prob)))
+        y_pred_prob = np.clip(self.y_pred_prob, 1e-7, 1 - 1e-7)
+        grad_y_pred = -(
+            (self.y_true / y_pred_prob) - ((1 - self.y_true) / (1 - y_pred_prob))
+        )
         grad_y_pred /= len(y_pred_prob)
         # Incorporate the upstream gradient
         grad_y_pred *= grad.data
@@ -201,17 +399,21 @@ class BinaryCrossEntropy(Function):
 
 class BinaryCrossEntropyWithLogits(Function):
     """
-    Stable implementation of binary cross-entropy with logits.
+    Binary Cross Entropy Loss with logits.
+
+    This implementation is numerically stable for logits input.
     """
 
     def forward(self, y_pred: np.ndarray, y_true: np.ndarray) -> np.floating:
         """
+        Computes the binary cross entropy loss with logits input.
+
         Args:
-            y_pred (np.ndarray): shape (N, ...) unbounded real values
-            y_true (np.ndarray): same shape as y_pred in {0, 1}
+            y_pred (np.ndarray): shape (N, ...) Unbounded real-valued logits.
+            y_true (np.ndarray): True binary labels (0 or 1), same shape as y_pred.
 
         Returns:
-            float: the binary cross-entropy loss
+            float: The computed binary cross entropy loss.
         """
         y_true = np.asarray(y_true, dtype=np.float32)
         y_pred = np.asarray(y_pred, dtype=np.float32)
@@ -238,15 +440,25 @@ class BinaryCrossEntropyWithLogits(Function):
         return loss
 
     def backward(self, grad: Tensor) -> Tuple[np.ndarray, None]:
-        """
+        r"""
+        Computes the gradient of the binary cross entropy loss with logits with respect to $y_{pred}$.
+
+        The gradient is given by:
+        $$
+        \frac{\partial L}{\partial y_{pred}} = sigmoid(y_{pred}) - y_{true}
+        = -(\frac{y_{true}}{y_{pred}} - \frac{1-y_{true}}{1-y_{pred}})
+        $$
+        Where
+        $$
+        sigmoid = 1 / (1 + exp(-y_{pred}))
+        $$
+
         Args:
-            grad (Tensor): upstream gradient
+            grad (Tensor): Upstream gradient.
 
-        dL/dy_pred = sigmoid(y_pred) - y_true
+        Returns:
+            Tuple[np.ndarray, None]: A tuple containing the gradient with respect to $y_{pred}$ and None for $y_{true}$.
         """
-        # $$ \frac{\partial{L}}{\partial{y_{pred}}} = -(\frac{y_{true}}{y_{pred}} - \frac{1-y_{true}}{1-y_{pred}})$$
-        # sigmoid = 1 / (1 + exp(-y_pred))
-
         # 1) Stable sigmoid computation
         sig = np.empty_like(self.y_pred, dtype=np.float32)
 
@@ -275,12 +487,10 @@ class BinaryCrossEntropyWithLogits(Function):
 
 class CrossEntropy(Function):
     """
-    Cross-entropy for 2D or 3D predictions with optional pad_idx ignoring,
-    BUT accepts raw logits (not probabilities).
+    Cross-Entropy Loss for multi-dimensional predictions with optional padding and label smoothing.
 
-    Usage is analogous to SparseCrossEntropy, but we do:
-    - stable log-softmax inside the forward pass
-    - label smoothing if label_smoothing > 0
+    This function accepts raw logits (not probabilities) and computes a stable log-softmax internally.
+    It supports both 2D and 3D predictions.
     """
 
     def forward(
@@ -291,21 +501,24 @@ class CrossEntropy(Function):
         label_smoothing: float = 0.0,
         **kwargs: Any,
     ) -> float:
-        """
+        r"""
+        Computes the cross-entropy loss with optional padding and label smoothing.
+
         Args:
-            - y_pred are raw logits (not restricted to [0,1]).
-                Shape can be (batch_size, feature_dim) or (batch_size, seq_len, feature_dim).
-            - y_true must be integer class indices in [0, feature_dim):
-                If y_pred is (batch_size, feature_dim), y_true is (batch_size,).
-                If y_pred is (batch_size, seq_len, feature_dim), y_true is (batch_size, seq_len).
-            - pad_idx (int, optional): The padding index, which will be masked out from the loss.
-              Defaults to 0.
-            - label_smoothing (float, optional): How much uniform smoothing to add to the "correct" class.
-              Defaults to 0.0.
-              (Ref: "Rethinking the Inception Architecture for Computer Vision", https://arxiv.org/abs/1512.00567)
+            y_pred (np.ndarray): Raw logits. Shape can be $(batch\_size, feature\_dim)$ or $(batch\_size, seq\_len, feature\_dim)$.
+            y_true (Union[np.ndarray, Tensor]): True class indices. If $y_{pred}$ is 2D, shape is $(batch\_size,)$; if 3D, shape is $(batch\_size, seq\_len)$.
+            pad_idx (int, optional): Padding index to ignore in the loss. Defaults to 0.
+            label_smoothing (float, optional): Label smoothing factor. Defaults to 0.0. Label smoothing is applied if $label\_smoothing > 0$
+            **kwargs: Additional keyword arguments.
+
+        For label smoothing, the smoothed target distribution is given by:
+        $$
+        T_{i,j} = (1 - \alpha) \, y_{i,j} + \frac{\alpha}{K-1} (1 - y_{i,j})
+        $$
+        (Ref: "Rethinking the Inception Architecture for Computer Vision", https://arxiv.org/abs/1512.00567)
 
         Returns:
-            - A scalar float representing the average cross-entropy loss over non-pad positions.
+            float: The average cross-entropy loss over non-padding positions.
         """
 
         # 1. Convert y_true to NumPy if it’s a Tensor, ensure it's int64 for indexing.
@@ -366,21 +579,32 @@ class CrossEntropy(Function):
         self.pad_idx = pad_idx
         self.label_smoothing = label_smoothing
         self.num_classes = num_classes
-
         return loss_val
 
     def backward(self, grad: Tensor) -> Tuple[np.ndarray, None]:
-        """
-        Backprop through the label-smoothed log-softmax cross-entropy.
+        r"""
+        Computes the backward pass for the cross-entropy loss with label smoothing.
 
-        p_{i,j} = exp(log_softmax_{i,j})
-        dL/dlogits[i,j] = p_{i,j} - T_{i,j}
+        The gradient with respect to the logits is given by:
         $$
-        T_{i,j} = (1 - \alpha) * y_{i,j} + \frac{\alpha}{K-1} * (1 - y_{i,j})
+        \frac{\partial L}{\partial logits_{i,j}} = p_{i,j} - T_{i,j}
         $$
-        Then zero out for padded positions, and scale by grad / number of non-padded.
-        """
+        where
+        $$
+        p_{i,j} = exp(log\_softmax_{i,j})
+        $$
+        and the target distribution $T_{i,j}$ is defined as:
+        $$
+        T_{i,j} = (1 - \alpha) \, y_{i,j} + \frac{\alpha}{K-1} (1 - y_{i,j})
+        $$
+        The gradient is zeroed out for padding positions and scaled by the upstream gradient divided by the number of non-padding positions.
 
+        Args:
+            grad (Tensor): Upstream gradient.
+
+        Returns:
+            Tuple[np.ndarray, None]: A tuple containing the gradient with respect to the logits and None for $y_{true}$.
+        """
         # 1. Softmax from log-softmax is safe: p_{i,j} = exp(log_sm[i,j])
         softmax_probs = np.exp(self.log_softmax)
 
@@ -400,10 +624,10 @@ class CrossEntropy(Function):
         # Correct class: 1 - a + a / (num_class - 1) = (1 - a) + a / (num_class - 1)
         # Incorrect class: a / (num_class - 1)
 
-        # Step 1: All classes
+        # 4. (Step 1): All classes
         grad_out[non_pad_idx, :] -= self.label_smoothing / (self.num_classes - 1)
 
-        # Step 2: Correct classes
+        # 4. (Step 2): Correct classes
         correct_idx = (non_pad_idx, self.y_true[non_pad_idx])
         grad_out[correct_idx] -= 1.0 - self.label_smoothing
 
@@ -421,17 +645,20 @@ class CrossEntropy(Function):
 
 
 class HingeLoss(Function):
-    """
-    Hinge Loss
-    If the point is correctly classified, y_pred * y_true > 1, the loss is 0 (loss functions typically don't go into the negatives so we take the max of 0 and 1 - y_true * y_pred)
-    Otherwise, y_pred * y_true < 1, then the loss is 1 - y_true * y_pred > 0.
+    r"""
+    Hinge Loss.
 
-    loss = max(0, 1 - y_true * y_pred)
+    The hinge loss is defined as:
+        $$
+        loss = max(0, 1 - y_{true} \cdot y_{pred})
+        $$
+    For correctly classified points ($y_{true} \cdot y_{pred} \geq 1$), the loss is 0; otherwise, it is $1 - y_{true} \cdot y_{pred}$. This is because loss functions typically don't go into the negatives so we take the max of 0 and 1 - y_true * y_pred)
 
-    Objective Function: ||w||^2 + C * sum(max(0, 1 - y_true * y_pred))
-    where:
-        C is a hyperparameter that controls the trade-off between maximizing the margin (through regularization) and minimizing the loss.
-        w is the weight vector (||w||^2 is the regularization term)
+    The objective function typically includes a regularization term:
+        $$
+        \|w\|^2 + C \sum max(0, 1 - y_{true} \cdot y_{pred})
+        $$
+    where $C$ is a hyperparameter controlling the trade-off between maximizing the margin (through regularization) and minimizing the loss, and $w$ is the weight vector. ($\|w\|^2$ is the regularization term)
 
     Paper: https://ieeexplore.ieee.org/document/708428
     """
@@ -443,6 +670,19 @@ class HingeLoss(Function):
         reduction: str = "none",
         **kwargs: Any,
     ) -> Union[np.floating, np.ndarray]:
+        """
+        Computes the hinge loss.
+
+        Args:
+            y_pred (np.ndarray): Predicted scores.
+            y_true (Union[np.ndarray, Tensor]): True labels.
+            reduction (str, optional): Specifies the reduction to apply to the output:
+                "none", "mean", or "sum". Defaults to "none".
+            **kwargs: Additional keyword arguments.
+
+        Returns:
+            Union[float, np.ndarray]: The computed hinge loss. A scalar if reduction is "mean" or "sum", otherwise an array.
+        """
         if isinstance(y_true, Tensor):
             y_true = y_true.data
         y_true = np.asarray(y_true, dtype=np.float32)
@@ -470,13 +710,31 @@ class HingeLoss(Function):
         return loss_data
 
     def backward(self, grad: Tensor) -> Tuple[np.ndarray, None]:
+        r"""
+        Computes the gradient of the hinge loss with respect to the predictions.
+
+        For each element, the gradient is:
+        $$
+        \begin{align}
+        \frac{\partial loss}{\partial y_{pred}} \\
+        &= \frac{d(C * sum(max(0, 1 - y_{true} * y_{pred})))}{dw} \\
+        &= C * max(0, 1 - y_{true} * y_{pred}) \\
+        &=\begin{cases}
+        -y_{true}, & \text{if } y_{true} \cdot y_{pred} < 1 \\
+        0, & \text{otherwise}
+        \end{cases}
+        \end{align}
+        $$
+        For the gradient of w in the regularization term, $$\frac{d(\frac{1}{2}\|w\|^2)}{dw} = w$$ (we multiple 1/2 because it makes the gradient calculation easier)
+
+        If the reduction is "mean", the gradient is averaged over the number of elements.
+
+        Args:
+            grad (Tensor): Upstream gradient.
+
+        Returns:
+            Tuple[np.ndarray, None]: A tuple containing the gradient with respect to $y_{pred}$ and None for $y_{true}$.
         """
-        d (1/2||w||^2)/dw = w (we multiple 1/2 because it makes the gradient calculation easier)
-        d(C * sum(max(0, 1 - y_true * y_pred)))/dw = C * max(0, 1 - y_true * y_pred)
-        = 1 - y_true * y_pred (if y_true * y_pred < 1)
-        = 0 (if y_true * y_pred >= 1)
-        """
-        # Initialize gradient array with same shape as predictions
         grad_y_pred = np.zeros_like(self.y_pred)
 
         # Where margin > 0, gradient is -y_true
@@ -497,16 +755,47 @@ class HingeLoss(Function):
 
 
 class MeanSquaredLoss(Function):
+    r"""
+    Mean Squared Error (MSE) Loss.
+
+    The MSE loss is defined as:
+        $$
+        MSE = \frac{1}{N} \sum (y_{pred} - y_{true})^2
+        $$
+    """
+
     def forward(
         self, y_pred: np.ndarray, y_true: np.ndarray, **kwargs: Any
     ) -> np.floating:
+        """
+        Computes the Mean Squared Error loss.
+
+        Args:
+            y_pred (np.ndarray): Predicted values.
+            y_true (np.ndarray): True values.
+            **kwargs: Additional keyword arguments.
+
+        Returns:
+            float: The computed MSE loss.
+        """
         self.y_pred = y_pred
         self.y_true = y_true
         return np.mean((y_pred - y_true) ** 2)
 
     def backward(self, grad: Tensor) -> np.ndarray:
-        """
-        dL/dx = 2 * (x - y)
+        r"""
+        Computes the gradient of the Mean Squared Error loss with respect to the predictions.
+
+        The gradient is given by:
+        $$
+        \frac{\partial L}{\partial y_{pred}} = 2 (y_{pred} - y_{true})
+        $$
+
+        Args:
+            grad (Tensor): Upstream gradient.
+
+        Returns:
+            np.ndarray: The gradient with respect to the predictions.
         """
         return 2 * (self.y_pred - self.y_true) * grad.data
 
@@ -514,6 +803,19 @@ class MeanSquaredLoss(Function):
 def binary_cross_entropy(
     y_pred: Tensor, y_true: Union[Tensor, np.ndarray], **kwargs: Any
 ) -> Tensor:
+    """
+    Computes the binary cross entropy loss given predicted probabilities.
+
+    This function wraps the :class:`BinaryCrossEntropy` operation.
+
+    Args:
+        y_pred (Tensor): Predicted probabilities.
+        y_true (Union[Tensor, np.ndarray]): True binary labels.
+        **kwargs: Additional keyword arguments.
+
+    Returns:
+        Tensor: The computed binary cross entropy loss.
+    """
     if not isinstance(y_true, Tensor):
         y_true = Tensor(y_true, requires_grad=False)
     return BinaryCrossEntropy.apply(y_pred, y_true, **kwargs)
@@ -522,10 +824,23 @@ def binary_cross_entropy(
 def binary_cross_entropy_with_logits(
     y_pred: Tensor, y_true: Union[Tensor, np.ndarray], **kwargs: Any
 ) -> Tensor:
-    """
-    Binary Cross Entropy Loss with logits input (more stable)
-    Use binary_cross_entropy if y_pred contain probabilities
-    -(y_true * log(y_pred)) + (1 - y_true) * log(1 - y_pred)
+    r"""
+    Computes the binary cross entropy loss using logits input for improved numerical stability.
+
+    If $y_{pred}$ contains probabilities, use :func:`binary_cross_entropy` instead.
+
+    The loss is computed as:
+        $$
+        -\left(y_{true} \cdot \log(y_{pred}) + (1 - y_{true}) \cdot \log(1 - y_{pred})\right)
+        $$
+
+    Args:
+        y_pred (Tensor): Logits.
+        y_true (Union[Tensor, np.ndarray]): True binary labels.
+        **kwargs: Additional keyword arguments.
+
+    Returns:
+        Tensor: The computed binary cross entropy loss.
     """
     if not isinstance(y_true, Tensor):
         y_true = Tensor(y_true, requires_grad=False)
@@ -540,7 +855,19 @@ def cross_entropy(
     **kwargs: Any,
 ) -> Tensor:
     """
-    For multi-class classification with logits y_pred and y_true should be class indices (not one-hot)
+    Computes the cross-entropy loss for multi-class classification with logits.
+
+    This function expects $y_{pred}$ to be raw logits and $y_{true}$ to be class indices (not one-hot vectors).
+
+    Args:
+        y_pred (Tensor): Raw logits.
+        y_true (Union[Tensor, np.ndarray]): True class indices.
+        pad_idx (Optional[int], optional): Padding index to ignore in the loss. Defaults to None.
+        label_smoothing (float, optional): Label smoothing factor. Defaults to 0.0.
+        **kwargs: Additional keyword arguments.
+
+    Returns:
+        Tensor: The computed cross-entropy loss.
     """
     if not isinstance(y_true, Tensor):
         y_true = Tensor(y_true, requires_grad=False)
@@ -555,6 +882,18 @@ def hinge_loss(
     reduction: str = "none",
     **kwargs: Any,
 ) -> Tensor:
+    """
+    Computes the hinge loss for binary classification.
+
+    Args:
+        y_pred (Tensor): Predicted scores.
+        y_true (Union[Tensor, np.ndarray]): True labels.
+        reduction (str, optional): Specifies the reduction to apply: "none", "mean", or "sum". Defaults to "none".
+        **kwargs: Additional keyword arguments.
+
+    Returns:
+        Tensor: The computed hinge loss.
+    """
     if not isinstance(y_true, Tensor):
         y_true = Tensor(y_true, requires_grad=False)
     return HingeLoss.apply(y_pred, y_true, reduction=reduction, **kwargs)
@@ -563,6 +902,17 @@ def hinge_loss(
 def mean_squared_loss(
     y_pred: Tensor, y_true: Union[Tensor, np.ndarray], **kwargs: Any
 ) -> Tensor:
+    """
+    Computes the Mean Squared Error (MSE) loss.
+
+    Args:
+        y_pred (Tensor): Predicted values.
+        y_true (Union[Tensor, np.ndarray]): True values.
+        **kwargs: Additional keyword arguments.
+
+    Returns:
+        Tensor: The computed MSE loss.
+    """
     if not isinstance(y_true, Tensor):
         y_true = Tensor(y_true, requires_grad=False)
     return MeanSquaredLoss.apply(y_pred, y_true, **kwargs)
