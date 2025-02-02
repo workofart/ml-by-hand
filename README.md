@@ -6,7 +6,7 @@
 
 
 
-We are creating a deep learning library from scratch (that evolved from a simple autograd engine). It was designed to demystify the inner workings of building deep learning models by exposing every mathematical detail and stripping down the abstractions shiny ML libraries (e.g. PyTorch/TensorFlow) have. **This project tries to provide an opportunity to learn deep learning from first-principles.**
+We are creating a deep learning library from scratch (that evolved from a simple autograd engine). It is designed to demystify the inner workings of building deep learning models by exposing every mathematical detail and stripping down the abstractions shiny ML libraries (e.g. PyTorch/TensorFlow) have. **This project tries to provide an opportunity to learn deep learning from first-principles. And use the hand-built library to create and train state-of-art models (such as [GPT-2](https://github.com/workofart/ml-by-hand/blob/main/examples/gpt-2.py))).**
 
 
 > “What I cannot create, I do not understand.”
