@@ -5,5 +5,3 @@ ml-by-hand
    :maxdepth: 4
 
    autograd
-   conf
-   test

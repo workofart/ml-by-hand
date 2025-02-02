@@ -1,2 +1,5 @@
-Sphinx>=5,<6
+Sphinx
 sphinx_rtd_theme
+sphinx_autodoc_typehints
+sphinxcontrib-napoleon
+sphinx-math-dollar

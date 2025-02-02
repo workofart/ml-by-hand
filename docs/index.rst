@@ -19,8 +19,3 @@ documentation for details.
 
 API Documentation
 =================
-
-.. automodule:: autograd
-   :members:
-   :undoc-members:
-   :show-inheritance:

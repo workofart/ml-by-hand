@@ -1,3 +1,6 @@
+import os
+import sys
+
 # Configuration file for the Sphinx documentation builder.
 #
 # For the full list of built-in configuration values, see the documentation:
@@ -5,6 +8,8 @@
 
 # -- Project information -----------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
+
+sys.path.insert(0, os.path.abspath(".."))
 
 project = "ML-By-Hand"
 copyright = "2025, Henry (Hanxiang) Pan"
@@ -17,19 +22,34 @@ extensions = [
     "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
     "sphinx_autodoc_typehints",
+    "sphinx.ext.napoleon",
+    "sphinx.ext.mathjax",
+    "sphinx_math_dollar",
 ]
 
 
 # Autodoc settings
 autodoc_member_order = "bysource"  # Order members by their appearance in source code
-autosummary_generate = (
-    True  # Automatically generate stub pages for autosummary directives
-)
-
+# Automatically generate stub pages for autosummary directives
+autosummary_generate = True
+napoleon_google_docstring = True
 
 templates_path = ["_templates"]
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", ".venv"]
 
+# mathjax_config = {
+#     'tex2jax': {
+#         'inlineMath': [ ["\\(","\\)"] ],
+#         'displayMath': [["\\[","\\]"] ],
+#     },
+# }
+
+# mathjax3_config = {
+#   "tex": {
+#     "inlineMath": [['\\(', '\\)']],
+#     "displayMath": [["\\[", "\\]"]],
+#   }
+# }
 
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
