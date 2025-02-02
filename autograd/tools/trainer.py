@@ -268,7 +268,7 @@ class SimpleTrainer(AbstractTrainer):
             else "regression"
         )
 
-    def train_step(self, batch_data) -> float:
+    def train_step(self, batch_data, data_loader=None) -> float:
         batch_X, batch_y = batch_data
         self.optimizer.zero_grad()
         y_pred = self.model(batch_X)
@@ -385,8 +385,8 @@ class LLMTrainer(AbstractTrainer):
                 model=self.model,
                 prediction_func=self.forward_fn,
                 bpe=train_data_loader.bpe,
-                groundtruth_data=train_data_loader.data[: train_data_loader.seq_len],
-                max_length=train_data_loader.seq_len,
+                groundtruth_data=train_data_loader.data[: train_data_loader.seq_len // 3],
+                max_length=train_data_loader.seq_len // 3,
             )
 
         # Normal sampling
@@ -397,7 +397,7 @@ class LLMTrainer(AbstractTrainer):
             start_tokens=self.config.eval_start_string,
             max_length=int(train_data_loader.seq_len * 0.4),
             temperature=1.0,
-            top_k=200,
+            top_k=self.config.eval_top_k,
         )
 
 
