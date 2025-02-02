@@ -361,12 +361,16 @@ def inference(
         num_steps = max_length - len(output_ids)
 
     # Main loop: decide input tokens based on the mode.
-    for i in tqdm(range(num_steps), desc="Inference", leave=False):
+    # for i in tqdm(range(num_steps), desc="Inference", leave=False):
+    for i in range(num_steps):
         current_input = groundtruth_data[: i + 1] if teacher_forcing else output_ids
         logits = prediction_func(
             model=model, batch_data=np.array([current_input]), mode="sample"
         )[0].data[0, -1]
         output_ids.append(sample_next_token(logits, temperature, top_k))
+        print(bpe.decode([sample_next_token(logits, temperature, top_k)]), end="", flush=True)
+    
+    print("\n")
 
     if teacher_forcing:
         groundtruth_text = "\n".join(
@@ -374,10 +378,10 @@ def inference(
         )
         logger.info(f"Teacher forcing mode on!!\nGroundtruth:\n{groundtruth_text}")
 
-    prediction_text = "\n\n".join(bpe.decode(output_ids).split("<|endoftext|>"))
-    logger.info(f"Prediction:\n\n{prediction_text}")
+    # prediction_text = "\n\n".join(bpe.decode(output_ids).split("<|endoftext|>"))
+    # logger.info(f"Prediction:\n\n{prediction_text}")
 
-    return prediction_text
+    # return prediction_text
 
 
 def load_wiki_simple() -> str:

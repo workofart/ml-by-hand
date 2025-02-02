@@ -261,8 +261,8 @@ class AbstractTrainer(ABC):
                 - optimizer (optim.Optimizer): The loaded or newly instantiated optimizer.
                 - checkpoint (dict): Dictionary of checkpoint data if loaded, otherwise empty.
         """
-        if resume_epoch is not None:
-            # Construct paths if not provided
+        if resume_epoch is not None or checkpoint_path is not None:
+            # Look for checkpoint files
             if checkpoint_path is not None:
                 ckpt_json = f"{checkpoint_path}.json"
                 ckpt_npz = f"{checkpoint_path}.npz"
