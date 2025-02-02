@@ -385,7 +385,9 @@ class LLMTrainer(AbstractTrainer):
                 model=self.model,
                 prediction_func=self.forward_fn,
                 bpe=train_data_loader.bpe,
-                groundtruth_data=train_data_loader.data[: train_data_loader.seq_len // 3],
+                groundtruth_data=train_data_loader.data[
+                    : train_data_loader.seq_len // 3
+                ],
                 max_length=train_data_loader.seq_len // 3,
             )
 

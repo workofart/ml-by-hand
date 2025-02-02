@@ -1,7 +1,9 @@
+import sys
+
+import numpy as real_numpy
 import pytest
 import torch
-import sys
-import numpy as real_numpy
+
 
 @pytest.fixture(scope="session", autouse=True)
 def patch_torch_numpy():
@@ -25,6 +27,7 @@ def patch_torch_numpy():
 
     # revert back after tests
     torch.Tensor.numpy = old_numpy
-    
+
+
 # Replace 'cupy' in sys.modules with numpy
 sys.modules["cupy"] = real_numpy
