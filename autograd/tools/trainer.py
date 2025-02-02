@@ -42,7 +42,6 @@ class AbstractTrainer(ABC):
         optimizer_cls: type[optim.Optimizer],
         loss_fn: Callable,
         config: GenericTrainingConfig,
-        # total_epochs: int = 10,
         **kwargs,
     ):
         """
@@ -61,6 +60,7 @@ class AbstractTrainer(ABC):
             model_kwargs=config.model_kwargs,
             optimizer_kwargs=config.optimizer_kwargs,
             resume_epoch=config.resume_epoch,
+            checkpoint_path=kwargs.get("checkpoint_path"),
         )
         self.start_epoch = self.config.resume_epoch or 0
         self.metrics = defaultdict(list)
@@ -93,14 +93,24 @@ class AbstractTrainer(ABC):
 
             self._on_epoch_end(epoch, train_loss, val_loss)
 
-        self._save_metrics()
+            if (
+                epoch % (self.config.total_epochs // min(20, self.config.total_epochs))
+                == 0
+            ):
+                self._save_metrics()
 
     def _train_one_epoch(self, data_loader) -> float:
         total_loss = 0.0
         batch_count = 0
+        self.optimizer.zero_grad()
         for batch in tqdm(data_loader, desc="Training Batches", leave=False):
             loss = self.train_step(batch, data_loader)
             total_loss += loss
+            # This is to simulate larger batches by updating the weights once every N batches.
+            if (batch_count + 1) % self.config.update_weights_every_n_steps == 0:
+                self.optimizer.step()  # increments .timestep, applies LR scheduler if present
+                self.metrics["grad_l2_norm"].append(grad_l2_norm(self.model.parameters))
+                self.optimizer.zero_grad()
             batch_count += 1
         return total_loss / max(batch_count, 1)
 
@@ -118,10 +128,12 @@ class AbstractTrainer(ABC):
                 }
                 os.makedirs(self.CHECKPOINT_DIR, exist_ok=True)
                 cp_path_json = os.path.join(
-                    self.CHECKPOINT_DIR, f"{self.model.__class__.__name__}_{epoch}.json"
+                    self.CHECKPOINT_DIR,
+                    f"{self.config.training_run_name}_{self.model.__class__.__name__}_{epoch}.json",
                 )
                 cp_path_npz = os.path.join(
-                    self.CHECKPOINT_DIR, f"{self.model.__class__.__name__}_{epoch}.npz"
+                    self.CHECKPOINT_DIR,
+                    f"{self.config.training_run_name}_{self.model.__class__.__name__}_{epoch}.npz",
                 )
                 save_checkpoint(
                     checkpoint, json_path=cp_path_json, npz_path=cp_path_npz
@@ -159,7 +171,6 @@ class AbstractTrainer(ABC):
             if key != "epoch" and self.metrics[key][-1] is not None:
                 log_msg += f"\n{key} = {self.metrics[key][-1]:.4f}"
         log_msg += f"\nLR = {self.optimizer.lr:.4f}"
-        log_msg += f"\nGrad L2 Norm = {grad_l2_norm(self.model.parameters):.2f}"
         logger.info(log_msg)
 
     @abstractmethod
@@ -176,6 +187,7 @@ class AbstractTrainer(ABC):
         model_kwargs: Dict[str, Any],
         optimizer_kwargs: Dict[str, Any],
         resume_epoch: Optional[int] = None,
+        checkpoint_path: Optional[str] = None,
     ) -> Tuple[Any, Any, dict]:
         """
         Loads model & optimizer states from checkpoint if resume_epoch is given.
@@ -195,18 +207,25 @@ class AbstractTrainer(ABC):
             model_kwargs: Dictionary of kwargs to pass when constructing the model_class.
             optimizer_kwargs: Dictionary of kwargs to pass when constructing the optimizer_class.
             resume_epoch (int, optional): If provided, attempts to load from checkpoint
+            checkpoint_path (str, optional): If provided, the path of the checkpoint file
 
         Returns:
             (model, optimizer, checkpoint_dict)
         """
         if resume_epoch is not None:
             # Look for checkpoint files
-            ckpt_json = os.path.join(
-                self.CHECKPOINT_DIR, f"{model_class.__name__}_{resume_epoch}.json"
-            )
-            ckpt_npz = os.path.join(
-                self.CHECKPOINT_DIR, f"{model_class.__name__}_{resume_epoch}.npz"
-            )
+            if checkpoint_path is not None:
+                ckpt_json = f"{checkpoint_path}.json"
+                ckpt_npz = f"{checkpoint_path}.npz"
+            else:
+                ckpt_json = os.path.join(
+                    self.CHECKPOINT_DIR,
+                    f"{self.config.training_run_name}_{model_class.__name__}_{resume_epoch}.json",
+                )
+                ckpt_npz = os.path.join(
+                    self.CHECKPOINT_DIR,
+                    f"{self.config.training_run_name}_{model_class.__name__}_{resume_epoch}.npz",
+                )
 
             logger.info(f"Attempting to load from checkpoint: {ckpt_json}, {ckpt_npz}")
             loaded_ckpt = load_checkpoint(ckpt_json, ckpt_npz)
@@ -269,12 +288,11 @@ class SimpleTrainer(AbstractTrainer):
         )
 
     def train_step(self, batch_data, data_loader=None) -> float:
+        # Note that .zero_grad() and .step() calls are in the _train_one_epoch() function
         batch_X, batch_y = batch_data
-        self.optimizer.zero_grad()
         y_pred = self.model(batch_X)
         loss = self.loss_fn(y_pred, batch_y)
         loss.backward()
-        self.optimizer.step()
         return float(loss.detach().data)
 
     def evaluate(self, train_data_loader, val_data_loader, epoch) -> float:
@@ -344,7 +362,7 @@ class LLMTrainer(AbstractTrainer):
         """
         batch_data: (X, dec_inp, y, src_mask, tgt_mask, causal_mask)
         """
-        self.optimizer.zero_grad()
+        # Note that .zero_grad() and .step() calls are in the _train_one_epoch() function
         pred_probs, y = self.forward_fn(self.model, batch_data, mode="train")
         loss = self.loss_fn(
             pred_probs,
@@ -353,7 +371,6 @@ class LLMTrainer(AbstractTrainer):
             label_smoothing=self.config.label_smoothing,  # type: ignore
         )
         loss.backward()
-        self.optimizer.step()  # increments .timestep, applies LR scheduler if present
         return float(loss.detach().data)
 
     def evaluate(self, train_data_loader, val_data_loader, epoch) -> float:
@@ -397,7 +414,7 @@ class LLMTrainer(AbstractTrainer):
             prediction_func=self.forward_fn,
             bpe=train_data_loader.bpe,
             start_tokens=self.config.eval_start_string,
-            max_length=int(train_data_loader.seq_len * 0.4),
+            max_length=max(128, int(train_data_loader.seq_len * 0.4)),
             temperature=1.0,
             top_k=self.config.eval_top_k,
         )

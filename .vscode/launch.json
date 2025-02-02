@@ -68,6 +68,13 @@
             "module": "autograd.text.tokenizer"
         },
         {
+            "name": "Trainer",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": ["test/autograd/tools/test_trainer.py"]
+        },
+        {
             "name": "MaxPool2d",
             "type": "debugpy",
             "request": "launch",
