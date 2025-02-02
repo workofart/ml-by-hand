@@ -243,7 +243,7 @@ class TestLLMTrainer(BaseTrainerTest):
     def test_train_step_returns_loss(self):
         """Check that a single train step returns the constant scalar loss."""
         batch = next(iter(self.train_data))
-        loss_val = self.trainer.train_step(batch)
+        loss_val = self.trainer.train_step(batch, self.train_loader)
         self.assertAlmostEqual(loss_val, 1.23, places=5)
         self.assertEqual(self.trainer.optimizer.step_call_count, 1)
 

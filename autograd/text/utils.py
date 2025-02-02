@@ -11,7 +11,13 @@ from typing import (
     Union,
 )
 
-import numpy as np
+try:
+    # drop-in replacement for numpy for GPU acceleration
+    import cupy as np  # type: ignore
+
+    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
+except Exception:
+    import numpy as np
 from tqdm import tqdm
 
 from autograd import nn
@@ -271,7 +277,7 @@ def inference(
             filtered_logits[top_indices] = scaled_logits[top_indices]
             scaled_logits = filtered_logits
         probabilities = Softmax().forward(scaled_logits)
-        return int(np.random.choice(len(probabilities), p=probabilities))
+        return int(np.random.choice(len(probabilities), size=1, p=probabilities))
 
     # Determine mode and set up initial values.
     teacher_forcing = groundtruth_data is not None

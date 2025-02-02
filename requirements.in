@@ -9,5 +9,4 @@ pyright
 pytest
 openml # for dataset
 regex
-torch
 ruff

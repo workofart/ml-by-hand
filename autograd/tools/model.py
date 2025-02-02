@@ -2,7 +2,15 @@ import json
 import os
 from typing import Any, Dict
 
-import numpy as np
+import numpy  # need this for loading checkpoint
+
+try:
+    # drop-in replacement for numpy for GPU acceleration
+    import cupy as np  # type: ignore
+
+    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
+except Exception:
+    import numpy as np
 
 from autograd.tensor import Tensor
 
@@ -127,7 +135,8 @@ def load_checkpoint(
         meta: SerializedMeta = json.load(f)
 
     # Load NPZ data
-    with np.load(npz_path, allow_pickle=True) as npz_data:
+    # Need to use numpy's load API
+    with numpy.load(npz_path, allow_pickle=True) as npz_data:
         data_dict = {key: np.array(npz_data[key]) for key in npz_data.files}
 
     deserialized_data = _deserialize(meta, data_dict)

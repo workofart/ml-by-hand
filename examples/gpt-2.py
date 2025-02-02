@@ -1,7 +1,13 @@
 import logging
 from typing import Any, Optional
 
-import numpy as np
+try:
+    # drop-in replacement for numpy for GPU acceleration
+    import cupy as np  # type: ignore
+
+    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
+except Exception:
+    import numpy as np
 
 from autograd import functional, nn, optim
 from autograd.tensor import Tensor
@@ -187,15 +193,15 @@ if __name__ == "__main__":
         training_run_name="shakespeare_mini",
         dataset_name="shakespeare_mini",
         batch_size=64,  # GPT-2 uses 512
-        total_epochs=25,
-        eval_iters=10,
-        steps_per_epoch=20,
-        checkpoint_freq=2,
+        total_epochs=15,
+        eval_iters=50,
+        steps_per_epoch=100,
+        checkpoint_freq=4,
         model_kwargs={
             "num_attention_heads": 6,  # GPT-2 small uses 12
-            "hidden_size": 72,  # GPT-2 small uses 768, must be divisible by num_attention_heads
-            "dropout_prob": 0.2,
-            "max_seq_len": 64,  # GPT-2 uses 1024
+            "hidden_size": 768,  # GPT-2 small uses 768, must be divisible by num_attention_heads
+            "dropout_prob": 0.0,
+            "max_seq_len": 256,  # GPT-2 uses 1024
             "num_decoder_layers": 6,  # GPT-2 uses 12
         },
         optimizer_kwargs={
@@ -206,21 +212,22 @@ if __name__ == "__main__":
             "lr_scheduler_kwargs": {
                 "lr_scheduler_cls": optim.CosineScheduler,  # TODO: check if we can serialize this into checkpoint
                 "warmup_steps": 100,
-                "lr_decay_iters": 500,  # steps_per_epoch * total_epochs
+                "lr_decay_iters": 1000,  # steps_per_epoch * total_epochs
             },
         },
-        resume_epoch=24,
-        teacher_enforcing=False,
+        resume_epoch=4,
+        teacher_enforcing=True,
         include_decoder_input=False,
         create_padding_masks=False,
         label_smoothing=0.1,
         eval_start_string="First",
+        eval_top_k=50,  # Shakespeare only has ~60 unique characters, we so will just sample top 50
         custom_bpe=CustomBpeConfig(
             num_merges=0,
             encoded_data_path="training_data/bpe_0_shakespeare_encoded_data.npz",
             vocab_path="training_data/shakespeare_vocab_0.pkl",
-            overwrite_encoded_data=False,
-            overwrite_vocabulary_file=False,
+            overwrite_encoded_data=True,
+            overwrite_vocabulary_file=True,
             split_token="<|endoftext|>",
         ),
     )
@@ -228,7 +235,7 @@ if __name__ == "__main__":
     WIKI_CONFIG = TransformerTrainingConfig(
         training_run_name="wiki",
         dataset_name="wiki_simple_english",
-        batch_size=64,  # GPT-2 uses 512
+        batch_size=128,  # GPT-2 uses 512
         total_epochs=30,
         eval_iters=100,
         steps_per_epoch=200,
@@ -248,7 +255,7 @@ if __name__ == "__main__":
             "lr_scheduler_kwargs": {
                 "lr_scheduler_cls": optim.CosineScheduler,
                 "warmup_steps": 100,
-                "lr_decay_iters": 500,
+                "lr_decay_iters": 1000,
             },
         },
         resume_epoch=None,
@@ -334,14 +341,15 @@ if __name__ == "__main__":
     trainer.fit(train_data_loader, test_data_loader)
 
     # Inference test
-    for k in range(10):
+    for k in range(5):
         text_utils.inference(
             model=trainer.model,
             prediction_func=GPT2ForwardFn(),
             bpe=bpe,
-            start_tokens="April is a charming day",  # Example start token
-            max_length=int(trainer.model.max_seq_len * 0.9),
-            temperature=0.7,
-            # top_k=200,
+            start_tokens="\n",  # Example start token
+            # start_tokens="April is a charming day",  # Example start token
+            max_length=int(trainer.model.max_seq_len * 2),
+            temperature=0.3,
+            top_k=50,  # for shakespeare, there are only 63 vocabulary that are used, so let's limit to the top 50 to avoid printing weird characters
         )
         print("\n------------------------\n")

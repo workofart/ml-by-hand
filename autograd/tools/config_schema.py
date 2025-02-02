@@ -64,3 +64,4 @@ class TransformerTrainingConfig(GenericTrainingConfig):
     eval_start_string: Optional[str] = (
         "\n"  # starting token for the evaluation during training
     )
+    eval_top_k: Optional[int] = None

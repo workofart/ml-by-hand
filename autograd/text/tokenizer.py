@@ -293,7 +293,9 @@ class BytePairEncoder:
                     )
 
         # Apply learned merges in a naive pass
-        for pair, new_id in tqdm(self.learned_merges, desc="Applying merges to encode"):
+        for pair, new_id in tqdm(
+            self.learned_merges, desc="Applying merges to encode", leave=False
+        ):
             byte_encoded_chars = list(
                 self._merge_pairs(pair, new_id, byte_encoded_chars)
             )
