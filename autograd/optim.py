@@ -277,14 +277,16 @@ class Optimizer:
         Return a dictionary representing the optimizer's state for checkpointing.
 
         The returned dictionary has the following structure:
+
+        .. code-block:: json
+
             {
-                'hyperparams': {
-                    'lr': 0.01,
-                    ... any other hyperparameters ...
+                "hyperparams": {
+                    "lr": 0.01,
                 },
-                'states': {
-                    "module1.weight": {'m': ..., 'v': ..., ...},
-                    "module1.bias": {...},
+                "states": {
+                    "module1.weight": {"m": "...", "v": "..." },
+                    "module1.bias": "..."
                 }
             }
 

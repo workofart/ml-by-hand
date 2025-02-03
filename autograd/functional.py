@@ -92,10 +92,6 @@ class Relu(Function):
         $$
         ReLU(x) = max(0, x)
         $$
-
-    Methods:
-        forward: Computes the forward pass.
-        backward: Computes the gradient with respect to the input.
     """
 
     def forward(self, x: np.ndarray) -> np.ndarray:
@@ -652,12 +648,14 @@ class HingeLoss(Function):
         $$
         loss = max(0, 1 - y_{true} \cdot y_{pred})
         $$
+
     For correctly classified points ($y_{true} \cdot y_{pred} \geq 1$), the loss is 0; otherwise, it is $1 - y_{true} \cdot y_{pred}$. This is because loss functions typically don't go into the negatives so we take the max of 0 and 1 - y_true * y_pred)
 
     The objective function typically includes a regularization term:
         $$
         \|w\|^2 + C \sum max(0, 1 - y_{true} \cdot y_{pred})
         $$
+
     where $C$ is a hyperparameter controlling the trade-off between maximizing the margin (through regularization) and minimizing the loss, and $w$ is the weight vector. ($\|w\|^2$ is the regularization term)
 
     Paper: https://ieeexplore.ieee.org/document/708428

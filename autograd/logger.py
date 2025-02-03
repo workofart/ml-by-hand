@@ -9,16 +9,6 @@ class ColorFormatter(logging.Formatter):
 
     This formatter maps each logging level to a specific color for improved readability
     in the console output.
-
-    Attributes:
-        grey (str): ANSI escape sequence for grey color.
-        yellow (str): ANSI escape sequence for yellow color.
-        red (str): ANSI escape sequence for red color.
-        bold_red (str): ANSI escape sequence for bold red color.
-        cyan (str): ANSI escape sequence for cyan color.
-        green (str): ANSI escape sequence for green color.
-        reset (str): ANSI escape sequence to reset the color.
-        FORMATS (dict): Dictionary mapping log levels to their corresponding ANSI color codes.
     """
 
     grey = "\x1b[38;20m"
