@@ -1,16 +1,30 @@
 autograd package
 ================
 
-Subpackages
------------
+autograd.tensor module
+----------------------
+This module defines core tensor operations and the `Tensor` class.
 
-.. toctree::
-   :maxdepth: 4
+.. automodule:: autograd.tensor
+   :members:
+   :undoc-members:
+   :show-inheritance:
 
-   autograd.text
+autograd.nn module
+------------------
 
-Submodules
-----------
+.. automodule:: autograd.nn
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+autograd.optim module
+---------------------
+
+.. automodule:: autograd.optim
+   :members:
+   :undoc-members:
+   :show-inheritance:
 
 autograd.functional module
 --------------------------
@@ -36,30 +50,6 @@ autograd.logger module
    :undoc-members:
    :show-inheritance:
 
-autograd.nn module
-------------------
-
-.. automodule:: autograd.nn
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
-autograd.optim module
----------------------
-
-.. automodule:: autograd.optim
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
-autograd.tensor module
-----------------------
-
-.. automodule:: autograd.tensor
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
 Module contents
 ---------------
 
@@ -67,3 +57,11 @@ Module contents
    :members:
    :undoc-members:
    :show-inheritance:
+
+Subpackages
+-----------
+
+.. toctree::
+   :maxdepth: 4
+
+   autograd.text

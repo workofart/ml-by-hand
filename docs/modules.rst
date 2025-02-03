@@ -1,4 +1,4 @@
-ml-by-hand
+ML By Hand
 ==========
 
 .. toctree::
