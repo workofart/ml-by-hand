@@ -21,7 +21,6 @@ author = "Henry (Hanxiang) Pan"
 extensions = [
     "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
-    "sphinx_autodoc_typehints",
     "sphinx.ext.napoleon",
     "sphinx.ext.mathjax",
     "sphinx_math_dollar",
@@ -34,23 +33,10 @@ autodoc_member_order = "bysource"  # Order members by their appearance in source
 autosummary_generate = True
 napoleon_google_docstring = True
 pygments_style = "sphinx"
-
+napoleon_use_rtype = False
 templates_path = ["_templates"]
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", ".venv"]
 
-# mathjax_config = {
-#     'tex2jax': {
-#         'inlineMath': [ ["\\(","\\)"] ],
-#         'displayMath': [["\\[","\\]"] ],
-#     },
-# }
-
-# mathjax3_config = {
-#   "tex": {
-#     "inlineMath": [['\\(', '\\)']],
-#     "displayMath": [["\\[", "\\]"]],
-#   }
-# }
 
 # -- Options for HTML output -------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
