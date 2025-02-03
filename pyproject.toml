@@ -1,3 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autograd"
+version = "0.0.0"
+description = "We are creating a deep learning library from scratch to demystify the inner workings of building deep learning models"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.8"
+dependencies = [
+    "numpy",
+    "scikit-learn",  # for dataset
+    "tqdm",
+    "openml",  # for dataset
+    "regex",
+    "cupy-cuda12x; platform_system == 'Linux'" # Numpy GPU-acceleration
+]
+
+[tool.setuptools.packages.find]
+# Look in the current directory (the project root) and include the autograd package.
+where = ["."]
+include = ["autograd", "autograd.*"]
+
 [tool.pyright]
 reportIncompatibleMethodOverride = "none"
 exclude = [
@@ -8,3 +33,14 @@ exclude = [
 testpaths = ["test"]
 python_files = "test_*.py"
 memray = true
+
+
+[project.optional-dependencies]
+dev = [
+    "memray",
+    "psutil",
+    "pre-commit",
+    "pyright",
+    "pytest",
+    "ruff",
+]

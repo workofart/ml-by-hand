@@ -3,11 +3,11 @@ autograd package
 
 autograd.tensor module
 ----------------------
-This module defines core tensor operations and the `Tensor` class.
 
 .. automodule:: autograd.tensor
    :members:
    :undoc-members:
+   :special-members:
    :show-inheritance:
 
 autograd.nn module

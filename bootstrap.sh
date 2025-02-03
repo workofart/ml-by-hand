@@ -23,7 +23,7 @@ echo "Setup complete. Virtual environment is ready."
 
 source .venv/bin/activate
 
-echo "Installing dependencies..."
+echo "Checking GPU support..."
 
 # Install PyTorch with CUDA support if on Linux with NVIDIA drivers
 # PyTorch is only used for unit test validation
@@ -35,6 +35,5 @@ else
     uv pip install torch --index-url https://download.pytorch.org/whl/cpu
 fi
 
-# echo "Installing remaining requirements"
-uv pip install -r requirements.txt
-
+echo "Installing all dependencies (including dev)"
+uv pip install ".[dev]"

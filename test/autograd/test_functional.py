@@ -104,7 +104,9 @@ class TestActivationFunctions(TestCase):
 
         assert np.allclose(
             out_custom, gelu_torch(X_torch).detach().numpy(), atol=1e-6
-        ), "Approximate GELU forward pass did not match PyTorch GELU with approximate='tanh'."
+        ), (
+            "Approximate GELU forward pass did not match PyTorch GELU with approximate='tanh'."
+        )
 
     def test_gelu_backward(self):
         out_custom = functional.gelu(self.X)
@@ -118,7 +120,9 @@ class TestActivationFunctions(TestCase):
 
         assert np.allclose(
             self.X.grad.data, X_torch.grad.detach().numpy(), atol=1e-6
-        ), "Approximate GELU backward pass did not match PyTorch GELU with approximate='tanh'."
+        ), (
+            "Approximate GELU backward pass did not match PyTorch GELU with approximate='tanh'."
+        )
 
 
 class TestBinaryCrossEntropy(TestCase):

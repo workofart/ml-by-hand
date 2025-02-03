@@ -647,9 +647,9 @@ class TestTensorGather(TestTensor):
         gathered_torch = embeddings_torch[indices]
 
         # Check forward pass
-        assert (
-            gathered.shape == gathered_torch.shape
-        ), f"Shape mismatch: {gathered.shape} vs {gathered_torch.shape}"
+        assert gathered.shape == gathered_torch.shape, (
+            f"Shape mismatch: {gathered.shape} vs {gathered_torch.shape}"
+        )
         assert np.allclose(gathered.data, gathered_torch.detach().numpy())
 
         # Backward pass
@@ -1145,17 +1145,17 @@ class TestTensorPermute(TestTensor):
         y_ours = x_ours.permute(0, 2, 3, 1)
 
         # Compare shapes
-        assert (
-            y_torch.shape == y_ours.shape
-        ), f"Shape mismatch: {y_torch.shape} vs {y_ours.shape}"
+        assert y_torch.shape == y_ours.shape, (
+            f"Shape mismatch: {y_torch.shape} vs {y_ours.shape}"
+        )
 
         z_torch = y_torch.permute(0, 3, 1, 2)
         z_ours = y_ours.permute(0, 3, 1, 2)
 
         # Compare shapes
-        assert (
-            z_torch.shape == z_ours.shape
-        ), f"Shape mismatch: {z_torch.shape} vs {z_ours.shape}"
+        assert z_torch.shape == z_ours.shape, (
+            f"Shape mismatch: {z_torch.shape} vs {z_ours.shape}"
+        )
 
         # Backward pass
         loss_torch = z_torch.sum()
@@ -1165,9 +1165,9 @@ class TestTensorPermute(TestTensor):
         loss_ours.backward()
 
         # Compare gradient shapes
-        assert (
-            x_torch.grad.shape == x_ours.grad.shape
-        ), f"Gradient shape mismatch: {x_torch.grad.shape} vs {x_ours.grad.shape}"
+        assert x_torch.grad.shape == x_ours.grad.shape, (
+            f"Gradient shape mismatch: {x_torch.grad.shape} vs {x_ours.grad.shape}"
+        )
 
     def test_invalid_permute(self):
         x = Tensor(np.random.randn(2, 3, 4, 5))
@@ -1374,9 +1374,9 @@ class TestTensorStridedWindows(TestTensor):
         expected_grad_positions_stride2 = [(0, 0), (0, 2), (2, 0), (2, 2)]
 
         for pos in expected_grad_positions_stride2:
-            assert (
-                grad_stride2[pos] != 0
-            ), f"Gradient should be non-zero at position {pos}"
+            assert grad_stride2[pos] != 0, (
+                f"Gradient should be non-zero at position {pos}"
+            )
 
     def test_strided_windows_cnn_gradients(self):
         x = (
