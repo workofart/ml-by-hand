@@ -489,9 +489,9 @@ class TestLayerNorm(TestCase):
         var = np.var(x_simple[0, 0])  # should be 1.25
         expected = (x_simple[0, 0] - mean) / np.sqrt(var + self.epsilon)
 
-        assert np.allclose(
-            output.data[0, 0], expected, rtol=1e-4, atol=1e-4
-        ), "Output doesn't match manual calculation"
+        assert np.allclose(output.data[0, 0], expected, rtol=1e-4, atol=1e-4), (
+            "Output doesn't match manual calculation"
+        )
 
     def test_different_shapes(self):
         # Test with different input shapes
@@ -749,27 +749,27 @@ class TestMaxPool2d(TestConv2d):
         out1_torch = conv_torch(x1_torch)
 
         # Compare outputs
-        assert np.allclose(
-            out1.data, out1_torch.detach().numpy()
-        ), "Conv outputs do not match!"
+        assert np.allclose(out1.data, out1_torch.detach().numpy()), (
+            "Conv outputs do not match!"
+        )
 
         # Test 2: 4x4 input
         out2 = conv(x2)
         out2_torch = conv_torch(x2_torch)
 
         # Compare outputs
-        assert np.allclose(
-            out2.data, out2_torch.detach().numpy()
-        ), "Conv outputs do not match!"
+        assert np.allclose(out2.data, out2_torch.detach().numpy()), (
+            "Conv outputs do not match!"
+        )
 
         # Add pooling
         pool2 = pool(out2)
         pool2_torch = pool_torch(out2_torch)
 
         # Compare pooling outputs
-        assert np.allclose(
-            pool2.data, pool2_torch.detach().numpy()
-        ), "Pooling outputs do not match!"
+        assert np.allclose(pool2.data, pool2_torch.detach().numpy()), (
+            "Pooling outputs do not match!"
+        )
 
     def test_conv_pool_chain_with_grads(self):
         # Setup with more complex input tensor (3 channels, 6x6)
@@ -894,9 +894,9 @@ class TestMaxPool2d(TestConv2d):
             else np.zeros_like(conv_out_torch.data),
         ), "Conv output gradients do not match!"
 
-        assert np.allclose(
-            x2.grad.data, x2_torch.grad.numpy()
-        ), "Input gradients do not match!"
+        assert np.allclose(x2.grad.data, x2_torch.grad.numpy()), (
+            "Input gradients do not match!"
+        )
 
         assert np.allclose(
             conv._parameters["weight"].grad.data, conv_torch.weight.grad.numpy()
@@ -1041,9 +1041,9 @@ class TestRecurrentNetwork(TestCase):
 
         # Compare gradients
         # Input gradients
-        assert np.allclose(
-            x.grad.data, x_torch.grad.numpy(), rtol=1e-4, atol=1e-4
-        ), "Input gradients don't match"
+        assert np.allclose(x.grad.data, x_torch.grad.numpy(), rtol=1e-4, atol=1e-4), (
+            "Input gradients don't match"
+        )
 
         # Weight gradients - need to transpose PyTorch gradients to match our format
         assert np.allclose(

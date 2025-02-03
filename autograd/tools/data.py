@@ -244,7 +244,7 @@ class LLMDataLoader(AbstractDataLoader):
             max_offset = self.data_size - (self.seq_len + 1)
             if max_offset < 1:
                 raise ValueError(
-                    f"Dataset too small ({self.data_size} tokens) for seq_len={self.seq_len+1}"
+                    f"Dataset too small ({self.data_size} tokens) for seq_len={self.seq_len + 1}"
                 )
 
             # Randomly choose starting offsets for each sequence in the batch.

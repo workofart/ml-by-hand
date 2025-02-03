@@ -266,7 +266,7 @@ class BytePairEncoder:
 
             if (i + 1) % 100 == 0:
                 logger.info(
-                    f"[{i+1}/{self.num_merges} merge] Best Pair Merged "
+                    f"[{i + 1}/{self.num_merges} merge] Best Pair Merged "
                     f"({best_pair_count} occurrences). "
                     f"Vocab size: {len(self._unicode_to_int_vocab)}"
                 )

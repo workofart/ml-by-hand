@@ -81,7 +81,7 @@ class AbstractTrainer(ABC):
         """
         logger.info(
             f"Training {self.model.__class__.__name__} with "
-            f"{(self.model.num_parameters()/1e6):.2f}M parameters."
+            f"{(self.model.num_parameters() / 1e6):.2f}M parameters."
         )
         for epoch in tqdm(
             range(self.start_epoch, self.config.total_epochs),
