@@ -17,13 +17,37 @@ logger = logging.getLogger(__name__)
 
 
 class Module:
+    """
+    Base class for all neural network modules.
+
+    This class provides mechanisms for registering parameters, submodules,
+    and states, and implements common functionality such as zero_grad, forward,
+    and state dict management.
+
+    Note that we don't implement the backward() function in this Module class, because all the backward() functions are implemented at the tensor-level operations. And the forward fuctions are just piecing together tensor-level operations like lego.
+
+    Attributes:
+        _parameters (Dict[str, Tensor]): Dictionary of trainable parameters.
+        _modules (Dict[str, Module]): Dictionary of submodules.
+        _states (Dict[str, Any]): Dictionary of non-trainable states/buffers.
+        _is_training (Optional[bool]): Flag indicating training mode.
+    """
+
     def __init__(self, *args, **kwargs) -> None:
+        """
+        Initialize the Module.
+
+        This constructor initializes empty dictionaries for parameters, submodules, and states.
+        """
         self._parameters: Dict[str, Tensor] = {}
         self._modules: Dict[str, "Module"] = {}
         self._states: Dict[str, Any] = {}
         self._is_training: Optional[bool] = None
 
     def zero_grad(self) -> None:
+        """
+        Zero the gradients for all parameters in the module and its submodules.
+        """
         # Zero gradients for parameters in current module
         for p in self._parameters.values():
             p.grad = 0
@@ -33,19 +57,39 @@ class Module:
             module.zero_grad()
 
     def forward(self, x: Any) -> Tensor:
+        """
+        Perform the forward pass.
+
+        Args:
+            x (Any): Input data.
+
+        Returns:
+            Tensor: The output tensor after going through the forward pass
+
+        Raises:
+            NotImplementedError: If the method is not overridden by a subclass.
+        """
         raise NotImplementedError
 
     def __call__(self, *args: Any, **kwargs: Any) -> Tensor:
         """
-        Sometimes people like to call model = Module() then call model(x)
-        as a forward pass. So this is an alias.
+        Allows the module to be called as a function to perform a forward pass.
+
+        Returns:
+            Tensor: The output of the forward pass.
         """
         return self.forward(*args, **kwargs)
 
     def __setattr__(self, name: str, value: Any) -> None:
         """
-        Hook into attribute setting so that submodules / parameters
-        are automatically registered.
+        Override attribute setting to automatically register submodules, parameters, and states.
+
+        Args:
+            name (str): Attribute name.
+            value (Any): Attribute value.
+
+        Note:
+            Private attributes (names starting with '_') are set normally.
         """
         if name.startswith("_"):
             # Bypass custom logic for private/internal attributes
@@ -61,6 +105,18 @@ class Module:
             super().__setattr__(name, value)
 
     def __getattr__(self, name: str) -> Any:
+        """
+        Retrieve a submodule or state by name.
+
+        Args:
+            name (str): The name of the attribute to retrieve.
+
+        Returns:
+            Any: The submodule or state corresponding to the name.
+
+        Raises:
+            AttributeError: If the attribute is not found.
+        """
         if name in self._modules:
             return self._modules[name]
         if name in self._states:
@@ -69,9 +125,14 @@ class Module:
             f"Module {self.__class__.__name__} has no attribute {name}"
         )
 
-    def apply(self, func: Callable):
+    def apply(self, func: Callable) -> None:
         """
-        Apply a certain operation to every submodule (recursively) in-place.
+        Apply a function recursively to every submodule in-place.
+        This can be useful for dynamically adjusting the gradient or parameters of the model.
+        E.g. Clipping gradient norms, setting parameters to a specific value, etc.
+
+        Args:
+            func (Callable): A function that takes a Module and applies some operation.
         """
         for module in self._modules.values():
             module.apply(func)
@@ -81,9 +142,17 @@ class Module:
     @property
     def parameters(self) -> Dict[str, Any]:
         """
-        Return a flattened dictionary of all Tensors (trainable parameters)
-        from this module and submodules:
-          { 'weight': <Tensor>, 'submodule1.weight': <Tensor>, ... }
+        Get a flattened dictionary of all trainable parameters from the module and its submodules.
+
+        .. code-block:: json
+
+            {
+                "weight": "Tensor",
+                "submodule1.weight": "Tensor"
+            }
+
+        Returns:
+            Dict[str, Any]: A dictionary mapping parameter names to Tensor objects.
         """
         return {
             k: v
@@ -94,9 +163,17 @@ class Module:
     @property
     def states(self) -> Dict[str, Any]:
         """
-        Return a flattened dictionary of all non-trainable states/buffers
-        from this module and submodules:
-          { 'some_state': <np.ndarray>, 'submodule1.running_var': <np.ndarray>, ... }
+        Get a flattened dictionary of all non-trainable states or buffers from the module and its submodules.
+
+        .. code-block:: json
+
+            {
+                "some_state":  "np.ndarray",
+                "submodule1.running_var": "np.ndarray"
+            }
+
+        Returns:
+            Dict[str, Any]: A dictionary mapping state names to their values (np.ndarray).
         """
         return {
             k: v
@@ -106,12 +183,22 @@ class Module:
 
     def state_dict(self) -> Dict[str, Dict[str, Any]]:
         """
-        Return a dict of:
-          {
-            'parameters': { 'weight': np.array(...), 'bias': np.array(...), ... },
-            'states': { 'stateful_states': np.array(...), ... }
-          }
-        This is a flat representation (like PyTorch's state_dict).
+        Return a state dictionary of the module.
+
+        The state dictionary contains two keys:
+          - "parameters": A dictionary mapping parameter names to their raw numpy arrays.
+          - "states": A dictionary mapping state names to their values.
+
+        Returns:
+            Dict[str, Dict[str, Any]]: The state dictionary. This is a flat representation (like PyTorch's `state_dict`)
+
+        .. code-block:: json
+
+            {
+                "parameters": { "weight": "np.array()", "bias": "np.array()" },
+                "states": { "stateful_states": "np.array()" }
+            }
+
         """
         # Convert Tensors to raw np.array
         param_arrays = {k: v.data for k, v in self.parameters.items()}
@@ -120,14 +207,20 @@ class Module:
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
         """
-        Inverse of state_dict(). For example:
-            loaded = load_model('checkpoint.json', 'checkpoint.npz')
-            model.load_state_dict(loaded)
+        Load the module's state from a state dictionary.
+
         Expects a dict of the form:
-        {
-            'parameters': { 'weight': np.array(...), 'bias': np.array(...) },
-            'states': { 'stateful_states': np.array(...), ... }
-        }
+
+        .. code-block:: json
+
+            {
+                "parameters": { "weight": "np.array()", "bias": "np.array()" },
+                "states": { "stateful_states": "np.array()" }
+            }
+
+
+        Args:
+            state_dict (Dict[str, Any]): A dictionary containing the module's parameters and states.
         """
         # 1. Update parameters
         if "parameters" in state_dict:
@@ -141,24 +234,39 @@ class Module:
 
     def num_parameters(self) -> int:
         """
-        Returns the total number of parameters in the module and its submodules.
+        Calculate the total number of trainable parameters in the module and its submodules.
+
+        Returns:
+            int: The total number of parameters.
         """
         return sum(p.data.size for p in self.parameters.values())
 
     def train(self) -> None:
+        """
+        Set the module and all its submodules to training mode.
+        """
         for module in self._modules.values():
             module.train()
         self._is_training = True
 
     def eval(self) -> None:
+        """
+        Set the module and all its submodules to evaluation mode.
+        """
         for module in self._modules.values():
             module.eval()
         self._is_training = False
 
     def _get_attr_nested(self, attr_name: str, prefix: str = "") -> Dict[str, Any]:
         """
-        Recursively collect items (parameters or states) from self and submodules.
-        Returns a flattened dict: { 'prefix.param_name': value, ... }
+        Recursively collect items from the module and its submodules.
+
+        Args:
+            attr_name (str): The name of the attribute to collect (e.g., "_parameters" or "_states").
+            prefix (str, optional): The prefix for naming. Defaults to "".
+
+        Returns:
+            Dict[str, Any]: A flattened dictionary mapping full attribute names to their values.
         """
         out = {}
         # 1. Collect this module's items (e.g. self._parameters or self._states)
@@ -178,13 +286,12 @@ class Module:
         self, attr_name: str, flat_dict: Dict[str, Any], is_parameter: bool
     ) -> None:
         """
-        Recursively update either `_parameters` or `_states` by descending into submodules.
+        Recursively update attributes in the module and its submodules.
 
         Args:
-            flat_dict: is a mapping
-                { "submodule1.sub_weight": np.array(...),  ... }
-            attr_name: "_parameters" or "_states"
-            is_parameter: indicates if these are trainable parameters (Tensor) or not.
+            attr_name (str): The attribute to update ("_parameters" or "_states").
+            flat_dict (Dict[str, Any]): A dictionary mapping full attribute names to their new values.
+            is_parameter (bool): True if updating trainable parameters, False if updating states. This is needed to ensure in-place update for parameters to avoid breaking optimizer references
         """
         for full_name, value in flat_dict.items():
             parts = full_name.split(".")  # e.g. ["submodule1", "sub_weight"]
@@ -212,38 +319,87 @@ class Module:
 
 class ModuleList(Module):
     """
-    A list-like container of submodules.
-    Each submodule is properly registered so that it
-    appears in this container's .parameters, .modules, etc.
+    A container for holding submodules in a list-like structure.
+
+    This container registers each submodule so that they are included in the module's parameters and state dictionaries.
     """
 
     def __init__(self, modules=None):
+        """
+        Initialize the ModuleList.
+
+        Args:
+            modules (Optional[Iterable[Module]], optional): An iterable of modules to add to the list. Defaults to None.
+        """
         super().__init__()
         if modules is not None:
             for module in modules:
                 self.append(module)
 
     def append(self, module: Module) -> None:
-        """Append a module to the end of the list."""
+        """
+        Append a module to the ModuleList.
+
+        Args:
+            module (Module): The module to append.
+        """
         index = len(self._modules)  # how many modules we already have
         # Use __setattr__ with a string key so that it registers `module` as a submodule
         setattr(self, str(index), module)
 
     def __getitem__(self, idx: int) -> Module:
-        """Retrieve the submodule at index `idx`."""
+        """
+        Retrieve the submodule at the given index.
+
+        Args:
+            idx (int): The index of the submodule.
+
+        Returns:
+            Module: The submodule at the specified index.
+        """
         return self._modules[str(idx)]
 
     def __len__(self) -> int:
+        """
+        Get the number of submodules in the ModuleList.
+
+        Returns:
+            int: The number of submodules.
+        """
         return len(self._modules)
 
     def __iter__(self):
-        """Allow iteration over submodules in a for-loop, e.g. for m in module_list: ..."""
+        """
+        Return an iterator over the submodules.
+
+        Yields:
+            Module: Each submodule in the ModuleList.
+        """
         for idx in range(len(self)):
             yield self[idx]
 
 
 class Linear(Module):
+    """
+    A linear (fully connected) layer.
+
+    This layer performs a linear transformation:
+        $$
+        y = xW + b
+        $$
+
+    where $W$ is the weight matrix and $b$ is the bias.
+    """
+
     def __init__(self, input_size: int, output_size: int, **kwargs: Any) -> None:
+        """
+        Initialize the Linear layer.
+
+        Args:
+            input_size (int): The size of the input features.
+            output_size (int): The size of the output features.
+            **kwargs: Additional keyword arguments.
+        """
         super().__init__(input_size, output_size, **kwargs)
 
         # weight is a matrix of shape (input_size, output_size)
@@ -255,6 +411,15 @@ class Linear(Module):
         self._parameters["bias"] = Tensor(np.zeros(output_size, dtype=np.float32))
 
     def forward(self, x: Union[Tensor, np.ndarray]) -> Tensor:
+        """
+        Compute the forward pass of the Linear layer.
+
+        Args:
+            x (Union[Tensor, np.ndarray]): The input tensor.
+
+        Returns:
+            Tensor: The result of the linear transformation.
+        """
         if not isinstance(x, Tensor):
             x = Tensor(x)
 
@@ -266,6 +431,13 @@ class Linear(Module):
 
 
 class Conv2d(Module):
+    """
+    A 2D convolutional layer.
+
+    This layer applies a convolution operation over a 4D input tensor with shape
+    (N, in_channels, H, W) and produces an output tensor with shape (N, out_channels, H_out, W_out).
+    """
+
     def __init__(
         self,
         in_channels: int,
@@ -277,25 +449,18 @@ class Conv2d(Module):
         **kwargs: Any,
     ) -> None:
         """
-        Applies a 2D convolution over an input tensor.
-        The shape convention is the same as PyTorch:
-            input_shape = (N, in_channels, H, W)
-            output_shape = (N, out_channels, H', W')
+        Initialize the Conv2d layer.
 
-        where:
-        - N is the batch size
-        - in_channels is the number of input channels
-        - out_channels is the number of kernels, where each kernel is convolved with the input tensor in all input channels
+        Applies a 2D convolution over an input tensor with shape (N, in_channels, H, W).
 
         Args:
             in_channels (int): Number of input channels.
-            out_channels (int): Number of output channels.
+            out_channels (int): Number of output channels (number of kernels).
             kernel_size (int): Size of the convolutional kernel.
             stride (int, optional): Stride of the convolution. Defaults to 1.
-            bias (bool, optional): Whether to add a bias term. Defaults to True.
-            padding_mode (str, optional): The amount of padding_mode to add to the input. Defaults to 'valid'.
-            - "valid" means no padding.
-            - "same" means padding such that the output shape is the same as the input shape.
+            padding_mode (str, optional): Padding mode, either "valid" (no padding) or "same" (output same shape as input). Defaults to "valid".
+            bias (bool, optional): Whether to include a bias term. Defaults to True.
+            **kwargs: Additional keyword arguments.
         """
         super().__init__(
             in_channels,
@@ -335,6 +500,15 @@ class Conv2d(Module):
             )  # one bias per kernel
 
     def forward(self, x: Union[Tensor, np.ndarray]) -> Tensor:
+        """
+        Compute the forward pass of the Conv2d layer.
+
+        Args:
+            x (Union[Tensor, np.ndarray]): Input tensor of shape (N, in_channels, H, W).
+
+        Returns:
+            Tensor: Output tensor after applying the convolution and bias addition.
+        """
         if not isinstance(x, Tensor):
             x = Tensor(x)
 
@@ -386,6 +560,12 @@ class Conv2d(Module):
 
 
 class MaxPool2d(Module):
+    """
+    A 2D max pooling layer.
+
+    This layer performs max pooling over a sliding window of the input tensor.
+    """
+
     def __init__(
         self,
         kernel_size: int,
@@ -394,14 +574,13 @@ class MaxPool2d(Module):
         **kwargs: Any,
     ) -> None:
         """
-        2D Max Pooling Layer
+        Initialize the MaxPool2d layer.
 
         Args:
-            kernel_size (int): Size of pooling window (2 means 2x2 window)
-            stride (int, optional): How many pixels to move the window each time. Defaults to kernel_size.
-            padding_mode (str, optional): The type of padding_mode to add to the input. Defaults to 'valid'.
-            - "valid" means no padding.
-            - "same" means padding such that the output shape is the same as the input shape.
+            kernel_size (int): Size of the pooling window.
+            stride (Optional[int], optional): Stride of the pooling operation. Defaults to kernel_size if not provided.
+            padding_mode (str, optional): Padding mode, either "valid" (no padding) or "same" (output same shape as input). Defaults to "valid".
+            **kwargs: Additional keyword arguments.
         """
         super().__init__(kernel_size, **kwargs)
         self.kernel_size = kernel_size
@@ -411,6 +590,15 @@ class MaxPool2d(Module):
         self.padding_mode = padding_mode
 
     def forward(self, x: Union[Tensor, np.ndarray]) -> Tensor:
+        """
+        Compute the forward pass of the MaxPool2d layer.
+
+        Args:
+            x (Union[Tensor, np.ndarray]): Input tensor.
+
+        Returns:
+            Tensor: Tensor after applying max pooling.
+        """
         if not isinstance(x, Tensor):
             x = Tensor(x)
 
@@ -433,16 +621,24 @@ class MaxPool2d(Module):
 
 class ResidualBlock(Module):
     """
-    Residual Block as described in Deep Residual Learning for Image Recognition
-    The residual block as a whole implements both F(x) and x (identity mapping)
-    The function that were trying to learn is H(x) = F(x) + x
-    F(x) is the convolutional layer with ReLU activation
-    x is the identity mapping
+    Residual Block.
 
+    Implements a residual block that learns a function F(x) such that the output is
+    Currently this wraps the Convolution block inside. TODO: Remove the convolutional block
+
+    H(x) = F(x) + x, where x is the identity mapping.
     Paper: https://arxiv.org/abs/1512.03385
     """
 
     def __init__(self, in_channels: int, out_channels: int, stride: int = 1) -> None:
+        """
+        Initialize the ResidualBlock.
+
+        Args:
+            in_channels (int): Number of input channels.
+            out_channels (int): Number of output channels.
+            stride (int, optional): Stride for the convolution. Defaults to 1.
+        """
         super().__init__(in_channels, out_channels, stride=stride)
         self.conv1 = Conv2d(
             in_channels, out_channels, kernel_size=3, stride=stride, padding_mode="same"
@@ -461,6 +657,15 @@ class ResidualBlock(Module):
         )
 
     def forward(self, x: Union[Tensor, np.ndarray]) -> Tensor:
+        """
+        Compute the forward pass of the ResidualBlock.
+
+        Args:
+            x (Union[Tensor, np.ndarray]): Input tensor.
+
+        Returns:
+            Tensor: Output tensor after applying the residual block.
+        """
         identity = self.shortcut(x)  # Match channels
 
         out = self.conv1(x)
@@ -470,6 +675,14 @@ class ResidualBlock(Module):
 
 
 class RecurrentBlock(Module):
+    """
+    Recurrent Neural Network (RNN) block.
+
+    Implements a simple RNN that processes a sequence and returns either the final hidden state or
+    an output computed from the final hidden state if output_size is specified.
+    Paper: https://arxiv.org/abs/1308.0850
+    """
+
     def __init__(
         self,
         input_size: int,
@@ -478,16 +691,14 @@ class RecurrentBlock(Module):
         dropout_prob: Optional[float] = None,
     ) -> None:
         """
-        Recurrent Neural Network (RNN)
-        Paper: https://arxiv.org/abs/1308.0850
+        Initialize the RecurrentBlock.
 
         Args:
-            input_size (int): The size of the input
-            hidden_size (int): The size of the hidden state
-            output_size (int, optional): The size of the output. Defaults to None.
-            If specified, the output will be a linear combination of final hidden state
-            and output layer weights.
-            dropout_prob (float, optional): Whether to apply dropout to non-recurrent connections
+            input_size (int): The size of the input features.
+            hidden_size (int): The size of the hidden state.
+            output_size (Optional[int], optional): The size of the output. If specified, the output is computed
+                from the final hidden state. Defaults to None.
+            dropout_prob (Optional[float], optional): Dropout probability for non-recurrent connections. Defaults to None.
 
         W_xh: transforms the input into "hidden embedding"
         W_hh: transforms the hidden state into the next hidden state
@@ -525,10 +736,13 @@ class RecurrentBlock(Module):
 
     def forward(self, x: Union[Tensor, np.ndarray]) -> Tensor:
         """
-        Forward pass of the RNN
+        Perform the forward pass of the RNN.
 
         Args:
-            x (Tensor): The input tensor of shape (batch_size, sequence_length, input_size)
+            x (Union[Tensor, np.ndarray]): Input tensor of shape (batch_size, sequence_length, input_size).
+
+        Returns:
+            Tensor: Output tensor computed from the final hidden state or the hidden state itself if output_size is not specified.
         """
         if not isinstance(x, Tensor):
             x = Tensor(x)
@@ -566,6 +780,13 @@ class RecurrentBlock(Module):
 
 
 class LongShortTermMemoryBlock(Module):
+    """
+    Long Short-Term Memory (LSTM) block.
+
+    Implements an LSTM that processes a sequence and returns the final output and cell state.
+    Paper: https://www.bioinf.jku.at/publications/older/2604.pdf
+    """
+
     def __init__(
         self,
         input_size: int,
@@ -574,16 +795,13 @@ class LongShortTermMemoryBlock(Module):
         dropout_prob: Optional[float] = None,
     ) -> None:
         """
-        Long Short-Term Memory (LSTM) Neural Network
-        Paper: https://www.bioinf.jku.at/publications/older/2604.pdf
+        Initialize the LSTM block.
 
         Args:
-            input_size (int): The size of the input
-            hidden_size (int): The size of the hidden state
-            output_size (int, optional): The size of the output. Defaults to None.
-            If specified, the output will be a linear combination of final hidden state
-            and output layer weights.
-            dropout_prob (float, optional): Whether to apply dropout to non-recurrent connections
+            input_size (int): The size of the input features.
+            hidden_size (int): The size of the hidden state.
+            output_size (Optional[int], optional): The size of the output. If specified, the output will be a linear combination of final hidden state and output layer weights. Defaults to None.
+            dropout_prob (Optional[float], optional): Dropout probability for non-recurrent connections. Defaults to None.
 
         States:
             - Cell state: Internal memory of LSTM. It flows down the chain (time steps)
@@ -639,19 +857,17 @@ class LongShortTermMemoryBlock(Module):
         C_t: Optional[Tensor] = None,
     ) -> Tuple[Tensor, Tensor]:
         """
-        Forward pass of the LSTM
+        Perform the forward pass of the LSTM.
 
         Args:
-            x (Tensor): The input tensor of shape (batch_size, sequence_length, input_size)
+            x (Union[Tensor, np.ndarray]): Input tensor of shape (batch_size, sequence_length, input_size).
+            hidden_state (Optional[Tensor], optional): Initial hidden state. Defaults to zeros if not provided.
+            C_t (Optional[Tensor], optional): Initial cell state. Defaults to zeros if not provided.
 
-            The following are optional. If you are explicitly "unrolling" the recursive time series structure by calling forward() one time step at a time
-
-            hidden_state (Tensor): Starting hidden state
-            C_t (Tensor): The starting cell state
-
-            Returns:
-                1. output (if output_size was specified when initializing the LSTM block), otherwise, the last hidden state
-                2. Last cell state
+        Returns:
+            Tuple[Tensor, Tensor]: A tuple containing:
+                - The output tensor (or final hidden state) if output_size is specified, otherwise the final hidden state.
+                - The final cell state.
         """
         if not isinstance(x, Tensor):
             x = Tensor(x)
@@ -734,6 +950,13 @@ class Embedding(Module):
     """
 
     def __init__(self, input_size: int, embedding_size: int) -> None:
+        """
+        Initialize the Embedding layer.
+
+        Args:
+            input_size (int): The size of the vocabulary.
+            embedding_size (int): The size of the embedding vectors.
+        """
         super().__init__()
 
         # weight.shape: (input_size, embedding_size)
@@ -744,8 +967,13 @@ class Embedding(Module):
 
     def forward(self, x: Union[Tensor, np.ndarray]) -> Tensor:
         """
-        x: shape (batch_size, seq_len), each entry is an integer index in [0..vocab_size-1].
-        Returns: (batch_size, seq_len, embedding_size)
+        Perform the forward pass of the Embedding layer.
+
+        Args:
+            x (Union[Tensor, np.ndarray]): Input tensor of shape (batch_size, seq_len), each entry is an integer index in [0.. vocab_size - 1]
+
+        Returns:
+            Tensor: Output tensor of shape (batch_size, seq_len, embedding_size).
         """
         if not isinstance(x, Tensor):
             x = Tensor(x)
@@ -757,20 +985,36 @@ class Embedding(Module):
 
 class LayerNorm(Module):
     """
-    Layer Normalization
+    Layer Normalization.
 
-    This layer computes mean and variance from all of the summed inputs to the neurons in a layer on a single training case
-
+    Normalizes the summed inputs to neurons for each training example.
     Paper: https://arxiv.org/abs/1607.06450
     """
 
     def __init__(self, input_size: int, epsilon: float = 1e-5, **kwargs: Any) -> None:
+        """
+        Initialize the LayerNorm layer.
+
+        Args:
+            input_size (int): The number of features in the input.
+            epsilon (float, optional): Small constant for numerical stability. Defaults to 1e-5.
+            **kwargs: Additional keyword arguments.
+        """
         super().__init__(**kwargs)
         self.epsilon = epsilon
         self._parameters["gain"] = Tensor(np.ones((input_size,)))
         self._parameters["bias"] = Tensor(np.zeros((input_size,)))
 
     def forward(self, x: Tensor) -> Tensor:
+        """
+        Perform the forward pass of LayerNorm.
+
+        Args:
+            x (Tensor): Input tensor.
+
+        Returns:
+            Tensor: Normalized tensor scaled and shifted by learnable parameters.
+        """
         # Equation 4 in section 3.1 in the paper
         mean = x.mean(
             axis=-1, keepdims=True
@@ -791,10 +1035,9 @@ class LayerNorm(Module):
 
 class BatchNorm(Module):
     """
-    Batch Normalization: Accelerating Deep Network Training by Reducing Internal Covariate Shift
+    Batch Normalization: Accelerating Deep Network Training by Reducing Internal Covariate Shift.
 
     This layer normalizes the input tensor by subtracting the batch mean and dividing by the batch standard deviation.
-
     Paper: http://arxiv.org/abs/1502.03167
     """
 
@@ -805,6 +1048,15 @@ class BatchNorm(Module):
         epsilon: float = 1e-5,
         **kwargs: Any,
     ) -> None:
+        """
+        Initialize the BatchNorm layer.
+
+        Args:
+            input_size (int): The number of features in the input.
+            momentum (float, optional): Momentum factor for running statistics. Defaults to 0.1.
+            epsilon (float, optional): Small constant for numerical stability. Defaults to 1e-5.
+            **kwargs: Additional keyword arguments.
+        """
         super().__init__(input_size, momentum=momentum, epsilon=epsilon, **kwargs)
 
         self.momentum = momentum  # used in running mean and variance calculation
@@ -822,8 +1074,16 @@ class BatchNorm(Module):
 
     def forward(self, x: Tensor) -> Tensor:
         """
+        Perform the forward pass of BatchNorm.
+
         Note that the backward pass is implemented via primitive operations in the Tensor class.
         The operations in the forward pass have all been implemented as Tensor-level operations.
+
+        Args:
+            x (Tensor): Input tensor.
+
+        Returns:
+            Tensor: Normalized tensor with learnable scaling and shifting.
         """
         if self._is_training:
             # Compute batch statistics using Tensor operations
@@ -857,21 +1117,35 @@ class BatchNorm(Module):
 
 
 class Dropout(Module):
+    """
+    Dropout layer.
+
+    Randomly sets a fraction of input units to 0 during training to prevent overfitting.
+    "It prevents overfitting and provides a way of approximately combining exponentially many different neural network architectures efficiently."
+    Paper: https://arxiv.org/abs/1207.0580
+    """
+
     def __init__(self, p: float = 0.5, **kwargs: Any) -> None:
         """
-        The Dropout layer randomly sets a fraction of input units to 0 at each update during training time.
-
-        "It prevents overfitting and provides a way of approximately combining exponentially many different
-        neural network architectures efficiently."
-        Paper: https://arxiv.org/abs/1207.0580
+        Initialize the Dropout layer.
 
         Args:
             p (float, optional): Fraction of the input units to drop. Defaults to 0.5.
+            **kwargs: Additional keyword arguments.
         """
         super().__init__(p=p, **kwargs)
         self.p = p
 
     def forward(self, x: Tensor) -> Tensor:
+        """
+        Perform the forward pass of Dropout.
+
+        Args:
+            x (Tensor): Input tensor.
+
+        Returns:
+            Tensor: Tensor after applying dropout (only during training).
+        """
         if self._is_training:
             mask = np.random.binomial(1, 1 - self.p, size=x.data.shape)
             return (
@@ -887,20 +1161,42 @@ class Dropout(Module):
 
 
 class ScaledDotProductAttention(Module):
-    """
-    Implements the Scaled Dot-Product Attention in Section 3.2.1 in the paper.
-    Paper: https://arxiv.org/abs/1706.03762
+    r"""
+    Scaled Dot-Product Attention layer.
 
-    Attention(Q,K,V) = softmax(Q transpose(K) / sqrt(key_dim)) V
+    Computes attention scores as:
+    $$
+    \text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{key\_dim}}\right) V
+    $$
+
+    Implements the Scaled Dot-Product Attention in Section 3.2.1 in paper: https://arxiv.org/abs/1706.03762
     """
 
     def __init__(self, dropout_prob: float = 0.1) -> None:
+        """
+        Initialize the ScaledDotProductAttention layer.
+
+        Args:
+            dropout_prob (float, optional): Dropout probability applied after softmax. Defaults to 0.1.
+        """
         super().__init__()
         self.dropout = Dropout(p=dropout_prob)
 
     def forward(
         self, query: Tensor, key: Tensor, value: Tensor, mask: Optional[Tensor] = None
     ) -> Tensor:
+        """
+        Compute the scaled dot-product attention.
+
+        Args:
+            query (Tensor): Query tensor.
+            key (Tensor): Key tensor.
+            value (Tensor): Value tensor.
+            mask (Optional[Tensor], optional): Mask tensor to prevent attention to certain positions. Defaults to None.
+
+        Returns:
+            Tensor: The result of applying attention to the value tensor.
+        """
         attention_size = Tensor(key.shape[-1])
 
         # scaled dot product
@@ -917,16 +1213,24 @@ class ScaledDotProductAttention(Module):
 
 class MultiHeadAttention(Module):
     """
-    Implements the Multi-Head Attention in Section 3.2.2 in the paper.
-    Paper: https://arxiv.org/abs/1706.03762
+    Multi-Head Attention layer.
 
     Instead of performing a single attention with hidden_size keys, query, and values,
     we project them "num_heads" times with different learned linear projects
+    Implements the Multi-Head Attention in Section 3.2.2 in the paper: https://arxiv.org/abs/1706.03762
     """
 
     def __init__(
         self, num_heads: int, hidden_size: int, dropout_prob: float = 0.1
     ) -> None:
+        """
+        Initialize the MultiHeadAttention layer.
+
+        Args:
+            num_heads (int): Number of attention heads.
+            hidden_size (int): Size of the hidden representation.
+            dropout_prob (float, optional): Dropout probability. Defaults to 0.1.
+        """
         super().__init__()
         self.num_heads = num_heads
         self.attention_size = (
@@ -944,6 +1248,18 @@ class MultiHeadAttention(Module):
     def forward(
         self, query: Tensor, key: Tensor, value: Tensor, mask: Optional[Tensor] = None
     ) -> Tensor:
+        """
+        Compute the forward pass of the MultiHeadAttention layer.
+
+        Args:
+            query (Tensor): Query tensor.
+            key (Tensor): Key tensor.
+            value (Tensor): Value tensor.
+            mask (Optional[Tensor], optional): Mask tensor for attention. Defaults to None.
+
+        Returns:
+            Tensor: Output tensor after multi-head attention.
+        """
         batch_size = query.shape[0]
 
         # We try to avoid explicitly splitting and combining the heads
@@ -987,35 +1303,62 @@ class MultiHeadAttention(Module):
         return self.fc(att_score)
 
 
-########### Utility Functions ###########
+########### Misc Functions ###########
 
 
 class AbstractLLMForwardFn(ABC):
     """
-    An interface describing how to run a 'forward' pass for language modeling.
-    Subclasses implement the __call__ method, which returns (logits, labels).
+    Abstract interface for a language modeling forward function.
+
+    Subclasses should implement the sample and train methods to perform forward passes
+    for language modeling tasks.
     """
 
     @abstractmethod
     def sample(self, model: Any, batch_data: Any) -> Tuple[Any, Any]:
+        """
+        Generate samples from the model.
+
+        Args:
+            model (Any): The model to sample from.
+            batch_data (Any): Data for the current batch.
+
+        Returns:
+            Tuple[Any, Any]: A tuple containing generated outputs and auxiliary information.
+        """
         pass
 
     @abstractmethod
     def train(self, model: Any, batch_data: Any) -> Tuple[Any, Any]:
+        """
+        Compute the forward pass for training.
+
+        Args:
+            model (Any): The model to train.
+            batch_data (Any): Data for the current batch.
+
+        Returns:
+            Tuple[Any, Any]: A tuple containing prediction logits and ground truth labels.
+        """
         pass
 
     def __call__(
         self, model: Any, batch_data: Any, mode: str = "train"
     ) -> Tuple[Any, Any]:
         """
+        Execute a forward pass in either training or sampling mode.
+
         Args:
-            model: The model to run a forward pass on.
-            batch_data: The data for the current batch, in any format.
-            mode (str): "train" or "sample"
+            model (Any): The model to run.
+            batch_data (Any): Data for the current batch.
+            mode (str, optional): Mode of operation, either "train" or "sample". Defaults to "train".
 
         Returns:
-            If train mode (prediction_logits, ground_truth_labels).
-            If sample mode (prediction_logits, None)
+            Tuple[Any, Any]: If mode is "train", returns (prediction_logits, ground_truth_labels).
+                              If mode is "sample", returns (prediction_logits, None).
+
+        Raises:
+            ValueError: If an invalid mode is provided.
         """
         if mode == "train":
             return self.train(model, batch_data)
@@ -1032,18 +1375,18 @@ def extract_windows(
     padding_mode: str = "valid",
 ) -> Tuple[Tensor, Tuple[int, int]]:
     """
-    Extract windows from input tensor while maintaining computational graph.
+    Extract sliding windows from the input tensor while maintaining the computational graph.
 
     Args:
-        x (Tensor): Input tensor of shape (batch_size, channels, height, width)
-        kernel_size (int): Size of the sliding window
-        stride (int): Step size between windows
-        padding_mode (str): Type of padding - "valid" or "same"
+        x (Union[Tensor, np.ndarray]): Input tensor of shape (batch_size, channels, height, width).
+        kernel_size (int): Size of the sliding window.
+        stride (int): Step size between windows.
+        padding_mode (str, optional): Padding mode to apply, either "valid" or "same". Defaults to "valid".
 
     Returns:
-        tuple: (windows, output_shape)
-            - windows: Stacked tensor of shape (H_out, W_out, batch_size, channels, kernel_size, kernel_size)
-            - output_shape: (H_out, W_out) tuple for reshaping
+        Tuple[Tensor, Tuple[int, int]]:
+            - windows: Stacked tensor of windows with shape (H_out, W_out, batch_size, channels, kernel_size, kernel_size).
+            - output_shape: A tuple (H_out, W_out) representing the spatial dimensions of the output.
     """
     if not isinstance(x, Tensor):
         x = Tensor(x)
