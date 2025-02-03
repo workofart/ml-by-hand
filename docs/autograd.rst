@@ -7,6 +7,7 @@ autograd.tensor module
 .. automodule:: autograd.tensor
    :members:
    :undoc-members:
+   :special-members:
    :show-inheritance:
 
 autograd.nn module
