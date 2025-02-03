@@ -33,6 +33,7 @@ autodoc_member_order = "bysource"  # Order members by their appearance in source
 # Automatically generate stub pages for autosummary directives
 autosummary_generate = True
 napoleon_google_docstring = True
+pygments_style = "sphinx"
 
 templates_path = ["_templates"]
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", ".venv"]
