@@ -24,6 +24,5 @@ sphinx:
 python:
    install:
    - requirements: docs/requirements.txt
-
-commands:
-  - sphinx-apidoc -f -o docs/ autograd  # Generate API documentation
+   - method: pip
+     path: .
