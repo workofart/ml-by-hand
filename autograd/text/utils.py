@@ -249,8 +249,7 @@ def inference(
         to generate the next token (i.e. next token is conditioned on all previously
         generated tokens).
     - Teacher forcing inference if `groundtruth_data` is provided.
-        - In teacher forcing mode, temperature is overridden to 0.0 and top_k to 1 to
-        yield argmax behavior.
+        - In teacher forcing mode, temperature is overridden to 0.0 and top_k to 1 to yield argmax behavior.
         - Generates text by teacher forcing on `groundtruth_data`. At each time step, we feed the model the ground truth tokens up to that point, and measure or collect the predicted next token.
 
     Args:
