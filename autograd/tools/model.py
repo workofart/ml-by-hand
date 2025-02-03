@@ -1,3 +1,7 @@
+"""
+Utility functions for saving and loading model checkpoints.
+"""
+
 import json
 import os
 from typing import Any, Dict
@@ -21,26 +25,50 @@ SerializedMeta = Dict[str, Any]
 def save_checkpoint(
     obj: Any, json_path: str = "checkpoint.json", npz_path: str = "checkpoint.npz"
 ) -> None:
-    """
-    Serialize any Python object (model checkpoint, etc.) to:
-      1. JSON file with nested structure (metadata).
-      2. NPZ file with numeric array data.
+    """Saves a Python object (model state, etc.) into JSON and NPZ files.
+
+    This function splits the saved content into:
+    - A JSON file for the metadata or structure.
+    - A NPZ file for numeric array data (e.g., model weights).
 
     Args:
-       obj: The object to serialize (usually the state_dict of a model or optimizer).
-            You can also add custom metadata to this object.
-       json_path: Path to save the JSON metadata file.
-       npz_path: Path to save the NPZ data file.
+        obj: The Python object to serialize, typically a model's state_dict or
+            other checkpoint data structure.
+        json_path (str): The file path to save the JSON metadata. Defaults to
+            'checkpoint.json'.
+        npz_path (str): The file path to save the NPZ data. Defaults to
+            'checkpoint.npz'.
+
+    Raises:
+        OSError: If there is an error writing to the specified files.
+
+    Example:
+        >>> from autograd.tensor import Tensor
+        >>> obj_to_save = {
+        ...     "parameters": {
+        ...         "weight": Tensor([1.0, 2.0, 3.0]),
+        ...         "bias": Tensor([0.5])
+        ...     },
+        ...     "epoch": 5
+        ... }
+        >>> save_checkpoint(obj_to_save, "my_model.json", "my_model.npz")
     """
 
     def _serialize(
         obj: Any, arrays: Dict[str, np.ndarray], prefix: str = ""
     ) -> SerializedMeta:
-        """
-        Recursively serialize a Python object into a structure
+        """Recursively serialize a Python object into a structure
         that can be stored as JSON + NPZ.
+
+        Args:
+            obj: The object (dictionary, list, tuple, Tensor, etc.) to serialize.
+            arrays (Dict[str, np.ndarray]): A dictionary to store array data keyed
+                by string identifiers.
+            prefix (str): A prefix for naming arrays in `arrays`.
+
+        Returns:
+            SerializedMeta: A dictionary representing the serialized metadata.
         """
-        # Dictionary
         if isinstance(obj, dict):
             return {
                 "_type": "dict",
@@ -94,18 +122,47 @@ def load_checkpoint(
     npz_path: str = "checkpoint.npz",
     weights_only: bool = False,
 ) -> Any:
-    """
-    Load an object saved by `save_model`, reconstructing Tensors, arrays, etc.
+    """Loads an object from saved checkpoint files.
+
+    This function reconstructs the Python object that was previously serialized
+    by `save_checkpoint`. It reads:
+    - A JSON file for the metadata or structure.
+    - A NPZ file for numeric array data.
 
     Args:
-       json_path: Path to the JSON file containing the serialized object.
-       npz_path: Path to the NPZ file containing the serialized arrays.
-       weights_only: If True, only load the weights (e.g., "parameters" key), ignoring other states.
+        json_path (str): The file path of the JSON metadata. Defaults to
+            'checkpoint.json'.
+        npz_path (str): The file path of the NPZ data. Defaults to
+            'checkpoint.npz'.
+        weights_only (bool): If True, only loads the "parameters" sub-dictionary
+            (commonly used for model weights). Defaults to False.
+
+    Returns:
+        Any: The reconstructed Python object, which may be a nested dictionary,
+        list, Tensor, etc.
+
+    Raises:
+        ValueError: If either JSON or NPZ checkpoint file does not exist.
+        ValueError: If the metadata contains unknown types that cannot be deserialized.
+
+    Example:
+        >>> checkpoint_data = load_checkpoint("my_model.json", "my_model.npz")
+        >>> # If only model parameters are needed:
+        >>> model_weights = load_checkpoint("my_model.json", "my_model.npz", weights_only=True)
     """
 
     def _deserialize(meta: SerializedMeta, data: Dict[str, np.ndarray]) -> Any:
-        """
-        Recursively reconstruct an object from its serialized form.
+        """Recursively reconstruct an object from its serialized form.
+
+        Args:
+            meta (SerializedMeta): The serialized metadata.
+            data (Dict[str, np.ndarray]): A dictionary of array data loaded from NPZ.
+
+        Returns:
+            Any: The reconstructed Python object (dict, list, Tensor, etc.).
+
+        Raises:
+            ValueError: If the metadata has an unknown '_type'.
         """
         t = meta["_type"]
 

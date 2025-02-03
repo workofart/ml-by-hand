@@ -18,28 +18,67 @@ logger = logging.getLogger(__name__)
 class LRScheduler:
     """
     Interface for a learning rate scheduler.
+
     Subclasses should implement the __call__ method.
     """
 
     def __call__(self, step: int, initial_lr: float, current_lr: float) -> float:
+        """
+        Compute the updated learning rate.
+
+        Args:
+            step (int): The current global step.
+            initial_lr (float): The initial learning rate.
+            current_lr (float): The current learning rate.
+
+        Returns:
+            float: The updated learning rate.
+
+        Raises:
+            NotImplementedError: Must be implemented by subclasses.
+        """
         raise NotImplementedError
 
 
 class CosineScheduler(LRScheduler):
     """
     Cosine learning rate scheduler with warmup.
-    Implements Section 3 in "SGDR: Stochastic Gradient Descent with Warm Restarts"
+
+    Implements Section 3 in "SGDR: Stochastic Gradient Descent with Warm Restarts".
     Paper: https://arxiv.org/abs/1608.03983
     """
 
     def __init__(
         self, warmup_steps: int = 100, lr_decay_iters: int = 200, min_lr: float = 1e-4
     ):
+        """
+        Initialize the CosineScheduler.
+
+        Args:
+            warmup_steps (int, optional): Number of warmup steps. Defaults to 100.
+            lr_decay_iters (int, optional): Step at which learning rate decay ends. Defaults to 200.
+            min_lr (float, optional): Minimum learning rate. Defaults to 1e-4.
+        """
         self.warmup_steps = warmup_steps
         self.lr_decay_iters = lr_decay_iters
         self.min_lr = min_lr
 
     def __call__(self, step: int, initial_lr: float, current_lr: float) -> float:
+        """
+        Compute the learning rate for a given step using cosine decay with warmup.
+
+        Note:
+            The initial_lr is treated as the maximum learning rate during warmup,
+            and then decayed cosine-wise to min_lr.
+
+        Args:
+            step (int): The current global step.
+            initial_lr (float): The initial (maximum) learning rate.
+            current_lr (float): The current learning rate (unused in this scheduler).
+
+        Returns:
+            float: The updated learning rate.
+        """
         # The initial_lr is the min learning rate in the original paper
         if step < self.warmup_steps:
             return initial_lr * (step + 1) / (self.warmup_steps + 1)
@@ -54,17 +93,24 @@ class CosineScheduler(LRScheduler):
 
 class Optimizer:
     """
-    Base Optimizer Class
+    Base Optimizer Class.
 
-    Usage:
-      scheduler = CosineScheduler(warmup_steps=100, lr_decay_iters=5000)
-      optimizer = Optimizer(model.parameters(), lr=0.01, lr_scheduler=scheduler)
-      for input, target in dataset:
-          optimizer.zero_grad()
-          output = model(input)
-          loss = loss_fn(output, target)
-          loss.backward()
-          optimizer.step()
+    Usage Example:
+
+    .. code-block:: python
+
+        optimizer = Optimizer(model.parameters(), lr=0.01, lr_scheduler_kwargs={
+            "lr_scheduler_cls": CosineScheduler,
+            "warmup_steps": 100,
+            "lr_decay_iters": 5000,
+            "min_lr": 1e-4
+        })
+        for input, target in dataset:
+            optimizer.zero_grad()
+            output = model(input)
+            loss = loss_fn(output, target)
+            loss.backward()
+            optimizer.step()
     """
 
     def __init__(
@@ -74,6 +120,18 @@ class Optimizer:
         lr_scheduler_kwargs: Optional[dict] = None,
         **kwargs: Any,
     ) -> None:
+        """
+        Initialize the Base Optimizer. Usually you wouldn't directly initialize this, but rather initialize a
+        specific Optimizer subclass (e.g. Adam)
+
+        Args:
+            model_parameters (Dict[str, Tensor]): A flattened dictionary of model parameters.
+            lr (float): The initial learning rate.
+            lr_scheduler_kwargs (Optional[dict], optional): A dictionary containing the learning rate
+                scheduler class under the key 'lr_scheduler_cls' and its initialization parameters.
+                Defaults to None.
+            **kwargs: Additional hyperparameters.
+        """
         self._states: Dict[str, Any] = defaultdict(dict)
         self._hyperparams: Dict[str, Any] = {}
         # We assume this is a flattened named parameter dict
@@ -95,19 +153,43 @@ class Optimizer:
             self._hyperparams[k] = v
 
     @property
-    def lr(self):
+    def lr(self) -> float:
+        """
+        Get the current learning rate.
+
+        Returns:
+            float: The current learning rate.
+        """
         return self._hyperparams["lr"]
 
     @lr.setter
-    def lr(self, value):
+    def lr(self, value: float) -> None:
+        """
+        Set a new learning rate.
+
+        Args:
+            value (float): The new learning rate.
+        """
         self._hyperparams["lr"] = value
 
     @property
     def timestep(self) -> int:
+        """
+        Get the current global timestep.
+
+        Returns:
+            int: The current timestep.
+        """
         return self._states.get("timestep", 0)
 
     @timestep.setter
-    def timestep(self, value: int):
+    def timestep(self, value: int) -> None:
+        """
+        Set the global timestep.
+
+        Args:
+            value (int): The new timestep value.
+        """
         self._states["timestep"] = value
 
     def update_lr(self) -> None:
@@ -120,6 +202,16 @@ class Optimizer:
     def _recursive_param_op(
         self, params: Any, update_fn: Callable[[Any], None]
     ) -> None:
+        """
+        Recursively apply an update function to parameters.
+
+        This method traverses nested dictionaries, lists, or tuples of parameters,
+        and applies the update function to each parameter that has a 'grad' attribute.
+
+        Args:
+            params (Any): The parameters to update; can be a dict, list, tuple, or a single parameter.
+            update_fn (Callable[[Any], None]): The function to apply to each parameter.
+        """
         # 1) If params is a dict
         if isinstance(params, dict):
             for _, v in params.items():
@@ -136,16 +228,19 @@ class Optimizer:
 
     def _clip_grad_norm(self, max_norm: float, norm_type: float = 2.0) -> None:
         r"""
-        Scales the gradients of all parameters (in-place) so that the norm of the
-        gradients is at most `max_norm`.
-        Implements Section 10.11.1 "Clipping Gradients" in Deep Learning Book by Goodfellow et al.
+        Scale the gradients of all parameters in-place so that their norm is at most max_norm.
 
-        $$\frac{\text{max\_norm} \cdot g}{\|g\|_n}$$
-        where n is the nth norm
+        Implements Section 10.11.1 "Clipping Gradients" in the Deep Learning Book by Goodfellow et al.
+
+        The scaling is done according to:
+        $$
+        \frac{\text{max\_norm} \cdot g}{\|g\|_n}
+        $$
+        where $n$ is the norm type.
 
         Args:
-           max_norm (float): The maximum norm of the gradients.
-           norm_type (float): The type of norm to use. Default is 2 (Euclidean norm).
+            max_norm (float): The maximum allowed norm of the gradients.
+            norm_type (float, optional): The type of norm to use (default is 2, Euclidean norm a.k.a. L2 norm).
         """
         # Compute the global norm of all gradients
         total_norm = 0.0
@@ -168,7 +263,9 @@ class Optimizer:
                     param.grad.data *= scale_factor
 
     def zero_grad(self) -> None:
-        """Set the gradients of all optimized tensors to zero."""
+        """
+        Set the gradients of all optimized tensors to zero.
+        """
 
         def update_fn(x: Any) -> None:
             x.grad = None
@@ -177,35 +274,41 @@ class Optimizer:
 
     def state_dict(self) -> Dict[str, Any]:
         """
-        Return a dict of the Optimizer's state, for checkpointing. For example:
-          {
-            'hyperparams': {
-                'lr': 0.01,
-                ... any other hyperparams ...
-            },
-            'states': {
-                "module1.weight": {'m': ..., 'v': ..., ...},
-                "module1.bias": {...},
+        Return a dictionary representing the optimizer's state for checkpointing.
+
+        The returned dictionary has the following structure:
+
+        .. code-block:: json
+
+            {
+                "hyperparams": {
+                    "lr": 0.01,
+                },
+                "states": {
+                    "module1.weight": {"m": "...", "v": "..." },
+                    "module1.bias": "..."
+                }
             }
-          }
+
+        Returns:
+            Dict[str, Any]: The state dictionary of the optimizer.
         """
         return {
             "hyperparams": dict(self._hyperparams),
             "states": {
-                key: dict(value)
-                if isinstance(value, dict)
-                else value  # shallow copy of each sub-dict
+                key: dict(value) if isinstance(value, dict) else value
                 for key, value in self._states.items()
             },
         }
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
         """
-        Load the optimizer state from a checkpoint. This performs an in-place
-        update of the optimizer's internal state and hyperparameter.
+        Load the optimizer state from a checkpoint.
+
+        This performs an in-place update of the optimizer's internal state and hyperparameters.
 
         Args:
-           state_dict(Dict[str, Any]): The state dict read from a checkpoint
+            state_dict (Dict[str, Any]): The state dictionary read from a checkpoint.
         """
         # Restore hyperparams:
         for k, v in state_dict["hyperparams"].items():
@@ -228,7 +331,9 @@ class Optimizer:
 
     def step(self) -> None:
         """
-        Performs a single optimization step.
+        Perform a single optimization step.
+
+        This method increments the timestep and updates the learning rate.
         """
         self.timestep += 1
         self.update_lr()
@@ -236,13 +341,28 @@ class Optimizer:
 
 class SGD(Optimizer):
     """
-    Stochastic Gradient Descent Optimizer
+    Stochastic Gradient Descent (SGD) Optimizer.
     """
 
     def __init__(self, model_parameters: Any, lr: float, **kwargs: Any) -> None:
+        """
+        Initialize the SGD optimizer.
+
+        Args:
+            model_parameters (Any): Model parameters to optimize.
+            lr (float): The learning rate.
+            **kwargs: Additional hyperparameters.
+        """
         super(SGD, self).__init__(model_parameters, lr=lr, **kwargs)
 
     def step(self) -> None:
+        """
+        Perform a single optimization step using SGD.
+
+        This method updates each parameter by subtracting the product of the learning rate
+        and the parameter's gradient. If 'max_grad_norm' is specified in hyperparameters,
+        gradient clipping is applied before the update.
+        """
         super().step()
 
         def update_fn(param: Any) -> None:
@@ -256,16 +376,15 @@ class SGD(Optimizer):
 
 class Adam(Optimizer):
     """
-    Adam Optimizer
-    Stochastic gradient descent with first and second order momentum
+    Adam Optimizer.
+
+    Implements stochastic gradient descent with first and second order momentum.
     Paper: https://arxiv.org/abs/1412.6980
 
-    The `weight_decay` parameter is part of the AdamW implementation from the paper
-    Decoupled Weight Decay Regularization
-    Paper: https://arxiv.org/abs/1711.05101
+    The `weight_decay` parameter implements decoupled weight decay as described in:
+    "Decoupled Weight Decay Regularization" (https://arxiv.org/abs/1711.05101).
 
-    We have decoupled the Adam-step and the weight-decay step.
-    When `weight_decay` is set to 0, AdamW is equivalent to Adam
+    When `weight_decay` is set to 0, AdamW is equivalent to Adam.
     """
 
     def __init__(
@@ -278,6 +397,18 @@ class Adam(Optimizer):
         weight_decay: float = 0.0,
         **kwargs: Any,
     ) -> None:
+        """
+        Initialize the Adam optimizer.
+
+        Args:
+            model_parameters (Any): Model parameters to optimize.
+            lr (float): The learning rate.
+            beta1 (float, optional): Exponential decay rate for the first moment estimates. Defaults to 0.9.
+            beta2 (float, optional): Exponential decay rate for the second moment estimates. Defaults to 0.999.
+            epsilon (float, optional): Small constant for numerical stability. Defaults to 1e-7.
+            weight_decay (float, optional): Weight decay (L2 penalty) factor. Defaults to 0.0.
+            **kwargs: Additional hyperparameters.
+        """
         super(Adam, self).__init__(model_parameters, lr=lr, **kwargs)
         # These notations are based on the same notations in the paper linked above
         self._hyperparams["beta1"] = beta1
@@ -289,7 +420,14 @@ class Adam(Optimizer):
         self._states["m"] = defaultdict(float)  # first momentum estimate
         self._states["v"] = defaultdict(float)  # second momentum estimate
 
-    def step(self):
+    def step(self) -> None:
+        """
+        Perform a single optimization step using the Adam algorithm.
+
+        This method updates the biased first and second moment estimates,
+        applies bias correction, performs a decoupled weight decay step if specified,
+        and updates the parameters accordingly.
+        """
         super().step()
 
         if "max_grad_norm" in self._hyperparams:
