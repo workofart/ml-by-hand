@@ -2,6 +2,9 @@
 
 <div align="center">
 <img src="https://github.com/user-attachments/assets/0655f743-6bb0-46c8-9cdf-ec3a8c84058a" width="400" height="400">
+  
+[![Unit Tests](https://github.com/workofart/ml-by-hand/actions/workflows/test.yml/badge.svg)](https://github.com/workofart/ml-by-hand/actions/workflows/test.yml)
+
 </div>
 
 
@@ -142,35 +145,9 @@ assert np.isclose(x.data @ weights + bias, y_true)
 ```
 </details>
 
-## **Technical Overview**
+## **Documentation**
 
-Here’s a brief look at the major modules in this project. This not exhaustive. API doc coming out soon.
-- **`tensor`**
-  - Supports scalar, vector, and N-dimensional data
-  - Arithmetic ops: add, mul, matmul, pow, sub, division, neg, max, mean
-  - Core methods: forward, backward, reshape
-
-- **`nn`**
-  - `Module` (base class)
-  - `Linear`, `BatchNorm`, `Conv2d`, `MaxPool2d`, `Dropout`
-  - Recurrent Layers: `RNN`, `LSTM`
-
-- **`functional`**
-  - Activation functions: relu, sigmoid, softmax
-  - Losses: binary_cross_entropy, sparse_cross_entropy, hinge_loss
-
-- **`optim`**
-  - Optimizer (base)
-  - SGD, Adam
-
-- **`tools`**
-  - `trainer.py` for end-to-end training
-  - `data.py` for data loading/splitting
-  - `metrics.py` for accuracy, etc.
-
-- **`test/`**
-  - Unit tests & integration tests for all modules
-  - Validation with PyTorch for gradient correctness
+Check out the modules in this project in the [docs website](https://ml-by-hand.readthedocs.io/en/latest/) built from the docs/ directory.
 
 ## **Environment Setup**
 
