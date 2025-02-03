@@ -235,16 +235,17 @@ if __name__ == "__main__":
     WIKI_CONFIG = TransformerTrainingConfig(
         training_run_name="wiki",
         dataset_name="wiki_simple_english",
-        batch_size=128,  # GPT-2 uses 512
+        batch_size=16,  # GPT-2 uses 512
         total_epochs=30,
         eval_iters=100,
-        steps_per_epoch=200,
-        checkpoint_freq=2,
+        steps_per_epoch=1600,
+        update_weights_every_n_steps=8, # simulate larger batch sizes
+        checkpoint_freq=4,
         model_kwargs={
             "num_attention_heads": 12,  # GPT-2 small uses 12
             "hidden_size": 768,  # GPT-2 small uses 768, must be divisible by num_attention_heads
             "dropout_prob": 0.2,
-            "max_seq_len": 192,  # GPT-2 uses 1024
+            "max_seq_len": 568,  # GPT-2 uses 1024
             "num_decoder_layers": 12,  # GPT-2 uses 12
         },
         optimizer_kwargs={
@@ -255,7 +256,7 @@ if __name__ == "__main__":
             "lr_scheduler_kwargs": {
                 "lr_scheduler_cls": optim.CosineScheduler,
                 "warmup_steps": 100,
-                "lr_decay_iters": 1000,
+                "lr_decay_iters": 40000,
             },
         },
         resume_epoch=None,
@@ -266,21 +267,56 @@ if __name__ == "__main__":
         eval_start_string="April is",
         custom_bpe=CustomBpeConfig(
             num_merges=12000,
-            encoded_data_path="training_data/bpe_12000_wiki_simple_encoded_data",
+            encoded_data_path="training_data/bpe_12000_wiki_simple_encoded_data.npz",
             vocab_path="training_data/wikipedia_simpleenglish_vocab_12000.pkl",
             overwrite_encoded_data=False,
             overwrite_vocabulary_file=False,
             split_token="<|endoftext|>",
         ),
     )
+    
+    OPENWEBTEXT_CONFIG = TransformerTrainingConfig(
+        training_run_name="open_web_text",
+        dataset_name="open_web_text",
+        batch_size=16,  # GPT-2 uses 512
+        total_epochs=500,
+        eval_iters=100,
+        steps_per_epoch=200,
+        checkpoint_freq=4,
+        model_kwargs={
+            "num_attention_heads": 12,  # GPT-2 small uses 12
+            "hidden_size": 768,  # GPT-2 small uses 768, must be divisible by num_attention_heads
+            "dropout_prob": 0.2,
+            "max_seq_len": 392,  # GPT-2 uses 1024
+            "num_decoder_layers": 12,  # GPT-2 uses 12
+        },
+        optimizer_kwargs={
+            "lr": 1e-3,
+            "beta2": 0.99,
+            "max_grad_norm": 1.0,
+            "weight_decay": 0.1,
+            "lr_scheduler_kwargs": {
+                "lr_scheduler_cls": optim.CosineScheduler,
+                "warmup_steps": 100,
+                "lr_decay_iters": 5000,
+            },
+        },
+        resume_epoch=380,
+        teacher_enforcing=False,
+        include_decoder_input=False,
+        create_padding_masks=False,
+        label_smoothing=0.1,
+        eval_start_string="April is",
+        custom_bpe=None,
+    )
 
-    CONFIG = SHAPESPEARE_CONFIG
+    CONFIG = WIKI_CONFIG
 
     logger = logging.getLogger(__name__)
 
     # Load some data
-    data = text_utils.load_shakespeare_mini()
-    # data = text_utils.load_wiki_simple()
+    # data = text_utils.load_shakespeare_mini()
+    data = text_utils.load_wiki_simple()
 
     if CONFIG.custom_bpe:
         # Create a Byte Pair Encoder and prepare data
@@ -301,7 +337,17 @@ if __name__ == "__main__":
         import tiktoken
 
         bpe = tiktoken.get_encoding("gpt2")
-        encoded_data = bpe.encode(data)
+        # encoded_data = bpe.encode(data)
+        # import numpy
+        # with np.load("training_data/openwebtext_train.npz", allow_pickle=True) as npz_data:
+        #     train_data = npz_data["arr_0"]
+        # with np.load("training_data/openwebtext_val.npz", allow_pickle=True) as npz_data:
+        #     test_data = npz_data["arr_0"]
+            
+        # train_data = np.asarray(numpy.memmap("training_data/openwebtext_train.bin", dtype=numpy.uint16, mode="r"))
+        # test_data = np.asarray(numpy.memmap("training_data/openwebtext_val.bin", dtype=numpy.uint16, mode="r"))
+        # encoded_data = np.asarray(numpy.memmap("training_data/openwebtext_val.bin", dtype=numpy.uint16, mode="r"))
+        # np.savez_compressed("training_data/openwebtext_train.npz", numpy.memmap("training_data/openwebtext_train.bin", dtype=numpy.uint16, mode="r"))
 
     n = int(len(encoded_data) * 0.9)
     train_data, test_data = encoded_data[:n], encoded_data[n:]
@@ -346,10 +392,10 @@ if __name__ == "__main__":
             model=trainer.model,
             prediction_func=GPT2ForwardFn(),
             bpe=bpe,
-            start_tokens="\n",  # Example start token
-            # start_tokens="April is a charming day",  # Example start token
-            max_length=int(trainer.model.max_seq_len * 2),
-            temperature=0.3,
-            top_k=50,  # for shakespeare, there are only 63 vocabulary that are used, so let's limit to the top 50 to avoid printing weird characters
+            # start_tokens="\n",  # Example start token
+            start_tokens="The capital of China is",  # Example start token
+            max_length=int(trainer.model.max_seq_len),
+            temperature=1.0,
+            top_k=200,  # for shakespeare, there are only 63 vocabulary that are used, so let's limit to the top 50 to avoid printing weird characters
         )
         print("\n------------------------\n")
