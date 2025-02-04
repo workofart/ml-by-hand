@@ -7,15 +7,17 @@ try:
     _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
 except Exception:
     import numpy as np
+import logging
+
 import pandas as pd
 
 from autograd import functional, nn, optim
 from autograd.text.utils import create_vocabulary, text_to_one_hot_and_sparse
+from autograd.tools.config_schema import GenericTrainingConfig
 from autograd.tools.data import (
     SimpleDataLoader,
     train_test_split,
 )
-from autograd.tools.metrics import accuracy
 from autograd.tools.trainer import SimpleTrainer
 
 
@@ -60,49 +62,66 @@ class LSTM(nn.Module):
 
 
 def main(
-    model: nn.Module,
+    model_cls: type,
     train_data_loader: SimpleDataLoader,
     test_data_loader: SimpleDataLoader,
+    config: GenericTrainingConfig,
 ):
+    """
+    Trains a movie sentiment analysis model using binary cross-entropy.
+    The model is created by the SimpleTrainer using the provided model class,
+    optimizer class, loss function and configuration.
+    """
+    logger.info(
+        f"Training {model_cls.__name__} Neural Network for movie sentiment analysis..."
+    )
     trainer = SimpleTrainer(
-        model,
+        model_cls=model_cls,
+        optimizer_cls=optim.Adam,
         loss_fn=functional.binary_cross_entropy,
-        optimizer=optim.Adam(model.parameters, lr=0.001),
-        epochs=15,
         output_type="sigmoid",
+        config=config,
     )
 
-    print(
-        f"Training {model.__class__.__name__} Neural Network for movie sentiment analysis..."
-    )
-
-    trainer.fit(train_data_loader=train_data_loader, test_data_loader=test_data_loader)
-
-    # print("Evaluating model...")
-    for X_test, y_test in test_data_loader:
-        model.eval()
-        y_pred = model(X_test).data
-        # convert sigmoid to binary
-        y_pred = (y_pred > 0.5).astype(int).squeeze()
-        print(f"Test Accuracy: {accuracy(y_pred, y_test)}")
+    trainer.fit(train_data_loader=train_data_loader, val_data_loader=test_data_loader)
 
 
 if __name__ == "__main__":
-    # Check if data exist
-    if not os.path.exists("examples/IMDB Dataset.csv"):
+    logger = logging.getLogger(__name__)
+
+    # Check if data exist; if not, download and extract.
+    if not os.path.exists("training_data/IMDB Dataset.csv"):
         print("Downloading data...")
         os.system(
-            "curl -L -o examples/imdb-dataset-of-50k-movie-reviews.zip https://www.kaggle.com/api/v1/datasets/download/lakshmi25npathi/imdb-dataset-of-50k-movie-reviews"
+            "curl -L -o training_data/imdb-dataset-of-50k-movie-reviews.zip "
+            "https://www.kaggle.com/api/v1/datasets/download/lakshmi25npathi/imdb-dataset-of-50k-movie-reviews"
         )
-        os.system("unzip examples/imdb-dataset-of-50k-movie-reviews.zip -d examples")
+        os.system(
+            "unzip training_data/imdb-dataset-of-50k-movie-reviews.zip -d training_data"
+        )
 
-    data = pd.read_csv("examples/IMDB Dataset.csv").to_numpy()
+    # Process the data (assume process_data returns train/test splits and a vocabulary)
+    data = pd.read_csv("training_data/IMDB Dataset.csv").to_numpy()
     X_train, X_test, y_train, y_test, vocab = process_data(data)
     train_data_loader = SimpleDataLoader(X_train, y_train, batch_size=32, shuffle=True)
     test_data_loader = SimpleDataLoader(X_test, y_test, batch_size=32, shuffle=False)
 
-    model = RNN(input_size=len(vocab), hidden_size=32, output_size=1)
-    main(model, train_data_loader, test_data_loader)
+    # Train the RNN model.
+    config_rnn = GenericTrainingConfig(
+        training_run_name="movie_sentiment_rnn",
+        total_epochs=15,
+        checkpoint_freq=15,
+        model_kwargs={"input_size": len(vocab), "hidden_size": 32, "output_size": 1},
+        optimizer_kwargs={"lr": 0.001},
+    )
+    main(RNN, train_data_loader, test_data_loader, config_rnn)
 
-    model = LSTM(input_size=len(vocab), hidden_size=64, output_size=1)
-    main(model, train_data_loader, test_data_loader)
+    # Train the LSTM model.
+    config_lstm = GenericTrainingConfig(
+        training_run_name="movie_sentiment_rnn",
+        total_epochs=15,
+        checkpoint_freq=15,
+        model_kwargs={"input_size": len(vocab), "hidden_size": 64, "output_size": 1},
+        optimizer_kwargs={"lr": 0.001, "max_grad_norm": 1.0},
+    )
+    main(LSTM, train_data_loader, test_data_loader, config_lstm)

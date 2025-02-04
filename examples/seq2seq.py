@@ -7,6 +7,7 @@ except Exception:
     import numpy as np
 from autograd import functional, nn, optim, tensor
 from autograd.text.utils import create_vocabulary, text_to_one_hot_and_sparse
+from autograd.tools.config_schema import GenericTrainingConfig
 from autograd.tools.data import SimpleDataLoader, load_data
 from autograd.tools.trainer import SimpleTrainer
 
@@ -88,11 +89,11 @@ def main():
     train_data_url = "https://huggingface.co/datasets/d0rj/wikisum/resolve/main/data/train-00000-of-00001-b28959cff7dcaf55.parquet"
     test_data_url = "https://huggingface.co/datasets/d0rj/wikisum/resolve/main/data/test-00000-of-00001-52a8a7cd640a9fff.parquet"
 
-    train_filename = "examples/wikisum_train.parquet"
-    test_filename = "examples/wikisum_test.parquet"
+    train_filename = "training_data/wikisum_train.parquet"
+    test_filename = "training_data/wikisum_test.parquet"
 
-    train_data = load_data(train_data_url, train_filename, max_rows=256)
-    test_data = load_data(test_data_url, test_filename, max_rows=256)
+    train_data = load_data(train_data_url, train_filename, max_rows=1024)
+    test_data = load_data(test_data_url, test_filename, max_rows=1024)
 
     train_X, train_y = parse_data_into_xy(train_data)
     test_X, test_y = parse_data_into_xy(test_data)
@@ -104,31 +105,50 @@ def main():
     labels, labels_vocab_idx = text_to_one_hot_and_sparse(
         train_y, vocab, max_sequence_length=60
     )
-
-    model = Seq2Seq(
-        input_size=len(vocab),
-        word_embed_size=512,
-        hidden_size=128,
-        max_output_len=60,
+    test_features, features_vocab_idx = text_to_one_hot_and_sparse(
+        train_X, vocab, max_sequence_length=120
+    )
+    test_labels, test_labels_vocab_idx = text_to_one_hot_and_sparse(
+        train_y, vocab, max_sequence_length=60
     )
 
     train_data_loader = SimpleDataLoader(
         features,
         labels_vocab_idx,
-        batch_size=128,
+        batch_size=32,
         shuffle=True,
     )
+    test_data_loader = SimpleDataLoader(
+        test_features,
+        test_labels_vocab_idx,
+        batch_size=32,
+        shuffle=False,
+    )
 
-    trainer = SimpleTrainer(
-        model,
+    # Build a training configuration for the Seq2Seq model.
+    config = GenericTrainingConfig(
+        total_epochs=40,
+        checkpoint_freq=20,
+        model_kwargs={
+            "input_size": len(vocab),
+            "word_embed_size": 512,
+            "hidden_size": 128,
+            "max_output_len": 60,
+        },
+        optimizer_kwargs={"lr": 0.001},
+    )
+
+    # Create the trainer using the unified interface.
+    trainer_instance = SimpleTrainer(
+        model_cls=Seq2Seq,
+        optimizer_cls=optim.Adam,
         loss_fn=functional.cross_entropy,
-        optimizer=optim.Adam(model.parameters, lr=0.001),
-        epochs=20,
         output_type="logits",
+        config=config,
         sample_predictions=True,
     )
 
-    trainer.fit(train_data_loader, weight=labels_vocab_idx != 0)
+    trainer_instance.fit(train_data_loader, test_data_loader)
 
 
 if __name__ == "__main__":

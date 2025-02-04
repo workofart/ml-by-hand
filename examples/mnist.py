@@ -1,5 +1,7 @@
 import logging
 
+from autograd.tools.config_schema import GenericTrainingConfig
+
 try:
     # drop-in replacement for numpy for GPU acceleration
     import cupy as np  # type: ignore
@@ -148,29 +150,41 @@ def train_mnist_with_hinge_loss(
 
     for digit in range(10):
         logger.info(f"Training digit={digit}")
-        train_data_loader = SimpleDataLoader(
+        train_loader = SimpleDataLoader(
             X_train.copy(), y_train.copy(), batch_size, shuffle=True
         )
-        test_data_loader = SimpleDataLoader(
+        test_loader = SimpleDataLoader(
             X_test.copy(), y_test.copy(), batch_size, shuffle=False
         )
 
-        train_data_loader.preprocess(lambda x, y: preprocess_for_digit(x, y, digit))
-        test_data_loader.preprocess(lambda x, y: preprocess_for_digit(x, y, digit))
+        # Use a lambda with a default parameter to capture the current digit.
+        train_loader.preprocess(lambda x, y, d=digit: preprocess_for_digit(x, y, d))
+        test_loader.preprocess(lambda x, y, d=digit: preprocess_for_digit(x, y, d))
 
-        model = MnistOneVsRestBinaryClassifier(output_logits=True)
-        trainer = SimpleTrainer(
-            model=model,
-            loss_fn=lambda p, t: functional.hinge_loss(p, t, reduction="mean"),
-            optimizer=optim.Adam(model.parameters, lr=1e-3),
-            epochs=epochs,
-            output_type="logits",
+        # Build a training configuration for the trainer.
+        config = GenericTrainingConfig(
+            total_epochs=epochs,
+            steps_per_epoch=10,
+            checkpoint_freq=10,
+            model_kwargs={"output_logits": True},
+            optimizer_kwargs={"lr": 1e-3},
         )
-        trainer.fit(train_data_loader, test_data_loader)
-        one_vs_rest_models.append(model)
+
+        # Call SimpleTrainer using the same pattern as the multiclass trainer.
+        trainer = SimpleTrainer(
+            model_cls=MnistOneVsRestBinaryClassifier,
+            optimizer_cls=optim.Adam,
+            loss_fn=lambda p, t: functional.hinge_loss(p, t, reduction="mean"),
+            output_type="logits",
+            config=config,
+        )
+        trainer.fit(train_loader)
+        one_vs_rest_models.append(trainer.model)
 
     logger.info("Training complete! Now evaluating on the original test set...")
-    predictions_by_digit = np.array([m(X_test).data for m in one_vs_rest_models])
+    predictions_by_digit = np.array(
+        [model(X_test).data for model in one_vs_rest_models]
+    )
     predictions_by_digit = np.transpose(predictions_by_digit, (1, 0, 2)).squeeze(-1)
     pred_digits = predictions_by_digit.argmax(axis=1)
     acc_val = accuracy(pred_digits, y_test.astype(int))
@@ -194,41 +208,49 @@ def train_mnist_one_vs_rest_model(
     one_vs_rest_models = []
 
     def preprocess_for_digit(x, y, digit):
-        """
-        Convert y from {0,1,2,...,9} into {0,1},
-        where 1 means 'this sample is digit == d', else 0.
-        """
+        # Convert y into {0, 1}
         y_bin = (y == digit).astype(int)
         return x, y_bin
 
     for digit in range(10):
         logger.info(f"Training digit={digit}")
-        train_data_loader = SimpleDataLoader(
+        # Create fresh data loaders for each digit
+        train_loader = SimpleDataLoader(
             X_train.copy(), y_train.copy(), batch_size, shuffle=True
         )
-        test_data_loader = SimpleDataLoader(
+        test_loader = SimpleDataLoader(
             X_test.copy(), y_test.copy(), batch_size, shuffle=False
         )
 
-        train_data_loader.preprocess(lambda x, y: preprocess_for_digit(x, y, digit))
-        test_data_loader.preprocess(lambda x, y: preprocess_for_digit(x, y, digit))
+        # Freeze the current digit in the lambda via a default parameter.
+        train_loader.preprocess(lambda x, y, d=digit: preprocess_for_digit(x, y, d))
+        test_loader.preprocess(lambda x, y, d=digit: preprocess_for_digit(x, y, d))
 
-        model = MnistOneVsRestBinaryClassifier(output_logits=False)
-        trainer = SimpleTrainer(
-            model=model,
-            loss_fn=functional.binary_cross_entropy,
-            optimizer=optim.Adam(model.parameters, lr=1e-3),
-            epochs=epochs,
-            output_type="sigmoid",
+        # Build the training configuration.
+        config = GenericTrainingConfig(
+            total_epochs=epochs,
+            checkpoint_freq=10,
+            model_kwargs={"output_logits": False},
+            optimizer_kwargs={"lr": 1e-3},
         )
-        trainer.fit(train_data_loader, test_data_loader)
-        one_vs_rest_models.append(model)
+
+        # Create a trainer following the same pattern as for the multiclass model.
+        trainer = SimpleTrainer(
+            model_cls=MnistOneVsRestBinaryClassifier,
+            optimizer_cls=optim.Adam,
+            loss_fn=functional.binary_cross_entropy,
+            output_type="sigmoid",
+            config=config,
+        )
+        trainer.fit(train_loader)
+        one_vs_rest_models.append(trainer.model)
 
     logger.info("Training complete! Now evaluating on the original test set...")
-    predictions_by_digit = np.array([m(X_test).data for m in one_vs_rest_models])
+    predictions_by_digit = np.array(
+        [model(X_test).data for model in one_vs_rest_models]
+    )
     predictions_by_digit = np.transpose(predictions_by_digit, (1, 0, 2)).squeeze(-1)
     pred_digits = predictions_by_digit.argmax(axis=1)
-
     acc_val = accuracy(pred_digits, y_test.astype(int))
     prec_val = precision(pred_digits, y_test.astype(int))
     logger.info(f"Final Test Accuracy: {acc_val:.4f}")
@@ -236,32 +258,26 @@ def train_mnist_one_vs_rest_model(
 
 
 def train_mnist_multiclass_model(
-    train_data_loader, test_data_loader, optimizer, model, loss_fn, epochs=50, msg=""
+    train_data_loader,
+    test_data_loader,
+    optimizer_cls,
+    model_cls,
+    loss_fn,
+    config,
+    msg="",
 ):
     logger.info("=" * 66)
     logger.info(f"Starting Multi-class MNIST model {msg}")
     logger.info("=" * 66)
     trainer = SimpleTrainer(
-        model=model,
+        model_cls=model_cls,
+        optimizer_cls=optimizer_cls,
         loss_fn=loss_fn,
-        optimizer=optimizer,
-        epochs=epochs,
         output_type="logits",
+        config=config,
+        sample_predictions=True,
     )
     trainer.fit(train_data_loader, test_data_loader)
-
-    # ---- Make predictions on a small sample from test_data_loader ----
-    x_sample, y_sample = next(iter(test_data_loader))  # get first batch
-    model.eval()
-    y_pred = model(x_sample)
-    pred_labels = np.argmax(y_pred.data, axis=1)
-
-    accuracy_val = accuracy(pred_labels, y_sample)
-    logger.info(f"Accuracy on Test Batch: {accuracy_val:.4f}")
-
-    logger.info("Sample Predictions on Test Batch:")
-    for i in range(min(5, len(pred_labels))):
-        logger.info(f"  Predicted: {pred_labels[i]}, Actual: {y_sample[i]}")
 
 
 if __name__ == "__main__":
@@ -269,62 +285,100 @@ if __name__ == "__main__":
     X, y, _, __ = get_dataset(dataset_id=554, download_data=True).get_data(
         target="class", dataset_format="array"
     )
-    X /= 255.0  # normalize to [0, 1] to speed up convergence
+    X /= 255.0  # Normalize to [0, 1] to speed up convergence
 
+    # Use a subset of the data for faster training
     X = X[:3000]
     y = y[:3000]
     logger.info(f"X shape: {X.shape}, y shape: {y.shape}")
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.1)
 
-    train_data_loader = SimpleDataLoader(X_train, y_train, batch_size=256, shuffle=True)
-    val_data_loader = SimpleDataLoader(X_test, y_test, batch_size=256, shuffle=False)
+    # Create data loaders with a consistent batch size.
+    train_data_loader = SimpleDataLoader(X_train, y_train, batch_size=512, shuffle=True)
+    val_data_loader = SimpleDataLoader(X_test, y_test, batch_size=512, shuffle=False)
 
-    model = MnistResNet()
-    logger.info(f"Number of parameters: {model.num_parameters()}")
+    # Train several multi-class models.
     train_mnist_multiclass_model(
         train_data_loader,
         val_data_loader,
-        optim.Adam(model.parameters, lr=1e-3),
-        model,
-        functional.cross_entropy,
-        epochs=10,
+        optimizer_cls=optim.Adam,
+        model_cls=MnistResNet,
+        loss_fn=functional.cross_entropy,
+        config=GenericTrainingConfig(
+            total_epochs=10,
+            checkpoint_freq=10,
+            model_kwargs={},
+            optimizer_kwargs={
+                "lr": 1e-3,
+                "max_grad_norm": 1.0,
+            },
+        ),
         msg="ResNet-based",
     )
 
-    model = MnistMultiClassClassifier(batch_norm=False)
     train_mnist_multiclass_model(
         train_data_loader,
         val_data_loader,
-        optim.SGD(model.parameters, lr=1e-3),
-        model,
-        functional.cross_entropy,
-        epochs=100,
+        optimizer_cls=optim.SGD,
+        model_cls=MnistMultiClassClassifier,
+        loss_fn=functional.cross_entropy,
+        config=GenericTrainingConfig(
+            total_epochs=10,
+            checkpoint_freq=10,
+            model_kwargs={
+                "batch_norm": False,
+            },
+            optimizer_kwargs={
+                "lr": 1e-3,
+            },
+        ),
         msg="(MLP, no batch norm, SGD)",
     )
 
-    model = MnistMultiClassClassifier(batch_norm=True)
     train_mnist_multiclass_model(
         train_data_loader,
         val_data_loader,
-        optim.SGD(model.parameters, lr=1e-3),
-        model,
-        functional.cross_entropy,
-        epochs=100,
+        optimizer_cls=optim.SGD,
+        model_cls=MnistMultiClassClassifier,
+        loss_fn=functional.cross_entropy,
+        config=GenericTrainingConfig(
+            total_epochs=10,
+            steps_per_epoch=10,
+            checkpoint_freq=10,
+            model_kwargs={
+                "batch_norm": True,
+            },
+            optimizer_kwargs={
+                "lr": 1e-3,
+            },
+        ),
         msg="(MLP, batch norm, SGD)",
     )
 
-    model = MnistMultiClassClassifier(batch_norm=True)
     train_mnist_multiclass_model(
         train_data_loader,
         val_data_loader,
-        optim.Adam(model.parameters, lr=1e-3),
-        model,
-        functional.cross_entropy,
-        epochs=100,
+        optimizer_cls=optim.Adam,
+        model_cls=MnistMultiClassClassifier,
+        loss_fn=functional.cross_entropy,
+        config=GenericTrainingConfig(
+            total_epochs=10,
+            checkpoint_freq=10,
+            model_kwargs={
+                "batch_norm": True,
+            },
+            optimizer_kwargs={
+                "lr": 1e-3,
+            },
+        ),
         msg="(MLP, batch norm, Adam)",
     )
 
-    train_mnist_one_vs_rest_model(X_train, y_train, X_test, y_test)
-
-    train_mnist_with_hinge_loss(X_train, y_train, X_test, y_test)
+    # Now train the one-vs-rest models.
+    train_mnist_one_vs_rest_model(
+        X_train, y_train, X_test, y_test, batch_size=256, epochs=10
+    )
+    train_mnist_with_hinge_loss(
+        X_train, y_train, X_test, y_test, batch_size=256, epochs=10
+    )

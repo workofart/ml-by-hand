@@ -405,6 +405,17 @@ class SimpleTrainer(AbstractTrainer):
                 y_pred_proc.reshape(-1), y_true_proc.reshape(-1).astype(int)
             )
             self.metrics["val_accuracy"].append(acc_val)
+
+            if (
+                self.sample_predictions
+                and epoch % (self.config.total_epochs // 10) == 0
+            ):
+                logger.info("Sample Predictions on Validation Batch:")
+                for i in range(min(5, len(y_pred_proc))):
+                    logger.info(
+                        f"\nPredicted: {y_pred_proc[i]}\nActual: {y_true_proc[i]}"
+                    )
+
         else:
             mse_val = mean_squared_error(y_pred_full, y_true_full)
             self.metrics["val_mse"].append(mse_val)
@@ -544,7 +555,7 @@ class LLMTrainer(AbstractTrainer):
             prediction_func=self.forward_fn,
             bpe=train_data_loader.bpe,
             start_tokens=self.config.eval_start_string,
-            max_length=max(128, int(train_data_loader.seq_len * 0.4)),
+            max_length=min(128, int(train_data_loader.seq_len * 0.4)),
             temperature=1.0,
             top_k=self.config.eval_top_k,
         )
