@@ -103,6 +103,36 @@ class Function:
         out = Tensor(out_data, creator=func, requires_grad=requires_grad)
         return out
 
+    @staticmethod
+    def unbroadcast(grad_arr: np.ndarray, to_shape: Tuple[int, ...]) -> np.ndarray:
+        """
+        Sum out broadcasted dimensions so that grad_arr can match to_shape.
+        Essentially the inverse of numpy's broadcasting.
+        Args:
+            grad_arr (np.ndarray): Gradient array to unbroadcast.
+            to_shape (Tuple[int, ...]): Shape to unbroadcast to.
+        Returns:
+            np.ndarray: Unbroadcasted gradient array.
+        """
+        if grad_arr.shape == to_shape:
+            # No broadcasting happened
+            return grad_arr
+
+        # e.g. grad_arr.shape might be (4,3,2) but to_shape is (1,3,2).
+        # We need to sum over the broadcasted dimension (dim=0) which was 1 in to_shape.
+
+        # 1) If grad_arr.ndim > len(to_shape), we must sum across extra leading dims:
+        while len(grad_arr.shape) > len(to_shape):
+            grad_arr = grad_arr.sum(axis=0, keepdims=False)
+
+        # 2) Now both have same ndim.  For each dim where to_shape[dim] == 1 but grad_arr.shape[dim] != 1, we sum out that dimension.
+        for dim in range(len(to_shape)):
+            if to_shape[dim] == 1 and grad_arr.shape[dim] != 1:
+                grad_arr = grad_arr.sum(axis=dim, keepdims=True)
+
+        # At this point grad_arr.shape should match to_shape exactly
+        return grad_arr
+
 
 class Tensor:
     """
@@ -254,8 +284,6 @@ class Tensor:
         """
         Element-wise addition of two tensors (or a tensor and a scalar).
 
-        Broadcasting rules apply if shapes differ.
-
         Args:
             other (Union[Tensor, float, int]): The tensor or scalar to add.
 
@@ -267,14 +295,7 @@ class Tensor:
         if self.shape == other.shape:
             return Add.apply(self, other)
 
-        # 1. Calculate broadcast shape
-        broadcast_shape = np.broadcast_shapes(self.shape, other.shape)
-
-        # 2. Movement ops: expand both tensors to broadcast shape
-        x = self.expand(broadcast_shape)
-        y = other.expand(broadcast_shape)
-
-        return Add.apply(x, y)
+        return Add.apply(self, other)
 
     def __mul__(self, other: Union["Tensor", float, int]) -> "Tensor":
         r"""
@@ -282,8 +303,6 @@ class Tensor:
         $$
         z = x \cdot y
         $$
-
-        Broadcasting rules apply if shapes differ.
 
         Args:
             other (Union[Tensor, float, int]): The tensor or scalar to multiply with.
@@ -296,13 +315,7 @@ class Tensor:
         if self.shape == other.shape:
             return Mul.apply(self, other)
 
-        # 1. Calculate broadcast shape
-        broadcast_shape = np.broadcast_shapes(self.shape, other.shape)
-
-        # 2. Movement ops: expand both tensors to broadcast shape
-        x = self.expand(broadcast_shape)
-        y = other.expand(broadcast_shape)
-        return Mul.apply(x, y)
+        return Mul.apply(self, other)
 
     def __matmul__(self, other: Union["Tensor", float, int]) -> "Tensor":
         """
@@ -324,8 +337,6 @@ class Tensor:
         """
         Compute the power operation $z = x^y$ with another tensor or scalar.
 
-        Broadcasting rules apply if shapes differ.
-
         Args:
             other (Union[Tensor, float, int]): The exponent.
 
@@ -337,11 +348,7 @@ class Tensor:
         if self.shape == other.shape:
             return Pow.apply(self, other)
 
-        # Use expand for broadcasting
-        broadcast_shape = np.broadcast_shapes(self.shape, other.shape)
-        x = self.expand(broadcast_shape)
-        y = other.expand(broadcast_shape)
-        return Pow.apply(x, y)
+        return Pow.apply(self, other)
 
     def __iadd__(self, other: Union["Tensor", float, int]) -> "Tensor":
         """
@@ -392,7 +399,7 @@ class Tensor:
         if not isinstance(value, Tensor):
             value = Tensor(value, requires_grad=False)  # this is important
 
-        return SetItem.apply(self, idx=idx, value=value)
+        return SetItem.apply(self, value, idx=idx)
 
     def sum(
         self, axis: Optional[Union[int, Tuple[int, ...]]] = None, keepdims: bool = False
@@ -535,7 +542,6 @@ class Tensor:
         """
         Element-wise maximum between two tensors or a tensor and a scalar.
 
-        Broadcasting rules apply if shapes differ.
         This function performs an element-wise comparison between two input tensors and returns a new tensor
         containing the maximum value from each pair of elements. When both inputs are equal, the gradient is
         split equally between them.
@@ -549,11 +555,7 @@ class Tensor:
         if not isinstance(other, Tensor):
             other = Tensor(other, requires_grad=False)
 
-        # Use expand for broadcasting
-        broadcast_shape = np.broadcast_shapes(self.shape, other.shape)
-        x = self.expand(broadcast_shape)
-        y = other.expand(broadcast_shape)
-        return Maximum.apply(x, y)
+        return Maximum.apply(self, other)
 
     def pad(
         self,
@@ -963,6 +965,8 @@ class Add(Function):
         Returns:
             np.ndarray: The element-wise sum of ``x`` and ``y``.
         """
+        self.x_shape = x.shape  # for backward unbroadcast
+        self.y_shape = y.shape  # for backward unbroadcast
         return x + y
 
     def backward(
@@ -982,6 +986,15 @@ class Add(Function):
         """
         grad_x = grad.data if self.tensors[0].requires_grad else None
         grad_y = grad.data if self.tensors[1].requires_grad else None
+
+        # 1) If x required grad, we have to sum out the dims that were broadcast.
+        if grad_x is not None:
+            grad_x = Function.unbroadcast(grad_x, self.x_shape)
+
+        # 2) If y required grad, do the same
+        if grad_y is not None:
+            grad_y = Function.unbroadcast(grad_y, self.y_shape)
+
         return grad_x, grad_y
 
 
@@ -1000,6 +1013,8 @@ class Mul(Function):
         Returns:
             np.ndarray: The element-wise product of ``x`` and ``y``.
         """
+        self.x_shape = x.shape  # for backward unbroadcast
+        self.y_shape = y.shape  # for backward unbroadcast
         return x * y
 
     def backward(
@@ -1031,6 +1046,14 @@ class Mul(Function):
         grad_y = (
             grad.data * self.tensors[0].data if self.tensors[1].requires_grad else None
         )
+
+        # 1) If x required grad, we have to sum out the dims that were broadcast.
+        if grad_x is not None:
+            grad_x = Function.unbroadcast(grad_x, self.x_shape)
+
+        # 2) If y required grad, do the same
+        if grad_y is not None:
+            grad_y = Function.unbroadcast(grad_y, self.y_shape)
         return grad_x, grad_y
 
 
@@ -1049,6 +1072,8 @@ class Pow(Function):
         Returns:
             np.ndarray: The result of raising ``x`` to the power ``y``.
         """
+        self.x_shape = x.shape  # for backward unbroadcast
+        self.y_shape = y.shape  # for backward unbroadcast
         return x**y
 
     def backward(
@@ -1086,6 +1111,15 @@ class Pow(Function):
             valid_base = x.data > 0
             grad_y = (x.data**y.data) * np.log(np.abs(x.data)) * grad.data
             grad_y = np.where(valid_base, grad_y, 0)
+
+        # 1) If x required grad, we have to sum out the dims that were broadcast.
+        if grad_x is not None:
+            grad_x = Function.unbroadcast(grad_x, self.x_shape)
+
+        # 2) If y required grad, do the same
+        if grad_y is not None:
+            grad_y = Function.unbroadcast(grad_y, self.y_shape)
+
         return grad_x, grad_y
 
 
@@ -1275,7 +1309,7 @@ class SetItem(Function):
     See :func:`autograd.tensor.Tensor.__setitem__` function
     """
 
-    def forward(self, x: np.ndarray, idx: Any, value: np.ndarray) -> np.ndarray:
+    def forward(self, x: np.ndarray, value: np.ndarray, idx: Any) -> np.ndarray:
         """Perform in-place assignment on the input tensor.
 
         Args:
@@ -1507,6 +1541,8 @@ class Maximum(Function):
         Returns:
             np.ndarray: The element-wise maximum of the two input tensors.
         """
+        self.x_shape = x.shape  # for backward unbroadcast
+        self.y_shape = y.shape  # for backward unbroadcast
         out = np.maximum(x, y)
         self.out_data = out
         return out
@@ -1550,6 +1586,14 @@ class Maximum(Function):
 
         if y.requires_grad:
             grad_y = grad.data * (y_matches * (1.0 - 0.5 * x_matches))
+
+        # 1) If x required grad, we have to sum out the dims that were broadcast.
+        if grad_x is not None:
+            grad_x = Function.unbroadcast(grad_x, self.x_shape)
+
+        # 2) If y required grad, do the same
+        if grad_y is not None:
+            grad_y = Function.unbroadcast(grad_y, self.y_shape)
 
         return grad_x, grad_y
 
@@ -1744,7 +1788,7 @@ class Expand(Function):
         """
         self.original_shape = x.shape
         expanded = np.broadcast_to(x, shape)
-        return expanded.copy()
+        return expanded
 
     def backward(self, grad: "Tensor") -> np.ndarray:
         """Compute the gradient of the expand operation.
