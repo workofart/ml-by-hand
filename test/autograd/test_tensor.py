@@ -414,46 +414,112 @@ class TestTensorMean(TestTensor):
 
     def test_scalar_tensor_mean(self):
         m = self.x_scalar.mean()
+        # Forward check
         assert m.data == 2.0
         assert m.requires_grad == self.x_scalar.requires_grad
 
+        # Backward: for a scalar, d(mean)/dx is 1.0 (only one value)
+        m.backward()
+        # When x_scalar is a scalar, its gradient should be 1.
+        assert self.x_scalar.grad.data == 1.0
+
     def test_1d_tensor_mean_global(self):
-        m = self.x_vector.mean()
+        m = self.x_vector.mean()  # self.x_vector.data is [1.0, 2.0]
+        # Forward: (1+2)/2 = 1.5
         assert m.data == 1.5
-        assert np.array_equal(m.creator.tensors[0].data, self.x_vector.data)
+
+        # Backward: each element should get a gradient of 1/2.
+        m.backward()
+        np.testing.assert_allclose(self.x_vector.grad.data, [0.5, 0.5])
 
     def test_1d_tensor_mean_axis(self):
+        # Even though mean(axis=0) on a 1D tensor returns the same scalar value,
+        # we test both forward and backward.
         m = self.x_vector.mean(axis=0)
         assert m.data == 1.5
+        m.backward()
+        np.testing.assert_allclose(self.x_vector.grad.data, [0.5, 0.5])
 
     def test_2d_tensor_mean_global(self):
-        m = self.x_matrix.mean()
+        m = self.x_matrix.mean()  # self.x_matrix.data is [[1, 2], [3, 4]]
+        # Forward: (1+2+3+4)/4 = 2.5
         assert m.data == 2.5
 
+        # Backward: each element should receive a gradient of 1/4.
+        m.backward()
+        np.testing.assert_allclose(
+            self.x_matrix.grad.data, [[0.25, 0.25], [0.25, 0.25]]
+        )
+
     def test_2d_tensor_mean_axis_0(self):
-        m = self.x_matrix.mean(axis=0)  # (2, 2) -> (2,)
-        assert np.array_equal(m.data, [2.0, 3.0])
+        m = self.x_matrix.mean(axis=0)  # (2,2) -> (2,)
+        # Forward: [ (1+3)/2, (2+4)/2 ] = [2.0, 3.0]
+        np.testing.assert_allclose(m.data, [2.0, 3.0])
+        m.backward()
+        # Each column: each element gets a gradient of 1/2.
+        np.testing.assert_allclose(self.x_matrix.grad.data, [[0.5, 0.5], [0.5, 0.5]])
 
     def test_2d_tensor_mean_axis_1(self):
-        m = self.x_matrix.mean(axis=1)  # (2, 2) -> (2,)
-        assert np.array_equal(m.data, [1.5, 3.5])
+        m = self.x_matrix.mean(axis=1)  # (2,2) -> (2,)
+        # Forward: [ (1+2)/2, (3+4)/2 ] = [1.5, 3.5]
+        np.testing.assert_allclose(m.data, [1.5, 3.5])
+        m.backward()
+        # For each row, each element gets 1/2.
+        np.testing.assert_allclose(self.x_matrix.grad.data, [[0.5, 0.5], [0.5, 0.5]])
 
     def test_2d_tensor_mean_keepdims(self):
         m = self.keepdims_tensor.mean(axis=0, keepdims=True)
-        assert m.data.shape == (1, 2)  # (2,2) -> (1,2)
-        assert np.array_equal(m.data, [[2.0, 3.0]])
+        # Forward: shape (1,2) and data [[(1+3)/2, (2+4)/2]] = [[2.0, 3.0]]
+        assert m.data.shape == (1, 2)
+        np.testing.assert_allclose(m.data, [[2.0, 3.0]])
+        m.backward()
+        # Since the reduction was over axis=0 (2 elements), each input element gets gradient 1/2.
+        np.testing.assert_allclose(
+            self.keepdims_tensor.grad.data, [[0.5, 0.5], [0.5, 0.5]]
+        )
 
     def test_3d_tensor_mean(self):
-        m = self.three_d_matrix.mean(axis=(1, 2))  # (2,2,2) -> (2,)
-        assert np.array_equal(m.data, [2.5, 6.5])
+        m = self.three_d_matrix.mean(axis=(1, 2))  # three_d_matrix shape is (2,2,2)
+        # For each 2x2 slice, mean = (sum of four elements)/4.
+        # For example, if the slice is [[1,2],[3,4]] then mean = 2.5.
+        np.testing.assert_allclose(m.data, [2.5, 6.5])
+        m.backward()
+        # For each 2x2 slice, each element's gradient should be 1/4.
+        expected_grad = np.full((2, 2, 2), 0.25)
+        np.testing.assert_allclose(self.three_d_matrix.grad.data, expected_grad)
 
     def test_multiple_axis_mean(self):
-        m = self.three_d_matrix.mean(axis=(0, 1))  # (2,2,2) -> (2,)
-        assert np.array_equal(m.data, [4.0, 5.0])
+        m = self.three_d_matrix.mean(
+            axis=(0, 1)
+        )  # three_d_matrix shape (2,2,2) -> (2,)
+        # The expected forward result depends on the values in self.three_d_matrix.data.
+        # For example, if self.three_d_matrix.data is:
+        #   [[[1,2],[3,4]], [[5,6],[7,8]]]
+        # then mean over axis (0,1) gives:
+        #   [ (1+3+5+7)/4, (2+4+6+8)/4 ] = [4.0, 5.0]
+        np.testing.assert_allclose(m.data, [4.0, 5.0])
+        m.backward()
+        # The gradient from m (shape (2,)) will be broadcast back over the axes (0,1).
+        # Since each output element is the average of 4 elements, each input gets 1/4.
+        expected_grad = np.full(self.three_d_matrix.data.shape, 0.25)
+        np.testing.assert_allclose(self.three_d_matrix.grad.data, expected_grad)
 
     def test_requires_grad_propagation(self):
         m = self.no_grad_tensor.mean()
         assert not m.requires_grad
+
+    def test_global_mean_backward_scaling(self):
+        # Create a tensor with known shape and values.
+        # For a 1D tensor of length 4, the mean is the sum divided by 4.
+        t = Tensor([10.0, 20.0, 30.0, 40.0], requires_grad=True)
+        m = t.mean()  # global mean: (10+20+30+40)/4 = 25.0
+        # Forward check
+        assert m.data == 25.0
+
+        # Call backward (default seed gradient is ones with the same shape as m, i.e. scalar 1.0)
+        m.backward()
+        # The gradient for each element should be 1/4 = 0.25.
+        np.testing.assert_allclose(t.grad.data, [0.25, 0.25, 0.25, 0.25])
 
 
 class TestTensorMaximum(TestTensor):
