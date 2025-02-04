@@ -9,6 +9,7 @@ except Exception:
 from autograd import functional, nn, optim
 from autograd.tensor import Tensor
 from autograd.tools import data, trainer
+from autograd.tools.config_schema import GenericTrainingConfig
 
 """
 Neural Turing Machines
@@ -426,35 +427,54 @@ if __name__ == "__main__":
     X_val = to_one_hot(X_val, input_size)
 
     print("------------- Neural Turing Machine ---------------")
-    ntm = NeuralTuringMachine(
-        input_size=input_size,
-        memory_length=memory_length,
-        memory_dim=memory_dim,
-        output_size=output_size,
-        hidden_size=hidden_size,
-    )
     train_data_loader = data.SimpleDataLoader(X, y, batch_size=batch_size, shuffle=True)
     val_data_loader = data.SimpleDataLoader(
         X_val, y_val, batch_size=batch_size, shuffle=True
     )
-    t = trainer.SimpleTrainer(
-        model=ntm,
-        loss_fn=functional.cross_entropy,
-        optimizer=optim.Adam(ntm.parameters, lr=5e-3),
-        epochs=epochs,
-        output_type="logits",
+
+    # Create training configuration for the Neural Turing Machine.
+    config_ntm = GenericTrainingConfig(
+        training_run_name="neural_turing_machine_copy_task",
+        total_epochs=epochs,
+        checkpoint_freq=epochs,
+        model_kwargs={
+            "input_size": input_size,
+            "memory_length": memory_length,
+            "memory_dim": memory_dim,
+            "output_size": output_size,
+            "hidden_size": hidden_size,
+        },
+        optimizer_kwargs={"lr": 5e-3},
     )
-    t.fit(train_data_loader, val_data_loader)
+
+    ntm_trainer = trainer.SimpleTrainer(
+        model_cls=NeuralTuringMachine,
+        optimizer_cls=optim.Adam,
+        loss_fn=functional.cross_entropy,
+        output_type="logits",
+        config=config_ntm,
+    )
+    ntm_trainer.fit(train_data_loader, val_data_loader)
 
     print("------------- Long-Short Memory Network ---------------")
-    lstm = LSTM(input_size=input_size, hidden_size=hidden_size, output_size=output_size)
-
-    t = trainer.SimpleTrainer(
-        model=lstm,
-        loss_fn=functional.cross_entropy,
-        optimizer=optim.Adam(lstm.parameters, lr=5e-3),
-        epochs=epochs,
-        output_type="logits",
+    # Create training configuration for the LSTM.
+    config_lstm = GenericTrainingConfig(
+        training_run_name="lstm_copy_task",
+        total_epochs=epochs,
+        checkpoint_freq=epochs,
+        model_kwargs={
+            "input_size": input_size,
+            "hidden_size": hidden_size,
+            "output_size": output_size,
+        },
+        optimizer_kwargs={"lr": 5e-3},
     )
 
-    t.fit(train_data_loader, val_data_loader)
+    lstm_trainer = trainer.SimpleTrainer(
+        model_cls=LSTM,
+        optimizer_cls=optim.Adam,
+        loss_fn=functional.cross_entropy,
+        output_type="logits",
+        config=config_lstm,
+    )
+    lstm_trainer.fit(train_data_loader, val_data_loader)
