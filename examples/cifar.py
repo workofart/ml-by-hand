@@ -3,6 +3,7 @@ import logging
 from openml.datasets import get_dataset
 
 from autograd import functional, nn, optim
+from autograd.tools.config_schema import GenericTrainingConfig
 from autograd.tools.data import SimpleDataLoader, train_test_split
 from autograd.tools.trainer import SimpleTrainer
 
@@ -97,27 +98,41 @@ class CifarConvolutionalClassifier(nn.Module):
         return self.fc1(x)
 
 
-def train_cifar_multiclass_model(model: nn.Module, train_data_loader, test_data_loader):
+def train_cifar_multiclass_model(
+    train_data_loader,
+    test_data_loader,
+    optimizer_cls,
+    model_cls,
+    loss_fn,
+    config,
+    msg="",
+):
+    logger.info("=" * 66)
+    logger.info(f"Starting CIFAR multiclass model {msg}")
+    logger.info("=" * 66)
     trainer = SimpleTrainer(
-        model=model,
-        loss_fn=functional.cross_entropy,
-        optimizer=optim.Adam(model.parameters, lr=1e-3),
-        epochs=100,
+        model_cls=model_cls,
+        optimizer_cls=optimizer_cls,
+        loss_fn=loss_fn,
         output_type="logits",
+        config=config,
     )
     trainer.fit(train_data_loader, test_data_loader)
 
 
 if __name__ == "__main__":
+    # ------------------------------
+    # CIFAR-10
+    # ------------------------------
     logger.info("Fetching data for CIFAR-10")
     X, y, _, __ = get_dataset(dataset_id=40927, download_data=True).get_data(
         target="class", dataset_format="array"
     )
-    X = X / 255.0  # normalize to [0, 1] to speed up convergence
+    X = X / 255.0  # Normalize to [0, 1] to speed up convergence
 
     # To speed up the training on local machine
-    X = X[:2000]
-    y = y[:2000]
+    X = X[:5000]
+    y = y[:5000]
     logger.info(f"{X.shape=}, {y.shape=}")
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.1)
@@ -125,26 +140,68 @@ if __name__ == "__main__":
     train_data_loader = SimpleDataLoader(X_train, y_train, batch_size=256, shuffle=True)
     test_data_loader = SimpleDataLoader(X_test, y_test, batch_size=256, shuffle=False)
 
+    # Train ResNet CIFAR-10 model
     logger.info("Training ResNet CIFAR-10 model")
-    cifar10_model = CifarResNet(num_classes=10)
-    logger.info(f"There are {cifar10_model.num_parameters()} parameters in the model")
-    train_cifar_multiclass_model(cifar10_model, train_data_loader, test_data_loader)
+    config = GenericTrainingConfig(
+        total_epochs=30,
+        checkpoint_freq=100,
+        model_kwargs={"num_classes": 10},
+        optimizer_kwargs={"lr": 3e-3, "max_grad_norm": 1.0},
+    )
+    train_cifar_multiclass_model(
+        train_data_loader,
+        test_data_loader,
+        optimizer_cls=optim.Adam,
+        model_cls=CifarResNet,
+        loss_fn=functional.cross_entropy,
+        config=config,
+        msg="ResNet CIFAR-10",
+    )
 
+    # Train Convolutional CIFAR-10 model
     logger.info("Training Convolutional CIFAR-10 model")
-    cifar10_model = CifarConvolutionalClassifier(num_classes=10)
-    logger.info(f"There are {cifar10_model.num_parameters()} parameters in the model")
-    train_cifar_multiclass_model(cifar10_model, train_data_loader, test_data_loader)
+    config = GenericTrainingConfig(
+        total_epochs=100,
+        checkpoint_freq=100,
+        model_kwargs={"num_classes": 10},
+        optimizer_kwargs={"lr": 1e-3, "max_grad_norm": 1.0},
+    )
+    train_cifar_multiclass_model(
+        train_data_loader,
+        test_data_loader,
+        optimizer_cls=optim.Adam,
+        model_cls=CifarConvolutionalClassifier,
+        loss_fn=functional.cross_entropy,
+        config=config,
+        msg="Convolutional CIFAR-10",
+    )
 
+    # Train Dense CIFAR-10 model
     logger.info("Training Dense CIFAR-10 model")
-    cifar10_model = CifarMulticlassClassifier(num_classes=10)
-    logger.info(f"There are {cifar10_model.num_parameters()} parameters in the model")
-    train_cifar_multiclass_model(cifar10_model, train_data_loader, test_data_loader)
+    config = GenericTrainingConfig(
+        total_epochs=100,
+        checkpoint_freq=100,
+        model_kwargs={"num_classes": 10},
+        optimizer_kwargs={"lr": 1e-3, "max_grad_norm": 1.0},
+    )
+    train_cifar_multiclass_model(
+        train_data_loader,
+        test_data_loader,
+        optimizer_cls=optim.Adam,
+        model_cls=CifarMulticlassClassifier,
+        loss_fn=functional.cross_entropy,
+        config=config,
+        msg="Dense CIFAR-10",
+    )
 
+    # ------------------------------
+    # CIFAR-100
+    # ------------------------------
     logger.info("Fetching data for CIFAR-100")
     X, y, _, __ = get_dataset(dataset_id=41983, download_data=True).get_data(
         target="class", dataset_format="array"
     )
-    X = X / 255.0  # normalize to [0, 1] to speed up convergence
+    X = X / 255.0  # Normalize to [0, 1]
     X = X[:5000]
     y = y[:5000]
     logger.info(f"{X.shape=}, {y.shape=}")
@@ -153,17 +210,56 @@ if __name__ == "__main__":
     train_data_loader = SimpleDataLoader(X_train, y_train, batch_size=256, shuffle=True)
     test_data_loader = SimpleDataLoader(X_test, y_test, batch_size=256, shuffle=False)
 
+    # Train ResNet CIFAR-100 model
     logger.info("Training ResNet CIFAR-100 model")
-    cifar100_model = CifarResNet(num_classes=100)
-    logger.info(f"There are {cifar100_model.num_parameters()} parameters in the model")
-    train_cifar_multiclass_model(cifar100_model, train_data_loader, test_data_loader)
+    config = GenericTrainingConfig(
+        total_epochs=100,
+        checkpoint_freq=100,
+        model_kwargs={"num_classes": 100},
+        optimizer_kwargs={"lr": 1e-3, "max_grad_norm": 1.0},
+    )
+    train_cifar_multiclass_model(
+        train_data_loader,
+        test_data_loader,
+        optimizer_cls=optim.Adam,
+        model_cls=CifarResNet,
+        loss_fn=functional.cross_entropy,
+        config=config,
+        msg="ResNet CIFAR-100",
+    )
 
+    # Train Convolutional CIFAR-100 model
     logger.info("Training Convolutional CIFAR-100 model")
-    cifar100_model = CifarConvolutionalClassifier(num_classes=100)
-    logger.info(f"There are {cifar100_model.num_parameters()} parameters in the model")
-    train_cifar_multiclass_model(cifar100_model, train_data_loader, test_data_loader)
+    config = GenericTrainingConfig(
+        total_epochs=100,
+        checkpoint_freq=100,
+        model_kwargs={"num_classes": 100},
+        optimizer_kwargs={"lr": 1e-3, "max_grad_norm": 1.0},
+    )
+    train_cifar_multiclass_model(
+        train_data_loader,
+        test_data_loader,
+        optimizer_cls=optim.Adam,
+        model_cls=CifarConvolutionalClassifier,
+        loss_fn=functional.cross_entropy,
+        config=config,
+        msg="Convolutional CIFAR-100",
+    )
 
+    # Train Dense CIFAR-100 model
     logger.info("Training Dense CIFAR-100 model")
-    cifar100_model = CifarMulticlassClassifier(num_classes=100)
-    logger.info(f"There are {cifar100_model.num_parameters()} parameters in the model")
-    train_cifar_multiclass_model(cifar100_model, train_data_loader, test_data_loader)
+    config = GenericTrainingConfig(
+        total_epochs=100,
+        checkpoint_freq=100,
+        model_kwargs={"num_classes": 100},
+        optimizer_kwargs={"lr": 1e-3, "max_grad_norm": 1.0},
+    )
+    train_cifar_multiclass_model(
+        train_data_loader,
+        test_data_loader,
+        optimizer_cls=optim.Adam,
+        model_cls=CifarMulticlassClassifier,
+        loss_fn=functional.cross_entropy,
+        config=config,
+        msg="Dense CIFAR-100",
+    )
