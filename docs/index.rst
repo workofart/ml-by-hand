@@ -1,6 +1,8 @@
 ML-By-Hand Documentation
 ========================
 
+The main github repository is located at https://github.com/workofart/ml-by-hand.
+
 Welcome to the ML-By-Hand project documentation. This project is organized into several core modules, each providing specific functionality:
 
 - **autograd**: Contains the core automatic differentiation engine, including the `Tensor` class and differentiable tensor-level operations.
