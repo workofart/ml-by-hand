@@ -292,8 +292,6 @@ class Tensor:
         """
         if not isinstance(other, Tensor):
             other = Tensor(other, requires_grad=False)
-        if self.shape == other.shape:
-            return Add.apply(self, other)
 
         return Add.apply(self, other)
 
@@ -312,8 +310,6 @@ class Tensor:
         """
         if not isinstance(other, Tensor):
             other = Tensor(other, requires_grad=False)
-        if self.shape == other.shape:
-            return Mul.apply(self, other)
 
         return Mul.apply(self, other)
 
@@ -345,8 +341,6 @@ class Tensor:
         """
         if not isinstance(other, Tensor):
             other = Tensor(other, requires_grad=False)
-        if self.shape == other.shape:
-            return Pow.apply(self, other)
 
         return Pow.apply(self, other)
 
