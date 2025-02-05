@@ -8,15 +8,24 @@ PYTHON_VERSION="3.12.2"
 if ! command -v uv &> /dev/null; then
     echo "Installing uv..."
     curl -LsSf https://astral.sh/uv/install.sh | sh
-    source $HOME/.cargo/env
+
+    # Ensure uv is in the PATH by adding the installation directory.
+    export PATH="$HOME/.local/bin:$PATH"
+    
+    # If the cargo environment file exists, source it.
+    if [ -f "$HOME/.cargo/env" ]; then
+        source "$HOME/.cargo/env"
+    else
+        echo "Note: $HOME/.cargo/env not found; proceeding..."
+    fi
 fi
 
 # Check if venv exists
 if [ -d ".venv" ]; then
     echo "Virtual environment already exists. Skipping creating venv."
 else
-    uv python install $PYTHON_VERSION
-    uv venv --python $PYTHON_VERSION
+    uv python install "$PYTHON_VERSION"
+    uv venv --python "$PYTHON_VERSION"
 fi
 
 echo "Setup complete. Virtual environment is ready."
@@ -37,3 +46,4 @@ fi
 
 echo "Installing all dependencies (including dev)"
 uv pip install ".[dev]"
+
