@@ -62,6 +62,22 @@
             "module": "examples.gpt-2"
         },
         {
+            "name": "Inference CLI",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "examples.inference_cli",
+            "args": [
+                "--checkpoint", "checkpoints/shakespeare/shakespeare_mini_vocab_3000_GPT2_15",
+                // "--checkpoint", "checkpoints/wiki_GPT2_20",
+                "--mode", "sampling",
+                "--num-samples", "2",
+                "--temperature", "1",
+                "--top-k", "100",
+                "--max-length", "100",
+                "--prompt", "All:",
+            ]
+        },        
+        {
             "name": "Tokenizer",
             "type": "debugpy",
             "request": "launch",
