@@ -609,15 +609,22 @@ class Tensor:
         """
         Compute gradients for all upstream nodes in the graph via backpropagation.
 
-        If `grad` is None, initializes gradient to ones with the same shape as `self.data`.
+        1. If `grad` is None, we treat the gradient as ones (like d(self)/d(self) = 1).
+        2. We then do a post-order traversal of the graph: gather all nodes that lead to this tensor
+        and store them in a topologically sorted list.
+        3. Finally, we go through that list in reverse order to apply each node's .backward(...),
+        passing gradients back to the node's inputs.
+
+        As a side effect, each ancestor Tensor accumulates its .grad field.
 
         Args:
             grad (Optional[Union[Tensor, np.ndarray, float, int]]): The gradient w.r.t. this tensor's output.
         """
         if not self.requires_grad:
+            # If this tensor doesn't require grad, there's nothing to do.
             return
 
-        # Initialize gradient if none provided
+        # If caller didn't supply a gradient, we assume d(self)/d(self) = 1
         if grad is None:
             grad = Tensor(np.ones_like(self.data))
 
@@ -626,9 +633,9 @@ class Tensor:
         # Build computational graph in reverse order
         topological_sorted_tensors = []
         visited = set()
-        stack = [(self, False)]  # node, visited_children
+        stack = [(self, False)]  # node, visited_children_flag
 
-        # Post-order traversal
+        # Post-order traversal to figure out the order of the backprop
         while stack:
             node, visited_children = stack.pop()
             if node not in visited:
@@ -641,17 +648,19 @@ class Tensor:
                             if p.requires_grad:
                                 stack.append((p, False))
                 else:
-                    # second time we see this node, children are done
+                    # Now we've visited node's inputs (second time seeing node),
+                    # so node is in correct post-order
                     visited.add(node)
                     topological_sorted_tensors.append(node)
 
         # Backward pass
+        # Traverse the sorted list in reverse to propagate gradients
         for tensor in reversed(topological_sorted_tensors):
             if tensor.creator is not None:
-                # Call function's backward to get gradients for inputs
+                # Call function's backward to get gradients w.r.t. to each input
                 grads = tensor.creator.backward(tensor.grad)
                 if not isinstance(grads, tuple):
-                    grads = (grads,)
+                    grads = (grads,)  # handle single input
                 # Accumulate grads into the input tensors
                 for input_tensor, g in zip(tensor.creator.tensors, grads):
                     if (
@@ -660,9 +669,11 @@ class Tensor:
                         and g is not None
                     ):
                         input_tensor._accumulate_grad(g)
+                # Free references to reduce memory usage
                 tensor.creator.tensors = None
 
-        # Clear references
+        # Clear references to break the graph after everything is done
+        # to reduce memory usage
         for node in topological_sorted_tensors:
             node.creator = None
 
