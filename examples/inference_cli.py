@@ -30,8 +30,8 @@ def parse_args():
         "--mode",
         type=str,
         required=True,
-        choices=["dialogue", "sampling"],
-        help="Inference mode: 'dialogue' or 'sampling'."
+        choices=["chat", "sampling"],
+        help="Inference mode: 'chat' or 'sampling'."
     )
     parser.add_argument(
         "--num-samples",
@@ -66,9 +66,44 @@ def parse_args():
     return parser.parse_args()
 
 
+TRAINING_DATA_MAP = {
+    "wiki_8000": {
+        "vocab_size": 8260,
+        "num_merges": 8000,
+        "encoded_data_path": "training_data/bpe_8000_wiki_simple_encoded_data",
+        "vocab_path": "training_data/wikipedia_simpleenglish_vocab_8000.pkl",
+    },
+    "wiki_12000": {
+        "vocab_size": 12260,
+        "num_merges": 12000,
+        "encoded_data_path": "training_data/bpe_12000_wiki_simple_encoded_data",
+        "vocab_path": "training_data/wikipedia_simpleenglish_vocab_12000.pkl",
+    },
+    "shakespeare_0": {
+        "vocab_size": 260,
+        "num_merges": 0,
+        "encoded_data_path": "training_data/bpe_0_shakespeare_encoded_data.npz",
+        "vocab_path": "training_data/shakespeare_vocab_0.pkl",
+    },
+    "shakespeare_3000": {
+        "vocab_size": 4260,
+        "num_merges": 3000,
+        "encoded_data_path": "training_data/bpe_3000_shakespeare_encoded_data.npz",
+        "vocab_path": "training_data/shakespeare_vocab_3000.pkl",
+    },
+    "openwebtext_tiktoken": {
+        "vocab_size": 50257,
+        # "num_merges": 0,
+        # "encoded_data_path": "training_data/openwebtext_tiktoken_encoded_data",
+        # "vocab_path": "training_data/openwebtext_tiktoken_vocab.pkl"
+    },
+}
+
 def main():
     args = parse_args()
     logger = logging.getLogger(__name__)
+    
+    dataset_name = "wiki_8000"
 
     # --------------------------------------------------------------------
     # 1. Load the checkpoint (including model, optimizer, bpe, config etc.)
@@ -80,20 +115,11 @@ def main():
         total_epochs=10,
         checkpoint_freq=0,
         model_kwargs={
-            # Shakespeare
-            # "vocab_size": 260,
-            # "num_attention_heads": 6,  # GPT-2 small uses 12
-            # "hidden_size": 768,  # GPT-2 small uses 768, must be divisible by num_attention_heads
-            # "dropout_prob": 0.0,
-            # "max_seq_len": 256,  # GPT-2 uses 1024
-            # "num_decoder_layers": 6,  # GPT-2 uses 12
-            # WIKI
-            "vocab_size": 12260,
-            "num_attention_heads": 12,  # GPT-2 small uses 12
-            "hidden_size": 768,  # GPT-2 small uses 768, must be divisible by num_attention_heads
-            "dropout_prob": 0.2,
-            "max_seq_len": 192,  # GPT-2 uses 1024
-            "num_decoder_layers": 12,  # GPT-2 uses 12
+            "vocab_size": TRAINING_DATA_MAP[dataset_name]["vocab_size"],
+            # TODO: completely remove reliance on these dummy config values, check checkpoint loading logic
+            # "max_seq_len": 740,  # wiki
+            # "max_seq_len": 392,  # openwebtext
+            "max_seq_len": 480,  # shakespeare
         },
         optimizer_kwargs={
             "lr": 1e-3,
@@ -103,18 +129,10 @@ def main():
         create_padding_masks=False,
         label_smoothing=0.0,
         custom_bpe=CustomBpeConfig(
-            # Shakespeare
-            # num_merges=0,
-            # encoded_data_path="training_data/bpe_0_shakespeare_encoded_data.npz",
-            # vocab_path="training_data/shakespeare_vocab_0.pkl",
-            # overwrite_encoded_data=True,
-            # overwrite_vocabulary_file=True,
-            # split_token="<|endoftext|>",
-            # WIKI
-            num_merges=12000,
-            encoded_data_path="training_data/bpe_12000_wiki_simple_encoded_data",
-            vocab_path="training_data/wikipedia_simpleenglish_vocab_12000.pkl",
-            overwrite_encoded_data=True,
+            num_merges=TRAINING_DATA_MAP[dataset_name]["num_merges"],
+            encoded_data_path=TRAINING_DATA_MAP[dataset_name]["encoded_data_path"],
+            vocab_path=TRAINING_DATA_MAP[dataset_name]["vocab_path"],
+            overwrite_encoded_data=False,
             overwrite_vocabulary_file=False,
             split_token="<|endoftext|>",
         )
@@ -139,12 +157,12 @@ def main():
     # 2. Choose mode and run inference
     # ---------------------------------------------------------
 
-    if args.mode == "dialogue":
-        logger.info("Entering dialogue mode. Type 'quit' or 'exit' to stop.")
+    if args.mode == "chat":
+        logger.info("Entering chat mode. Type 'quit' or 'exit' to stop.")
         while True:
-            user_input = input("\nUser: ").strip()
+            user_input = input("\n >> User: ").strip()
             if user_input.lower() in ["quit", "exit"]:
-                logger.info("Exiting dialogue mode.")
+                logger.info("Exiting chat mode.")
                 break
 
             text_utils.inference(
