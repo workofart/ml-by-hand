@@ -192,17 +192,17 @@ if __name__ == "__main__":
     SHAPESPEARE_CONFIG = TransformerTrainingConfig(
         training_run_name="shakespeare_mini",
         dataset_name="shakespeare_mini",
-        batch_size=64,  # GPT-2 uses 512
-        total_epochs=15,
+        batch_size=256,  # GPT-2 uses 512
+        total_epochs=20,
         eval_iters=50,
-        steps_per_epoch=100,
-        checkpoint_freq=4,
+        steps_per_epoch=50,
+        checkpoint_freq=1,
         model_kwargs={
-            "num_attention_heads": 6,  # GPT-2 small uses 12
-            "hidden_size": 768,  # GPT-2 small uses 768, must be divisible by num_attention_heads
-            "dropout_prob": 0.0,
-            "max_seq_len": 256,  # GPT-2 uses 1024
-            "num_decoder_layers": 6,  # GPT-2 uses 12
+            "num_attention_heads": 4,  # GPT-2 small uses 12
+            "hidden_size": 256,  # GPT-2 small uses 768, must be divisible by num_attention_heads
+            "dropout_prob": 0.3,
+            "max_seq_len": 480,  # GPT-2 uses 1024
+            "num_decoder_layers": 4,  # GPT-2 uses 12
         },
         optimizer_kwargs={
             "lr": 1e-3,
@@ -215,7 +215,7 @@ if __name__ == "__main__":
                 "lr_decay_iters": 1000,  # steps_per_epoch * total_epochs
             },
         },
-        resume_epoch=4,
+        resume_epoch=None,
         teacher_enforcing=True,
         include_decoder_input=False,
         create_padding_masks=False,
@@ -224,10 +224,10 @@ if __name__ == "__main__":
         eval_top_k=50,  # Shakespeare only has ~60 unique characters, we so will just sample top 50
         custom_bpe=CustomBpeConfig(
             num_merges=0,
-            encoded_data_path="training_data/bpe_0_shakespeare_encoded_data.npz",
-            vocab_path="training_data/shakespeare_vocab_0.pkl",
-            overwrite_encoded_data=True,
-            overwrite_vocabulary_file=True,
+            encoded_data_path="training_data/bpe_3000_shakespeare_encoded_data.npz",
+            vocab_path="training_data/shakespeare_vocab_3000.pkl",
+            overwrite_encoded_data=False,
+            overwrite_vocabulary_file=False,
             split_token="<|endoftext|>",
         ),
     )
@@ -245,7 +245,7 @@ if __name__ == "__main__":
             "num_attention_heads": 12,  # GPT-2 small uses 12
             "hidden_size": 768,  # GPT-2 small uses 768, must be divisible by num_attention_heads
             "dropout_prob": 0.2,
-            "max_seq_len": 568,  # GPT-2 uses 1024
+            "max_seq_len": 740,  # GPT-2 uses 1024
             "num_decoder_layers": 12,  # GPT-2 uses 12
         },
         optimizer_kwargs={
@@ -310,13 +310,13 @@ if __name__ == "__main__":
         custom_bpe=None,
     )
 
-    CONFIG = WIKI_CONFIG
+    CONFIG = SHAPESPEARE_CONFIG
 
     logger = logging.getLogger(__name__)
 
     # Load some data
-    # data = text_utils.load_shakespeare_mini()
-    data = text_utils.load_wiki_simple()
+    data = text_utils.load_shakespeare_mini()
+    # data = text_utils.load_wiki_simple()
 
     if CONFIG.custom_bpe:
         # Create a Byte Pair Encoder and prepare data
