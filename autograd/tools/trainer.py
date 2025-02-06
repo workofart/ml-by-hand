@@ -18,6 +18,7 @@ from autograd.tensor import Tensor
 from autograd.text import utils as text_utils
 from autograd.tools.config_schema import (
     GenericTrainingConfig,
+    CustomBpeConfig,
     TransformerTrainingConfig,
 )
 from autograd.tools.metrics import accuracy, mean_squared_error
@@ -148,6 +149,8 @@ class AbstractTrainer(ABC):
                     "epoch": epoch + 1,
                     "model_state_dict": self.model.state_dict(),
                     "optimizer_state_dict": self.optimizer.state_dict(),
+                    "model_init_kwargs": self.config.model_kwargs,
+                    "optimizer_init_kwargs": self.config.optimizer_kwargs,
                     "config": self.config,
                 }
                 os.makedirs(self.CHECKPOINT_DIR, exist_ok=True)
@@ -261,6 +264,12 @@ class AbstractTrainer(ABC):
                 - optimizer (optim.Optimizer): The loaded or newly instantiated optimizer.
                 - checkpoint (dict): Dictionary of checkpoint data if loaded, otherwise empty.
         """
+        allowed_globals = {
+            "GenericTrainingConfig": GenericTrainingConfig,
+            "TransformerTrainingConfig": TransformerTrainingConfig,
+            "CustomBpeConfig": CustomBpeConfig,
+        }
+        
         if resume_epoch is not None or checkpoint_path is not None:
             # Look for checkpoint files
             if checkpoint_path is not None:
@@ -278,15 +287,15 @@ class AbstractTrainer(ABC):
 
             logger.info(f"Attempting to load from checkpoint: {ckpt_json}, {ckpt_npz}")
             loaded_ckpt = load_checkpoint(ckpt_json, ckpt_npz)
+            loaded_config = eval(loaded_ckpt["config"], allowed_globals)
 
             # If your checkpoint has hyperparams or constructor kwargs,
             # you can either override model_kwargs or do a partial merge:
             #  e.g. model_kwargs.update(loaded_ckpt["hyperparams"].get("model_kwargs", {}))
-            hyperparams = loaded_ckpt.get("hyperparams", {})
-            model_init_kwargs = hyperparams.get("model_kwargs", model_kwargs)
-            optimizer_init_kwargs = hyperparams.get(
-                "optimizer_kwargs", optimizer_kwargs
-            )
+            model_init_kwargs = loaded_config.model_kwargs
+            optimizer_init_kwargs = optimizer_kwargs
+            # model_init_kwargs = loaded_ckpt["model_init_kwargs"]
+            # optimizer_init_kwargs = loaded_ckpt["optimizer_init_kwargs"]
 
             # Instantiate model & optimizer
             model = model_class(**model_init_kwargs)
