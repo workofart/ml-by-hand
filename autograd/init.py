@@ -24,10 +24,10 @@ def xavier_uniform(tensor: Tensor):
     The weight tensor is assumed to have the shape:
         (input_size, output_size, additional_dimensions...)
 
-    The limits for the uniform distribution are computed using the number of input and output tensor count
-    for the given tensor, where the limit is given by:
+    The limits for the uniform distribution are computed using the number of input and output
+    tensor counts of the given tensor, where the limit is given by:
     $$
-    limit = \sqrt{\frac{6}{\text{\# of input tensor count} + \text{\# of output tensor count}}}
+    \text{limit} = \sqrt{\frac{6}{\text{\# of input tensor count} + \text{\# of output tensor count}}}
     $$
 
     Args:
@@ -35,6 +35,14 @@ def xavier_uniform(tensor: Tensor):
 
     Returns:
         Tensor: The same tensor after in-place initialization.
+
+    Examples:
+        >>> import cupy as np
+        >>> from autograd.tensor import Tensor
+        >>> # Create an uninitialized tensor with shape (3, 4)
+        >>> tensor = Tensor(np.empty((3, 4)))
+        >>> # Initialize the tensor using Xavier Uniform initialization
+        >>> tensor = xavier_uniform(tensor)
     """
     input_tensor_count, output_tensor_count = compute_in_out_tensor_count(tensor.data)
     limit = np.sqrt(6.0 / (input_tensor_count + output_tensor_count))
@@ -47,30 +55,46 @@ def xavier_uniform(tensor: Tensor):
 
 def compute_in_out_tensor_count(tensor: Tensor):
     r"""
-    Computes number of input and output tensor count for the given tensor.
+    Computes the number of input and output tensor counts for the given tensor.
 
     For convolution kernels:
       - tensor.shape[0] is assumed to represent the number of output channels.
       - tensor.shape[1] is assumed to represent the number of input channels.
       - The remaining dimensions correspond to the spatial kernel sizes (e.g., kernel height, kernel width).
 
+    The counts are computed as follows:
     $$
     \begin{align}
-    \text{\# of input tensor count} = tensor.shape[0] \times (\prod_{i=2}^{n} tensor.shape[i]) \\
-    \text{\# of output tensor count} = tensor.shape[-1] \times (\prod_{i=2}^{n} tensor.shape[i])
+    \text{\# of input tensor count} &= \text{tensor.shape}[0] \times \prod_{i=2}^{n} \text{tensor.shape}[i] \\
+    \text{\# of output tensor count} &= \text{tensor.shape}[-1] \times \prod_{i=2}^{n} \text{tensor.shape}[i]
     \end{align}
     $$
-    Where $n$ is the number of layers in the network.
+    where \( n \) is the number of dimensions in the tensor.
 
     Args:
         tensor (Tensor): The tensor for which to compute the number of input and output tensor counts.
-            The tensor must have at least 2 dimensions.
+                         The tensor must have at least 2 dimensions.
 
     Returns:
         Tuple[int, int]: A tuple containing (input_tensor_count, output_tensor_count).
 
     Raises:
         ValueError: If the tensor has fewer than 2 dimensions.
+
+    Examples:
+        >>> import cupy as np
+        >>> from autograd.tensor import Tensor
+        >>> # Example for a fully-connected layer weight matrix with shape (fan_in, fan_out)
+        >>> tensor_fc = Tensor(np.empty((5, 10)))
+        >>> compute_in_out_tensor_count(tensor_fc.data)
+        (5, 10)
+        >>> # Example for a convolution kernel with shape
+        >>> # (output_channels, input_channels, kernel_height, kernel_width)
+        >>> tensor_conv = Tensor(np.empty((16, 3, 3, 3)))
+        >>> # The receptive field size is 3*3 = 9
+        >>> # So, input tensor count = 16 * 9 = 144, output tensor count = 3 * 9 = 27
+        >>> compute_in_out_tensor_count(tensor_conv.data)
+        (144, 27)
     """
     tensor_shape = tensor.shape
     if len(tensor_shape) < 2:
