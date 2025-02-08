@@ -175,7 +175,7 @@ class DecoderSublayer(nn.Module):
 
 class GPT2ForwardFn(nn.AbstractLLMForwardFn):
     """
-    A forward function for the Transformer model.
+    A forward function for the GPT-2 model.
     """
 
     def train(self, model: GPT2, batch_data: Any, **kwargs):
@@ -196,13 +196,13 @@ if __name__ == "__main__":
         total_epochs=10,
         eval_iters=50,
         steps_per_epoch=100,
-        checkpoint_freq=1,
+        checkpoint_freq=4,
         model_kwargs={
-            "num_attention_heads": 4,  # GPT-2 small uses 12
-            "hidden_size": 256,  # GPT-2 small uses 768, must be divisible by num_attention_heads
+            "num_attention_heads": 6,  # GPT-2 small uses 12
+            "hidden_size": 768,  # GPT-2 small uses 768, must be divisible by num_attention_heads
             "dropout_prob": 0.3,
             "max_seq_len": 96,  # GPT-2 uses 1024
-            "num_decoder_layers": 4,  # GPT-2 uses 12
+            "num_decoder_layers": 6,  # GPT-2 uses 12
         },
         optimizer_kwargs={
             "lr": 1e-3,
@@ -221,9 +221,14 @@ if __name__ == "__main__":
         create_padding_masks=False,
         label_smoothing=0.1,
         eval_start_string="First",
-        eval_top_k=50,  # Shakespeare only has ~60 unique characters, we so will just sample top 50
+        eval_top_k=50,  # Shakespeare only has ~60 unique characters, and our if we do 3000 merges in BPE, our vocabulary size is 260, we so will just sample top 50.
+        # The following shows what we use to tokenize and encode our input data
+        # We are using our own BytePairEncoder class in autograd/text/tokenizer.py
+        # Feel free to play around with the "num_merges". This controls the tradeoff between vocabulary size
+        # and the total sequence length of the encoded text.
+        # Double-check whether we want to overwrite the encoded_data and vocabulary
         custom_bpe=CustomBpeConfig(
-            num_merges=0,
+            num_merges=3000,
             encoded_data_path="training_data/bpe_3000_shakespeare_encoded_data.npz",
             vocab_path="training_data/shakespeare_vocab_3000.pkl",
             overwrite_encoded_data=False,
@@ -295,7 +300,6 @@ if __name__ == "__main__":
             raw_text=data,
             overwrite_encoded_data=CONFIG.custom_bpe.overwrite_encoded_data,
             overwrite_vocabulary_file=CONFIG.custom_bpe.overwrite_vocabulary_file,
-            split_token=CONFIG.custom_bpe.split_token,
         )
     else:
         raise ValueError(
@@ -348,6 +352,6 @@ if __name__ == "__main__":
             start_tokens="\n",  # Example start token
             max_length=int(trainer.model.max_seq_len),
             temperature=1.0,
-            top_k=200,  # for shakespeare, there are only 63 vocabulary that are used, so let's limit to the top 50 to avoid printing weird characters
+            top_k=200,
         )
         print("\n------------------------\n")
