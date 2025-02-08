@@ -239,7 +239,7 @@ class BytePairEncoder:
             >>> print(vocab)  # Prints the vocabulary mapping
         """
         # If we already have a loaded vocab and don't want to overwrite, skip training
-        if self._unicode_to_int_vocab and not overwrite_saved_file:
+        if os.path.exists(self.vocab_file_path) and not overwrite_saved_file:
             return self._unicode_to_int_vocab, self._int_to_unicode_vocab
 
         text_chunks = self._pretokenize(input_text)
