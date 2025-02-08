@@ -25,6 +25,18 @@ class Function:
 
     Subclasses of `Function` should implement the `forward` and `backward` methods to define the
     forward and backward passes of a particular operation. Some subclasses can be found in `functional.py` module
+
+    Examples:
+        >>> # Example of a subclass (dummy function for demonstration)
+        >>> class DummyFunction(Function):
+        ...     def forward(self, x):
+        ...         return x + 1
+        ...     def backward(self, grad):
+        ...         return grad
+        >>> from autograd.tensor import Tensor
+        >>> import numpy as np
+        >>> x = Tensor(np.array([1, 2, 3]))
+        >>> y = DummyFunction.apply(x) # Expected output: [2, 3, 4]
     """
 
     def __init__(self, *tensors: "Tensor"):
@@ -33,6 +45,11 @@ class Function:
 
         Args:
             *tensors (Tensor): The input tensors for this operation.
+
+        Examples:
+            >>> from autograd.tensor import Tensor
+            >>> x = Tensor([1, 2, 3])
+            >>> f = Function(x)  # Although Function is abstract, this demonstrates the initializer.
         """
         self.tensors = tensors
 
@@ -108,11 +125,18 @@ class Function:
         """
         Sum out broadcasted dimensions so that grad_arr can match to_shape.
         Essentially the inverse of numpy's broadcasting.
+
         Args:
             grad_arr (np.ndarray): Gradient array to unbroadcast.
             to_shape (Tuple[int, ...]): Shape to unbroadcast to.
+
         Returns:
             np.ndarray: Unbroadcasted gradient array.
+
+        Examples:
+            >>> import numpy as np
+            >>> grad_arr = np.array([[1, 1], [1, 1]])
+            >>> unb = Function.unbroadcast(grad_arr, (1, 2))  # Expected output: [[2, 2]] (summing over the broadcasted dim)
         """
         if grad_arr.shape == to_shape:
             # No broadcasting happened
@@ -139,6 +163,11 @@ class Tensor:
     A `Tensor` is the core data structure of this autograd engine.
 
     It holds a NumPy array, an optional reference to a creator function, and gradient information.
+
+    Examples:
+        >>> import numpy as np
+        >>> from autograd.tensor import Tensor
+        >>> x = Tensor(np.array([1.0, 2.0, 3.0])) # Expected: array([1., 2., 3.], dtype=float32)
     """
 
     def __init__(
@@ -156,6 +185,9 @@ class Tensor:
             creator (Optional[Function], optional): The function that created this tensor.
                 Defaults to None if this tensor is a leaf.
             requires_grad (bool, optional): Whether this tensor requires gradients. Defaults to True.
+
+        Examples:
+            >>> x = Tensor([1, 2, 3]) # Expected: array([1., 2., 3.], dtype=float32)
         """
         self.data = np.asarray(data, dtype=np.float32)
         self._grad: Optional["Tensor"] = None  # Lazily initialized
@@ -173,6 +205,10 @@ class Tensor:
 
         Returns:
             Optional[Tensor]: The gradient if it exists, or None.
+
+        Examples:
+            >>> x = Tensor([1, 2, 3])
+            >>> print(x.grad)  # Expected: None
         """
         if isinstance(self._grad, np.ndarray):
             return Tensor(self._grad, requires_grad=False)
@@ -228,6 +264,11 @@ class Tensor:
 
         Returns:
             Tensor: A new tensor that shares data with the original but is shaped differently.
+
+        Examples:
+            >>> x = Tensor(np.array([1, 2, 3, 4]))
+            >>> y = x.view(2, 2)
+            >>> print(y.data.shape)  # Expected: (2, 2)
         """
         return View.apply(self, new_shape=shape)
 
@@ -246,13 +287,9 @@ class Tensor:
             Tensor: A new tensor created by stacking.
 
         Examples:
-            >>> import numpy as np
-            >>> from your_module import Tensor, Stack
             >>> t1 = Tensor(np.array([1, 2]))
             >>> t2 = Tensor(np.array([3, 4]))
-            >>> op = Tensor.stack([t1, t2], axis=0)
-            >>> print(op)
-            Tensor([[1, 2], [3, 4]])
+            >>> result = Tensor.stack([t1, t2], axis=0)  # Expected: [[1, 2], [3, 4]]
         """
         return Stack.apply(*tensors, axis=axis)
 
@@ -270,13 +307,9 @@ class Tensor:
             Tensor: The concatenated tensor.
 
         Examples:
-            >>> import numpy as np
-            >>> from your_module import Tensor, Cat
             >>> t1 = Tensor(np.array([[1, 2]]))
             >>> t2 = Tensor(np.array([[3, 4]]))
-            >>> result = Tensor.cat( [t1, t2], axis=0)
-            >>> result
-            Tensor([[1, 2],[3, 4]]
+            >>> result = Tensor.cat([t1, t2], axis=0)  # Expected: [[1, 2], [3, 4]]
         """
         return Cat.apply(*tensors, axis=axis)
 
@@ -338,6 +371,10 @@ class Tensor:
 
         Returns:
             Tensor: The result of the power operation.
+
+        Examples:
+            >>> x = Tensor(np.array([2, 3]))
+            >>> y = x ** 3 # Expected: [8, 27]
         """
         if not isinstance(other, Tensor):
             other = Tensor(other, requires_grad=False)
@@ -433,6 +470,10 @@ class Tensor:
 
         Returns:
             Tensor: The tensor with summed values.
+
+        Examples:
+            >>> x = Tensor(np.array([[1, 2], [3, 4]]))
+            >>> s = x.sum(axis=0, keepdims=True) # Expected: [[4, 6]]
         """
         return Sum.apply(self, axis=axis, keepdims=keepdims)
 
@@ -466,6 +507,10 @@ class Tensor:
 
         Returns:
             Tensor: The tensor with mean values.
+
+        Examples:
+            >>> x = Tensor(np.array([[1, 2], [3, 4]]))
+            >>> m = x.mean(axis=0) # Expected: [2, 3]
         """
         return Mean.apply(self, axis=axis, keepdims=keepdims)
 
@@ -494,6 +539,10 @@ class Tensor:
 
         Returns:
             Tensor: The tensor with maximum values.
+
+        Examples:
+            >>> x = Tensor(np.array([[1, 5], [3, 4]]))
+            >>> m = x.max(axis=0) # Expected: [3, 5]
         """
         return Max.apply(self, axis=axis, keepdims=keepdims)
 
@@ -529,6 +578,10 @@ class Tensor:
 
         Returns:
             Tensor: The result of the sqrt operation.
+
+        Examples:
+            >>> x = Tensor(np.array([4, 9, 16]))
+            >>> y = x.sqrt() # Expected: [2, 3, 4]
         """
         return Sqrt.apply(self)
 
@@ -545,10 +598,14 @@ class Tensor:
 
         Returns:
             Tensor: Element-wise maximum.
+
+        Examples:
+            >>> x = Tensor(np.array([1, 5, 3]))
+            >>> y = Tensor(np.array([2, 4, 3]))
+            >>> z = x.maximum(y) # Expected: [2, 5, 3]
         """
         if not isinstance(other, Tensor):
             other = Tensor(other, requires_grad=False)
-
         return Maximum.apply(self, other)
 
     def pad(
@@ -613,6 +670,10 @@ class Tensor:
 
         Args:
             grad (Optional[Union[Tensor, np.ndarray, float, int]]): The gradient w.r.t. this tensor's output.
+
+        Examples:
+            >>> # In a typical usage, backward() is invoked on the loss tensor.
+            >>> loss.backward()
         """
         if not self.requires_grad:
             return
@@ -673,6 +734,10 @@ class Tensor:
 
         Returns:
             Tuple[int, ...]: The shape of this tensor.
+
+        Examples:
+            >>> x = Tensor(np.array([[1,2],[3,4]]))
+            >>> print(x.shape)  # Expected: (2, 2)
         """
         if isinstance(self.data, (int, float)) or not hasattr(self.data, "shape"):
             return ()
@@ -689,6 +754,11 @@ class Tensor:
 
         Returns:
             Tensor: A reshaped tensor.
+
+        Examples:
+            >>> x = Tensor(np.array([1, 2, 3, 4]))
+            >>> y = x.reshape(2,2)
+            >>> print(y.data.shape)  # Expected: (2, 2)
         """
         return Reshape.apply(self, shape=shape)
 
@@ -760,13 +830,19 @@ class Tensor:
 
         Returns:
             Tensor: A new tensor with the specified dimensions swapped.
+
+        Examples:
+            >>> tensor = Tensor(np.array([[1, 2], [3, 4]]))
+            >>> t = tensor.transpose(0, 1)
+            >>> print(t.data)
+            [[1, 3],
+             [2, 4]]
         """
         return Transpose.apply(self, dim0=dim0, dim1=dim1)
 
     def strided_windows(self, kernel_size: int, stride: int) -> "Tensor":
         r"""
         Extract sliding windows of size `kernel_size` with stride `stride`.
-
 
         This operation generates overlapping windows from the input tensor using the specified kernel size and stride.
         The output shape is given by:
@@ -815,10 +891,10 @@ class Tensor:
             Tensor: The rolled tensor.
 
         Example:
-            >>> tensor = Tensor([1, 2, 3, 4, 5])
+            >>> tensor = Tensor(np.array([1, 2, 3, 4, 5]))
             >>> rolled_tensor = tensor.roll(shifts=2, dims=0)
-            >>> print(rolled_tensor)
-            Tensor([4, 5, 1, 2, 3])
+            >>> print(rolled_tensor.data)
+            [4, 5, 1, 2, 3]
         """
         return Roll.apply(self, shifts=shifts, dims=dims)
 
@@ -829,6 +905,12 @@ class Tensor:
 
         Returns:
             Tensor: A new tensor that does not track gradients.
+
+        Examples:
+            >>> x = Tensor(np.array([1, 2, 3]))
+            >>> y = x.detach()
+            >>> y.requires_grad
+            False
         """
         return Tensor(self.data, requires_grad=False)
 
@@ -839,6 +921,10 @@ class Tensor:
 
         Returns:
             int: The number of dimensions.
+
+        Examples:
+            >>> x = Tensor(np.array([[1,2],[3,4]]))
+            >>> print(x.ndim)  # Expected: 2
         """
         return len(self.data.shape)
 
@@ -853,6 +939,12 @@ class Tensor:
 
         Raises:
             ValueError: If the tensor is not 2D.
+
+        Examples:
+            >>> x = Tensor(np.array([[1,2],[3,4]]))
+            >>> print(x.T.data)
+            [[1, 3],
+             [2, 4]]
         """
         if len(self.data.shape) != 2:
             raise ValueError(
@@ -916,6 +1008,11 @@ class Tensor:
     def __repr__(self) -> str:
         """
         Return a string representation of the tensor, showing its data and gradient.
+
+        Examples:
+            >>> x = Tensor(np.array([1,2,3]))
+            >>> print(x)
+            Tensor(data=[1. 2. 3.], grad=None)
         """
         return f"Tensor(data={self.data}, grad={self.grad})"
 
@@ -947,6 +1044,11 @@ Binary Ops
 class Add(Function):
     """Element-wise addition of two tensors.
     See :func:`autograd.tensor.Tensor.__add__` function
+
+    Examples:
+        >>> x = Tensor(np.array([1,2,3]))
+        >>> y = Tensor(np.array([4,5,6]))
+        >>> z = Add.apply(x, y) # Expected: [5, 7, 9]
     """
 
     def forward(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
@@ -977,6 +1079,12 @@ class Add(Function):
         Returns:
             Tuple[Optional[np.ndarray], Optional[np.ndarray]]: The gradients with respect to
             ``x`` and ``y``.
+
+        Examples:
+            >>> x = Tensor(np.array([1,2,3]))
+            >>> y = Tensor(np.array([4,5,6]))
+            >>> z = x + y
+            >>> # During backprop, the gradient for both x and y would be the same as grad.
         """
         grad_x = grad.data if self.tensors[0].requires_grad else None
         grad_y = grad.data if self.tensors[1].requires_grad else None
@@ -995,6 +1103,11 @@ class Add(Function):
 class Mul(Function):
     """Element-wise multiplication of two tensors.
     See :func:`autograd.tensor.Tensor.__mul__` function
+
+    Examples:
+        >>> x = Tensor(np.array([1,2,3]))
+        >>> y = Tensor(np.array([4,5,6]))
+        >>> z = Mul.apply(x, y)  # Expected: [4, 10, 18]
     """
 
     def forward(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
@@ -1033,6 +1146,12 @@ class Mul(Function):
         Returns:
             Tuple[Optional[np.ndarray], Optional[np.ndarray]]: The gradients with respect to
             ``x`` and ``y``.
+
+        Examples:
+            >>> x = Tensor(np.array([1,2,3]))
+            >>> y = Tensor(np.array([4,5,6]))
+            >>> z = x * y
+            >>> # Backpropagated gradients for x would be y, and for y would be x.
         """
         grad_x = (
             grad.data * self.tensors[1].data if self.tensors[0].requires_grad else None
@@ -1054,6 +1173,10 @@ class Mul(Function):
 class Pow(Function):
     """Element-wise power operation.
     See :func:`autograd.tensor.Tensor.__pow__` function
+
+    Examples:
+        >>> x = Tensor(np.array([2, 3]))
+        >>> y = x ** 3 # Expected: [8, 27]
     """
 
     def forward(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
@@ -1092,6 +1215,12 @@ class Pow(Function):
         Returns:
             Tuple[Optional[np.ndarray], Optional[np.ndarray]]: The gradients with respect to
             ``x`` and ``y``.
+
+        Examples:
+            >>> x = Tensor(np.array([2, 3]))
+            >>> y = Tensor(np.array([3, 2]))
+            >>> z = x ** y
+            >>> # Gradients for x: y * x^(y-1) and for y: x^y * ln(x)
         """
         x = self.tensors[0]
         y = self.tensors[1]
@@ -1120,6 +1249,11 @@ class Pow(Function):
 class Matmul(Function):
     """Matrix multiplication of two tensors.
     See :func:`autograd.tensor.Tensor.__matmul__` function
+
+    Examples:
+        >>> x = Tensor(np.array([[1, 2], [3, 4]]))
+        >>> y = Tensor(np.array([[5, 6], [7, 8]]))
+        >>> z = Matmul.apply(x, y)  # Expected: [[19, 22], [43, 50]]
     """
 
     def forward(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
@@ -1145,13 +1279,6 @@ class Matmul(Function):
     ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         r"""Compute the gradient for the matrix multiplication operation.
 
-        Args:
-            grad (Tensor): The gradient of the loss with respect to the output.
-
-        Returns:
-            Tuple[Optional[np.ndarray], Optional[np.ndarray]]: The gradients with respect to
-            ``x`` and ``y``.
-
         For matrix multiplication:
 
             $z = x \cdot y$
@@ -1162,6 +1289,19 @@ class Matmul(Function):
 
         Special handling is provided for the vector @ vector case and for batched multiplications.
 
+        Args:
+            grad (Tensor): The gradient of the loss with respect to the output.
+
+        Returns:
+            Tuple[Optional[np.ndarray], Optional[np.ndarray]]: The gradients with respect to
+            ``x`` and ``y``.
+
+        Examples:
+            >>> x = Tensor(np.array([[1, 2], [3, 4]]))
+            >>> y = Tensor(np.array([[5, 6], [7, 8]]))
+            >>> z = x @ y
+            >>> # Backpropagation would compute gradients:
+            >>> grad_x, grad_y = Matmul.apply(x, y).creator.backward(Tensor(np.ones_like(z.data)))
         """
         x = self.tensors[0]
         y = self.tensors[1]
@@ -1229,6 +1369,11 @@ class Matmul(Function):
 class IAdd(Function):
     """In-place addition of two tensors.
     See :func:`autograd.tensor.Tensor.__iadd__` function
+
+    Examples:
+        >>> x = Tensor(np.array([1, 2, 3]))
+        >>> y = Tensor(np.array([4, 5, 6]))
+        >>> IAdd.apply(x, y)  # Expected: [5, 7, 9]
     """
 
     def forward(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
@@ -1255,6 +1400,13 @@ class IAdd(Function):
 
         Returns:
             Tuple[np.ndarray, np.ndarray]: The gradients with respect to ``x`` and ``y``.
+
+        Examples:
+            >>> x = Tensor(np.array([1,2,3]))
+            >>> y = Tensor(np.array([4,5,6]))
+            >>> z = x  # In-place addition: x += y
+            >>> z = IAdd.apply(x, y)
+            >>> # Gradients for both x and y would be identical to grad.
         """
         return grad.data, grad.data
 
@@ -1262,6 +1414,10 @@ class IAdd(Function):
 class GetItem(Function):
     """Retrieve an item from a tensor using numpy-style indexing.
     See :func:`autograd.tensor.Tensor.__getitem__` function
+
+    Examples:
+        >>> x = Tensor(np.array([10, 20, 30]))
+        >>> y = GetItem.apply(x, idx=1)  # Expected: 20
     """
 
     def forward(self, x: np.ndarray, idx: Any) -> np.ndarray:
@@ -1288,6 +1444,11 @@ class GetItem(Function):
 
         Returns:
             np.ndarray: The gradient with respect to the input tensor.
+
+        Examples:
+            >>> x = Tensor(np.array([10, 20, 30]))
+            >>> y = x[1]
+            >>> # During backprop, only index 1 receives the gradient.
         """
         grad = grad.data if isinstance(grad, Tensor) else grad
 
@@ -1301,6 +1462,10 @@ class GetItem(Function):
 class SetItem(Function):
     """In-place assignment to a tensor using numpy-style indexing.
     See :func:`autograd.tensor.Tensor.__setitem__` function
+
+    Examples:
+        >>> x = Tensor(np.array([1, 2, 3]))
+        >>> SetItem.apply(x, Tensor(10, requires_grad=False), idx=1) # Expected: [1, 10, 3]
     """
 
     def forward(self, x: np.ndarray, value: np.ndarray, idx: Any) -> np.ndarray:
@@ -1330,6 +1495,11 @@ class SetItem(Function):
 
         Returns:
             np.ndarray: The gradient with respect to the input tensor.
+
+        Examples:
+            >>> x = Tensor(np.array([1, 2, 3]))
+            >>> _ = SetItem.apply(x, Tensor(10, requires_grad=False), idx=1)
+            >>> # During backprop, only index 1 will contribute to the gradient.
         """
         return grad.data[self.idx]
 
@@ -1337,6 +1507,10 @@ class SetItem(Function):
 class Sqrt(Function):
     """Compute the element-wise square root of a tensor.
     See :func:`autograd.tensor.Tensor.sqrt` function
+
+    Examples:
+        >>> x = Tensor(np.array([4, 9, 16]))
+        >>> y = Sqrt.apply(x) # Expected: [2, 3, 4]
     """
 
     def forward(self, x: np.ndarray) -> np.ndarray:
@@ -1368,6 +1542,11 @@ class Sqrt(Function):
 
         Returns:
             np.ndarray: The gradient of the loss with respect to the input tensor.
+
+        Examples:
+            >>> x = Tensor(np.array([4, 9, 16]))
+            >>> y = x.sqrt()
+            >>> # If grad is ones, the gradient should be 0.5 / sqrt(x)
         """
         return grad.data * 0.5 / np.sqrt(self.x)
 
@@ -1379,8 +1558,11 @@ Reduction Ops
 
 class Sum(Function):
     """Compute the sum of tensor elements.
-
     See :func:`autograd.tensor.Tensor.sum` function
+
+    Examples:
+        >>> x = Tensor(np.array([[1, 2], [3, 4]]))
+        >>> s = Sum.apply(x, axis=0, keepdims=True)  # Expected: Tensor with data [[4, 6]]
     """
 
     def forward(
@@ -1420,6 +1602,11 @@ class Sum(Function):
 
         Returns:
             np.ndarray: The gradient of the loss with respect to the input tensor.
+
+        Examples:
+            >>> x = Tensor(np.array([[1, 2], [3, 4]]))
+            >>> s = x.sum(axis=0)
+            >>> # During backprop, the gradient is broadcast back to shape (2,2)
         """
         # Use expand to handle gradient broadcasting
         if grad is None:
@@ -1452,6 +1639,10 @@ class Sum(Function):
 class Max(Function):
     """
     See :func:`autograd.tensor.Tensor.max` function
+
+    Examples:
+        >>> x = Tensor(np.array([[1, 5], [3, 4]]))
+        >>> m = Max.apply(x, axis=0, keepdims=True) # Expected: [[3, 5]]
     """
 
     def forward(
@@ -1501,6 +1692,11 @@ class Max(Function):
 
         Returns:
             np.ndarray: The gradient of the loss with respect to the input tensor.
+
+        Examples:
+            >>> x = Tensor(np.array([[1, 5], [3, 4]]))
+            >>> m = x.max(axis=0, keepdims=True)
+            >>> # During backprop, gradient is distributed to the positions where x equals the max.
         """
         x = self.tensors[0]
 
@@ -1523,6 +1719,11 @@ class Max(Function):
 class Maximum(Function):
     """Compute the element-wise maximum between two tensors.
     See :func:`autograd.tensor.Tensor.maximum` function
+
+    Examples:
+        >>> x = Tensor(np.array([1, 5, 3]))
+        >>> y = Tensor(np.array([2, 4, 3]))
+        >>> z = Maximum.apply(x, y)  # Expected: [2, 5, 3]
     """
 
     def forward(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
@@ -1565,6 +1766,12 @@ class Maximum(Function):
         Returns:
             Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
                 Gradients of the loss with respect to the input tensors x and y.
+
+        Examples:
+            >>> x = Tensor(np.array([1, 5, 3]))
+            >>> y = Tensor(np.array([2, 4, 3]))
+            >>> z = x.maximum(y)
+            >>> # Backpropagation would distribute the gradient to x and y based on the maximum rule.
         """
         x = self.tensors[0]
         y = self.tensors[1]
@@ -1595,6 +1802,10 @@ class Maximum(Function):
 class Mean(Function):
     """Compute the mean of tensor elements.
     See :func:`autograd.tensor.Tensor.mean` function
+
+    Examples:
+        >>> x = Tensor(np.array([[1, 2], [3, 4]]))
+        >>> m = Mean.apply(x, axis=0) # Expected: [2, 3]
     """
 
     def forward(
@@ -1637,6 +1848,11 @@ class Mean(Function):
 
         Returns:
             np.ndarray: The gradient of the loss with respect to the input tensor.
+
+        Examples:
+            >>> x = Tensor(np.array([[1, 2], [3, 4]]))
+            >>> m = x.mean()
+            >>> # During backprop, the gradient is divided by the number of elements.
         """
         # Use expand for gradient broadcasting
         grad_expanded = grad.expand(
@@ -1654,6 +1870,13 @@ class Mean(Function):
 class Gather(Function):
     """Gather operation for 2D tensors along axis 0 using integer indices.
     See :func:`autograd.tensor.Tensor.gather` function
+
+    Examples:
+        >>> x = Tensor(np.array([[10, 20], [30, 40], [50, 60]]))
+        >>> g = Gather.apply(x, index=np.array([0, 2]))
+        >>> print(g.data)
+        [[10, 20],
+         [50, 60]]
     """
 
     def forward(self, x: np.ndarray, index: np.ndarray) -> np.ndarray:
@@ -1682,7 +1905,12 @@ class Gather(Function):
 
         Returns:
             Tuple[np.ndarray, None]: A tuple where the first element is the gradient with respect to
-            the input tensor, and the second element is None (since indices are not differentiable).
+            the input tensor, and the second element is None. (since indices are not differentiable).
+
+        Examples:
+            >>> x = Tensor(np.array([[10, 20], [30, 40], [50, 60]]))
+            >>> g = x.gather(np.array([0, 2]))
+            >>> # Backpropagated gradient will be placed in rows 0 and 2 of a zero tensor.
         """
         dx = np.zeros_like(self.x)
         flat_indices = self.index.ravel()
@@ -1699,6 +1927,11 @@ Movement Ops
 class View(Function):
     """View the tensor with a new shape without copying data.
     See :func:`autograd.tensor.Tensor.view` function
+
+    Examples:
+        >>> x = Tensor(np.array([1, 2, 3, 4]))
+        >>> v = View.apply(x, new_shape=(2,2))
+        >>> print(v.data.shape)  # Expected: (2, 2)
     """
 
     def forward(
@@ -1757,6 +1990,11 @@ class View(Function):
 
         Returns:
             Optional[np.ndarray]: The gradient reshaped to the original tensor shape, or None if grad is None.
+
+        Examples:
+            >>> x = Tensor(np.array([1,2,3,4]))
+            >>> v = x.view(2,2)
+            >>> # Backward pass would reshape grad from (2,2) back to original shape.
         """
         return grad.reshape(self.original_shape).data if grad is not None else None
 
@@ -1764,6 +2002,10 @@ class View(Function):
 class Expand(Function):
     """Expand the tensor to a given shape without copying data (broadcasting).
     See :func:`autograd.tensor.Tensor.expand` function
+
+    Examples:
+        >>> x = Tensor(np.array([1,2,3]))
+        >>> e = Expand.apply(x, shape=(3,3)) # Expected: array where each row is [1,2,3]
     """
 
     def forward(
@@ -1794,6 +2036,11 @@ class Expand(Function):
 
         Returns:
             np.ndarray: The gradient of the loss with respect to the input tensor.
+
+        Examples:
+            >>> x = Tensor(np.array([1,2,3]))
+            >>> e = x.expand(3, 3)
+            >>> # Backward pass would sum gradients over broadcasted dimensions.
         """
         grad_arr = grad.data
         # Handle extra leading dimensions
@@ -1826,6 +2073,11 @@ class Expand(Function):
 class Reshape(Function):
     """Reshape the tensor to a new shape without changing its data content.
     See :func:`autograd.tensor.Tensor.reshape` function
+
+    Examples:
+        >>> x = Tensor(np.array([[1,2],[3,4]]))
+        >>> r = Reshape.apply(x, shape=(4,))
+        >>> print(r.data)  # Expected: [1, 2, 3, 4]
     """
 
     def forward(
@@ -1854,6 +2106,11 @@ class Reshape(Function):
 
         Returns:
             Optional[np.ndarray]: The gradient reshaped to the original tensor shape, or None if grad is None.
+
+        Examples:
+            >>> x = Tensor(np.array([[1,2],[3,4]]))
+            >>> r = x.reshape(4)
+            >>> # Backward would reshape grad from shape (4,) to (2,2)
         """
         return grad.data.reshape(self.original_shape) if grad is not None else None
 
@@ -1861,6 +2118,11 @@ class Reshape(Function):
 class Transpose(Function):
     """Transpose operation for swapping any two dimensions of a tensor.
     See :func:`autograd.tensor.Tensor.transpose` function
+
+    Examples:
+        >>> x = Tensor(np.array([[1, 2], [3, 4]]))
+        >>> t = Transpose.apply(x, dim0=0, dim1=1)
+        >>> print(t.data)  # Expected: [[1, 3], [2, 4]]
     """
 
     def _get_transpose_axes(
@@ -1912,7 +2174,12 @@ class Transpose(Function):
             grad (Tensor): The gradient of the loss with respect to the output tensor.
 
         Returns:
-            np.ndarray: The gradient with dimensions swapped back to the original order.
+            np.ndarray: The gradient with dimensions swapped back to their original order.
+
+        Examples:
+            >>> x = Tensor(np.array([[1,2],[3,4]]))
+            >>> t = x.transpose(0,1)
+            >>> # Backward would apply the inverse transpose.
         """
         transposed_grad = np.transpose(
             grad.data,
@@ -1924,6 +2191,10 @@ class Transpose(Function):
 class Pad(Function):
     """Pad the tensor with a specified padding.
     See :func:`autograd.tensor.Tensor.pad` function
+
+    Examples:
+        >>> x = Tensor(np.array([[1, 2], [3, 4]]))
+        >>> p = Pad.apply(x, pad_width=1, mode="constant", constant_values=0) # Expected padded tensor with zeros around the original data.
     """
 
     def forward(
@@ -1980,6 +2251,11 @@ class Pad(Function):
 
         Returns:
             np.ndarray: The gradient corresponding to the unpadded input.
+
+        Examples:
+            >>> x = Tensor(np.array([[1,2],[3,4]]))
+            >>> p = x.pad(1, mode="constant", constant_values=0)
+            >>> # During backprop, the gradient will be unpadded to match x.
         """
         # Extract the unpadded region
         slices = tuple(
@@ -1991,6 +2267,11 @@ class Pad(Function):
 class Cat(Function):
     """Concatenate a sequence of tensors along a specified axis.
     See :func:`autograd.tensor.Tensor.cat` function
+
+    Examples:
+        >>> x = Tensor(np.array([[1, 2]]))
+        >>> y = Tensor(np.array([[3, 4]]))
+        >>> c = Cat.apply(x, y, axis=0) # Expected: [[1,2],[3,4]]
     """
 
     def forward(self, *tensors: "Tensor", axis: int = 0) -> np.ndarray:
@@ -2017,6 +2298,12 @@ class Cat(Function):
 
         Returns:
             Tuple[Optional[np.ndarray], ...]: A tuple of gradients corresponding to each input tensor.
+
+        Examples:
+            >>> x = Tensor(np.array([[1, 2]]))
+            >>> y = Tensor(np.array([[3, 4]]))
+            >>> c = Tensor.cat([x, y], axis=0)
+            >>> # Backward pass would split the gradient along axis 0.
         """
         grads = []
         start_idx = 0
@@ -2037,6 +2324,11 @@ class Cat(Function):
 class Permute(Function):
     """Reorder the dimensions of a tensor.
     See :func:`autograd.tensor.Tensor.permute` function
+
+    Examples:
+        >>> x = Tensor(np.array([[[1,2],[3,4]], [[5,6],[7,8]]]))  # shape (2,2,2)
+        >>> p = Permute.apply(x, dims=(1,0,2))
+        >>> print(p.data.shape)  # Expected shape: (2,2,2) with dimensions permuted.
     """
 
     def forward(self, x: np.ndarray, dims: Sequence[int]) -> np.ndarray:
@@ -2066,6 +2358,11 @@ class Permute(Function):
 
         Returns:
             np.ndarray: The gradient with dimensions restored to their original order.
+
+        Examples:
+            >>> x = Tensor(np.array([[1,2],[3,4]]))
+            >>> p = x.permute(1,0)
+            >>> # Backward would transpose the gradient back.
         """
         inv_dims = [self.dims.index(i) for i in range(len(self.dims))]
         return np.transpose(grad.data, inv_dims)
@@ -2074,6 +2371,11 @@ class Permute(Function):
 class Stack(Function):
     """Stack a sequence of tensors along a new axis.
     See :func:`autograd.tensor.Tensor.stack` function
+
+    Examples:
+        >>> x = Tensor(np.array([1,2]))
+        >>> y = Tensor(np.array([3,4]))
+        >>> s = Stack.apply(x, y, axis=0) # Expected: [[1,2],[3,4]]
     """
 
     def forward(self, *tensors: "Tensor", axis: int = 0) -> np.ndarray:
@@ -2111,6 +2413,12 @@ class Stack(Function):
 
         Returns:
             Tuple[Optional[np.ndarray], ...]: A tuple of gradients corresponding to each input tensor.
+
+        Examples:
+            >>> x = Tensor(np.array([1,2]))
+            >>> y = Tensor(np.array([3,4]))
+            >>> s = Tensor.stack([x, y], axis=0)
+            >>> # Backward pass would split grad along the new axis.
         """
         grad_size = grad.shape[self.axis]
         chunk_size = grad_size // len(self.tensors)
@@ -2131,6 +2439,12 @@ class Stack(Function):
 class StridedWindows(Function):
     """Create a strided windows view of a tensor.
     See :func:`autograd.tensor.Tensor.strided_windows` function
+
+    Examples:
+        >>> x = Tensor(np.random.rand(2, 3, 10, 10))
+        >>> windows = StridedWindows.apply(x, kernel_size=3, stride=1)
+        >>> print(windows.shape)
+        (8, 8, 2, 3, 3, 3)
     """
 
     def forward(self, x: np.ndarray, kernel_size: int, stride: int) -> np.ndarray:
@@ -2184,6 +2498,11 @@ class StridedWindows(Function):
 
         Returns:
             np.ndarray: The gradient of the loss with respect to the original input tensor.
+
+        Examples:
+            >>> x = Tensor(np.random.rand(2, 3, 10, 10))
+            >>> windows = x.strided_windows(kernel_size=3, stride=1)
+            >>> # Backward pass would accumulate gradients from overlapping windows.
         """
         grad_arr = grad.data.reshape(
             self.H_out,
@@ -2211,6 +2530,10 @@ class StridedWindows(Function):
 class Roll(Function):
     """Roll tensor elements along a specified dimension.
     See :func:`autograd.tensor.Tensor.roll` function
+
+    Examples:
+        >>> x = Tensor(np.array([1,2,3,4,5]))
+        >>> r = Roll.apply(x, shifts=2, dims=0)  # Expected: [4,5,1,2,3]
     """
 
     def forward(
@@ -2241,6 +2564,11 @@ class Roll(Function):
 
         Returns:
             np.ndarray: The gradient of the loss with respect to the input tensor.
+
+        Examples:
+            >>> x = Tensor(np.array([1,2,3,4,5]))
+            >>> r = x.roll(shifts=2, dims=0)
+            >>> # Backward would roll grad in the opposite direction.
         """
         grad_arr = grad.data
         # Handle scalar gradients by reshaping to original input shape
