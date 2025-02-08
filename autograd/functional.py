@@ -23,6 +23,11 @@ def relu(x: Tensor) -> Tensor:
 
     Returns:
         Tensor: The tensor after applying the ReLU function.
+
+    Examples:
+        >>> from autograd.tensor import Tensor
+        >>> x = Tensor([-1, 0, 2])
+        >>> y = relu(x) # Expected output: [0, 0, 2]
     """
     return Relu.apply(x)
 
@@ -36,6 +41,11 @@ def sigmoid(x: Tensor) -> Tensor:
 
     Returns:
         Tensor: The tensor after applying the sigmoid function.
+
+    Examples:
+        >>> from autograd.tensor import Tensor
+        >>> x = Tensor([0, 2])
+        >>> y = sigmoid(x) # Expected output: [0.5, ~0.88]
     """
     return Sigmoid.apply(x)
 
@@ -49,6 +59,12 @@ def softmax(x: Tensor) -> Tensor:
 
     Returns:
         Tensor: The tensor with softmax probabilities.
+
+    Examples:
+        >>> from autograd.tensor import Tensor
+        >>> import cupy as np
+        >>> x = Tensor(np.array([2.0, 1.0, 0.1]))
+        >>> y = softmax(x) # Expected output: probabilities that sum to 1
     """
     return Softmax.apply(x)
 
@@ -62,17 +78,22 @@ def tanh(x: Tensor) -> Tensor:
 
     Returns:
         Tensor: The tensor after applying the tanh function.
+
+    Examples:
+        >>> from autograd.tensor import Tensor
+        >>> x = Tensor([0, 1])
+        >>> y = tanh(x) # Expected output: [0, tanh(1)]
     """
     return Tanh.apply(x)
 
 
 def gelu(x: Tensor) -> Tensor:
-    """
+    r"""
     Applies the Gaussian Error Linear Unit (GELU) activation function.
 
     This function uses the approximate formula:
     $$
-    0.5 * x * (1 + tanh( sqrt(2/pi)*(x + 0.044715*x^3) ))
+    0.5 * x * \left(1 + \tanh\left(\sqrt{\frac{2}{\pi}} \, (x + 0.044715*x^3)\right)\right)
     $$
 
     Args:
@@ -80,18 +101,31 @@ def gelu(x: Tensor) -> Tensor:
 
     Returns:
         Tensor: The tensor after applying the GELU function.
+
+    Examples:
+        >>> from autograd.tensor import Tensor
+        >>> x = Tensor([1.0, -1.0])
+        >>> y = gelu(x) # Expected output: approximate GELU values for the inputs
     """
     return Gelu.apply(x)
 
 
 class Relu(Function):
-    """
+    r"""
     Rectified Linear Unit (ReLU) activation function.
 
     The ReLU function is defined as:
         $$
-        ReLU(x) = max(0, x)
+        ReLU(x) = \max(0, x)
         $$
+
+    Note:
+        This class is used internally. For applying ReLU, use the `relu` function.
+
+    Examples:
+        >>> from autograd.tensor import Tensor
+        >>> x = Tensor([-3, 0, 3])
+        >>> y = Relu.apply(x) # Expected output: [0, 0, 3]
     """
 
     def forward(self, x: np.ndarray) -> np.ndarray:
@@ -123,15 +157,22 @@ class Relu(Function):
 class Gelu(Function):
     r"""
     Gaussian Error Linear Unit (GELU) activation function.
-    GELU(x) = x * P(X <= x) where P(X) ~ Gaussian Distribution with mean 0 and standard deviation 1
+    GELU(x) = x * P(X \le x) where X ~ N(0, 1)
 
     This activation function approximates:
     $$
-    0.5 * x * \left(1 + tanh\left(\sqrt{\frac{2}{\pi}} \left(x + 0.044715*x^3\right)\right)\right)
+    0.5 * x * \left(1 + \tanh\left(\sqrt{\frac{2}{\pi}} \, (x + 0.044715*x^3)\right)\right)
     $$
 
     Paper: https://arxiv.org/abs/1606.08415
 
+    Note:
+        Use the `gelu` function to apply this activation.
+
+    Examples:
+        >>> from autograd.tensor import Tensor
+        >>> x = Tensor([0.5, -0.5])
+        >>> y = Gelu.apply(x) # Expected output: approximate GELU values
     """
 
     def forward(self, x: np.ndarray) -> np.ndarray:
@@ -196,6 +237,14 @@ class Sigmoid(Function):
         $$
         sigmoid(x) = \frac{1}{1 + e^{-x}}
         $$
+
+    Note:
+        Use the `sigmoid` function to apply this activation.
+
+    Examples:
+        >>> from autograd.tensor import Tensor
+        >>> x = Tensor([0, 2])
+        >>> y = Sigmoid.apply(x) # Expected output: [0.5, ~0.88]
     """
 
     def forward(self, x: np.ndarray) -> np.ndarray:
@@ -232,6 +281,15 @@ class Softmax(Function):
         $$
         softmax(x)_i = \frac{e^{x_i}}{\sum_j e^{x_j}}
         $$
+
+    Note:
+        Use the `softmax` function to apply this activation.
+
+    Examples:
+        >>> from autograd.tensor import Tensor
+        >>> import cupy as np
+        >>> x = Tensor(np.array([1.0, 2.0, 3.0]))
+        >>> y = Softmax.apply(x) # Expected output: probabilities that sum to 1
     """
 
     def forward(self, x: np.ndarray) -> np.ndarray:
@@ -280,8 +338,16 @@ class Tanh(Function):
 
     The tanh function is defined as:
         $$
-        tanh(x) = \frac{e^x - e^{-x}}{e^x + e^{-x}}
+        \tanh(x) = \frac{e^x - e^{-x}}{e^x + e^{-x}}
         $$
+
+    Note:
+        Use the `tanh` function to apply this activation.
+
+    Examples:
+        >>> from autograd.tensor import Tensor
+        >>> x = Tensor([0, 1])
+        >>> y = Tanh.apply(x) # Expected output: [0, tanh(1)]
     """
 
     def forward(self, x: np.ndarray) -> np.ndarray:
@@ -325,11 +391,18 @@ class BinaryCrossEntropy(Function):
     Binary Cross Entropy (BCE) Loss.
 
     This loss function assumes that $y_{pred}$ contains probabilities rather than logits.
-    If the input is logits, use :func:`binary_cross_entropy_with_logits`, which applies a sigmoid before computing the loss.
+    If the input is logits, use :func:`binary_cross_entropy_with_logits`.
 
+    The loss is computed as:
     $$
     BCE = -\left( y_{true} \cdot \log(y_{pred}) + (1 - y_{true}) \cdot \log(1 - y_{pred}) \right)
     $$
+
+    Examples:
+        >>> from autograd.tensor import Tensor
+        >>> y_pred = Tensor([0.9, 0.2, 0.1])
+        >>> y_true = Tensor([1, 0, 0])
+        >>> loss = BinaryCrossEntropy.apply(y_pred, y_true) # Expected output: a small loss value
     """
 
     def forward(
@@ -398,6 +471,12 @@ class BinaryCrossEntropyWithLogits(Function):
     Binary Cross Entropy Loss with logits.
 
     This implementation is numerically stable for logits input.
+
+    Examples:
+        >>> from autograd.tensor import Tensor
+        >>> y_pred = Tensor([2.0, -1.0, -2.0])  # logits
+        >>> y_true = Tensor([1, 0, 0])
+        >>> loss = BinaryCrossEntropyWithLogits.apply(y_pred, y_true) # Expected output: a loss value computed using logits
     """
 
     def forward(self, y_pred: np.ndarray, y_true: np.ndarray) -> np.floating:
@@ -486,7 +565,13 @@ class CrossEntropy(Function):
     Cross-Entropy Loss for multi-dimensional predictions with optional padding and label smoothing.
 
     This function accepts raw logits (not probabilities) and computes a stable log-softmax internally.
-    It supports both 2D and 3D predictions.
+
+    Examples:
+        >>> import cupy as np
+        >>> from autograd.tensor import Tensor
+        >>> y_pred = Tensor(np.array([[2.0, 1.0, 0.1]]))
+        >>> y_true = Tensor(np.array([0]))
+        >>> loss = CrossEntropy.apply(y_pred, y_true, pad_idx=-1, label_smoothing=0.1) # Expected output: a loss value for the given logits and target
     """
 
     def forward(
@@ -646,7 +731,7 @@ class HingeLoss(Function):
 
     The hinge loss is defined as:
         $$
-        loss = max(0, 1 - y_{true} \cdot y_{pred})
+        loss = \max(0, 1 - y_{true} \cdot y_{pred})
         $$
 
     For correctly classified points ($y_{true} \cdot y_{pred} \geq 1$), the loss is 0; otherwise, it is $1 - y_{true} \cdot y_{pred}$. This is because loss functions typically don't go into the negatives so we take the max of 0 and 1 - y_true * y_pred)
@@ -659,6 +744,12 @@ class HingeLoss(Function):
     where $C$ is a hyperparameter controlling the trade-off between maximizing the margin (through regularization) and minimizing the loss, and $w$ is the weight vector. ($\|w\|^2$ is the regularization term)
 
     Paper: https://ieeexplore.ieee.org/document/708428
+
+    Examples:
+        >>> from autograd.tensor import Tensor
+        >>> y_pred = Tensor([0.8, -0.5, 0.3])
+        >>> y_true = Tensor([1, -1, 1])
+        >>> loss = HingeLoss.apply(y_pred, y_true, reduction="mean") # Expected output: average hinge loss
     """
 
     def forward(
@@ -674,12 +765,11 @@ class HingeLoss(Function):
         Args:
             y_pred (np.ndarray): Predicted scores.
             y_true (Union[np.ndarray, Tensor]): True labels.
-            reduction (str, optional): Specifies the reduction to apply to the output:
-                "none", "mean", or "sum". Defaults to "none".
+            reduction (str, optional): "none", "mean", or "sum". Defaults to "none".
             **kwargs: Additional keyword arguments.
 
         Returns:
-            Union[float, np.ndarray]: The computed hinge loss. A scalar if reduction is "mean" or "sum", otherwise an array.
+            Union[float, np.ndarray]: The computed hinge loss.
         """
         if isinstance(y_true, Tensor):
             y_true = y_true.data
@@ -760,6 +850,12 @@ class MeanSquaredLoss(Function):
         $$
         MSE = \frac{1}{N} \sum (y_{pred} - y_{true})^2
         $$
+
+    Examples:
+        >>> from autograd.tensor import Tensor
+        >>> y_pred = Tensor([3.0, 5.0])
+        >>> y_true = Tensor([2.0, 5.0])
+        >>> loss = MeanSquaredLoss.apply(y_pred, y_true) # Expected output: 0.5
     """
 
     def forward(
@@ -793,7 +889,7 @@ class MeanSquaredLoss(Function):
             grad (Tensor): Upstream gradient.
 
         Returns:
-            np.ndarray: The gradient with respect to the predictions.
+            np.ndarray: The gradient with respect to y_pred.
         """
         return 2 * (self.y_pred - self.y_true) * grad.data
 
@@ -813,6 +909,12 @@ def binary_cross_entropy(
 
     Returns:
         Tensor: The computed binary cross entropy loss.
+
+    Examples:
+        >>> from autograd.tensor import Tensor
+        >>> y_pred = Tensor([0.9, 0.2, 0.1])
+        >>> y_true = [1, 0, 0]
+        >>> loss = binary_cross_entropy(y_pred, y_true)
     """
     if not isinstance(y_true, Tensor):
         y_true = Tensor(y_true, requires_grad=False)
@@ -839,6 +941,12 @@ def binary_cross_entropy_with_logits(
 
     Returns:
         Tensor: The computed binary cross entropy loss.
+
+    Examples:
+        >>> from autograd.tensor import Tensor
+        >>> y_pred = Tensor([2.0, -1.0, -2.0])
+        >>> y_true = [1, 0, 0]
+        >>> loss = binary_cross_entropy_with_logits(y_pred, y_true)
     """
     if not isinstance(y_true, Tensor):
         y_true = Tensor(y_true, requires_grad=False)
@@ -866,6 +974,13 @@ def cross_entropy(
 
     Returns:
         Tensor: The computed cross-entropy loss.
+
+    Examples:
+        >>> import cupy as np
+        >>> from autograd.tensor import Tensor
+        >>> y_pred = Tensor(np.array([[2.0, 1.0, 0.1]]))
+        >>> y_true = Tensor(np.array([0]))
+        >>> loss = cross_entropy(y_pred, y_true, pad_idx=-1, label_smoothing=0.1)
     """
     if not isinstance(y_true, Tensor):
         y_true = Tensor(y_true, requires_grad=False)
@@ -891,6 +1006,12 @@ def hinge_loss(
 
     Returns:
         Tensor: The computed hinge loss.
+
+    Examples:
+        >>> from autograd.tensor import Tensor
+        >>> y_pred = Tensor([0.8, -0.5, 0.3])
+        >>> y_true = [1, -1, 1]
+        >>> loss = hinge_loss(y_pred, y_true, reduction="mean")
     """
     if not isinstance(y_true, Tensor):
         y_true = Tensor(y_true, requires_grad=False)
@@ -910,6 +1031,12 @@ def mean_squared_loss(
 
     Returns:
         Tensor: The computed MSE loss.
+
+    Examples:
+        >>> from autograd.tensor import Tensor
+        >>> y_pred = Tensor([3.0, 5.0])
+        >>> y_true = [2.0, 5.0]
+        >>> loss = mean_squared_loss(y_pred, y_true) # Expected output: 0.5
     """
     if not isinstance(y_true, Tensor):
         y_true = Tensor(y_true, requires_grad=False)
