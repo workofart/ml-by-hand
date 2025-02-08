@@ -37,16 +37,18 @@ class Transformer(nn.Module):
         self, vocab_size: int, hidden_size: int, num_attention_heads: int, **kwargs: Any
     ) -> None:
         """
+        Initialize the Transformer model.
+
         Args:
-            vocab_size (int): Vocabulary size for the embeddings
-            hidden_size (int): Dimension of model (d_model in the paper)
-            num_attention_heads (int): Number of attention heads (Section 3.2.2)
+            vocab_size (int): Size of the vocabulary.
+            hidden_size (int): Dimensionality of the model.
+            num_attention_heads (int): Number of attention heads.
+            **kwargs: Additional keyword arguments (may include "max_seq_len").
         """
         super().__init__(**kwargs)
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
         self.max_seq_len = kwargs.get("max_seq_len")
-
         self.embedding = nn.Embedding(vocab_size, hidden_size)
 
         # Encoder and dedcoder each have 6 layers
@@ -67,16 +69,16 @@ class Transformer(nn.Module):
         target_mask: Optional[Tensor] = None,
     ) -> Tensor:
         """
-        Forward pass of the transformer
+        Compute the forward pass of the Transformer model.
 
         Args:
-            source (Tensor): Source sequence indices (batch_size, seq_len)
-            target (Tensor): Target sequence indices (batch_size, seq_len)
-            source_mask (Tensor, optional): Source mask to cover padding. Defaults to None.
-            target_mask (Tensor, optional): Target mask to cover padding + future tokens (causal mask). Defaults to None.
+            source (Tensor): Source sequence indices of shape (batch_size, seq_len).
+            target (Tensor): Target sequence indices of shape (batch_size, seq_len).
+            source_mask (Optional[Tensor]): Mask for the source sequence (e.g., to ignore padding).
+            target_mask (Optional[Tensor]): Mask for the target sequence (e.g., causal mask).
 
         Returns:
-            Tensor: Probability distribution over entire vocabulary
+            Tensor: Logits over the vocabulary for each position in the target sequence.
         """
         encoder_output = self.encoder(
             source, embedding_layer=self.embedding, mask=source_mask
@@ -93,16 +95,22 @@ class Transformer(nn.Module):
 
 class Encoder(nn.Module):
     """
+    Encoder component of the Transformer model.
     - Embeddings (Section 3.1) + Positional Encoding (Section 3.5)
     - 6 identical EncoderSublayer (Section 3.1)
     """
 
     def __init__(self, embedding_size: int, num_attention_heads: int) -> None:
+        """
+        Initialize the Encoder.
+
+        Args:
+            embedding_size (int): Dimensionality of the token embeddings.
+            num_attention_heads (int): Number of attention heads for the self-attention mechanism.
+        """
         super().__init__()
         self.embedding_size = embedding_size
-
         self.positional_encoder = PositionalEncoding(hidden_size=embedding_size)
-
         self.sublayers = nn.ModuleList(
             [
                 EncoderSublayer(
@@ -118,6 +126,21 @@ class Encoder(nn.Module):
     def forward(
         self, x: Tensor, embedding_layer: nn.Module, mask: Optional[Tensor] = None
     ) -> Tensor:
+        """
+        Compute the forward pass of the Encoder.
+
+        The method first applies token embedding (scaled by the square root of the embedding size),
+        then adds positional encodings, and processes the result through a stack of encoder sublayers.
+        Finally, a layer normalization is applied.
+
+        Args:
+            x (Tensor): Input token indices.
+            embedding_layer (nn.Module): Shared embedding layer.
+            mask (Optional[Tensor]): Mask to ignore certain positions (e.g., padding).
+
+        Returns:
+            Tensor: Encoder output of shape (batch_size, seq_len, embedding_size).
+        """
         # Section 3.4 (Embedding Scaling) embedding layer is shared between Encoder and Decoder
         x = embedding_layer(x) * Tensor(self.embedding_size).sqrt()
 
@@ -141,10 +164,17 @@ class Decoder(nn.Module):
     def __init__(
         self, vocab_size: int, hidden_size: int, num_attention_heads: int = 2
     ) -> None:
+        """
+        Initialize the Decoder.
+
+        Args:
+            vocab_size (int): Size of the vocabulary.
+            hidden_size (int): Dimensionality of the model.
+            num_attention_heads (int, optional): Number of attention heads. Defaults to 2.
+        """
         super().__init__()
         self.positional_encoder = PositionalEncoding(hidden_size=hidden_size)
         self.hidden_size = hidden_size
-
         self.sublayers = nn.ModuleList(
             [
                 DecoderSublayer(
@@ -167,12 +197,21 @@ class Decoder(nn.Module):
         target_mask: Optional[Tensor],
     ) -> Tensor:
         """
+        Compute the forward pass of the Decoder.
+
+        The method applies token embedding with scaling, positional encoding, and processes
+        the result through a stack of decoder sublayers that attend both to the decoder input
+        and the encoder output. Finally, a layer normalization is applied followed by a linear projection.
+
         Args:
-            x (Tensor): Target sequence (decoder input)
-            embedding_layer (nn.Module): The shared embedding layer between Encoder and Decoder (Section 3.4)
-            encoder_output (Tensor): Output of encoder
-            source_mask (Tensor): Source (padding) mask
-            target_mask (Tensor): Target (causal + padding) mask
+            x (Tensor): Target token indices.
+            embedding_layer (nn.Module): Shared embedding layer.
+            encoder_output (Tensor): Output from the encoder.
+            source_mask (Optional[Tensor]): Mask for the encoder input.
+            target_mask (Optional[Tensor]): Mask for the target input (e.g., causal mask).
+
+        Returns:
+            Tensor: Logits over the vocabulary for each time step.
         """
         x = embedding_layer(x) * Tensor(self.hidden_size).sqrt()
 
@@ -191,19 +230,37 @@ class ResidualAddAndNorm(nn.Module):
     """
     Implements the residual connection + Layer Normalization
     from Section 3.1 in the paper.
+
+    This module applies dropout to the output of a sublayer, adds it to the original input,
+    and then applies layer normalization.
     """
 
     def __init__(self, input_size: int, dropout_prob: float = 0.1) -> None:
+        """
+        Initialize the ResidualAddAndNorm module.
+
+        Args:
+            input_size (int): Dimensionality of the input tensor.
+            dropout_prob (float): Dropout probability.
+        """
         super().__init__()
         self.layer_norm = nn.LayerNorm(input_size)
-
         # 5.4 in Paper. Apply Dropout to the output of each layer before
         # adding to sublayer input
         self.dropout = nn.Dropout(p=dropout_prob)
 
     def forward(self, x: Tensor, previous_layer: nn.Module) -> Tensor:
-        # Residual connection from input x
-        # Post Layer normalization (same as the paper)
+        """
+        Apply a residual connection, dropout, and layer normalization.
+        Post Layer normalization (same as the paper)
+
+        Args:
+            x (Tensor): The input tensor.
+            previous_layer (nn.Module): A function representing the sublayer transformation.
+
+        Returns:
+            Tensor: The output tensor after residual addition and normalization.
+        """
         return x + self.layer_norm(self.dropout(previous_layer(x)))
 
 
@@ -223,14 +280,21 @@ class EncoderSublayer(nn.Module):
         dropout_prob: float = 0.1,
         num_attention_heads: int = 2,
     ) -> None:
-        super().__init__()
+        """
+        Initialize an EncoderSublayer.
 
+        Args:
+            hidden_size (int): Dimensionality of the model.
+            ff_hidden_size (int): Dimensionality of the hidden layer in the feed-forward network.
+            dropout_prob (float): Dropout probability.
+            num_attention_heads (int): Number of attention heads.
+        """
+        super().__init__()
         # Multi-head self attention
         self.add_and_norm1 = ResidualAddAndNorm(hidden_size)
         self.multi_head_attention = nn.MultiHeadAttention(
             num_heads=num_attention_heads, hidden_size=hidden_size
         )
-
         # Position-wise feedforward
         self.add_and_norm2 = ResidualAddAndNorm(hidden_size)
         self.feedforward = FeedForward(
@@ -240,7 +304,20 @@ class EncoderSublayer(nn.Module):
         )
 
     def forward(self, x: Tensor, mask: Optional[Tensor]) -> Tensor:
-        # (Section 3.2.2) Multi-head self attention
+        """
+        Compute the forward pass of the encoder sublayer.
+        (Section 3.2.2) Multi-head self attention
+
+        The sublayer applies multi-head self-attention followed by a position-wise feed-forward network,
+        each with residual connections and layer normalization.
+
+        Args:
+            x (Tensor): Input tensor.
+            mask (Optional[Tensor]): Attention mask to ignore certain positions.
+
+        Returns:
+            Tensor: The output tensor of the encoder sublayer.
+        """
         x = self.add_and_norm1(
             x, lambda x_: self.multi_head_attention(x_, x_, x_, mask=mask)
         )
@@ -266,6 +343,15 @@ class DecoderSublayer(nn.Module):
         dropout_prob: float = 0.1,
         num_attention_heads: int = 2,
     ) -> None:
+        """
+        Initialize a DecoderSublayer.
+
+        Args:
+            hidden_size (int): Dimensionality of the model.
+            ff_hidden_size (int): Dimensionality of the hidden layer in the feed-forward network.
+            dropout_prob (float): Dropout probability.
+            num_attention_heads (int): Number of attention heads.
+        """
         super().__init__()
 
         # Section 3.2.3 Masked Multi-head self-attention
@@ -295,8 +381,25 @@ class DecoderSublayer(nn.Module):
         source_mask: Optional[Tensor],
         target_mask: Optional[Tensor],
     ) -> Tensor:
-        # Masked Multi-head Attention
-        # Figure 1 in Paper.
+        """
+        Compute the forward pass of the decoder sublayer.
+
+        Masked Multi-head Attention
+        Figure 1 in Paper.
+
+        The sublayer applies masked multi-head self-attention on the decoder input, then
+        performs encoder-decoder attention, followed by a feed-forward network. Residual
+        connections and layer normalization are applied after each step.
+
+        Args:
+            x (Tensor): Decoder input tensor.
+            encoder_output (Tensor): Encoder output tensor.
+            source_mask (Optional[Tensor]): Mask for the encoder input.
+            target_mask (Optional[Tensor]): Mask for the decoder input (e.g., to enforce causality).
+
+        Returns:
+            Tensor: The output tensor of the decoder sublayer.
+        """
         x = self.add_and_norm1(
             x, lambda x_: self.masked_multi_head_attention(x_, x_, x_, mask=target_mask)
         )
@@ -318,7 +421,8 @@ class DecoderSublayer(nn.Module):
 
 class PositionalEncoding(nn.Module):
     """
-    Implements the Positional Encoding from Section 3.5 in the paper.
+    Implements positional encoding as described in Section 3.5 of the paper.
+
     This allows the model to learn to attend to relative positions even
     without the sequence order information.
 
@@ -332,24 +436,33 @@ class PositionalEncoding(nn.Module):
     def __init__(
         self, hidden_size: int, max_seq_len: int = 5000, dropout_prob: float = 0.1
     ) -> None:
+        """
+        Initialize the PositionalEncoding module.
+
+        Args:
+            hidden_size (int): Dimensionality of the model.
+            max_seq_len (int): Maximum sequence length for which to compute positional encodings.
+            dropout_prob (float): Dropout probability.
+        """
         super().__init__()
         pe = np.zeros((max_seq_len, hidden_size), dtype=np.float32)
         position = np.arange(0, max_seq_len)[:, np.newaxis]
         inverse_freq = 1.0 / 10000 ** (np.arange(0, hidden_size, 2) / hidden_size)
         pe[:, 0::2] = np.sin(position * inverse_freq)
         pe[:, 1::2] = np.cos(position * inverse_freq)
-
         # Shape (max_seq_len, hidden_size)
         self._parameters["pe"] = Tensor(pe, requires_grad=False)
-
         self.dropout = nn.Dropout(p=dropout_prob)
 
     def forward(self, x: Tensor) -> Tensor:
         """
-        Takes (batch_size, seq_len, vocab_size) and returns the same shape
+        Add positional encoding to the input embeddings and apply dropout.
 
         Args:
-            x (Tensor): Embedding representation for the input text
+            x (Tensor): Input embeddings of shape (batch_size, seq_len, input_size).
+
+        Returns:
+            Tensor: The embeddings with positional encodings added.
         """
         batch_size, seq_len, input_size = x.shape
         positional_embedding = self._parameters["pe"][:seq_len, :].expand(
@@ -362,20 +475,38 @@ class PositionalEncoding(nn.Module):
 
 class FeedForward(nn.Module):
     """
-    Position-wise Feed-forward Network (Section 3.3)
+    Position-wise feed-forward network as described in Section 3.3 of the paper.
 
-    $$ FFN(x) = max(0, xW1 + b1)W2 + b2 $$
+    This module consists of two linear layers with a ReLU activation in between and dropout applied
+    to the intermediate representation.
     """
 
     def __init__(
         self, fc_input_size: int, hidden_size: int, dropout_prob: float
     ) -> None:
+        """
+        Initialize the FeedForward network.
+
+        Args:
+            fc_input_size (int): Dimensionality of the input.
+            hidden_size (int): Dimensionality of the hidden layer.
+            dropout_prob (float): Dropout probability.
+        """
         super().__init__()
         self.fc1 = nn.Linear(fc_input_size, hidden_size)
         self.fc2 = nn.Linear(hidden_size, fc_input_size)
         self.dropout = nn.Dropout(p=dropout_prob)
 
     def forward(self, x: Tensor) -> Tensor:
+        """
+        Compute the forward pass of the FeedForward network.
+
+        Args:
+            x (Tensor): Input tensor.
+
+        Returns:
+            Tensor: Output tensor after applying ReLU, dropout, and a second linear transformation.
+        """
         x = functional.relu(self.fc1(x))
         x = self.fc2(self.dropout(x))
         return x
@@ -383,20 +514,61 @@ class FeedForward(nn.Module):
 
 class TransformerForwardFn(nn.AbstractLLMForwardFn):
     """
-    A forward function for the Transformer model.
+    Forward function implementation for the Transformer model.
+
+    This class implements the AbstractLLMForwardFn interface for the Transformer.
+    It provides separate methods for training (which returns logits and ground truth)
+    and sampling (which returns logits and None for the ground truth).
     """
 
     def train(self, model: Transformer, batch_data: Any, **kwargs):
+        """
+        Compute the forward pass during training.
+
+        Args:
+            model (Transformer): The Transformer model.
+            batch_data (Any): A tuple containing (X, decoder_input, y, src_mask, tgt_mask, causal_mask).
+
+        Returns:
+            Tuple[Tensor, Any]: The output logits and the target labels.
+        """
         X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_data
         logits = model(X, dec_inp, src_mask, tgt_mask)
         return logits, y
 
     def sample(self, model: Transformer, batch_data: Any, **kwargs):
+        """
+        Compute the forward pass during sampling.
+
+        Args:
+            model (Transformer): The Transformer model.
+            batch_data (Any): Input batch data used for sampling.
+
+        Returns:
+            Tuple[Tensor, None]: The output logits and None (no ground truth during sampling).
+        """
         logits = model(batch_data, batch_data, None, None)
         return logits, None
 
 
 if __name__ == "__main__":
+    """
+    Main script for training a Transformer model on a text summarization task.
+
+    The pipeline is as follows:
+      1) Define a training configuration using TransformerTrainingConfig.
+      2) Load a text dataset (here, the "shakespeare_mini" dataset) via a helper function.
+      3) Create a BytePairEncoder (BPE) using custom BPE configuration from the training config.
+      4) Prepare the data by encoding the raw text into a sequence of integer tokens.
+      5) Split the encoded data into training and testing portions.
+      6) Update the model configuration with the vocabulary size from the BPE.
+      7) Instantiate an LLMTrainer with the Transformer model, optimizer, loss function, and forward function.
+      8) Create LLMDataLoader objects for training and evaluation.
+      9) Train the Transformer model.
+      10) Run inference on the trained model to generate output text.
+
+    No value is returned; training progress and generated outputs are logged.
+    """
     CONFIG = TransformerTrainingConfig(
         training_run_name="shakespeare_mini",
         dataset_name="shakespeare_mini",
