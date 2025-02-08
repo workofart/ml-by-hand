@@ -1875,7 +1875,9 @@ class Mean(Function):
         grad_arr = grad_expanded.data
         # Scale gradient by number of elements
         if self.axis is not None:
-            num_elements = np.prod(np.array([self.tensors[0].shape[ax] for ax in self.axis]))
+            num_elements = np.prod(
+                np.array([self.tensors[0].shape[ax] for ax in self.axis])
+            )
         else:
             num_elements = np.prod(self.tensors[0].shape)
         return grad_arr / num_elements
