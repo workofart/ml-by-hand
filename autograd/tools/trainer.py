@@ -316,6 +316,48 @@ class SimpleTrainer(AbstractTrainer):
 
     This trainer supports classification or regression depending on the
     `output_type` parameter.
+
+    Examples:
+        The following example demonstrates how to instantiate and run a simple
+        supervised training loop using the SimpleTrainer.
+
+        >>> from autograd import nn, optim
+        >>> from autograd.tools.config_schema import GenericTrainingConfig
+        >>> import numpy as np
+        >>>
+        >>> # Define a dummy model.
+        >>> class DummyModel(nn.Module):
+        ...     def __init__(self):
+        ...         super().__init__()
+        ...         self.linear = nn.Linear(10, 2)
+        ...     def forward(self, x):
+        ...         return self.linear(x)
+        >>>
+        >>> # Instantiate model, optimizer, and loss function.
+        >>> model_cls = DummyModel
+        >>> optimizer_cls = optim.SGD
+        >>> loss_fn = nn.MSELoss()  # or any other loss function
+        >>>
+        >>> # Create a dummy training configuration.
+        >>> config = GenericTrainingConfig(
+        ...     total_epochs=10,
+        ...     update_weights_every_n_steps=1,
+        ...     training_run_name='dummy_run',
+        ...     model_kwargs={},
+        ...     optimizer_kwargs={},
+        ...     checkpoint_freq=1,
+        ...     resume_epoch=None
+        ... )
+        >>>
+        >>> # Instantiate the trainer.
+        >>> trainer = SimpleTrainer(model_cls, optimizer_cls, loss_fn, config, output_type='softmax')
+        >>>
+        >>> # Create dummy data loaders (using lists as an example).
+        >>> train_loader = [ (np.random.rand(32, 10), np.random.rand(32, 2)) for _ in range(100) ]
+        >>> val_loader = [ (np.random.rand(32, 10), np.random.rand(32, 2)) for _ in range(20) ]
+        >>>
+        >>> # Run the training loop.
+        >>> trainer.fit(train_loader, val_loader)
     """
 
     def __init__(
@@ -451,6 +493,71 @@ class LLMTrainer(AbstractTrainer):
     """Trainer specialized for language modeling or next-token prediction tasks.
 
     Expects DataLoader batches of the form (X, dec_inp, y, src_mask, tgt_mask, causal_mask).
+
+    Examples:
+        The following example demonstrates how to instantiate and run a training loop
+        for a language modeling task using the LLMTrainer.
+
+        >>> from autograd import nn, optim
+        >>> from autograd.tools.config_schema import TransformerTrainingConfig
+        >>> import numpy as np
+        >>>
+        >>> # Define a dummy language model.
+        >>> class DummyLLM(nn.Module):
+        ...     def __init__(self):
+        ...         super().__init__()
+        ...         self.embedding = nn.Embedding(1000, 64)
+        ...     def forward(self, x):
+        ...         return self.embedding(x)
+        >>>
+        >>> # Instantiate model, optimizer, and loss function.
+        >>> model_cls = DummyLLM
+        >>> optimizer_cls = optim.Adam
+        >>> loss_fn = nn.CrossEntropyLoss()  # or any suitable loss function for language modeling
+        >>>
+        >>> # Define a dummy forward function that complies with the expected interface.
+        >>> class DummyForwardFn:
+        ...     def __call__(self, model, batch_data, mode="train"):
+        ...         # Unpack batch_data; dummy implementation.
+        ...         X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_data
+        ...         logits = model(X)
+        ...         return logits, y
+        >>>
+        >>> forward_fn = DummyForwardFn()
+        >>>
+        >>> # Create a dummy training configuration.
+        >>> config = TransformerTrainingConfig(
+        ...     total_epochs=10,
+        ...     update_weights_every_n_steps=1,
+        ...     training_run_name='llm_dummy_run',
+        ...     model_kwargs={},
+        ...     optimizer_kwargs={},
+        ...     checkpoint_freq=1,
+        ...     resume_epoch=None,
+        ...     label_smoothing=0.1,
+        ...     teacher_enforcing=False,
+        ...     eval_start_string='Hello',
+        ...     eval_top_k=5
+        ... )
+        >>>
+        >>> # Instantiate the trainer.
+        >>> trainer = LLMTrainer(model_cls, optimizer_cls, loss_fn, forward_fn, config)
+        >>>
+        >>> # Create dummy data loaders for language modeling.
+        >>> # Each batch is expected to be a tuple: (X, dec_inp, y, src_mask, tgt_mask, causal_mask).
+        >>> dummy_batch = (
+        ...     np.random.randint(0, 1000, (32, 10)),  # X
+        ...     np.random.randint(0, 1000, (32, 10)),  # dec_inp
+        ...     np.random.randint(0, 1000, (32, 10)),  # y
+        ...     None,  # src_mask (dummy)
+        ...     None,  # tgt_mask (dummy)
+        ...     None   # causal_mask (dummy)
+        ... )
+        >>> train_loader = [dummy_batch for _ in range(100)]
+        >>> val_loader = [dummy_batch for _ in range(20)]
+        >>>
+        >>> # Run the training loop.
+        >>> trainer.fit(train_loader, val_loader)
     """
 
     def __init__(
