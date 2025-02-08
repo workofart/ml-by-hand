@@ -175,7 +175,7 @@ class DecoderSublayer(nn.Module):
 
 class GPT2ForwardFn(nn.AbstractLLMForwardFn):
     """
-    A forward function for the Transformer model.
+    A forward function for the GPT-2 model.
     """
 
     def train(self, model: GPT2, batch_data: Any, **kwargs):
@@ -192,16 +192,16 @@ if __name__ == "__main__":
     SHAPESPEARE_CONFIG = TransformerTrainingConfig(
         training_run_name="shakespeare_mini",
         dataset_name="shakespeare_mini",
-        batch_size=64,  # GPT-2 uses 512
-        total_epochs=15,
+        batch_size=16,  # GPT-2 uses 512
+        total_epochs=10,
         eval_iters=50,
         steps_per_epoch=100,
         checkpoint_freq=4,
         model_kwargs={
             "num_attention_heads": 6,  # GPT-2 small uses 12
             "hidden_size": 768,  # GPT-2 small uses 768, must be divisible by num_attention_heads
-            "dropout_prob": 0.0,
-            "max_seq_len": 256,  # GPT-2 uses 1024
+            "dropout_prob": 0.3,
+            "max_seq_len": 96,  # GPT-2 uses 1024
             "num_decoder_layers": 6,  # GPT-2 uses 12
         },
         optimizer_kwargs={
@@ -210,24 +210,29 @@ if __name__ == "__main__":
             "max_grad_norm": 1.0,
             "weight_decay": 0.1,
             "lr_scheduler_kwargs": {
-                "lr_scheduler_cls": optim.CosineScheduler,  # TODO: check if we can serialize this into checkpoint
+                "lr_scheduler_cls": "CosineScheduler",
                 "warmup_steps": 100,
                 "lr_decay_iters": 1000,  # steps_per_epoch * total_epochs
             },
         },
-        resume_epoch=4,
+        resume_epoch=None,  # Set this to None if you don't want to load from checkpoint
         teacher_enforcing=True,
         include_decoder_input=False,
         create_padding_masks=False,
         label_smoothing=0.1,
         eval_start_string="First",
-        eval_top_k=50,  # Shakespeare only has ~60 unique characters, we so will just sample top 50
+        eval_top_k=50,  # Shakespeare only has ~60 unique characters, and our if we do 3000 merges in BPE, our vocabulary size is 260, we so will just sample top 50.
+        # The following shows what we use to tokenize and encode our input data
+        # We are using our own BytePairEncoder class in autograd/text/tokenizer.py
+        # Feel free to play around with the "num_merges". This controls the tradeoff between vocabulary size
+        # and the total sequence length of the encoded text.
+        # Double-check whether we want to overwrite the encoded_data and vocabulary
         custom_bpe=CustomBpeConfig(
-            num_merges=0,
-            encoded_data_path="training_data/bpe_0_shakespeare_encoded_data.npz",
-            vocab_path="training_data/shakespeare_vocab_0.pkl",
-            overwrite_encoded_data=True,
-            overwrite_vocabulary_file=True,
+            num_merges=3000,
+            encoded_data_path="training_data/bpe_3000_shakespeare_encoded_data.npz",
+            vocab_path="training_data/shakespeare_vocab_3000.pkl",
+            overwrite_encoded_data=False,
+            overwrite_vocabulary_file=False,
             split_token="<|endoftext|>",
         ),
     )
@@ -235,16 +240,17 @@ if __name__ == "__main__":
     WIKI_CONFIG = TransformerTrainingConfig(
         training_run_name="wiki",
         dataset_name="wiki_simple_english",
-        batch_size=128,  # GPT-2 uses 512
+        batch_size=16,  # GPT-2 uses 512
         total_epochs=30,
         eval_iters=100,
-        steps_per_epoch=200,
-        checkpoint_freq=2,
+        steps_per_epoch=1600,
+        update_weights_every_n_steps=8,  # simulate larger batch sizes
+        checkpoint_freq=4,
         model_kwargs={
             "num_attention_heads": 12,  # GPT-2 small uses 12
             "hidden_size": 768,  # GPT-2 small uses 768, must be divisible by num_attention_heads
             "dropout_prob": 0.2,
-            "max_seq_len": 192,  # GPT-2 uses 1024
+            "max_seq_len": 740,  # GPT-2 uses 1024
             "num_decoder_layers": 12,  # GPT-2 uses 12
         },
         optimizer_kwargs={
@@ -255,10 +261,10 @@ if __name__ == "__main__":
             "lr_scheduler_kwargs": {
                 "lr_scheduler_cls": optim.CosineScheduler,
                 "warmup_steps": 100,
-                "lr_decay_iters": 1000,
+                "lr_decay_iters": 40000,
             },
         },
-        resume_epoch=None,
+        resume_epoch=None,  # Set this to None if you don't want to load from checkpoint
         teacher_enforcing=False,
         include_decoder_input=False,
         create_padding_masks=False,
@@ -266,7 +272,7 @@ if __name__ == "__main__":
         eval_start_string="April is",
         custom_bpe=CustomBpeConfig(
             num_merges=12000,
-            encoded_data_path="training_data/bpe_12000_wiki_simple_encoded_data",
+            encoded_data_path="training_data/bpe_12000_wiki_simple_encoded_data.npz",
             vocab_path="training_data/wikipedia_simpleenglish_vocab_12000.pkl",
             overwrite_encoded_data=False,
             overwrite_vocabulary_file=False,
@@ -279,6 +285,7 @@ if __name__ == "__main__":
     logger = logging.getLogger(__name__)
 
     # Load some data
+    # Note: Please supply the correct data for your model
     data = text_utils.load_shakespeare_mini()
     # data = text_utils.load_wiki_simple()
 
@@ -293,15 +300,11 @@ if __name__ == "__main__":
             raw_text=data,
             overwrite_encoded_data=CONFIG.custom_bpe.overwrite_encoded_data,
             overwrite_vocabulary_file=CONFIG.custom_bpe.overwrite_vocabulary_file,
-            split_token=CONFIG.custom_bpe.split_token,
         )
     else:
-        # TODO: Experimental to debug whether the model learning is poorly due to
-        # the tokenizer. Need to install the python package manually via `uv pip install tiktoken`
-        import tiktoken
-
-        bpe = tiktoken.get_encoding("gpt2")
-        encoded_data = bpe.encode(data)
+        raise ValueError(
+            "Please supply a custom_bpe config. Check out CustomBpeConfig for more details."
+        )
 
     n = int(len(encoded_data) * 0.9)
     train_data, test_data = encoded_data[:n], encoded_data[n:]
@@ -347,9 +350,8 @@ if __name__ == "__main__":
             prediction_func=GPT2ForwardFn(),
             bpe=bpe,
             start_tokens="\n",  # Example start token
-            # start_tokens="April is a charming day",  # Example start token
-            max_length=int(trainer.model.max_seq_len * 2),
-            temperature=0.3,
-            top_k=50,  # for shakespeare, there are only 63 vocabulary that are used, so let's limit to the top 50 to avoid printing weird characters
+            max_length=int(trainer.model.max_seq_len),
+            temperature=1.0,
+            top_k=200,
         )
         print("\n------------------------\n")

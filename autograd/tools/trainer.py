@@ -148,6 +148,8 @@ class AbstractTrainer(ABC):
                     "epoch": epoch + 1,
                     "model_state_dict": self.model.state_dict(),
                     "optimizer_state_dict": self.optimizer.state_dict(),
+                    "model_init_kwargs": self.config.model_kwargs,
+                    "optimizer_init_kwargs": self.config.optimizer_kwargs,
                     "config": self.config,
                 }
                 os.makedirs(self.CHECKPOINT_DIR, exist_ok=True)
@@ -261,8 +263,9 @@ class AbstractTrainer(ABC):
                 - optimizer (optim.Optimizer): The loaded or newly instantiated optimizer.
                 - checkpoint (dict): Dictionary of checkpoint data if loaded, otherwise empty.
         """
-        if resume_epoch is not None:
-            # Construct paths if not provided
+
+        if resume_epoch is not None or checkpoint_path is not None:
+            # Look for checkpoint files
             if checkpoint_path is not None:
                 ckpt_json = f"{checkpoint_path}.json"
                 ckpt_npz = f"{checkpoint_path}.npz"
@@ -282,11 +285,8 @@ class AbstractTrainer(ABC):
             # If your checkpoint has hyperparams or constructor kwargs,
             # you can either override model_kwargs or do a partial merge:
             #  e.g. model_kwargs.update(loaded_ckpt["hyperparams"].get("model_kwargs", {}))
-            hyperparams = loaded_ckpt.get("hyperparams", {})
-            model_init_kwargs = hyperparams.get("model_kwargs", model_kwargs)
-            optimizer_init_kwargs = hyperparams.get(
-                "optimizer_kwargs", optimizer_kwargs
-            )
+            model_init_kwargs = loaded_ckpt["model_init_kwargs"]
+            optimizer_init_kwargs = loaded_ckpt["optimizer_init_kwargs"]
 
             # Instantiate model & optimizer
             model = model_class(**model_init_kwargs)

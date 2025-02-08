@@ -183,9 +183,13 @@ def load_checkpoint(
         raise ValueError(f"Unknown meta type: {t}")
 
     if not os.path.exists(json_path):
-        raise ValueError(f"Checkpoint file not found: {json_path}")
+        raise ValueError(
+            f"Checkpoint file not found: {json_path}, double-check your 'resume_epoch' field in the config. Set to None if you don't want to load from checkpoint."
+        )
     if not os.path.exists(npz_path):
-        raise ValueError(f"Checkpoint file not found: {npz_path}")
+        raise ValueError(
+            f"Checkpoint file not found: {npz_path}, double-check your 'resume_epoch' field in the config. Set to None if you don't want to load from checkpoint."
+        )
 
     # Load metadata
     with open(json_path, "r") as f:
