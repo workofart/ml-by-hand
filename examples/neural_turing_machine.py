@@ -20,46 +20,91 @@ Paper: https://arxiv.org/abs/1410.5401
 
 class Memory:
     """
-    (batch_size, memory_length, memory_dim)
+    Implements a simple memory module for a Neural Turing Machine.
+
+    This class maintains a memory matrix for each batch with dimensions
+    (batch_size, memory_length, memory_dim) and provides methods to reset,
+    read from, and write to the memory.
     """
 
     def __init__(self, memory_length, memory_dim) -> None:
+        """
+        Initialize the Memory object.
+
+        Args:
+            memory_length (int): The number of memory locations.
+            memory_dim (int): The dimensionality of each memory vector.
+        """
         self.memory_length = memory_length
         self.memory_dim = memory_dim
         self.reset_memory()
         self._memory = None
 
     def reset_memory(self, batch_size=1):
+        """
+        Resets the memory by initializing a zero matrix for the given batch size.
+
+        Args:
+            batch_size (int): The number of samples in the batch. Defaults to 1.
+        """
         self._memory = Tensor(
             data=np.zeros((batch_size, self.memory_length, self.memory_dim)),
             requires_grad=False,
         )
 
     def read(self):
+        """
+        Returns the current memory content.
+
+        Returns:
+            Tensor: The memory matrix of shape (batch_size, memory_length, memory_dim).
+        """
         return self._memory
 
     def write(self, new_memory):
+        """
+        Overwrites the memory with new values.
+
+        Args:
+            new_memory (Tensor): A tensor with the same shape as the memory.
+        """
         self._memory = new_memory
 
 
 class ReadHead(nn.Module):
     """
-    "3.1 Reading" section in paper: https://arxiv.org/abs/1410.5401
+    Implements the reading mechanism for the Neural Turing Machine.
+
+    This module corresponds to section "3.1 Reading" in https://arxiv.org/abs/1410.5401.
+    It uses provided read weights to compute a weighted sum over the memory,
+    returning a read vector.
     """
 
     def __init__(self, memory: Memory):
+        """
+        Initialize the ReadHead.
+
+        Args:
+            memory (Memory): The Memory instance to read from.
+        """
         super().__init__()
         self.memory = memory
 
     def forward(self, read_weights):
         """
+        Computes the read vector from the memory using the read weights.
+
         r_t = \sum_i w_t(i) M_t(i)
         where:
             - r_t: Read vector at time t
             - M_t: N x M memory matrix at time t
             - N: the number of memory locations
             - w_t(i): Weights at time t
-        return:
+
+        Args:
+            read_weights (Tensor): Weights of shape (batch_size, memory_length).
+
+        Returns:
             r_t: read vector at time t of shape (batch_size, memory_dim)
         """
         read_weights = read_weights.view(
@@ -72,25 +117,45 @@ class ReadHead(nn.Module):
 
 class WriteHead(nn.Module):
     """
-    "3.2 Writing" section in paper: https://arxiv.org/abs/1410.5401
+    Implements the writing mechanism for the Neural Turing Machine.
+
+    This module corresponds to section "3.2 Writing" in https://arxiv.org/abs/1410.5401
+    It updates the memory based on the write weights, an erase vector, and an add vector.
     """
 
     def __init__(self, memory: Memory):
+        """
+        Initialize the WriteHead.
+
+        Args:
+            memory (Memory): The Memory instance to write to.
+        """
         super().__init__()
         self.memory = memory
 
     def forward(self, write_weights, erase_vector, add_vector):
         """
-        M_t(i) = (M_{t-1}(i)[1 - w_t(i) e_t]) + w_t(i) a_t
+        Writes to the memory using the given weights, erase vector, and add vector.
+
+        The update rule is:
+            M_t(i) = M_{t-1}(i) * (1 - w_t(i) * e_t) + w_t(i) * a_t
         where:
             - M_t(i): Memory vector at time t
             - w_t(i): Weights at time t
             - e_t: Erase vector at time t
             - a_t: Add vector at time t
             - 1: Row vector of all ones
+
+        Args:
+            write_weights (Tensor): Weights for writing of shape (batch_size, memory_length).
+            erase_vector (Tensor): Erase vector of shape (batch_size, memory_dim).
+            add_vector (Tensor): Add vector of shape (batch_size, memory_dim).
+
         If both erase vector and weight at the location i are both 0,
         then (1 - 1) will effectively "erase" the memory. Otherwise,
         the memory is left unchanged
+
+        The function updates the memory in place.
         """
         old_memory = self.memory.read()  # (batch_size, memory_length, memory_dim)
 
@@ -116,11 +181,18 @@ class WriteHead(nn.Module):
 
 class NeuralTuringMachine(nn.Module):
     """
-    The main model that encasulates all the components to build the
-    Neural Turing Machine for any task.
+    Implements a Neural Turing Machine (NTM).
 
-    Refer to Figure 2: Flow Diagram of the Addressing Mechanism
-    in paper: https://arxiv.org/abs/1410.5401
+    This model encapsulates the components of an NTM including an external memory,
+    a controller implemented via an LSTM block, and both read and write heads.
+    It follows the addressing mechanisms described in https://arxiv.org/abs/1410.5401 (Figure 2).
+
+    Attributes:
+        memory (Memory): The external memory module.
+        lstm (nn.LongShortTermMemoryBlock): The LSTM-based controller.
+        Various linear layers for computing addressing parameters (content key, shift, interpolation, etc.).
+        read_head (ReadHead): Module for reading from memory.
+        write_head (WriteHead): Module for writing to memory.
     """
 
     def __init__(
@@ -131,6 +203,16 @@ class NeuralTuringMachine(nn.Module):
         hidden_size,
         output_size,
     ):
+        """
+        Initialize the Neural Turing Machine.
+
+        Args:
+            input_size (int): Dimensionality of the input vector.
+            memory_length (int): Number of memory slots.
+            memory_dim (int): Dimensionality of each memory slot.
+            hidden_size (int): Number of hidden units in the controller.
+            output_size (int): Dimensionality of the model output.
+        """
         super().__init__(
             input_size, memory_length, memory_dim, hidden_size, output_size
         )
@@ -163,7 +245,7 @@ class NeuralTuringMachine(nn.Module):
 
     def forward(self, x):
         """
-        Run through the turing machine and LSTM model.
+        Run the Neural Turing Machine on the input sequence.
 
         For each time step:
             1. Read from memory
@@ -182,7 +264,10 @@ class NeuralTuringMachine(nn.Module):
             outputs:           (batch_size, seq_len, output_size)
 
         Args:
-            x: (batch_size, sequence_length, input_size): The input vector
+            x (np.ndarray): Input tensor of shape (batch_size, sequence_length, input_size).
+
+        Returns:
+            Tensor: Stacked outputs from each time step, of shape (batch_size, sequence_length, output_size).
         """
         batch_size, seq_len, input_size = x.shape
         self.memory.reset_memory(batch_size)
@@ -238,26 +323,30 @@ class NeuralTuringMachine(nn.Module):
             # 5. Write to memory
             self.write_head(new_weights, erase_vector, add_vector)
 
-            # 6. Update weights
+            # 6. Update weights for next time step
             read_weights = new_weights
 
         return Tensor.stack(outputs, axis=1)  # (batch_size, seq_len, output_size)
 
     def _content_addressing(self, key: Tensor, key_strength: Tensor):
         """
+        Perform content-based addressing to compute a normalized weight distribution.
         3.3.1 Focusing by Content in Paper: https://arxiv.org/abs/1410.5401
 
+        This function computes cosine similarity between the key vector and each memory
+        location, scales the similarity by key strength, and applies softmax to obtain weights.
+
         Args:
-            key (Tensor): What index to focus on
-            key_strength (Tensor): How much to focus on
+            key (Tensor): Key vector for addressing, shape (batch_size, memory_dim).
+            key_strength (Tensor): Scalar or vector indicating the focus strength, shape (batch_size, 1).
 
         Returns:
-            Tensor: Normalied weighting matrix based on content similarity
+            Tensor: A normalized weighting tensor of shape (batch_size, memory_length).
         """
         memory = self.memory.read()
         key_strength = functional.relu(key_strength) + 1e-8
 
-        # Compute cosine similarity between current content and
+        # Compute cosine similarity between current content and memory
         similarity = (memory * key.view(key.shape[0], 1, key.shape[1])).sum(
             axis=2
         )  # (batch_size, memory_length)
@@ -279,18 +368,21 @@ class NeuralTuringMachine(nn.Module):
         shift_logits,
     ):
         """
-        Location-based Addressing
+        Performs location-based addressing to refine memory read weights.
         3.3.2 Focusing by Location in Paper: https://arxiv.org/abs/1410.5401
 
+        This function interpolates between content-based weights and previous weights,
+        applies a circular convolution via shifting, and sharpens the result.
+
         Args:
-            content_weights (Tensor): The output of content-based addressing, determined what to focus on
-            sharpening_factor (Tensor): How much to sharpen the weights to combat shift weighting being not sharp
-            interpolation_gate (Tensor): In the range of (0, 1), used to blend the content weights produced by timestep (t - 1) and content weights at timestep t
-            old_weights (Tensor): Content weights read from memory produced by timestep (t-1)
-            shift_logits (Tensor): Normalized distribution over the allowed integer shifts
+            content_weights (Tensor): Weights obtained from content addressing.
+            sharpening_factor (Tensor): Factor for sharpening the distribution.
+            interpolation_gate (Tensor): In the range of (0, 1). Gate to blend previous weights and current content weights.
+            old_weights (Tensor): Weights from the previous time step.
+            shift_logits (Tensor): Logits determining the shift in attention.
 
         Returns:
-            Tensor: Sharpened weight matrix based on content similarity and order and sequence
+            Tensor: New, refined memory read weights.
         """
         interpolated_weights = (
             interpolation_gate * content_weights
@@ -302,16 +394,18 @@ class NeuralTuringMachine(nn.Module):
 
     def _shift_attention(self, old_weights, shift_logits):
         """
-        Take some information from the neighboring sequence and order
+        Adjusts attention weights using circular convolution.
         3.3.2 Focusing by Location in Paper: https://arxiv.org/abs/1410.5401
-        It's called "circular convolution" in the paper.
+
+        This function computes a weighted sum of the previous weights shifted left and right
+        based on shift probabilities obtained from shift_logits.
 
         Args:
-            old_weights (Tensor): Content weights read from memory produced by timestep (t-1)
-            shift_logits (Tensor): Normalized distribution over the allowed integer shifts
+            old_weights (Tensor): The previous memory read weights.
+            shift_logits (Tensor): Logits used to compute a distribution over allowed shifts.
 
         Returns:
-            Tensor: New weights after considering neighboring memory locations
+            Tensor: New attention weights after considering neighboring positions.
         """
         shift_probs = functional.softmax(shift_logits)  # (batch_size, 3)
         # shift_probs[:, 0] => p(shift=-1)
@@ -320,25 +414,31 @@ class NeuralTuringMachine(nn.Module):
 
         w_left = old_weights.roll(shifts=-1, dims=1)
         w_right = old_weights.roll(shifts=1, dims=1)
-        p_left = shift_probs[:, 0:1]  # batch_size, 1
-        p = shift_probs[:, 1:2]  # batch_size, 1
-        p_right = shift_probs[:, 2:3]  # batch_size, 1
+        p_left = shift_probs[:, 0:1]  # (batch_size, 1)
+        p = shift_probs[:, 1:2]  # (batch_size, 1)
+        p_right = shift_probs[:, 2:3]  # (batch_size, 1)
 
         new_weight = w_left * p_left + old_weights * p + w_right * p_right
         return new_weight
 
     def _sharpen(self, weights, gamma):
-        """
-        Raise weights to the power gamma to prevent leakage or dispersion of weights
-        overtime if the shift weights are not sharp.
+        r"""
+        Sharpens the attention weights by raising them to a power.
+        Raise weights to the power gamma to prevent leakage or dispersion of weights overtime if the shift weights are not sharp.
 
         3.3.2 Focusing by Location in paper: https://arxiv.org/abs/1410.5401
 
-        w_t = w_t^gamma / \sum_j w_t^gamma
+        $$w_t = w_t^{\gamma} / \sum_j w_t^{\gamma}$$
+
+        This function prevents the dispersion of weights over time by raising the weights
+        to a power gamma and then normalizing them.
 
         Args:
-            weights: original weights unsharpened at time t
-            gamma: scalar at time t
+            weights (Tensor): The unsharpened attention weights.
+            gamma (Tensor): The sharpening factor.
+
+        Returns:
+            Tensor: The sharpened, normalized attention weights.
         """
         gamma = functional.relu(gamma) + 1.0  # ensure gamma >= 1
         numerator = weights**gamma
@@ -350,11 +450,21 @@ class NeuralTuringMachine(nn.Module):
 
 def generate_copy_data(n_samples=100, seq_len=5, input_size=4):
     """
-    Helper Function to generate dummy data for the "Copy Task"
+    Generate dummy data for the "Copy Task".
     Similar to the 4.1 Copy Experiment in the paper: https://arxiv.org/abs/1410.5401
+
+    This helper function creates random integer sequences as input and uses the same
+    sequences as target output. It is intended to simulate the copy task from the NTM paper.
+
+    Args:
+        n_samples (int): Number of sequences to generate.
+        seq_len (int): Length of each sequence.
+        input_size (int): Range of token IDs is [0, input_size-1].
+
     Returns:
-      X: (n_samples, seq_len) sparse int tokens  in [0..input_size-1]
-      Y: (n_samples, seq_len) same as X, for the copy task
+        Tuple[np.ndarray, np.ndarray]:
+            - X: A (n_samples, seq_len) array of input token IDs in [0..input_size-1]
+            - Y: A copy of X, serving as the target output.
     """
     # Generate random integer sequences
     X_data = np.random.randint(0, input_size, size=(n_samples, seq_len))
@@ -365,8 +475,14 @@ def generate_copy_data(n_samples=100, seq_len=5, input_size=4):
 
 def to_one_hot(sequence_batch, vocab_size):
     """
-    sequence_batch: shape (batch_size, seq_len), each entry is [0..vocab_size-1]
-    Returns one_hot: shape (batch_size, seq_len, vocab_size)
+    Convert a batch of token index sequences into one-hot encoded representations.
+
+    Args:
+        sequence_batch (np.ndarray): Array of shape (batch_size, seq_len) containing integer token IDs each entry is [0..vocab_size-1]
+        vocab_size (int): Total number of tokens in the vocabulary.
+
+    Returns:
+        np.ndarray: One-hot encoded tensor of shape (batch_size, seq_len, vocab_size).
     """
     bsz, seq_len = sequence_batch.shape
     one_hot = np.zeros((bsz, seq_len, vocab_size), dtype=np.float32)
@@ -379,16 +495,39 @@ def to_one_hot(sequence_batch, vocab_size):
 
 class LSTM(nn.Module):
     """
-    This is only used a comparison against Neural Turing Machine
+    A simple LSTM network used for comparison against the Neural Turing Machine.
+
+    This model processes an input sequence through an LSTM block and applies a final linear
+    layer to produce outputs for each time step.
     """
 
     def __init__(self, input_size, hidden_size, output_size):
+        """
+        Initialize the LSTM model.
+
+        Args:
+            input_size (int): The dimensionality of the input.
+            hidden_size (int): The number of hidden units in the LSTM block.
+            output_size (int): The dimensionality of the output.
+        """
         super().__init__(input_size, hidden_size, output_size)
         self.lstm = nn.LongShortTermMemoryBlock(input_size, hidden_size)
         self.fc = nn.Linear(hidden_size, output_size)
         self.hidden_size = hidden_size
 
     def forward(self, x):
+        """
+        Compute the forward pass of the LSTM network.
+
+        Processes the input sequence one time step at a time, updating the hidden state
+        and cell state, and collecting the output at each step.
+
+        Args:
+            x (np.ndarray): Input tensor of shape (batch_size, seq_len, input_size).
+
+        Returns:
+            Tensor: Stacked outputs of shape (batch_size, seq_len, output_size).
+        """
         batch_size, seq_len, input_size = x.shape
         outputs = []
         h_t = Tensor(np.zeros((batch_size, self.hidden_size)))
@@ -406,6 +545,18 @@ class LSTM(nn.Module):
 
 
 if __name__ == "__main__":
+    """
+    Main script for training and evaluating the Neural Turing Machine and LSTM models
+    on a copy task.
+
+    The script performs the following steps:
+      1) Define hyperparameters and dimensions for the copy task.
+      2) Generate dummy data using generate_copy_data and convert it to one-hot representations.
+      3) Create training and validation data loaders.
+      4) Configure and train a Neural Turing Machine (NTM) model using SimpleTrainer.
+      5) Configure and train an LSTM model for comparison.
+      6) The models are trained on the copy task, where the goal is to reproduce the input sequence.
+    """
     # Suppose we have a batch of input sequences: (batch_size, seq_len, input_size)
     batch_size = 2
     seq_len = 40
@@ -420,7 +571,7 @@ if __name__ == "__main__":
     X, y = generate_copy_data(n_samples=10, seq_len=seq_len, input_size=input_size)
     X = to_one_hot(X, input_size)
 
-    # Generate a longer sequence to see if the model can generalize well
+    # Generate a longer sequence to test generalization
     X_val, y_val = generate_copy_data(
         n_samples=10, seq_len=seq_len * 5, input_size=input_size
     )
