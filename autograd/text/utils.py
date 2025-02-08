@@ -18,7 +18,6 @@ try:
     _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
 except Exception:
     import numpy as np
-from tqdm import tqdm
 
 from autograd import nn
 from autograd.functional import Softmax
@@ -369,7 +368,7 @@ def inference(
         print("Model:\n", end="", flush=True)
 
     # Main loop: decide input tokens based on the mode.
-    for i in range(max(num_steps, 100)):
+    for i in range(min(num_steps, 100)):
         current_input = groundtruth_data[: i + 1] if teacher_forcing else output_ids
         logits = prediction_func(
             model=model, batch_data=np.array([current_input]), mode="sample"
@@ -382,7 +381,6 @@ def inference(
         # Using classic print to avoid logger formatting
         print(token_str, end="", flush=True)
 
-    
     print("\n--------------------------------------------------------------\n")
 
 

@@ -51,7 +51,11 @@ class CosineScheduler(LRScheduler):
     """
 
     def __init__(
-        self, warmup_steps: int = 100, lr_decay_iters: int = 200, min_lr: float = 1e-4
+        self,
+        warmup_steps: int = 100,
+        lr_decay_iters: int = 200,
+        min_lr: float = 1e-4,
+        **kwargs,
     ):
         """
         Initialize the CosineScheduler.
@@ -142,7 +146,7 @@ class Optimizer:
         self._hyperparams["lr"] = lr
         self.initial_lr = lr
         if lr_scheduler_kwargs:
-            lr_scheduler_cls = lr_scheduler_kwargs.pop("lr_scheduler_cls")
+            lr_scheduler_cls = eval(lr_scheduler_kwargs["lr_scheduler_cls"])
             self.lr_scheduler = lr_scheduler_cls(**lr_scheduler_kwargs)
         else:
             self.lr_scheduler = None
