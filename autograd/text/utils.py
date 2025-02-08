@@ -359,14 +359,12 @@ def inference(
             bpe.decode(groundtruth_data.tolist()).split("<|endoftext|>")
         )
         logger.info(f"Teacher forcing mode on!!\nGroundtruth:\n{groundtruth_text}")
-
     else:
         start_tokens = start_tokens or "<SOS>"
         output_ids = list(bpe.encode(start_tokens))
         num_steps = max_length - len(output_ids)
-        # Using classic print to avoid logger formatting
-        print("Model:\n", end="", flush=True)
 
+    logger.info("Model:\n")
     # Main loop: decide input tokens based on the mode.
     for i in range(min(num_steps, 100)):
         current_input = groundtruth_data[: i + 1] if teacher_forcing else output_ids
