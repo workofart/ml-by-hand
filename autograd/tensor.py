@@ -1,4 +1,5 @@
 import logging
+from abc import abstractmethod
 from typing import (
     Any,
     List,
@@ -36,6 +37,7 @@ class Function:
         """
         self.tensors = tensors
 
+    @abstractmethod
     def forward(self, *args: np.ndarray, **kwargs: Any) -> np.ndarray:
         """
         Perform the forward pass of this operation.
@@ -55,6 +57,7 @@ class Function:
         """
         raise NotImplementedError("Forward pass not implemented for this function")
 
+    @abstractmethod
     def backward(self, grad: "Tensor") -> np.ndarray:
         """
         Perform the backward pass of this operation.
@@ -633,14 +636,14 @@ class Tensor:
         # Build computational graph in reverse order
         topological_sorted_tensors = []
         visited = set()
-        stack = [(self, False)]  # node, visited_children_flag
+        stack = [(self, False)]  # node, has_visited_children flag
 
         # Post-order traversal to figure out the order of the backprop
         while stack:
-            node, visited_children = stack.pop()
+            node, has_visited_children = stack.pop()
             if node not in visited:
-                if not visited_children:
-                    # first time we see this node, push it again with visited_children=True
+                if not has_visited_children:
+                    # first time we see this node, push it again with has_visited_children=True
                     stack.append((node, True))
                     # then push its parents
                     if node.creator is not None:
