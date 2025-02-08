@@ -21,6 +21,27 @@ def train_test_split(
     test_size: float = 0.2,
     random_state: Optional[int] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Splits arrays or matrices into random train and test subsets.
+
+    Args:
+        X (np.ndarray): Feature array.
+        y (np.ndarray): Labels array.
+        test_size (float): Proportion of the dataset to include in the test split.
+        random_state (Optional[int]): Seed for the random number generator.
+
+    Returns:
+        Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+            The training features, test features, training labels, and test labels.
+
+    Examples:
+        >>> import cupy as np
+        >>> X = np.arange(100).reshape(50, 2)
+        >>> y = np.arange(50)
+        >>> X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        >>> X_train.shape, X_test.shape
+        ((40, 2), (10, 2))
+    """
     if random_state is not None:
         np.random.seed(random_state)
     indices = np.arange(X.shape[0])
@@ -40,12 +61,29 @@ def load_data(
     Automatically handles parquet and text files based on extension.
 
     Args:
-        url: URL to download the file from
-        filename: Local path to save/load the file
-        max_rows: Maximum number of rows (only applies to parquet files)
+        url (str): URL to download the file from.
+        filename (str): Local path to save/load the file.
+        max_rows (Optional[int]): Maximum number of rows (only applies to parquet files).
 
     Returns:
-        str for text files, numpy array for parquet files
+        Union[str, np.ndarray]:
+            - For text files: the file content as a string.
+            - For parquet files: a numpy array containing the data.
+
+    Examples:
+        For a parquet file:
+        >>> url = "http://example.com/data.parquet"
+        >>> filename = "data.parquet"
+        >>> data = load_data(url, filename)
+        >>> isinstance(data, np.ndarray)
+        True
+
+        For a text file:
+        >>> url = "http://example.com/data.txt"
+        >>> filename = "data.txt"
+        >>> text = load_data(url, filename)
+        >>> isinstance(text, str)
+        True
     """
     # Download if file doesn't exist
     if not os.path.exists(filename):
@@ -65,8 +103,8 @@ def load_data(
 class AbstractDataLoader(ABC):
     """
     An abstract base class for DataLoaders.
-    A base interface for DataLoaders that yield batches of data for training.
-    With an optional per-epoch hook.
+    A base interface for DataLoaders that yield batches of data for training,
+    with an optional per-epoch hook.
     """
 
     def __init__(self, batch_size: int, shuffle: bool = True) -> None:
@@ -100,7 +138,7 @@ class AbstractDataLoader(ABC):
         """
         Should yield one batch at a time.
         The batch format can vary depending on the type of data.
-        Please implement this method in the subclasses
+        Please implement this method in the subclasses.
         """
         pass
 
@@ -109,9 +147,22 @@ class SimpleDataLoader(AbstractDataLoader):
     """
     A basic DataLoader for supervised tasks (e.g., classification or regression).
     It handles:
-      - In-memory storage of X and y
-      - Optional shuffling at the start of each epoch
-      - Batching data into (batch_X, batch_y) pairs
+      - In-memory storage of X and y.
+      - Optional shuffling at the start of each epoch.
+      - Batching data into (batch_X, batch_y) pairs.
+
+    Examples:
+        >>> import cupy as np
+        >>> from your_module import SimpleDataLoader  # Replace 'your_module' with your actual module name.
+        >>> # Create dummy data: 100 samples, each with 10 features.
+        >>> X = np.random.rand(100, 10)
+        >>> y = np.random.randint(0, 2, size=(100, 1))
+        >>> # Instantiate the data loader with a batch size of 32.
+        >>> loader = SimpleDataLoader(X, y, batch_size=32, shuffle=True)
+        >>> # Iterate over batches.
+        >>> for batch_X, batch_y in loader:
+        ...     print(batch_X.shape, batch_y.shape)
+        (32, 10) (32, 1)
     """
 
     def __init__(
@@ -128,7 +179,7 @@ class SimpleDataLoader(AbstractDataLoader):
         self.indices = np.arange(self.num_samples)
 
     def on_epoch_start(self) -> None:
-        # Shuffle the index array if needed
+        # Shuffle the index array if needed.
         if self.shuffle:
             np.random.shuffle(self.indices)
 
@@ -138,12 +189,20 @@ class SimpleDataLoader(AbstractDataLoader):
             yield self.X[batch_indices], self.y[batch_indices]
 
     def __len__(self) -> int:
-        # We'll compute how many steps per epoch (rounding down by default)
+        # Compute the number of batches per epoch.
         return (self.num_samples + self.batch_size - 1) // self.batch_size
 
     def preprocess(self, preprocess_func) -> None:
         """
         Optionally preprocess the data using the provided function.
+
+        Args:
+            preprocess_func: A function that takes (X, y) and returns preprocessed (X, y).
+
+        Examples:
+            >>> def dummy_preprocess(X, y):
+            ...     return X * 2, y  # Example: double the features.
+            >>> loader.preprocess(dummy_preprocess)
         """
         self.X, self.y = preprocess_func(self.X, self.y)
 
@@ -156,10 +215,44 @@ class LLMDataLoader(AbstractDataLoader):
       - A single tokenized array (e.g. integer IDs of text).
       - Random chunk sampling: each batch picks 'batch_size' random slices
         of length (seq_len+1).
-      - Optional creation of decoder_input by prepending a special <SOS> token.
+      - Optional creation of a decoder_input by prepending a special <SOS> token.
       - Optional creation of a causal mask or other masks.
-      - If a finite 'steps_per_epoch' is provided, we treat each epoch as
-        'steps_per_epoch' random batches. Otherwise we can yield batches infinitely.
+      - If a finite 'steps_per_epoch' is provided, each epoch produces that number of batches.
+        Otherwise, batches can be yielded infinitely.
+
+    Examples:
+        >>> import cupy as np
+        >>> from your_module import LLMDataLoader  # Replace 'your_module' with your actual module name.
+        >>> # Define a dummy Byte Pair Encoder (BPE) with minimal encode/decode functionality.
+        >>> class DummyBPE:
+        ...     def encode(self, text, allowed_special=None):
+        ...         # Simple encoding: return ASCII codes of characters.
+        ...         return [ord(c) for c in text]
+        ...     def decode(self, tokens):
+        ...         return ''.join(chr(t) for t in tokens)
+        >>> bpe = DummyBPE()
+        >>>
+        >>> # Create dummy token data: an array of token IDs (integers).
+        >>> token_data = np.random.randint(0, 100, 1000)  # 1000 tokens.
+        >>>
+        >>> # Instantiate the LLMDataLoader.
+        >>> loader = LLMDataLoader(
+        ...     data=token_data,
+        ...     bpe=bpe,
+        ...     batch_size=4,
+        ...     seq_len=10,
+        ...     steps_per_epoch=5,  # Produce 5 batches per epoch.
+        ...     include_decoder_input=True,
+        ...     create_padding_masks=True,
+        ...     sos_token="<SOS>",
+        ...     pad_token="<PAD>"
+        ... )
+        >>>
+        >>> # Iterate over one epoch of batches.
+        >>> for batch in loader:
+        ...     X_chunk, dec_inp, Y_chunk, smask, tmask, causal_mask = batch
+        ...     print(X_chunk.shape, Y_chunk.shape)
+        (4, 10) (4, 10)
     """
 
     def __init__(
@@ -180,22 +273,15 @@ class LLMDataLoader(AbstractDataLoader):
             data (np.ndarray): Tokenized integer IDs of the entire dataset.
             bpe: BytePairEncoder or other tokenizer with .encode() / .decode().
             batch_size (int): Number of sequences per batch.
-            seq_len (int): Length of each sequence (X) we feed the model.
-                           We'll actually slice out (seq_len+1) tokens so that
-                           position i can predict i+1.
-            shuffle (bool): Whether to randomize each epoch's sampling
-            steps_per_epoch (Optional[int]): If given, we produce exactly
-                'steps_per_epoch' batches each epoch. Otherwise you can
-                treat it as an infinite loader if you prefer.
-            include_decoder_input (bool): If True, we create a separate 'dec_inp'
-                array (common in seq2seq). If you just want normal GPT next-token,
-                you can ignore or set this false.
-            create_padding_masks (bool): If True, we create a padding for cases where
-            we have sequences of different lengths across the training samples.
-            If you're doing standard GPT, you'd typically want a causal mask, which is created
-            by default, and isn't controlled by this flag.
-            sos_token (str, bytes): The start-of-sequence token to use for the decoder input.
-            pad_token (str, bytes): The token for padding or ignoring if needed.
+            seq_len (int): Length of each sequence (X) fed to the model.
+                           (seq_len+1 tokens are sliced so that position i can predict i+1).
+            shuffle (bool): Whether to randomize each epoch's sampling.
+            steps_per_epoch (Optional[int]): If given, produces exactly this many batches per epoch.
+                                             Otherwise, batches can be yielded infinitely.
+            include_decoder_input (bool): If True, creates a separate decoder input array.
+            create_padding_masks (bool): If True, creates padding masks for variable-length sequences.
+            sos_token (Union[str, bytes]): The start-of-sequence token for the decoder input.
+            pad_token (Union[str, bytes]): The token for padding.
         """
         super().__init__(batch_size=batch_size, shuffle=shuffle)
 
@@ -206,7 +292,7 @@ class LLMDataLoader(AbstractDataLoader):
         self.include_decoder_input = include_decoder_input
         self.create_padding_masks = create_padding_masks
 
-        # For ignoring or masking out pad if needed:
+        # For ignoring or masking out pad tokens:
         self.pad_idx = bpe.encode(pad_token, allowed_special={pad_token})[0]
         if self.include_decoder_input:
             self.sos_idx = bpe.encode(sos_token, allowed_special={sos_token})[0]
@@ -217,11 +303,11 @@ class LLMDataLoader(AbstractDataLoader):
 
     def on_epoch_start(self) -> None:
         """
-        Called at the start of each 'epoch'. For random chunking, we can optionally
-        re-seed the RNG to ensure each epoch is different if shuffle=True.
+        Called at the start of each epoch.
+        For random chunking, reseeds the RNG to ensure different random offsets each epoch if shuffle is True.
         """
         if self.shuffle:
-            # Re-seeding ensures different random offsets each epoch.
+            # Reseeding ensures different random offsets each epoch.
             np.random.seed()
 
     def __iter__(
@@ -251,12 +337,12 @@ class LLMDataLoader(AbstractDataLoader):
             offsets = np.random.randint(low=0, high=max_offset, size=self.batch_size)
             # Extract chunks of (seq_len+1) tokens.
             batch_chunks = [self.data[o : o + self.seq_len + 1] for o in offsets]
-            # shape: (batch_size, seq_len+1), the + 1 is to give space for our X, y chunks to be shifted by 1.
+            # Stack to shape: (batch_size, seq_len+1)
             batch = np.stack(batch_chunks, axis=0)
 
             # Prepare input (X) and target (Y) by shifting the sequence.
-            X_chunk = batch[:, :-1]  # shape: (batch_size, seq_len)
-            Y_chunk = batch[:, 1:]  # shape: (batch_size, seq_len)
+            X_chunk = batch[:, :-1]  # (batch_size, seq_len)
+            Y_chunk = batch[:, 1:]  # (batch_size, seq_len)
 
             # Optionally create a decoder input by prepending the SOS token.
             if self.include_decoder_input:
@@ -281,9 +367,9 @@ class LLMDataLoader(AbstractDataLoader):
                 X_chunk,  # (batch_size, seq_len)
                 dec_inp,  # (batch_size, seq_len) or None
                 Y_chunk,  # (batch_size, seq_len)
-                smask,  # source mask (batch_size, 1, 1, seq_len) or None
-                tmask,  # target mask (batch_size, 1, seq_len, seq_len) or None
-                causal_mask,  # causal mask (batch_size, 1, seq_len, seq_len) or None
+                smask,  # source mask or None
+                tmask,  # target mask or None
+                causal_mask,  # causal mask or None
             )
 
     def __len__(self) -> int:
