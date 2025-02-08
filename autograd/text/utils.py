@@ -291,7 +291,7 @@ def inference(
     max_length: int = 50,
     temperature: float = 1.0,
     top_k: Optional[int] = None,
-) -> None:
+) -> str:
     """
     Perform model inference in one of two modes:
 
@@ -380,6 +380,8 @@ def inference(
         print(token_str, end="", flush=True)
 
     print("\n--------------------------------------------------------------\n")
+    final_text = bpe.decode(output_ids)
+    return final_text
 
 
 def load_wiki_simple() -> str:
