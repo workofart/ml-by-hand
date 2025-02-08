@@ -24,13 +24,26 @@ class Module:
     and states, and implements common functionality such as zero_grad, forward,
     and state dict management.
 
-    Note that we don't implement the backward() function in this Module class, because all the backward() functions are implemented at the tensor-level operations. And the forward fuctions are just piecing together tensor-level operations like lego.
+    Note that we don't implement the backward() function in this Module class, because all the
+    backward() functions are implemented at the tensor-level operations. And the forward functions
+    are just piecing together tensor-level operations like lego.
 
     Attributes:
         _parameters (Dict[str, Tensor]): Dictionary of trainable parameters.
         _modules (Dict[str, Module]): Dictionary of submodules.
         _states (Dict[str, Any]): Dictionary of non-trainable states/buffers.
         _is_training (Optional[bool]): Flag indicating training mode.
+
+    Examples:
+        >>> # Define a simple custom module by subclassing Module.
+        >>> class MyModule(Module):
+        ...     def forward(self, x):
+        ...         return x * 2
+        >>> module = MyModule()
+        >>> import cupy as np
+        >>> from autograd.tensor import Tensor
+        >>> input_tensor = Tensor(np.array([1, 2, 3]))
+        >>> output = module(input_tensor) # Expected output: [2, 4, 6]
     """
 
     def __init__(self, *args, **kwargs) -> None:
@@ -47,6 +60,10 @@ class Module:
     def zero_grad(self) -> None:
         """
         Zero the gradients for all parameters in the module and its submodules.
+
+        Examples:
+            >>> # Assuming module has trainable parameters with gradients.
+            >>> module.zero_grad()
         """
         # Zero gradients for parameters in current module
         for p in self._parameters.values():
@@ -68,6 +85,16 @@ class Module:
 
         Raises:
             NotImplementedError: If the method is not overridden by a subclass.
+
+        Examples:
+            >>> class MyModule(Module):
+            ...     def forward(self, x):
+            ...         return x + 1
+            >>> module = MyModule()
+            >>> from autograd.tensor import Tensor
+            >>> import cupy as np
+            >>> x = Tensor(np.array([1, 2, 3]))
+            >>> y = module(x) # Expected: [2, 3, 4]
         """
         raise NotImplementedError
 
@@ -133,6 +160,12 @@ class Module:
 
         Args:
             func (Callable): A function that takes a Module and applies some operation.
+
+        Examples:
+            >>> # Example: print the type of each module.
+            >>> def print_module(m):
+            ...     print(type(m))
+            >>> module.apply(print_module)
         """
         for module in self._modules.values():
             module.apply(func)
@@ -153,6 +186,11 @@ class Module:
 
         Returns:
             Dict[str, Any]: A dictionary mapping parameter names to Tensor objects.
+
+        Examples:
+            >>> # Assuming module has parameters 'weight' and a submodule with 'bias'
+            >>> params = module.parameters
+            >>> print(params.keys())
         """
         return {
             k: v
@@ -174,6 +212,11 @@ class Module:
 
         Returns:
             Dict[str, Any]: A dictionary mapping state names to their values (np.ndarray).
+
+        Examples:
+            >>> # Assuming module has a state 'running_mean' in a BatchNorm submodule.
+            >>> states = module.states
+            >>> print(states)
         """
         return {
             k: v
@@ -190,7 +233,7 @@ class Module:
           - "states": A dictionary mapping state names to their values.
 
         Returns:
-            Dict[str, Dict[str, Any]]: The state dictionary. This is a flat representation (like PyTorch's `state_dict`)
+            Dict[str, Dict[str, Any]]: The state dictionary.
 
         .. code-block:: json
 
@@ -199,6 +242,9 @@ class Module:
                 "states": { "stateful_states": "np.array()" }
             }
 
+        Examples:
+            >>> state = module.state_dict()
+            >>> print(state.keys())  # Expected output: dict_keys(['parameters', 'states'])
         """
         # Convert Tensors to raw np.array
         param_arrays = {k: v.data for k, v in self.parameters.items()}
@@ -221,6 +267,11 @@ class Module:
 
         Args:
             state_dict (Dict[str, Any]): A dictionary containing the module's parameters and states.
+
+        Examples:
+            >>> # Save a state dictionary and later load it into the module.
+            >>> state = module.state_dict()
+            >>> module.load_state_dict(state)
         """
         # 1. Update parameters
         if "parameters" in state_dict:
@@ -238,12 +289,18 @@ class Module:
 
         Returns:
             int: The total number of parameters.
+
+        Examples:
+            >>> print(module.num_parameters())
         """
         return sum(p.data.size for p in self.parameters.values())
 
     def train(self) -> None:
         """
         Set the module and all its submodules to training mode.
+
+        Examples:
+            >>> module.train()
         """
         for module in self._modules.values():
             module.train()
@@ -252,6 +309,9 @@ class Module:
     def eval(self) -> None:
         """
         Set the module and all its submodules to evaluation mode.
+
+        Examples:
+            >>> module.eval()
         """
         for module in self._modules.values():
             module.eval()
@@ -291,29 +351,25 @@ class Module:
         Args:
             attr_name (str): The attribute to update ("_parameters" or "_states").
             flat_dict (Dict[str, Any]): A dictionary mapping full attribute names to their new values.
-            is_parameter (bool): True if updating trainable parameters, False if updating states. This is needed to ensure in-place update for parameters to avoid breaking optimizer references
+            is_parameter (bool): True if updating trainable parameters, False if updating states.
+
+        Examples:
+            >>> # Suppose flat_dict contains updated parameter values.
+            >>> module._set_attr_nested("_parameters", flat_dict, is_parameter=True)
         """
         for full_name, value in flat_dict.items():
-            parts = full_name.split(".")  # e.g. ["submodule1", "sub_weight"]
+            parts = full_name.split(".")
             *path, var_name = parts
             module_ref = self
-            # Descend into submodules
             for p in path:
                 module_ref = module_ref._modules[p]
-
-            # Now module_ref is the submodule owning var_name in its container
             container = getattr(module_ref, attr_name)
-
             if var_name not in container:
-                # If it doesn't exist, create it
                 container[var_name] = Tensor(value) if is_parameter else value
             else:
-                # Important: In-place update for parameters to avoid breaking optimizer references
-                # Otherwise, the model would not train because optimizer will be pointing to old parameters
                 if is_parameter:
                     container[var_name].data[...] = value
                 else:
-                    # For states, just assign (or do an in-place copy if desired)
                     container[var_name] = value
 
 
@@ -322,6 +378,17 @@ class ModuleList(Module):
     A container for holding submodules in a list-like structure.
 
     This container registers each submodule so that they are included in the module's parameters and state dictionaries.
+
+    Examples:
+        >>> # Create a ModuleList with two simple modules.
+        >>> class MyModule(Module):
+        ...     def forward(self, x):
+        ...         return x + 1
+        >>> ml = ModuleList([MyModule(), MyModule()])
+        >>> for m in ml:
+        ...     print(m.forward(Tensor(np.array([1]))).data)
+        [2]
+        [2]
     """
 
     def __init__(self, modules=None):
@@ -342,6 +409,10 @@ class ModuleList(Module):
 
         Args:
             module (Module): The module to append.
+
+        Examples:
+            >>> ml = ModuleList()
+            >>> ml.append(MyModule())
         """
         index = len(self._modules)  # how many modules we already have
         # Use __setattr__ with a string key so that it registers `module` as a submodule
@@ -356,6 +427,9 @@ class ModuleList(Module):
 
         Returns:
             Module: The submodule at the specified index.
+
+        Examples:
+            >>> m = ml[0]
         """
         return self._modules[str(idx)]
 
@@ -365,6 +439,9 @@ class ModuleList(Module):
 
         Returns:
             int: The number of submodules.
+
+        Examples:
+            >>> print(len(ml))
         """
         return len(self._modules)
 
@@ -374,6 +451,10 @@ class ModuleList(Module):
 
         Yields:
             Module: Each submodule in the ModuleList.
+
+        Examples:
+            >>> for m in ml:
+            ...     print(m)
         """
         for idx in range(len(self)):
             yield self[idx]
@@ -387,8 +468,14 @@ class Linear(Module):
         $$
         y = xW + b
         $$
-
     where $W$ is the weight matrix and $b$ is the bias.
+
+    Examples:
+        >>> linear = Linear(4, 2)
+        >>> import cupy as np
+        >>> from autograd.tensor import Tensor
+        >>> x = Tensor(np.random.randn(3, 4))
+        >>> y = linear(x) # Expected shape: (3, 2)
     """
 
     def __init__(self, input_size: int, output_size: int, **kwargs: Any) -> None:
@@ -419,6 +506,12 @@ class Linear(Module):
 
         Returns:
             Tensor: The result of the linear transformation.
+
+        Examples:
+            >>> linear = Linear(5, 3)
+            >>> import cupy as np
+            >>> x = Tensor(np.random.randn(10, 5))
+            >>> y = linear(x) # Expected: (10, 3)
         """
         if not isinstance(x, Tensor):
             x = Tensor(x)
@@ -436,6 +529,13 @@ class Conv2d(Module):
 
     This layer applies a convolution operation over a 4D input tensor with shape
     (N, in_channels, H, W) and produces an output tensor with shape (N, out_channels, H_out, W_out).
+
+    Examples:
+        >>> conv = Conv2d(in_channels=3, out_channels=8, kernel_size=3, stride=1, padding_mode="same")
+        >>> import cupy as np
+        >>> from autograd.tensor import Tensor
+        >>> x = Tensor(np.random.randn(2, 3, 32, 32))
+        >>> y = conv(x) # Expected shape: (2, 8, 32, 32)
     """
 
     def __init__(
@@ -458,7 +558,7 @@ class Conv2d(Module):
             out_channels (int): Number of output channels (number of kernels).
             kernel_size (int): Size of the convolutional kernel.
             stride (int, optional): Stride of the convolution. Defaults to 1.
-            padding_mode (str, optional): Padding mode, either "valid" (no padding) or "same" (output same shape as input). Defaults to "valid".
+            padding_mode (str, optional): Padding mode ("valid" or "same"). Defaults to "valid".
             bias (bool, optional): Whether to include a bias term. Defaults to True.
             **kwargs: Additional keyword arguments.
         """
@@ -508,6 +608,13 @@ class Conv2d(Module):
 
         Returns:
             Tensor: Output tensor after applying the convolution and bias addition.
+
+        Examples:
+            >>> conv = Conv2d(3, 8, kernel_size=3, stride=1, padding_mode="same")
+            >>> import cupy as np
+            >>> from autograd.tensor import Tensor
+            >>> x = Tensor(np.random.randn(2, 3, 32, 32))
+            >>> y = conv(x) # Expected: (2, 8, 32, 32)
         """
         if not isinstance(x, Tensor):
             x = Tensor(x)
@@ -564,6 +671,13 @@ class MaxPool2d(Module):
     A 2D max pooling layer.
 
     This layer performs max pooling over a sliding window of the input tensor.
+
+    Examples:
+        >>> pool = MaxPool2d(kernel_size=2, stride=2, padding_mode="valid")
+        >>> import cupy as np
+        >>> from autograd.tensor import Tensor
+        >>> x = Tensor(np.random.randn(1, 3, 32, 32))
+        >>> y = pool(x) # Expected: (1, 3, 16, 16)
     """
 
     def __init__(
@@ -578,15 +692,13 @@ class MaxPool2d(Module):
 
         Args:
             kernel_size (int): Size of the pooling window.
-            stride (Optional[int], optional): Stride of the pooling operation. Defaults to kernel_size if not provided.
-            padding_mode (str, optional): Padding mode, either "valid" (no padding) or "same" (output same shape as input). Defaults to "valid".
+            stride (Optional[int], optional): Stride of the pooling operation. Defaults to kernel_size.
+            padding_mode (str, optional): Padding mode ("valid" or "same"). Defaults to "valid".
             **kwargs: Additional keyword arguments.
         """
         super().__init__(kernel_size, **kwargs)
         self.kernel_size = kernel_size
-        self.stride = (
-            stride if stride is not None else kernel_size
-        )  # Default to kernel_size
+        self.stride = stride if stride is not None else kernel_size
         self.padding_mode = padding_mode
 
     def forward(self, x: Union[Tensor, np.ndarray]) -> Tensor:
@@ -598,6 +710,13 @@ class MaxPool2d(Module):
 
         Returns:
             Tensor: Tensor after applying max pooling.
+
+        Examples:
+            >>> pool = MaxPool2d(kernel_size=2, stride=2)
+            >>> import cupy as np
+            >>> from autograd.tensor import Tensor
+            >>> x = Tensor(np.random.randn(1, 3, 32, 32))
+            >>> y = pool(x) # Expected: (1, 3, 16, 16)
         """
         if not isinstance(x, Tensor):
             x = Tensor(x)
@@ -605,14 +724,12 @@ class MaxPool2d(Module):
         windows, (H_out, W_out) = extract_windows(
             x, self.kernel_size, self.stride, self.padding_mode
         )
-
         H_out, W_out, batch_size, in_channels, H_kernel, W_kernel = windows.shape
 
         # Reshape windows to match spatial layout
         windows = windows.permute(2, 3, 0, 1, 4, 5)
         # Reorder axes to (batch_size, in_channels, H_out, W_out, kH * kW)
         windows = windows.reshape(batch_size, in_channels, H_out, W_out, -1)
-
         pooled = windows.max(axis=-1, keepdims=True).reshape(
             batch_size, in_channels, H_out, W_out
         )
@@ -623,11 +740,22 @@ class ResidualBlock(Module):
     """
     Residual Block.
 
-    Implements a residual block that learns a function F(x) such that the output is
-    Currently this wraps the Convolution block inside. TODO: Remove the convolutional block
-
+    Implements a residual block that computes:
+        $$
+        H(x) = F(x) + x
+        $$
+    where x is the identity mapping.
     H(x) = F(x) + x, where x is the identity mapping.
     Paper: https://arxiv.org/abs/1512.03385
+
+    Currently this wraps the Convolution block inside. TODO: Remove the convolutional block
+
+    Examples:
+        >>> res_block = ResidualBlock(16, 16, stride=1)
+        >>> import cupy as np
+        >>> from autograd.tensor import Tensor
+        >>> x = Tensor(np.random.randn(1, 16, 32, 32))
+        >>> y = res_block(x) # Expected: (1, 16, 32, 32)
     """
 
     def __init__(self, in_channels: int, out_channels: int, stride: int = 1) -> None:
@@ -665,9 +793,15 @@ class ResidualBlock(Module):
 
         Returns:
             Tensor: Output tensor after applying the residual block.
-        """
-        identity = self.shortcut(x)  # Match channels
 
+        Examples:
+            >>> res_block = ResidualBlock(16, 16)
+            >>> import cupy as np
+            >>> from autograd.tensor import Tensor
+            >>> x = Tensor(np.random.randn(1, 16, 32, 32))
+            >>> y = res_block(x) # Expected: (1, 16, 32, 32)
+        """
+        identity = self.shortcut(x)
         out = self.conv1(x)
         out = relu(out)
         out = self.conv2(out)
@@ -681,6 +815,14 @@ class RecurrentBlock(Module):
     Implements a simple RNN that processes a sequence and returns either the final hidden state or
     an output computed from the final hidden state if output_size is specified.
     Paper: https://arxiv.org/abs/1308.0850
+
+    Examples:
+        >>> rnn = RecurrentBlock(input_size=4, hidden_size=8, output_size=2)
+        >>> import cupy as np
+        >>> from autograd.tensor import Tensor
+        >>> # Create a random sequence: batch_size=3, sequence_length=5, input_size=4
+        >>> x = Tensor(np.random.randn(3, 5, 4))
+        >>> y = rnn(x) # Expected: (3, 2)
     """
 
     def __init__(
@@ -742,7 +884,14 @@ class RecurrentBlock(Module):
             x (Union[Tensor, np.ndarray]): Input tensor of shape (batch_size, sequence_length, input_size).
 
         Returns:
-            Tensor: Output tensor computed from the final hidden state or the hidden state itself if output_size is not specified.
+            Tensor: Output tensor computed from the final hidden state or the hidden state itself.
+
+        Examples:
+            >>> rnn = RecurrentBlock(input_size=4, hidden_size=8, output_size=3)
+            >>> import cupy as np
+            >>> from autograd.tensor import Tensor
+            >>> x = Tensor(np.random.randn(3, 5, 4))
+            >>> y = rnn(x) # Expected: (3, 3)
         """
         if not isinstance(x, Tensor):
             x = Tensor(x)
@@ -784,7 +933,17 @@ class LongShortTermMemoryBlock(Module):
     Long Short-Term Memory (LSTM) block.
 
     Implements an LSTM that processes a sequence and returns the final output and cell state.
+
     Paper: https://www.bioinf.jku.at/publications/older/2604.pdf
+
+    Examples:
+        >>> lstm = LongShortTermMemoryBlock(input_size=4, hidden_size=8, output_size=3)
+        >>> import cupy as np
+        >>> from autograd.tensor import Tensor
+        >>> x = Tensor(np.random.randn(3, 5, 4))
+        >>> output, cell_state = lstm(x)
+        >>> print(output.data.shape)  # Expected: (3, 3)
+        >>> print(cell_state.data.shape)  # Expected: (3, 8)
     """
 
     def __init__(
@@ -861,13 +1020,20 @@ class LongShortTermMemoryBlock(Module):
 
         Args:
             x (Union[Tensor, np.ndarray]): Input tensor of shape (batch_size, sequence_length, input_size).
-            hidden_state (Optional[Tensor], optional): Initial hidden state. Defaults to zeros if not provided.
-            C_t (Optional[Tensor], optional): Initial cell state. Defaults to zeros if not provided.
+            hidden_state (Optional[Tensor], optional): Initial hidden state. Defaults to zeros.
+            C_t (Optional[Tensor], optional): Initial cell state. Defaults to zeros.
 
         Returns:
-            Tuple[Tensor, Tensor]: A tuple containing:
-                - The output tensor (or final hidden state) if output_size is specified, otherwise the final hidden state.
-                - The final cell state.
+            Tuple[Tensor, Tensor]: A tuple containing the output and the final cell state.
+
+        Examples:
+            >>> lstm = LongShortTermMemoryBlock(input_size=4, hidden_size=8, output_size=3)
+            >>> import cupy as np
+            >>> from autograd.tensor import Tensor
+            >>> x = Tensor(np.random.randn(3, 5, 4))
+            >>> output, cell_state = lstm(x)
+            >>> print(output.data.shape)  # Expected: (3, 3)
+            >>> print(cell_state.data.shape)  # Expected: (3, 8)
         """
         if not isinstance(x, Tensor):
             x = Tensor(x)
@@ -946,7 +1112,15 @@ class LongShortTermMemoryBlock(Module):
 
 class Embedding(Module):
     """
-    Embedding layer that projects an arbitrary input_size down to embedding_size
+    Embedding layer that projects an arbitrary input_size down to embedding_size.
+
+    Examples:
+        >>> embed = Embedding(input_size=100, embedding_size=16)
+        >>> import cupy as np
+        >>> from autograd.tensor import Tensor
+        >>> # Create a batch of indices with shape (batch_size, seq_len)
+        >>> x = Tensor(np.array([[1, 5, 20], [2, 10, 30]]))
+        >>> y = embed(x) # Expected: (2, 3, 16)
     """
 
     def __init__(self, input_size: int, embedding_size: int) -> None:
@@ -970,10 +1144,17 @@ class Embedding(Module):
         Perform the forward pass of the Embedding layer.
 
         Args:
-            x (Union[Tensor, np.ndarray]): Input tensor of shape (batch_size, seq_len), each entry is an integer index in [0.. vocab_size - 1]
+            x (Union[Tensor, np.ndarray]): Input tensor of shape (batch_size, seq_len).
 
         Returns:
             Tensor: Output tensor of shape (batch_size, seq_len, embedding_size).
+
+        Examples:
+            >>> embed = Embedding(input_size=50, embedding_size=8)
+            >>> import cupy as np
+            >>> from autograd.tensor import Tensor
+            >>> x = Tensor(np.array([[0, 1, 2], [3, 4, 5]]))
+            >>> y = embed(x)  # Expected: (2, 3, 8)
         """
         if not isinstance(x, Tensor):
             x = Tensor(x)
@@ -989,6 +1170,13 @@ class LayerNorm(Module):
 
     Normalizes the summed inputs to neurons for each training example.
     Paper: https://arxiv.org/abs/1607.06450
+
+    Examples:
+        >>> ln = LayerNorm(input_size=10)
+        >>> import cupy as np
+        >>> from autograd.tensor import Tensor
+        >>> x = Tensor(np.random.randn(4, 10))
+        >>> y = ln(x) # Expected: (4, 10)
     """
 
     def __init__(self, input_size: int, epsilon: float = 1e-5, **kwargs: Any) -> None:
@@ -1014,6 +1202,13 @@ class LayerNorm(Module):
 
         Returns:
             Tensor: Normalized tensor scaled and shifted by learnable parameters.
+
+        Examples:
+            >>> ln = LayerNorm(input_size=10)
+            >>> import cupy as np
+            >>> from autograd.tensor import Tensor
+            >>> x = Tensor(np.random.randn(2, 10))
+            >>> y = ln(x)  # Expected: (2, 10)
         """
         # Equation 4 in section 3.1 in the paper
         mean = x.mean(
@@ -1037,8 +1232,15 @@ class BatchNorm(Module):
     """
     Batch Normalization: Accelerating Deep Network Training by Reducing Internal Covariate Shift.
 
-    This layer normalizes the input tensor by subtracting the batch mean and dividing by the batch standard deviation.
+    Normalizes the input tensor by subtracting the batch mean and dividing by the batch standard deviation.
     Paper: http://arxiv.org/abs/1502.03167
+
+    Examples:
+        >>> bn = BatchNorm(input_size=10)
+        >>> import cupy as np
+        >>> from autograd.tensor import Tensor
+        >>> x = Tensor(np.random.randn(4, 10))
+        >>> y = bn(x) # Expected: (4, 10)
     """
 
     def __init__(
@@ -1084,6 +1286,13 @@ class BatchNorm(Module):
 
         Returns:
             Tensor: Normalized tensor with learnable scaling and shifting.
+
+        Examples:
+            >>> bn = BatchNorm(input_size=10)
+            >>> import cupy as np
+            >>> from autograd.tensor import Tensor
+            >>> x = Tensor(np.random.randn(4, 10))
+            >>> y = bn(x) # Expected: (4, 10)
         """
         if self._is_training:
             # Compute batch statistics using Tensor operations
@@ -1123,6 +1332,14 @@ class Dropout(Module):
     Randomly sets a fraction of input units to 0 during training to prevent overfitting.
     "It prevents overfitting and provides a way of approximately combining exponentially many different neural network architectures efficiently."
     Paper: https://arxiv.org/abs/1207.0580
+
+    Examples:
+        >>> dropout = Dropout(p=0.5)
+        >>> import cupy as np
+        >>> from autograd.tensor import Tensor
+        >>> x = Tensor(np.ones((4, 4)))
+        >>> dropout.train()  # Set to training mode to apply dropout
+        >>> y = dropout(x) # Approximately half of the elements should be 0
     """
 
     def __init__(self, p: float = 0.5, **kwargs: Any) -> None:
@@ -1145,6 +1362,14 @@ class Dropout(Module):
 
         Returns:
             Tensor: Tensor after applying dropout (only during training).
+
+        Examples:
+            >>> dropout = Dropout(p=0.5)
+            >>> dropout.train()
+            >>> import cupy as np
+            >>> from autograd.tensor import Tensor
+            >>> x = Tensor(np.ones((2, 2)))
+            >>> y = dropout(x) # Approximately half of the values in y should be zero
         """
         if self._is_training:
             mask = np.random.binomial(1, 1 - self.p, size=x.data.shape)
@@ -1170,6 +1395,16 @@ class ScaledDotProductAttention(Module):
     $$
 
     Implements the Scaled Dot-Product Attention in Section 3.2.1 in paper: https://arxiv.org/abs/1706.03762
+
+    Examples:
+        >>> attn = ScaledDotProductAttention(dropout_prob=0.1)
+        >>> import cupy as np
+        >>> from autograd.tensor import Tensor
+        >>> # Create dummy query, key, value tensors with shape (batch_size, num_heads, seq_len, key_dim)
+        >>> query = Tensor(np.random.randn(2, 2, 4, 8))
+        >>> key = Tensor(np.random.randn(2, 2, 4, 8))
+        >>> value = Tensor(np.random.randn(2, 2, 4, 8))
+        >>> y = attn(query, key, value) # Expected shape: (2, 2, 4, 8)
     """
 
     def __init__(self, dropout_prob: float = 0.1) -> None:
@@ -1192,10 +1427,19 @@ class ScaledDotProductAttention(Module):
             query (Tensor): Query tensor.
             key (Tensor): Key tensor.
             value (Tensor): Value tensor.
-            mask (Optional[Tensor], optional): Mask tensor to prevent attention to certain positions. Defaults to None.
+            mask (Optional[Tensor], optional): Mask tensor. Defaults to None.
 
         Returns:
-            Tensor: The result of applying attention to the value tensor.
+            Tensor: The attended output.
+
+        Examples:
+            >>> attn = ScaledDotProductAttention()
+            >>> import cupy as np
+            >>> from autograd.tensor import Tensor
+            >>> query = Tensor(np.random.randn(2, 2, 4, 8))
+            >>> key = Tensor(np.random.randn(2, 2, 4, 8))
+            >>> value = Tensor(np.random.randn(2, 2, 4, 8))
+            >>> output = attn(query, key, value) # Expected: (2, 2, 4, 8)
         """
         attention_size = Tensor(key.shape[-1])
 
@@ -1218,6 +1462,14 @@ class MultiHeadAttention(Module):
     Instead of performing a single attention with hidden_size keys, query, and values,
     we project them "num_heads" times with different learned linear projects
     Implements the Multi-Head Attention in Section 3.2.2 in the paper: https://arxiv.org/abs/1706.03762
+
+    Examples:
+        >>> mha = MultiHeadAttention(num_heads=2, hidden_size=16, dropout_prob=0.1)
+        >>> import cupy as np
+        >>> from autograd.tensor import Tensor
+        >>> # Create dummy input tensors with shape (batch_size, seq_len, hidden_size)
+        >>> x = Tensor(np.random.randn(2, 5, 16))
+        >>> output = mha(x, x, x) # Expected: (2, 5, 16)
     """
 
     def __init__(
@@ -1255,10 +1507,17 @@ class MultiHeadAttention(Module):
             query (Tensor): Query tensor.
             key (Tensor): Key tensor.
             value (Tensor): Value tensor.
-            mask (Optional[Tensor], optional): Mask tensor for attention. Defaults to None.
+            mask (Optional[Tensor], optional): Mask tensor. Defaults to None.
 
         Returns:
             Tensor: Output tensor after multi-head attention.
+
+        Examples:
+            >>> mha = MultiHeadAttention(num_heads=2, hidden_size=16)
+            >>> import cupy as np
+            >>> from autograd.tensor import Tensor
+            >>> x = Tensor(np.random.randn(2, 5, 16))
+            >>> output = mha(x, x, x) # Expected: (2, 5, 16)
         """
         batch_size = query.shape[0]
 
@@ -1310,8 +1569,17 @@ class AbstractLLMForwardFn(ABC):
     """
     Abstract interface for a language modeling forward function.
 
-    Subclasses should implement the sample and train methods to perform forward passes
-    for language modeling tasks.
+    Subclasses should implement the sample and train methods.
+
+    Examples:
+        >>> # Example subclass implementing the abstract methods.
+        >>> class DummyLLMForward(AbstractLLMForwardFn):
+        ...     def sample(self, model, batch_data):
+        ...         return model(batch_data), None
+        ...     def train(self, model, batch_data):
+        ...         return model(batch_data), batch_data
+        >>> forward_fn = DummyLLMForward()
+        >>> # Now forward_fn can be used as: forward_fn(model, data, mode="train")
     """
 
     @abstractmethod
@@ -1381,12 +1649,20 @@ def extract_windows(
         x (Union[Tensor, np.ndarray]): Input tensor of shape (batch_size, channels, height, width).
         kernel_size (int): Size of the sliding window.
         stride (int): Step size between windows.
-        padding_mode (str, optional): Padding mode to apply, either "valid" or "same". Defaults to "valid".
+        padding_mode (str, optional): Padding mode ("valid" or "same"). Defaults to "valid".
 
     Returns:
         Tuple[Tensor, Tuple[int, int]]:
             - windows: Stacked tensor of windows with shape (H_out, W_out, batch_size, channels, kernel_size, kernel_size).
             - output_shape: A tuple (H_out, W_out) representing the spatial dimensions of the output.
+
+    Examples:
+        >>> import cupy as np
+        >>> from autograd.tensor import Tensor
+        >>> x = Tensor(np.random.randn(2, 3, 32, 32))
+        >>> windows, output_shape = extract_windows(x, kernel_size=3, stride=1, padding_mode="same")
+        >>> print(windows.data.shape)  # Expected: (H_out, W_out, 2, 3, 3, 3)
+        >>> print(output_shape)        # Expected: (32, 32) when padding_mode is "same"
     """
     if not isinstance(x, Tensor):
         x = Tensor(x)
