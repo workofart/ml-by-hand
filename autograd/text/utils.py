@@ -36,6 +36,12 @@ def create_vocabulary(
     """
     Create a vocabulary (word->index) from given texts,
     keeping up to max_features most common words.
+
+    Examples:
+        >>> texts = ["Hello world", "Hello there", "World peace"]
+        >>> vocab = create_vocabulary(texts, max_features=5)
+        >>> print(vocab)
+        {'hello': 0, 'world': 1, 'there': 2, 'peace': 3}  # Order and exact indices may vary.
     """
     token_freq = defaultdict(int)
     for text in texts:
@@ -76,10 +82,21 @@ def text_to_one_hot_and_sparse(
         vocabulary (dict): A mapping of word -> index. We'll also add "<PAD>"
                            if it’s not already present.
         max_sequence_length (int): The maximum sequence length for truncation/padding.
+        pad_str (str): The padding string.
 
     Returns:
         one_hot (np.ndarray): shape (batch_size, max_sequence_length, vocab_size)
         matrix  (np.ndarray): shape (batch_size, max_sequence_length) of integer IDs
+
+    Examples:
+        >>> texts = ["Hello world", "Hello there"]
+        >>> vocab = {"hello": 0, "world": 1, "there": 2, "<PAD>": 3, "<UNK>": 4}
+        >>> one_hot, matrix = text_to_one_hot_and_sparse(texts, vocabulary=vocab, max_sequence_length=4)
+        >>> print(matrix)
+        [[0, 1, 3, 3],
+         [0, 2, 3, 3]]
+        >>> print(one_hot.shape)
+        (2, 4, 5)
     """
     batch_size = len(texts)
     vocab_size = len(vocabulary)
@@ -132,6 +149,11 @@ def create_causal_mask(
 
     Returns:
         np.ndarray: shape (batch_size, 1, seq_len, seq_len) with 1.0 in masked positions.
+
+    Examples:
+        >>> mask = create_causal_mask(seq_len=5, batch_size=2)
+        >>> print(mask.shape)
+        (2, 1, 5, 5)
     """
     # We want to produce a matrix M of shape (seq_len, seq_len) where
     # M[i,j] = 1 if it is masked, else 0 if it's allowed.
@@ -172,6 +194,12 @@ def create_padding_mask(
 
     Returns:
         np.ndarray: A mask array where positions of 'pad_idx' are 1.0
+
+    Examples:
+        >>> token_indices = np.array([[1, 0, 2], [0, 3, 4]])
+        >>> mask = create_padding_mask(token_indices, pad_idx=0)
+        >>> print(mask.shape)
+        (2, 1, 1, 3)
     """
     pad_positions = (token_indices == pad_idx).astype(np.float32)
 
@@ -199,6 +227,12 @@ def clean_and_tokenize(
 
     Returns:
         list of tokens (str)
+
+    Examples:
+        >>> text = "Hello, world! \nNew line."
+        >>> tokens = clean_and_tokenize(text)
+        >>> print(tokens)
+        ['hello', ',', 'world', '!', 'new', 'line', '.']
     """
     tokens = np.array(re.findall(pattern, text))
 
@@ -222,6 +256,24 @@ def token_batch_to_indices(
     token_batch: List[List[str]],
     vocab: Dict[Union[str, bytes], int],
 ) -> np.ndarray:
+    """
+    Convert a batch of token lists to a matrix of token indices using a given vocabulary.
+
+    Args:
+        token_batch (List[List[str]]): A list of tokenized sentences (each a list of strings).
+        vocab (Dict[Union[str, bytes], int]): A vocabulary mapping tokens to integer indices.
+
+    Returns:
+        np.ndarray: A matrix of shape (batch_size, sequence_length) containing token indices.
+
+    Examples:
+        >>> token_batch = [["hello", "world"], ["this", "test"]]
+        >>> vocab = {"hello": 0, "world": 1, "this": 2, "test": 3, b"<UNK>": 4}
+        >>> indices = token_batch_to_indices(token_batch, vocab)
+        >>> print(indices)
+        [[0, 1],
+         [2, 3]]
+    """
     X: List[List[int]] = []
     for batch in token_batch:
         seq: List[int] = []
@@ -253,15 +305,33 @@ def inference(
         - Generates text by teacher forcing on `groundtruth_data`. At each time step, we feed the model the ground truth tokens up to that point, and measure or collect the predicted next token.
 
     Args:
-        model (nn.Module): The model to run inference on
-        prediction_func (nn.AbstractLLMForwardFn): The forward function that implements the AbstractLLMForwardFn interface
-        bpe (BytePairEncoder): BPE tokenizer
-        start_tokens (Optional[str]): The initial token string (e.g. "<SOS>")
-        max_length (int): The maximum length of tokens to run
+        model (nn.Module): The model to run inference on.
+        prediction_func (nn.AbstractLLMForwardFn): The forward function that implements the AbstractLLMForwardFn interface.
+        bpe (BytePairEncoder): BPE tokenizer.
+        start_tokens (Optional[str]): The initial token string (e.g. "<SOS>").
+        groundtruth_data (Optional[np.ndarray]): If provided, teacher forcing mode is used.
+        max_length (int): The maximum length of tokens to run.
         temperature (float): The amount of randomness in sampling
             > 1.0 => more random
-            < 1.0 => less random
-        top_k (Optional[int]): If set, only keep the top_k tokens from the distribution
+            < 1.0 => less random.
+        top_k (Optional[int]): If set, only keep the top_k tokens from the distribution.
+
+    Returns:
+        str: The generated text after inference.
+
+    Examples:
+        >>> # Dummy implementations for demonstration:
+        >>> class DummyModel(nn.Module):
+        ...     def forward(self, x): return x
+        >>> class DummyLLMForward(nn.AbstractLLMForwardFn):
+        ...     def sample(self, model, batch_data): return (np.array([[0,1,2]]), None)
+        ...     def train(self, model, batch_data): return (np.array([[0,1,2]]), None)
+        >>> model = DummyModel()
+        >>> forward_fn = DummyLLMForward()
+        >>> bpe = BytePairEncoder(num_merges=10)
+        >>> # Auto-regressive mode:
+        >>> prediction_text = inference(model, forward_fn, bpe, start_tokens="<SOS>", max_length=10)
+        >>> print(prediction_text)
     """
 
     def sample_next_token(logits: np.ndarray, temp: float, k: Optional[int]) -> int:
