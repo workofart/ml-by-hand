@@ -13,7 +13,21 @@ logger = logging.getLogger(__name__)
 
 # Best so far: 59% accuracy on CIFAR-10
 class CifarMulticlassClassifier(nn.Module):
+    """
+    A dense neural network for classifying CIFAR-10 images using fully connected layers.
+
+    This model processes flattened CIFAR-10 images (of size 32x32x3=3072) through a series
+    of linear layers with intermediate batch normalization and dropout. The final linear layer
+    outputs logits for each of the 10 classes.
+    """
+
     def __init__(self, num_classes: int):
+        """
+        Initialize the CifarMulticlassClassifier.
+
+        Args:
+            num_classes (int): The number of target classes (e.g., 10 for CIFAR-10).
+        """
         super().__init__()
         self.h1 = nn.Linear(
             3072, 1024
@@ -25,6 +39,19 @@ class CifarMulticlassClassifier(nn.Module):
         self.dropout = nn.Dropout(p=0.3)
 
     def forward(self, x):
+        """
+        Perform the forward pass for the dense CIFAR-10 classifier.
+
+        The input is expected as a flattened image vector. The forward method applies a linear
+        transformation followed by batch normalization, ReLU activation, and dropout at each layer,
+        and finally outputs raw logits.
+
+        Args:
+            x (np.ndarray): A batch of flattened CIFAR-10 images of shape (batch_size, 3072).
+
+        Returns:
+            np.ndarray: Logits of shape (batch_size, num_classes).
+        """
         x = functional.relu(self.bn1(self.h1(x)))
         x = self.dropout(x)
         x = functional.relu(self.h2(x))
@@ -35,7 +62,21 @@ class CifarMulticlassClassifier(nn.Module):
 
 
 class CifarResNet(nn.Module):
+    """
+    A residual network for classifying CIFAR-10 images.
+
+    This model uses residual blocks to enable improved gradient flow during training.
+    It expects CIFAR-10 images to be reshaped to (N, 3, 32, 32) and then applies two residual
+    blocks followed by a linear layer to produce the final logits.
+    """
+
     def __init__(self, num_classes: int):
+        """
+        Initialize the CifarResNet model.
+
+        Args:
+            num_classes (int): The number of target classes (e.g., 10 for CIFAR-10).
+        """
         super().__init__()
         self.res_block1 = nn.ResidualBlock(3, 16)
         self.res_block2 = nn.ResidualBlock(16, 16)
@@ -44,6 +85,18 @@ class CifarResNet(nn.Module):
         )  # 32*32 is the output size of the last maxpool layer
 
     def forward(self, x):
+        """
+        Perform the forward pass of the ResNet-based CIFAR-10 model.
+
+        The method reshapes the input to a 4D tensor and passes it through two residual blocks.
+        Finally, the output is flattened and passed through a linear layer.
+
+        Args:
+            x (np.ndarray): A batch of flattened CIFAR-10 images of shape (batch_size, 3072).
+
+        Returns:
+            np.ndarray: Logits of shape (batch_size, num_classes).
+        """
         batch_size = x.shape[0]
         x = x.reshape(batch_size, 3, 32, 32)  # (N, in_channels, H, W)
         x = self.res_block1(x)
@@ -53,7 +106,20 @@ class CifarResNet(nn.Module):
 
 
 class CifarConvolutionalClassifier(nn.Module):
+    """
+    A convolutional neural network for classifying CIFAR-10 images.
+
+    This model applies a series of convolutional layers with "same" padding followed by max pooling,
+    then flattens the output and applies a linear layer to produce the class logits.
+    """
+
     def __init__(self, num_classes: int):
+        """
+        Initialize the CifarConvolutionalClassifier.
+
+        Args:
+            num_classes (int): The number of target classes (e.g., 10 for CIFAR-10).
+        """
         super().__init__()
         self.conv1 = nn.Conv2d(
             in_channels=3, out_channels=8, kernel_size=3, padding_mode="same"
@@ -79,6 +145,19 @@ class CifarConvolutionalClassifier(nn.Module):
         self.fc1 = nn.Linear(16 * 7 * 7, num_classes)
 
     def forward(self, x):
+        """
+        Perform the forward pass of the convolutional CIFAR-10 classifier.
+
+        The input is reshaped to a 4D tensor, passed through two convolutional blocks
+        (each consisting of convolution, ReLU activation, and pooling), flattened, and finally
+        mapped to class logits via a linear layer.
+
+        Args:
+            x (np.ndarray): A batch of flattened CIFAR-10 images of shape (batch_size, 3072).
+
+        Returns:
+            np.ndarray: Logits of shape (batch_size, num_classes).
+        """
         batch_size = x.shape[0]
         # cifar-10 image has shape 32 x 32 x 3 (color channels)
         x = x.reshape(batch_size, 3, 32, 32)  # (N, in_channels, H, W)
@@ -107,6 +186,22 @@ def train_cifar_multiclass_model(
     config,
     msg="",
 ):
+    """
+    Train a CIFAR multiclass classifier model using a given training configuration.
+
+    This function creates a SimpleTrainer with the provided model class, optimizer class,
+    loss function, and configuration. It then trains the model using the provided training
+    and testing data loaders.
+
+    Args:
+        train_data_loader (SimpleDataLoader): Data loader for training data.
+        test_data_loader (SimpleDataLoader): Data loader for testing data.
+        optimizer_cls: Optimizer class to use (e.g., optim.Adam, optim.SGD).
+        model_cls: Neural network model class to instantiate.
+        loss_fn: Loss function to optimize.
+        config (GenericTrainingConfig): Configuration for training (epochs, learning rate, etc.).
+        msg (str): Additional message for logging purposes.
+    """
     logger.info("=" * 66)
     logger.info(f"Starting CIFAR multiclass model {msg}")
     logger.info("=" * 66)
@@ -121,6 +216,30 @@ def train_cifar_multiclass_model(
 
 
 if __name__ == "__main__":
+    """
+    Main script for training CIFAR-10 and CIFAR-100 classifiers.
+
+    The pipeline is as follows:
+      1) Fetch the CIFAR-10 dataset using OpenML, normalize the pixel values to [0, 1],
+         and subsample 5000 examples for faster training.
+      2) Split the data into training and testing sets using train_test_split.
+      3) Create SimpleDataLoader objects for both training and testing sets.
+      4) Train three types of models on CIFAR-10:
+           - A ResNet-based model using residual blocks.
+           - A convolutional classifier.
+           - A dense (fully connected) classifier.
+      5) Fetch the CIFAR-100 dataset similarly, subsample it, and create corresponding data loaders.
+      6) Train three types of models on CIFAR-100:
+           - A ResNet-based model.
+           - A convolutional classifier.
+           - A dense classifier.
+      7) Log training progress, checkpoints, and evaluation metrics (accuracy, precision).
+
+    Note:
+      - The training configurations (e.g., number of epochs, checkpoint frequency, learning rate,
+        and gradient clipping) are specified via GenericTrainingConfig.
+      - This script is designed to be run as the main module.
+    """
     # ------------------------------
     # CIFAR-10
     # ------------------------------
