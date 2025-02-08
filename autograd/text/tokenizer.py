@@ -25,6 +25,11 @@ class BytePairEncoder:
     This class implements BPE, which merges the most frequent pairs of tokens
     iteratively to learn subword units. It allows encoding raw text into
     a list of integer token IDs and decoding token IDs back into text.
+
+    Examples:
+        >>> raw_text = "Hello world! This is a test."
+        >>> bpe = BytePairEncoder(num_merges=50)
+        >>> encoded_array = bpe.prepare_data(raw_text) # Outputs an array of token IDs
     """
 
     SPECIAL_TOKENS = ["<|endoftext|>", "<PAD>", "<SOS>", "<UNK>"]
@@ -44,6 +49,10 @@ class BytePairEncoder:
             encoded_data_path (str): Path to store or load the encoded data as an NPZ file.
             n_workers (Optional[int]): Number of processes for parallel operations. If None,
                 defaults to the number of CPU cores minus one.
+
+        Examples:
+            >>> bpe = BytePairEncoder(num_merges=100, vocab_file_path="vocab.pkl", encoded_data_path="encoded.npz")
+            >>> print(bpe.num_merges)  # Expected output: 100
         """
         self.num_merges = num_merges
         self.vocab_file_path = vocab_file_path
@@ -70,7 +79,12 @@ class BytePairEncoder:
 
     @property
     def n_vocab(self) -> int:
-        """int: Number of tokens (including special tokens) in the vocabulary."""
+        """int: Number of tokens (including special tokens) in the vocabulary.
+
+        Examples:
+            >>> bpe = BytePairEncoder(num_merges=50)
+            >>> print(bpe.n_vocab)  # Outputs the size of the vocabulary
+        """
         return len(self._unicode_to_int_vocab)
 
     def _load_dictionary(self) -> None:
@@ -78,6 +92,10 @@ class BytePairEncoder:
 
         If the vocabulary file does not exist or fails to load, creates a new base
         dictionary (all single-byte chars plus special tokens).
+
+        Examples:
+            >>> bpe = BytePairEncoder(num_merges=50, vocab_file_path="nonexistent.pkl")
+            >>> bpe._load_dictionary()  # Will create a new dictionary since the file does not exist.
         """
         if not os.path.exists(self.vocab_file_path):
             logger.info(
@@ -117,6 +135,11 @@ class BytePairEncoder:
         Returns:
             Dict[ByteString, int]: A dictionary mapping each single-byte (0..255) and special tokens
             to unique integer IDs.
+
+        Examples:
+            >>> bpe = BytePairEncoder(num_merges=50)
+            >>> vocab = bpe._construct_unicode_to_int_vocab()
+            >>> print(list(vocab.items())[:5])  # Show first 5 items in the vocabulary
         """
         unicode_to_int_vocab: Dict[ByteString, int] = {}
         for i in range(256):
@@ -209,6 +232,11 @@ class BytePairEncoder:
                 A tuple containing:
                 - A dictionary mapping byte sequences or special tokens to integer IDs.
                 - A dictionary mapping integer IDs back to byte sequences.
+
+        Examples:
+            >>> bpe = BytePairEncoder(num_merges=50)
+            >>> vocab, rev_vocab = bpe.train_vocabulary("Hello world! Hello again!")
+            >>> print(vocab)  # Prints the vocabulary mapping
         """
         # If we already have a loaded vocab and don't want to overwrite, skip training
         if self._unicode_to_int_vocab and not overwrite_saved_file:
@@ -304,8 +332,7 @@ class BytePairEncoder:
             >>> bpe = BytePairEncoder(num_merges=50)
             >>> bpe.train_vocabulary("Hello world!")
             >>> token_ids = bpe.encode("Hello world!")
-            >>> print(token_ids)
-            [ ...some token IDs... ]
+            >>> print(token_ids)  # Outputs a list of token IDs
         """
         text_chunks = self._pretokenize(input_text)
         logger.debug(f"Text chunks: {text_chunks[:20]}")
@@ -347,9 +374,8 @@ class BytePairEncoder:
         Example:
             >>> bpe = BytePairEncoder(num_merges=50)
             >>> bpe.train_vocabulary("Hello world!")
-            >>> token_ids = [ ...some token IDs... ]
-            >>> text = bpe.decode(token_ids)
-            >>> print(text)  # "Hello world!"
+            >>> token_ids = bpe.encode("Hello world!")
+            >>> text = bpe.decode(token_ids) # Expected: "Hello world!" (or similar)
         """
         result_bytes = []
         for t in encoded_tokens:
@@ -378,7 +404,7 @@ class BytePairEncoder:
             >>> bpe = BytePairEncoder(num_merges=50)
             >>> tokens = bpe._pretokenize("Hello <|endoftext|> world!")
             >>> print(tokens)
-            ["Hello", "<|endoftext|>", " ", "world", "!"]
+            ['Hello', '<|endoftext|>', ' ', 'world', '!']
         """
         special_pattern = (
             "(" + "|".join(regex.escape(k) for k in self.SPECIAL_TOKENS) + ")"
@@ -411,6 +437,12 @@ class BytePairEncoder:
         Returns:
             Dict[Tuple[int, int], int]: A dictionary mapping each bigram (two adjacent token IDs)
             to its total frequency across the corpus.
+
+        Examples:
+            >>> from collections import Counter
+            >>> word_freq = Counter({(65, 66, 67): 10, (66, 67, 68): 5})
+            >>> bpe = BytePairEncoder(num_merges=50)
+            >>> counts = bpe._get_initial_pair_counts(word_freq) # Displays the frequency counts for each bigram
         """
         items = list(word_freq.items())
         chunk_size = max(1, len(items) // self.n_workers)
@@ -442,6 +474,14 @@ class BytePairEncoder:
             new_id (int): The integer ID assigned to the merged token.
             corpus_word_freq (Counter): A counter of (tuple_of_tokens -> frequency).
             pair_counts (Dict[Tuple[int, int], int]): Global dictionary of bigram frequencies.
+
+        Examples:
+            >>> corpus_word_freq = Counter({(65, 66, 67): 3})
+            >>> pair_counts = {(65, 66): 3, (66, 67): 3}
+            >>> bpe = BytePairEncoder(num_merges=50)
+            >>> bpe._apply_merges_to_corpus((65, 66), 300, corpus_word_freq, pair_counts)
+            >>> print(corpus_word_freq)
+            >>> print(pair_counts)
         """
         # Gather all items (word tuples) that contain the pair
         items_to_update = []
@@ -496,6 +536,10 @@ class BytePairEncoder:
 
         Returns:
             Tuple[int, ...]: A new sequence of token IDs with the merges replaced by new_idx.
+
+        Examples:
+            >>> corpus = [65, 66, 67, 65, 66]
+            >>> merged = BytePairEncoder._merge_pairs((65, 66), 300, corpus) # Expected: (300, 67, 300) or similar depending on merge implementation
         """
         merged_tokens: List[int] = []
         i = 0
@@ -518,6 +562,10 @@ class BytePairEncoder:
 
         Returns:
             Counter: A Counter object mapping each bigram to its frequency within this chunk.
+
+        Examples:
+            >>> chunk = [((65, 66, 67), 2)]
+            >>> counts = BytePairEncoder._local_pair_counts(chunk)  # Expected output: Counter({(65, 66): 2, (66, 67): 2})
         """
         partial_counts = Counter()
         for w_tuple, freq in chunk:
@@ -541,6 +589,10 @@ class BytePairEncoder:
             Tuple[Dict[Tuple[int, ...], int], Dict[Tuple[int, int], int]]:
                 A dictionary of updated word tuples to frequency counts,
                 and a dictionary of updated bigram pair frequencies.
+
+        Examples:
+            >>> chunk = [((65, 66, 67), 2)]
+            >>> result = BytePairEncoder._local_merge_chunk((chunk, (65, 66), 300))  # Expected: a tuple with updated frequencies
         """
         chunk, pair, new_id = args
         local_new_word_freq = Counter()
