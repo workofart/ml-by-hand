@@ -35,7 +35,7 @@ We are creating a deep learning library from scratch (that evolved from a simple
 
 ## **Demo/Examples**
 
-![1738821992836500](https://github.com/user-attachments/assets/f1a53595-2dd1-4a37-831e-00035dfc8fd8)
+<center><img src="https://www.henrypan.com/blog/assets/images/ml/ml-by-hand/ml-by-hand.gif" width="700" /></center>
 
 
 Explore the [`examples/`](https://github.com/workofart/ml-by-hand/tree/main/examples) directory for real-world demonstrations of how this engine can power neural network training on various tasks:
