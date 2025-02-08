@@ -19,10 +19,27 @@ from autograd.tools.trainer import SimpleTrainer
 logger = logging.getLogger(__name__)
 np.random.seed(1337)
 
-# --- Model Definitions ---
-
 
 class MnistResNet(nn.Module):
+    """
+    A residual network variant for MNIST classification.
+
+    This network:
+      - Consists of two ResidualBlock layers, each potentially adding skip connections
+        for improved gradient flow.
+      - Flattens the resulting feature maps and applies a linear layer that outputs
+        raw logits for each of the 10 MNIST classes.
+
+    Attributes:
+        res_block1 (nn.ResidualBlock): First residual block.
+        res_block2 (nn.ResidualBlock): Second residual block.
+        fc1 (nn.Linear): Final linear layer mapping to 10 logits.
+
+    Notes:
+        Input images are assumed to be 28x28 and are reshaped to (N,1,28,28)
+        for convolutional processing.
+    """
+
     def __init__(self):
         super().__init__()
         self.res_block1 = nn.ResidualBlock(1, 16)
@@ -32,6 +49,16 @@ class MnistResNet(nn.Module):
         )  # 28*28 is the output size of the last maxpool layer
 
     def forward(self, x):
+        """
+        Forward pass of the MnistResNet network.
+
+        Args:
+            x (np.ndarray): A batch of MNIST images of shape (N, 784),
+                which is reshaped to (N, 1, 28, 28) for further processing.
+
+        Returns:
+            np.ndarray: Logits of shape (N, 10).
+        """
         batch_size = x.shape[0]
         x = x.reshape(batch_size, 1, 28, 28)  # (N, in_channels, H, W)
         x = self.res_block1(x)
@@ -41,6 +68,23 @@ class MnistResNet(nn.Module):
 
 
 class MnistMultiClassClassifier(nn.Module):
+    """
+    A multi-layer perceptron (MLP) for MNIST multi-class classification.
+
+    This network:
+      - Takes 28x28=784 input features and maps them to an intermediate layer of size 64.
+      - Passes through another hidden layer of size 64.
+      - Outputs 10 logits for each of the 10 MNIST classes.
+      - Optionally includes a batch normalization step after the first layer.
+
+    Attributes:
+        batch_norm (bool): Whether batch normalization is applied after the first linear layer.
+        h1 (nn.Linear): First linear layer from 784 -> 64.
+        h2 (nn.Linear): Second linear layer from 64 -> 64.
+        h3 (nn.Linear): Final linear layer from 64 -> 10.
+        bn1 (nn.BatchNorm): BatchNorm layer for the first hidden representation, used if batch_norm=True.
+    """
+
     def __init__(self, batch_norm=False):
         super().__init__()
         self.batch_norm = batch_norm
@@ -51,6 +95,15 @@ class MnistMultiClassClassifier(nn.Module):
             self.bn1 = nn.BatchNorm(64, momentum=0.1, epsilon=1e-8)
 
     def forward(self, x):
+        """
+        Forward pass of the MnistMultiClassClassifier network.
+
+        Args:
+            x (np.ndarray): Batch of MNIST images (N, 784).
+
+        Returns:
+            np.ndarray: Output logits (N, 10).
+        """
         x = self.h1(x)
         if self.batch_norm:
             x = self.bn1(x)
@@ -61,6 +114,24 @@ class MnistMultiClassClassifier(nn.Module):
 
 
 class MnistConvolutionalClassifier(nn.Module):
+    """
+    A convolutional neural network (CNN) for MNIST classification.
+
+    This network:
+      - Includes two convolution blocks, each with 2 conv layers followed by max pooling.
+      - Maintains spatial dimensions where padding is set to "same".
+      - Finally flattens the feature maps and uses a single linear layer to produce logits.
+
+    Attributes:
+        conv1 (nn.Conv2d): First convolution (1 -> 8 channels, kernel_size=3).
+        conv2 (nn.Conv2d): Second convolution (8 -> 8 channels, kernel_size=3).
+        pool1 (nn.MaxPool2d): First pooling layer (kernel_size=3, stride=2).
+        conv3 (nn.Conv2d): Third convolution (8 -> 16 channels, kernel_size=3).
+        conv4 (nn.Conv2d): Fourth convolution (16 -> 16 channels, kernel_size=3).
+        pool2 (nn.MaxPool2d): Second pooling layer (kernel_size=3, stride=2).
+        fc1 (nn.Linear): Fully connected layer that outputs 10 logits.
+    """
+
     def __init__(self):
         super().__init__()
         self.conv1 = nn.Conv2d(
@@ -87,6 +158,16 @@ class MnistConvolutionalClassifier(nn.Module):
         self.fc1 = nn.Linear(16 * 6 * 6, 10)
 
     def forward(self, x):
+        """
+        Forward pass of the MnistConvolutionalClassifier network.
+
+        Args:
+            x (np.ndarray): A batch of MNIST images of shape (N, 784),
+                reshaped internally to (N, 1, 28, 28).
+
+        Returns:
+            np.ndarray: Output logits (N, 10).
+        """
         batch_size = x.shape[0]
         x = x.reshape(batch_size, 1, 28, 28)  # (N, in_channels, H, W)
 
@@ -106,6 +187,20 @@ class MnistConvolutionalClassifier(nn.Module):
 
 
 class MnistOneVsRestBinaryClassifier(nn.Module):
+    """
+    A binary classifier suitable for a one-vs-rest MNIST approach.
+
+    Each instance of this classifier is intended to distinguish a single digit (positive class)
+    from all other digits (negative class). This network uses a simple MLP architecture with
+    two hidden layers.
+
+    Attributes:
+        h1 (nn.Linear): First linear layer from 784 -> 64.
+        h2 (nn.Linear): Second linear layer from 64 -> 64.
+        h3 (nn.Linear): Final linear layer from 64 -> 1, producing one logit.
+        output_logits (bool): If True, returns raw logits. If False, applies sigmoid before returning.
+    """
+
     def __init__(self, output_logits=True):
         super().__init__()
         self.h1 = nn.Linear(784, 64)  # mnist image has shape 28*28=784
@@ -114,6 +209,16 @@ class MnistOneVsRestBinaryClassifier(nn.Module):
         self.output_logits = output_logits
 
     def forward(self, x):
+        """
+        Forward pass for the one-vs-rest binary classifier.
+
+        Args:
+            x (np.ndarray): Input data of shape (N, 784) representing MNIST images.
+
+        Returns:
+            np.ndarray: If output_logits is True, shape is (N, 1) of raw logits.
+                        Otherwise, shape is (N, 1) of post-sigmoid probabilities.
+        """
         x = functional.relu(self.h1(x))
         x = functional.relu(self.h2(x))
         x = self.h3(x)
@@ -127,15 +232,23 @@ def train_mnist_with_hinge_loss(
     X_train, y_train, X_test, y_test, batch_size=32, epochs=10
 ):
     """
-    Trains 10 one-vs-rest binary classifiers using hinge loss:
-      For each digit d in [0..9], label the data as +1 if y=d, else -1.
-      Then train a separate MnistOneVsRestBinaryClassifier for each digit.
+    Trains 10 one-vs-rest binary classifiers using hinge loss for MNIST.
+
+    Each of the 10 classifiers is trained to distinguish a single digit d in [0..9]
+    (labeled +1) from all other digits (labeled -1). This function constructs separate
+    MnistOneVsRestBinaryClassifier models, each trained with hinge loss.
 
     Args:
-      X_train, y_train: Full training data/labels (numpy arrays).
-      X_test, y_test: Full test data/labels (numpy arrays).
-      batch_size (int): Batch size for the SimpleDataLoader.
-      epochs (int): Number of epochs for each binary classifier.
+      X_train (np.ndarray): Training images, shaped (N, 784) for N samples.
+      y_train (np.ndarray): Training labels, shaped (N,).
+      X_test (np.ndarray): Test images, shaped (M, 784).
+      y_test (np.ndarray): Test labels, shaped (M,).
+      batch_size (int): Batch size for training each classifier.
+      epochs (int): Number of epochs to train each classifier.
+
+    Post-Training:
+      The resulting one-vs-rest classifiers are evaluated on the test set,
+      and overall accuracy/precision metrics are logged.
     """
     logger.info("=" * 50)
     logger.info("Starting to train One vs Rest MNIST model (Hinge Loss)")
@@ -198,8 +311,23 @@ def train_mnist_one_vs_rest_model(
     X_train, y_train, X_test, y_test, batch_size=32, epochs=10
 ):
     """
-    Trains 10 one-vs-rest binary classifiers using binary cross-entropy:
-      For each digit d in [0..9], label the data as 1 if y=d, else 0.
+    Trains 10 one-vs-rest binary classifiers using binary cross-entropy for MNIST.
+
+    Each of the 10 classifiers is trained to distinguish a single digit d in [0..9]
+    (labeled 1) from all other digits (labeled 0). This function constructs separate
+    MnistOneVsRestBinaryClassifier models, each trained with binary cross-entropy.
+
+    Args:
+      X_train (np.ndarray): Training images, shaped (N, 784).
+      y_train (np.ndarray): Training labels (N,).
+      X_test (np.ndarray): Test images, shaped (M, 784).
+      y_test (np.ndarray): Test labels (M,).
+      batch_size (int): Batch size for training each classifier.
+      epochs (int): Number of epochs to train each classifier.
+
+    Post-Training:
+      The resulting one-vs-rest classifiers are evaluated on the test set,
+      and overall accuracy/precision metrics are logged.
     """
     logger.info("=" * 50)
     logger.info("Starting to train One vs Rest MNIST model (Binary Cross Entropy)")
@@ -266,6 +394,23 @@ def train_mnist_multiclass_model(
     config,
     msg="",
 ):
+    """
+    Trains a multi-class MNIST classifier with a given model, optimizer, and loss.
+
+    This function:
+      - Creates a SimpleTrainer using the provided model_cls, optimizer_cls, loss_fn, and config.
+      - Trains the model using the train_data_loader for the specified number of epochs.
+      - Optionally evaluates on test_data_loader if provided.
+
+    Args:
+        train_data_loader (SimpleDataLoader): Data loader for training.
+        test_data_loader (SimpleDataLoader): Data loader for evaluation/testing.
+        optimizer_cls: An optimizer class from autograd.optim, e.g., optim.Adam or optim.SGD.
+        model_cls: A model class (nn.Module) defining the network architecture.
+        loss_fn: A loss function from autograd.functional, e.g., cross_entropy.
+        config (GenericTrainingConfig): Training configuration specifying hyperparameters.
+        msg (str): An optional message for logging.
+    """
     logger.info("=" * 66)
     logger.info(f"Starting Multi-class MNIST model {msg}")
     logger.info("=" * 66)
@@ -281,6 +426,27 @@ def train_mnist_multiclass_model(
 
 
 if __name__ == "__main__":
+    """
+    Main script that fetches MNIST data via OpenML,
+    normalizes it, and trains multiple neural network models on a subset of MNIST.
+
+    Pipeline:
+      1) Fetch the 'mnist_784' dataset (ID=554) from OpenML.
+      2) Subsample the data to 3000 examples (both X and y).
+      3) Split into training (90%) and test (10%) sets.
+      4) Create SimpleDataLoader objects for each split.
+      5) Train various model architectures, including:
+         - A ResNet-like model using residual blocks.
+         - A Multi-layer Perceptron (MLP) with optional batch normalization.
+         - A CNN-based classifier.
+         - One-vs-rest binary classifiers with hinge loss or binary cross-entropy.
+      6) Evaluate each trained model on the test set and log metrics.
+
+    Note:
+      - Adjust the hyperparameters (epochs, batch size, LR) or the number of data samples
+        to control training time and performance.
+      - The results are logged for each model, including final test accuracy and precision.
+    """
     logger.info("Fetching data for MNIST_784")
     X, y, _, __ = get_dataset(dataset_id=554, download_data=True).get_data(
         target="class", dataset_format="array"
