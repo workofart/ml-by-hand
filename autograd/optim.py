@@ -1,4 +1,5 @@
 import logging
+from abc import abstractmethod
 from collections import defaultdict
 from typing import Any, Callable, Dict, Optional
 
@@ -22,6 +23,7 @@ class LRScheduler:
     Subclasses should implement the __call__ method.
     """
 
+    @abstractmethod
     def __call__(self, step: int, initial_lr: float, current_lr: float) -> float:
         """
         Compute the updated learning rate.

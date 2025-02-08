@@ -73,6 +73,7 @@ class Module:
         for module in self._modules.values():
             module.zero_grad()
 
+    @abstractmethod
     def forward(self, x: Any) -> Tensor:
         """
         Perform the forward pass.
