@@ -192,16 +192,16 @@ if __name__ == "__main__":
     SHAPESPEARE_CONFIG = TransformerTrainingConfig(
         training_run_name="shakespeare_mini",
         dataset_name="shakespeare_mini",
-        batch_size=256,  # GPT-2 uses 512
-        total_epochs=20,
+        batch_size=16,  # GPT-2 uses 512
+        total_epochs=10,
         eval_iters=50,
-        steps_per_epoch=50,
+        steps_per_epoch=100,
         checkpoint_freq=1,
         model_kwargs={
             "num_attention_heads": 4,  # GPT-2 small uses 12
             "hidden_size": 256,  # GPT-2 small uses 768, must be divisible by num_attention_heads
             "dropout_prob": 0.3,
-            "max_seq_len": 480,  # GPT-2 uses 1024
+            "max_seq_len": 96,  # GPT-2 uses 1024
             "num_decoder_layers": 4,  # GPT-2 uses 12
         },
         optimizer_kwargs={
@@ -210,12 +210,12 @@ if __name__ == "__main__":
             "max_grad_norm": 1.0,
             "weight_decay": 0.1,
             "lr_scheduler_kwargs": {
-                "lr_scheduler_cls": optim.CosineScheduler,  # TODO: check if we can serialize this into checkpoint
+                "lr_scheduler_cls": "CosineScheduler",
                 "warmup_steps": 100,
                 "lr_decay_iters": 1000,  # steps_per_epoch * total_epochs
             },
         },
-        resume_epoch=None,
+        resume_epoch=None,  # Set this to None if you don't want to load from checkpoint
         teacher_enforcing=True,
         include_decoder_input=False,
         create_padding_masks=False,
@@ -239,7 +239,7 @@ if __name__ == "__main__":
         total_epochs=30,
         eval_iters=100,
         steps_per_epoch=1600,
-        update_weights_every_n_steps=8, # simulate larger batch sizes
+        update_weights_every_n_steps=8,  # simulate larger batch sizes
         checkpoint_freq=4,
         model_kwargs={
             "num_attention_heads": 12,  # GPT-2 small uses 12
@@ -259,7 +259,7 @@ if __name__ == "__main__":
                 "lr_decay_iters": 40000,
             },
         },
-        resume_epoch=None,
+        resume_epoch=None,  # Set this to None if you don't want to load from checkpoint
         teacher_enforcing=False,
         include_decoder_input=False,
         create_padding_masks=False,
@@ -274,47 +274,13 @@ if __name__ == "__main__":
             split_token="<|endoftext|>",
         ),
     )
-    
-    OPENWEBTEXT_CONFIG = TransformerTrainingConfig(
-        training_run_name="open_web_text",
-        dataset_name="open_web_text",
-        batch_size=16,  # GPT-2 uses 512
-        total_epochs=500,
-        eval_iters=100,
-        steps_per_epoch=200,
-        checkpoint_freq=4,
-        model_kwargs={
-            "num_attention_heads": 12,  # GPT-2 small uses 12
-            "hidden_size": 768,  # GPT-2 small uses 768, must be divisible by num_attention_heads
-            "dropout_prob": 0.2,
-            "max_seq_len": 392,  # GPT-2 uses 1024
-            "num_decoder_layers": 12,  # GPT-2 uses 12
-        },
-        optimizer_kwargs={
-            "lr": 1e-3,
-            "beta2": 0.99,
-            "max_grad_norm": 1.0,
-            "weight_decay": 0.1,
-            "lr_scheduler_kwargs": {
-                "lr_scheduler_cls": optim.CosineScheduler,
-                "warmup_steps": 100,
-                "lr_decay_iters": 5000,
-            },
-        },
-        resume_epoch=380,
-        teacher_enforcing=False,
-        include_decoder_input=False,
-        create_padding_masks=False,
-        label_smoothing=0.1,
-        eval_start_string="April is",
-        custom_bpe=None,
-    )
 
     CONFIG = SHAPESPEARE_CONFIG
 
     logger = logging.getLogger(__name__)
 
     # Load some data
+    # Note: Please supply the correct data for your model
     data = text_utils.load_shakespeare_mini()
     # data = text_utils.load_wiki_simple()
 
@@ -332,22 +298,9 @@ if __name__ == "__main__":
             split_token=CONFIG.custom_bpe.split_token,
         )
     else:
-        # TODO: Experimental to debug whether the model learning is poorly due to
-        # the tokenizer. Need to install the python package manually via `uv pip install tiktoken`
-        import tiktoken
-
-        bpe = tiktoken.get_encoding("gpt2")
-        # encoded_data = bpe.encode(data)
-        # import numpy
-        # with np.load("training_data/openwebtext_train.npz", allow_pickle=True) as npz_data:
-        #     train_data = npz_data["arr_0"]
-        # with np.load("training_data/openwebtext_val.npz", allow_pickle=True) as npz_data:
-        #     test_data = npz_data["arr_0"]
-            
-        # train_data = np.asarray(numpy.memmap("training_data/openwebtext_train.bin", dtype=numpy.uint16, mode="r"))
-        # test_data = np.asarray(numpy.memmap("training_data/openwebtext_val.bin", dtype=numpy.uint16, mode="r"))
-        # encoded_data = np.asarray(numpy.memmap("training_data/openwebtext_val.bin", dtype=numpy.uint16, mode="r"))
-        # np.savez_compressed("training_data/openwebtext_train.npz", numpy.memmap("training_data/openwebtext_train.bin", dtype=numpy.uint16, mode="r"))
+        raise ValueError(
+            "Please supply a custom_bpe config. Check out CustomBpeConfig for more details."
+        )
 
     n = int(len(encoded_data) * 0.9)
     train_data, test_data = encoded_data[:n], encoded_data[n:]
@@ -392,8 +345,7 @@ if __name__ == "__main__":
             model=trainer.model,
             prediction_func=GPT2ForwardFn(),
             bpe=bpe,
-            # start_tokens="\n",  # Example start token
-            start_tokens="The capital of China is",  # Example start token
+            start_tokens="\n",  # Example start token
             max_length=int(trainer.model.max_seq_len),
             temperature=1.0,
             top_k=200,  # for shakespeare, there are only 63 vocabulary that are used, so let's limit to the top 50 to avoid printing weird characters
