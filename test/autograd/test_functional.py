@@ -192,6 +192,61 @@ class TestCrossEntropy(TestCase):
         torch_loss.backward()
         assert allclose(logits.grad.data, logits_torch.grad.detach().numpy(), atol=1e-6)
 
+    def test_cross_entropy_label_smoothing_matches_pytorch_for_2d_logits(self):
+        logits = Tensor(
+            data=mx.array(
+                [[1.5409961, -0.2934289], [-2.1787894, 0.56843126]],
+                dtype=mx.float32,
+            ),
+            requires_grad=True,
+        )
+        logits_torch = torch.tensor(
+            logits.data, dtype=torch.float32, requires_grad=True
+        )
+        targets = mx.array([0, 1], dtype=mx.int64)
+
+        loss = functional.cross_entropy(logits, targets, label_smoothing=0.2)
+        torch_loss = torch.nn.functional.cross_entropy(
+            logits_torch,
+            torch.tensor(targets, dtype=torch.int64),
+            label_smoothing=0.2,
+        )
+
+        assert allclose(loss.data, torch_loss.detach().numpy(), atol=1e-6)
+
+        loss.backward()
+        torch_loss.backward()
+        assert allclose(logits.grad.data, logits_torch.grad.detach().numpy(), atol=1e-6)
+
+    def test_cross_entropy_label_smoothing_matches_pytorch_for_3d_logits(self):
+        logits_data = mx.array(
+            [
+                [[2.0, 0.5, -1.0], [0.1, 0.2, 3.0]],
+                [[-0.4, 1.2, 0.7], [1.5, -0.3, 0.0]],
+            ],
+            dtype=mx.float32,
+        )
+        logits = Tensor(data=logits_data, requires_grad=True)
+        logits_torch = torch.tensor(
+            logits.data, dtype=torch.float32, requires_grad=True
+        )
+        targets = mx.array([[0, 2], [1, 0]], dtype=mx.int64)
+
+        loss = functional.cross_entropy(
+            logits, targets, pad_idx=None, label_smoothing=0.1
+        )
+        torch_loss = torch.nn.functional.cross_entropy(
+            logits_torch.reshape(-1, logits_torch.shape[-1]),
+            torch.tensor(targets, dtype=torch.int64).reshape(-1),
+            label_smoothing=0.1,
+        )
+
+        assert allclose(loss.data, torch_loss.detach().numpy(), atol=1e-6)
+
+        loss.backward()
+        torch_loss.backward()
+        assert allclose(logits.grad.data, logits_torch.grad.detach().numpy(), atol=1e-6)
+
 
 class TestHingeLoss(TestCase):
     def setUp(self):

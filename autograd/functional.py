@@ -582,10 +582,30 @@ class CrossEntropy(Function):
             label_smoothing (float, optional): Label smoothing factor. Defaults to 0.0. Label smoothing is applied if $label\_smoothing > 0$
             **kwargs: Additional keyword arguments.
 
-        For label smoothing, the smoothed target distribution is given by:
-        $$
-        T_{i,j} = (1 - \alpha) \, y_{i,j} + \frac{\alpha}{K-1} (1 - y_{i,j})
-        $$
+            For label smoothing, we follow the Inception paper notation.
+            Here:
+            - $x$ is the current training example
+            - $y$ is the ground-truth class index for $x$
+            - $k$ is a class index
+            - $K$ is the total number of classes
+            - $\delta_{k,y}$ is the Kronecker delta, equal to $1$ when $k=y$ and $0$ otherwise
+            - $u(k)$ is a prior distribution over classes
+            $$
+            q'(k \mid x) = (1 - \epsilon)\,\delta_{k,y} + \epsilon\,u(k)
+            $$
+            and for the uniform prior used in the paper,
+            $$
+            u(k) = \frac{1}{K}
+            $$
+            so the smoothed target distribution becomes
+            $$
+            q'(k \mid x) = (1 - \epsilon)\,\delta_{k,y} + \frac{\epsilon}{K}
+            $$
+            In per-example / per-class notation, where $y_{i,j}$ is the one-hot
+            target entry for example $i$ and class $j$, this is
+            $$
+            T_{i,j} = (1 - \epsilon)\,y_{i,j} + \frac{\epsilon}{K}
+            $$
         (Ref: "Rethinking the Inception Architecture for Computer Vision", https://arxiv.org/abs/1512.00567)
 
         Returns:
@@ -627,17 +647,26 @@ class CrossEntropy(Function):
         # the largest value in shifted is 0, so sum(exp(shifted)) is safe to compute.
         log_softmax = shifted - mx.log(mx.sum(mx.exp(shifted), axis=1, keepdims=True))
 
-        # 4. Compute the label-smoothed cross-entropy for each element i.
-        # $$ L_i = -\left( (1 - \text{label\_smoothing}) \log p_{i,y_i} + \frac{\text{label\_smoothing}}{\text{num\_classes} - 1} \sum_{j \neq y_i} \log p_{i,j} \right) $$
-        # $$ = -\left( (1 - \text{label\_smoothing}) \log p_{i,y_i} + \frac{\text{label\_smoothing}}{\text{num\_classes} - 1} \left( \sum_{j=1}^{\text{num\_classes}} \log p_{i,j} - \log p_{i,y_i} \right) \right) $$
-        # Essentially, we are putting some (label_smoothing) weight on a uniform distribution over the non-correct classes
-        # This will make the model prediction les confident, and thus less likely to overfit.
+        """
+        4. Compute the label-smoothed cross-entropy for each element i.
+        $$
+        q'(k \mid x) = (1 - \epsilon)\,\delta_{k,y} + \frac{\epsilon}{K}
+        $$
+        where $\delta_{k,y}$ is 1 for the correct class and 0 otherwise.
+        so each row loss is
+        $$
+        L_i = -\sum_j q'_{i,j}\log p_{i,j}
+        $$
+        $$
+        = -\left((1 - \epsilon)\log p_{i,y_i} + \frac{\epsilon}{K}\sum_j \log p_{i,j}\right)
+        $$
+        Here $p_{i,j}$ is the model probability for example i and class j.
+        """
+        # We implement the second line directly using log-softmax.
         log_p_correct = log_softmax[mx.arange(len(y_true)), y_true]
-        sum_log_p = mx.sum(log_softmax, axis=1)
-
+        mean_log_p = mx.mean(log_softmax, axis=1)
         losses = -(
-            (1.0 - label_smoothing) * log_p_correct
-            + (label_smoothing / (num_classes - 1)) * (sum_log_p - log_p_correct)
+            (1.0 - label_smoothing) * log_p_correct + label_smoothing * mean_log_p
         )
 
         # 5) Average the loss only over non-pad positions.
@@ -663,9 +692,10 @@ class CrossEntropy(Function):
         $$
         p_{i,j} = exp(log\_softmax_{i,j})
         $$
-        and the target distribution $T_{i,j}$ is defined as:
+        is the model probability for example $i$ and class $j$, and the target
+        distribution $T_{i,j}$ is defined as:
         $$
-        T_{i,j} = (1 - \alpha) \, y_{i,j} + \frac{\alpha}{K-1} (1 - y_{i,j})
+        T_{i,j} = (1 - \epsilon)\,y_{i,j} + \frac{\epsilon}{K}
         $$
         The gradient is zeroed out for padding positions and scaled by the upstream gradient divided by the number of non-padding positions.
 
@@ -684,27 +714,19 @@ class CrossEntropy(Function):
         )
         non_pad_count = max(1, int(row_mask.sum()))
 
-        # 4. Label Smoothing
-        # When label_smoothing > 0, we subtract (1-label_smoothing) or something smaller
-        # than 1, because we don't want to be too confident (1) about the correct class
-        # We do this in two steps.
-        # Step 1: Incorrect class and correct class: a / (num_class - 1)
-        # Step 2: Correct class: 1 - a
-        # This is equivalent to:
-        # Correct class: 1 - a + a / (num_class - 1) = (1 - a) + a / (num_class - 1)
-        # Incorrect class: a / (num_class - 1)
-
-        off_value = 0.0
-        if self.num_classes > 1:
-            off_value = self.label_smoothing / (self.num_classes - 1)
-
+        """
+        4. Label smoothing target distribution.
+        $$
+        q'(k \mid x) = (1 - \epsilon)\,\delta_{k,y} + \frac{\epsilon}{K}
+        $$
+        where $\delta_{k,y}$ is the Kronecker delta.
+        so for each row we start from the uniform eps / K mass on every class,
+        then add the remaining (1 - eps) mass to the correct class.
+        """
+        off_value = self.label_smoothing / self.num_classes
         target = mx.ones_like(softmax_probs) * off_value
         correct_idx = (mx.arange(self.y_true.shape[0]), self.y_true)
-        target = (
-            cast(Any, target)
-            .at[correct_idx]
-            .add(1.0 - self.label_smoothing - off_value)
-        )
+        target = cast(Any, target).at[correct_idx].add(1.0 - self.label_smoothing)
         target *= row_mask
 
         # 6. Multiply by upstream grad and average by non-padded positions
