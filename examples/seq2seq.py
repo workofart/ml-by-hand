@@ -83,7 +83,7 @@ class Seq2Seq(nn.Module):
         h_t, cell_t = self.encoder(x)
         for t in range(self.max_output_len):
             x_t = x[:, t, :]
-            x_t = x_t.view((x_t.shape[0], 1, x_t.shape[1]))
+            x_t = x_t.view(x_t.shape[0], 1, x_t.shape[1])
             # We will initialize the decoder with the encoder's final hidden state
             h_t, cell_t = self.decoder(x=x_t, hidden_state=h_t, C_t=cell_t)
             # Get the final projection in logits format
@@ -97,7 +97,7 @@ class Seq2Seq(nn.Module):
         return tensor.Tensor.stack(output, axis=1)
 
 
-def parse_data_into_xy(data):
+def parse_data_into_xy(data) -> tuple[list[str], list[str]]:
     """
     Parse raw input data into source and target sequences for the Seq2Seq model.
 
@@ -124,7 +124,7 @@ def parse_data_into_xy(data):
     # In the paper, reversing the input sentence minimizes the distance between the
     # start of the source sentence and the relevant parts in the output sentence.
     # It shortens the "path" the gradients have to traverse in time.
-    articles = data[:, 3][::-1]
+    articles = [str(article) for article in data[:, 3][::-1]]
     return articles, summaries
 
 
@@ -151,6 +151,8 @@ def main():
 
     train_data = load_data(train_data_url, train_filename, max_rows=1024)
     test_data = load_data(test_data_url, test_filename, max_rows=1024)
+    assert not isinstance(train_data, str)
+    assert not isinstance(test_data, str)
 
     train_X, train_y = parse_data_into_xy(train_data)
     test_X, test_y = parse_data_into_xy(test_data)

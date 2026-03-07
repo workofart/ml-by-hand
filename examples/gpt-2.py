@@ -113,7 +113,7 @@ class GPT2(nn.Module):
         so we want to prevent outputs from blowing up in magnitude early in training.
         """
         if module.__class__.__name__ == "Linear":
-            module.parameters["weight"] /= mx.sqrt(number_of_layers)
+            module.parameters["weight"] /= float(number_of_layers) ** 0.5
 
 
 class DecoderSublayer(nn.Module):

@@ -77,7 +77,7 @@ class TestDataLoaders(unittest.TestCase):
         X_orig = mx.array([[1, 2], [3, 4]])
         y_orig = mx.array([10, 20])
         loader = SimpleDataLoader(
-            X_orig.copy(), y_orig.copy(), batch_size=1, shuffle=False
+            mx.array(X_orig), mx.array(y_orig), batch_size=1, shuffle=False
         )
 
         def preprocess_func(X_in, y_in):

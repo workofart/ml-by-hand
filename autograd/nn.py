@@ -1394,7 +1394,7 @@ class Dropout(Module):
             mask = mx.random.bernoulli(float(1 - self.p), shape=x.data.shape)
             return (
                 x
-                * mask
+                * Tensor(mask, requires_grad=False)
                 / (
                     1 - self.p
                 )  # we scale the output by 1/(1-p) to keep the expected output the same

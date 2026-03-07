@@ -31,8 +31,8 @@ class Memory:
         """
         self.memory_length = memory_length
         self.memory_dim = memory_dim
-        self.reset_memory()
         self._memory = None
+        self.reset_memory()
 
     def reset_memory(self, batch_size=1):
         """
@@ -53,6 +53,8 @@ class Memory:
         Returns:
             Tensor: The memory matrix of shape (batch_size, memory_length, memory_dim).
         """
+        if self._memory is None:
+            raise RuntimeError("Memory has not been initialized.")
         return self._memory
 
     def write(self, new_memory):
@@ -283,7 +285,7 @@ class NeuralTuringMachine(nn.Module):
                 [Tensor(x[:, t, :]), read_vector], axis=1
             )  # (batch_size, 1, input_size + memory_dim)
             combined_input = combined_input.view(
-                (combined_input.shape[0], 1, combined_input.shape[1])
+                combined_input.shape[0], 1, combined_input.shape[1]
             )
 
             # 3. LSTM (controller) forward. Controller output shift logits and next token
@@ -527,7 +529,7 @@ class LSTM(nn.Module):
 
         for t in range(seq_len):
             x_t = Tensor(x[:, t, :])  # (batch_size, 1, input_size)
-            x_t = x_t.view((x_t.shape[0], 1, x_t.shape[1]))
+            x_t = x_t.view(x_t.shape[0], 1, x_t.shape[1])
             h_t, cell_state = self.lstm(
                 x=x_t, hidden_state=h_t, C_t=cell_state
             )  # hidden state, cell state for this timestep

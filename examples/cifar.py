@@ -247,6 +247,7 @@ if __name__ == "__main__":
     X, y, _, __ = get_dataset(dataset_id=40927, download_data=True).get_data(
         target="class", dataset_format="array"
     )
+    assert y is not None
     X = X / 255.0  # Normalize to [0, 1] to speed up convergence
 
     # To speed up the training on local machine
@@ -320,6 +321,7 @@ if __name__ == "__main__":
     X, y, _, __ = get_dataset(dataset_id=41983, download_data=True).get_data(
         target="class", dataset_format="array"
     )
+    assert y is not None
     X = X / 255.0  # Normalize to [0, 1]
     X = X[:5000]
     y = y[:5000]

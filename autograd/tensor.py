@@ -263,7 +263,7 @@ class Tensor:
             # the same underlying array.
             self._grad.data += value_data
 
-    def view(self, *shape: int) -> "Tensor":
+    def view(self, *shape: Union[int, Tuple[int, ...]]) -> "Tensor":
         """
         Create a view of the tensor with the specified shape without copying the underlying data.
 
@@ -284,7 +284,11 @@ class Tensor:
             >>> y = x.view(2, 2)
             >>> print(y.data.shape)  # Expected: (2, 2)
         """
-        return View.apply(self, new_shape=shape)
+        if len(shape) == 1 and isinstance(shape[0], tuple):
+            new_shape = shape[0]
+        else:
+            new_shape = cast(Tuple[int, ...], shape)
+        return View.apply(self, new_shape=new_shape)
 
     @staticmethod
     def stack(tensors: List["Tensor"], axis: int = 0) -> "Tensor":

@@ -5,6 +5,7 @@ import torch  # for test comparisons
 
 from autograd import functional
 from autograd.tensor import Tensor
+from test.helpers import allclose
 
 
 class TestActivationFunctions(TestCase):
@@ -12,7 +13,7 @@ class TestActivationFunctions(TestCase):
         self.X = Tensor(data=mx.array([[1, 1, 1], [2, 2, 2]]), requires_grad=True)
 
     def test_sigmoid_forward(self):
-        assert mx.allclose(
+        assert allclose(
             functional.sigmoid(self.X).data,
             torch.nn.functional.sigmoid(torch.Tensor(self.X.data)).detach().numpy(),
         )
@@ -26,12 +27,12 @@ class TestActivationFunctions(TestCase):
         out_ref = torch.sigmoid(X_torch)
         out_ref.backward(torch.ones_like(out_ref))
 
-        assert mx.allclose(
-            self.X.grad.data, X_torch.grad.detach().numpy(), atol=1e-6
-        ), "Sigmoid backward pass did not match PyTorch."
+        assert allclose(self.X.grad.data, X_torch.grad.detach().numpy(), atol=1e-6), (
+            "Sigmoid backward pass did not match PyTorch."
+        )
 
     def test_relu_forward(self):
-        assert mx.allclose(
+        assert allclose(
             functional.relu(self.X).data,
             torch.nn.functional.relu(torch.Tensor(self.X.data)).detach().numpy(),
         )
@@ -45,12 +46,12 @@ class TestActivationFunctions(TestCase):
         out_ref = torch.relu(X_torch)
         out_ref.backward(torch.ones_like(out_ref))
 
-        assert mx.allclose(
-            self.X.grad.data, X_torch.grad.detach().numpy(), atol=1e-6
-        ), "ReLU backward pass did not match PyTorch."
+        assert allclose(self.X.grad.data, X_torch.grad.detach().numpy(), atol=1e-6), (
+            "ReLU backward pass did not match PyTorch."
+        )
 
     def test_softmax_forward(self):
-        assert mx.allclose(
+        assert allclose(
             functional.softmax(self.X).data,
             torch.nn.functional.softmax(torch.Tensor(self.X.data), dim=1)
             .detach()
@@ -67,12 +68,12 @@ class TestActivationFunctions(TestCase):
         out_ref = torch.softmax(X_torch, dim=1)
         out_ref.backward(torch.ones_like(out_ref))
 
-        assert mx.allclose(
-            self.X.grad.data, X_torch.grad.detach().numpy(), atol=1e-6
-        ), "Softmax backward pass did not match PyTorch."
+        assert allclose(self.X.grad.data, X_torch.grad.detach().numpy(), atol=1e-6), (
+            "Softmax backward pass did not match PyTorch."
+        )
 
     def test_tanh_forward(self):
-        assert mx.allclose(
+        assert allclose(
             functional.tanh(self.X).data,
             torch.nn.functional.tanh(torch.Tensor(self.X.data)).detach().numpy(),
         )
@@ -86,9 +87,9 @@ class TestActivationFunctions(TestCase):
         out_ref = torch.tanh(X_torch)
         out_ref.backward(torch.ones_like(out_ref))
 
-        assert mx.allclose(
-            self.X.grad.data, X_torch.grad.detach().numpy(), atol=1e-6
-        ), "Tanh backward pass did not match PyTorch."
+        assert allclose(self.X.grad.data, X_torch.grad.detach().numpy(), atol=1e-6), (
+            "Tanh backward pass did not match PyTorch."
+        )
 
     def test_gelu_forward(self):
         out_custom = functional.gelu(self.X).data
@@ -96,9 +97,7 @@ class TestActivationFunctions(TestCase):
         gelu_torch = torch.nn.GELU(approximate="tanh")
         X_torch = torch.tensor(self.X.data, requires_grad=False)
 
-        assert mx.allclose(
-            out_custom, gelu_torch(X_torch).detach().numpy(), atol=1e-6
-        ), (
+        assert allclose(out_custom, gelu_torch(X_torch).detach().numpy(), atol=1e-6), (
             "Approximate GELU forward pass did not match PyTorch GELU with approximate='tanh'."
         )
 
@@ -112,9 +111,7 @@ class TestActivationFunctions(TestCase):
         out_ref = gelu_torch(X_torch)
         out_ref.backward(torch.ones_like(out_ref))
 
-        assert mx.allclose(
-            self.X.grad.data, X_torch.grad.detach().numpy(), atol=1e-6
-        ), (
+        assert allclose(self.X.grad.data, X_torch.grad.detach().numpy(), atol=1e-6), (
             "Approximate GELU backward pass did not match PyTorch GELU with approximate='tanh'."
         )
 
@@ -136,18 +133,18 @@ class TestBinaryCrossEntropy(TestCase):
         torch_bce_loss = torch.nn.functional.binary_cross_entropy(
             self.y_pred_probs_torch, torch.tensor(self.y_true, dtype=torch.float32)
         )
-        assert mx.allclose(
+        assert allclose(
             bce_loss.data,
             torch_bce_loss.detach().numpy(),
         )
 
         bce_loss.backward()
         torch_bce_loss.backward()
-        assert mx.allclose(self.y_pred_probs.grad.data, self.y_pred_probs_torch.grad)
+        assert allclose(self.y_pred_probs.grad.data, self.y_pred_probs_torch.grad)
 
     def test_binary_cross_entropy_with_logits_error(self):
         with self.assertRaises((ValueError, RuntimeError)):
-            mx.allclose(
+            allclose(
                 functional.binary_cross_entropy(self.y_pred_logits, self.y_true).data,
                 torch.nn.functional.binary_cross_entropy(
                     torch.tensor(self.y_pred_logits.data), torch.tensor(self.y_true)
@@ -163,14 +160,14 @@ class TestBinaryCrossEntropy(TestCase):
         torch_bce_loss = torch.nn.functional.binary_cross_entropy_with_logits(
             self.y_pred_logits_torch, torch.tensor(self.y_true)
         )
-        assert mx.allclose(
+        assert allclose(
             bce_loss.data,
             torch_bce_loss.detach().numpy(),
         )
 
         bce_loss.backward()
         torch_bce_loss.backward()
-        assert mx.allclose(self.y_pred_logits.grad.data, self.y_pred_logits_torch.grad)
+        assert allclose(self.y_pred_logits.grad.data, self.y_pred_logits_torch.grad)
 
 
 class TestCrossEntropy(TestCase):
@@ -189,13 +186,11 @@ class TestCrossEntropy(TestCase):
             logits_torch, torch.tensor(targets, dtype=torch.int64)
         )
 
-        assert mx.allclose(loss.data, torch_loss.detach().numpy(), atol=1e-6)
+        assert allclose(loss.data, torch_loss.detach().numpy(), atol=1e-6)
 
         loss.backward()
         torch_loss.backward()
-        assert mx.allclose(
-            logits.grad.data, logits_torch.grad.detach().numpy(), atol=1e-6
-        )
+        assert allclose(logits.grad.data, logits_torch.grad.detach().numpy(), atol=1e-6)
 
 
 class TestHingeLoss(TestCase):
@@ -209,14 +204,14 @@ class TestHingeLoss(TestCase):
             self.y_pred, self.y_true, reduction="none"
         )
         expected_none = mx.maximum(0, 1 - self.y_true * self.y_pred.data)  # [0, 3, 0]
-        assert mx.allclose(hinge_loss_none.data, expected_none)
+        assert allclose(hinge_loss_none.data, expected_none)
 
         # Test gradients for no reduction
         hinge_loss_none.backward()
         expected_grad_none = mx.where(
             1 - self.y_true * self.y_pred.data > 0, -self.y_true, 0
         )  # [0, 1, 0]
-        assert mx.allclose(self.y_pred.grad.data, expected_grad_none)
+        assert allclose(self.y_pred.grad.data, expected_grad_none)
 
     def test_hinge_loss_mean(self):
         hinge_loss_mean = functional.hinge_loss(
@@ -225,7 +220,7 @@ class TestHingeLoss(TestCase):
         expected_mean = mx.mean(
             mx.maximum(0, 1 - self.y_true * self.y_pred.data)
         )  # 1.0
-        assert mx.allclose(hinge_loss_mean.data, expected_mean)
+        assert allclose(hinge_loss_mean.data, expected_mean)
 
         # Test gradients for mean reduction
         self.y_pred.grad = None  # Reset gradients
@@ -233,14 +228,14 @@ class TestHingeLoss(TestCase):
         expected_grad_mean = mx.where(
             1 - self.y_true * self.y_pred.data > 0, -self.y_true, 0
         ) / len(self.y_true)  # [0, 1/3, 0]
-        assert mx.allclose(self.y_pred.grad.data, expected_grad_mean)
+        assert allclose(self.y_pred.grad.data, expected_grad_mean)
 
     def test_hinge_loss_sum(self):
         hinge_loss_sum = functional.hinge_loss(
             self.y_pred, self.y_true, reduction="sum"
         )
         expected_sum = mx.sum(mx.maximum(0, 1 - self.y_true * self.y_pred.data))  # 3.0
-        assert mx.allclose(hinge_loss_sum.data, expected_sum)
+        assert allclose(hinge_loss_sum.data, expected_sum)
 
         # Test gradients for sum reduction
         self.y_pred.grad = None  # Reset gradients
@@ -248,7 +243,7 @@ class TestHingeLoss(TestCase):
         expected_grad_sum = mx.where(
             1 - self.y_true * self.y_pred.data > 0, -self.y_true, 0
         )  # [0, 1, 0]
-        assert mx.allclose(self.y_pred.grad.data, expected_grad_sum)
+        assert allclose(self.y_pred.grad.data, expected_grad_sum)
 
     def test_hinge_loss_invalid_reduction(self):
         with self.assertRaises(ValueError):
@@ -272,10 +267,8 @@ class TestMeanSquaredLoss(TestCase):
         mse_loss_torch = torch.nn.functional.mse_loss(
             self.y_pred_torch, self.y_true_torch
         )
-        assert mx.allclose(mse_loss.data, mse_loss_torch.detach().numpy())
+        assert allclose(mse_loss.data, mse_loss_torch.detach().numpy())
 
         mse_loss.backward()
         mse_loss_torch.backward()
-        assert mx.allclose(
-            self.y_pred.grad.data, self.y_pred_torch.grad.detach().numpy()
-        )
+        assert allclose(self.y_pred.grad.data, self.y_pred_torch.grad.detach().numpy())

@@ -7,6 +7,7 @@ import torch  # for test validation
 
 from autograd.nn import Tensor
 from autograd.optim import SGD, Adam, CosineScheduler, Optimizer
+from test.helpers import allclose
 
 
 class TestOptimizer(TestCase):
@@ -92,8 +93,8 @@ class TestOptimizer(TestCase):
 
         # 7) Verify the actual momentum buffers are the same
         for pid in self.params:
-            assert mx.allclose(new_adam._states["m"][pid], adam._states["m"][pid])
-            assert mx.allclose(new_adam._states["v"][pid], adam._states["v"][pid])
+            assert allclose(new_adam._states["m"][pid], adam._states["m"][pid])
+            assert allclose(new_adam._states["v"][pid], adam._states["v"][pid])
             self.assertEqual(new_adam.timestep, adam.timestep)
 
         # 8) Verify if the entire dict matches
@@ -112,8 +113,8 @@ class TestOptimizer(TestCase):
 
         # Finally check values inside m, v
         for pid in old_sd["states"]["m"].keys():
-            assert mx.allclose(old_sd["states"]["m"][pid], new_sd["states"]["m"][pid])
-            assert mx.allclose(old_sd["states"]["v"][pid], new_sd["states"]["v"][pid])
+            assert allclose(old_sd["states"]["m"][pid], new_sd["states"]["m"][pid])
+            assert allclose(old_sd["states"]["v"][pid], new_sd["states"]["v"][pid])
         self.assertEqual(old_sd["states"]["timestep"], new_sd["states"]["timestep"])
 
     def test_timestep_increment(self):
@@ -148,8 +149,8 @@ class TestOptimizer(TestCase):
         custom_final_g1 = self.params["param1"].grad.data
         custom_final_g2 = self.params["param2"].grad.data
 
-        assert mx.allclose(custom_final_g1, torch_final_g1, rtol=1e-6, atol=1e-7)
-        assert mx.allclose(custom_final_g2, torch_final_g2, rtol=1e-6, atol=1e-7)
+        assert allclose(custom_final_g1, torch_final_g1, rtol=1e-6, atol=1e-7)
+        assert allclose(custom_final_g2, torch_final_g2, rtol=1e-6, atol=1e-7)
 
     def test_clip_grad_norm_l2_above_threshold(self):
         g1 = mx.array([3.0, 4.0, 5.0], dtype=mx.float32)
@@ -173,8 +174,8 @@ class TestOptimizer(TestCase):
         custom_final_g1 = self.params["param1"].grad.data
         custom_final_g2 = self.params["param2"].grad.data
 
-        assert mx.allclose(custom_final_g1, torch_final_g1, rtol=1e-6, atol=1e-7)
-        assert mx.allclose(custom_final_g2, torch_final_g2, rtol=1e-6, atol=1e-7)
+        assert allclose(custom_final_g1, torch_final_g1, rtol=1e-6, atol=1e-7)
+        assert allclose(custom_final_g2, torch_final_g2, rtol=1e-6, atol=1e-7)
 
     def test_clip_grad_norm_l1(self):
         g1 = mx.array([10.0, 10.0, 10.0], dtype=mx.float32)
@@ -198,8 +199,8 @@ class TestOptimizer(TestCase):
         custom_final_g1 = self.params["param1"].grad.data
         custom_final_g2 = self.params["param2"].grad.data
 
-        assert mx.allclose(custom_final_g1, torch_final_g1, rtol=1e-6, atol=1e-7)
-        assert mx.allclose(custom_final_g2, torch_final_g2, rtol=1e-6, atol=1e-7)
+        assert allclose(custom_final_g1, torch_final_g1, rtol=1e-6, atol=1e-7)
+        assert allclose(custom_final_g2, torch_final_g2, rtol=1e-6, atol=1e-7)
 
     def test_clip_grad_norm_random(self):
         mx.random.seed(42)
@@ -224,8 +225,8 @@ class TestOptimizer(TestCase):
         custom_final_g1 = self.params["param1"].grad.data
         custom_final_g2 = self.params["param2"].grad.data
 
-        assert mx.allclose(custom_final_g1, torch_final_g1, rtol=1e-6, atol=1e-7)
-        assert mx.allclose(custom_final_g2, torch_final_g2, rtol=1e-6, atol=1e-7)
+        assert allclose(custom_final_g1, torch_final_g1, rtol=1e-6, atol=1e-7)
+        assert allclose(custom_final_g2, torch_final_g2, rtol=1e-6, atol=1e-7)
 
 
 class TestSGD(TestCase):
@@ -263,8 +264,8 @@ class TestSGD(TestCase):
 
         for _ in range(3):
             self.optimizer.step()
-            assert mx.allclose(self.param1.data, expected_param1[_])
-            assert mx.allclose(self.param2.data, expected_param2[_])
+            assert allclose(self.param1.data, expected_param1[_])
+            assert allclose(self.param2.data, expected_param2[_])
 
 
 class TestAdam(TestCase):
@@ -302,12 +303,12 @@ class TestAdam(TestCase):
         self.torch_optim.zero_grad()
         self.torch_optim.step()
 
-        assert mx.allclose(
+        assert allclose(
             self.param1.data,
             self.torch_params[0].detach().numpy(),
             atol=1e-6,
         )
-        assert mx.allclose(
+        assert allclose(
             self.param2.data,
             self.torch_params[1].detach().numpy(),
             atol=1e-6,
@@ -325,12 +326,12 @@ class TestAdam(TestCase):
             self.torch_optim.zero_grad()
 
             # Compare parameters
-            assert mx.allclose(
+            assert allclose(
                 self.param1.data,
                 self.torch_params[0].detach().numpy(),
                 atol=1e-6,
             )
-            assert mx.allclose(
+            assert allclose(
                 self.param2.data,
                 self.torch_params[1].detach().numpy(),
                 atol=1e-6,
@@ -364,12 +365,12 @@ class TestAdam(TestCase):
             self.torch_optim.step()
 
             # Compare results
-            assert mx.allclose(
+            assert allclose(
                 self.param1.data,
                 self.torch_params[0].detach().numpy(),
                 atol=1e-6,
             )
-            assert mx.allclose(
+            assert allclose(
                 self.param2.data,
                 self.torch_params[1].detach().numpy(),
                 atol=1e-6,
@@ -431,8 +432,8 @@ class TestAdam(TestCase):
         torch_final_p2 = torch_p2.detach().numpy()
 
         # Should match within a small tolerance
-        assert mx.allclose(custom_final_p1, torch_final_p1, atol=1e-6, rtol=1e-6)
-        assert mx.allclose(custom_final_p2, torch_final_p2, atol=1e-6, rtol=1e-6)
+        assert allclose(custom_final_p1, torch_final_p1, atol=1e-6, rtol=1e-6)
+        assert allclose(custom_final_p2, torch_final_p2, atol=1e-6, rtol=1e-6)
 
 
 class TestCosineScheduler(TestCase):

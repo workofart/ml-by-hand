@@ -95,14 +95,14 @@ class TestTrain(TestCase):
         y_pred = trainer.model(X).data
 
         # compare y_pred and y on the classification accuracy
-        acc = accuracy(mx.asarray(y_pred > 0.5).astype(int).squeeze(), y)
+        acc = accuracy(mx.asarray(y_pred > 0.5).astype(mx.int32).squeeze(), y)
         logger.info(f"Accuracy: {acc}")
         assert acc > 0.9
 
     def test_regression(self):
         X, y = load_diabetes(return_X_y=True)
         logger.info(f"Dataset: {X.shape=}, {y.shape=}")
-        logger.info(f"y unique values: {mx.unique(y)}")
+        logger.info(f"y unique values: {sorted(set(y.tolist()))}")
 
         CONFIG = GenericTrainingConfig(
             training_run_name="default",

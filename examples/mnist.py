@@ -444,6 +444,7 @@ if __name__ == "__main__":
     X, y, _, __ = get_dataset(dataset_id=554, download_data=True).get_data(
         target="class", dataset_format="array"
     )
+    assert y is not None
     X /= 255.0  # Normalize to [0, 1] to speed up convergence
 
     # Use a subset of the data for faster training

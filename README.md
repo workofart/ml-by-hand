@@ -2,7 +2,7 @@
 
 <div align="center">
 <img src="https://github.com/user-attachments/assets/0655f743-6bb0-46c8-9cdf-ec3a8c84058a" width="400" height="400">
-  
+
 [![Unit Tests](https://github.com/workofart/ml-by-hand/actions/workflows/test.yml/badge.svg)](https://github.com/workofart/ml-by-hand/actions/workflows/test.yml) |
 📝 [Blog Post](https://www.henrypan.com/blog/2025-02-06-ml-by-hand/)
 
@@ -21,7 +21,7 @@ We are creating a deep learning library from scratch (that evolved from a simple
   - **Learn By Doing:** All formulas and calculations are derived in code, so you see exactly how gradients (or derivatives) are computed—no hidden black boxes!
   - **Learning Over Optimization:** Focus on understanding the underlying mathematics and algorithms, rather than optimizing for speed or memory usage (though we can still train GPT models on a single CPU)
   - **PyTorch-Like API:** API interface closely mirrors [PyTorch](https://github.com/pytorch/pytorch/tree/main) for low adoption overhead
-  - **Minimal Dependencies:** Only uses `numpy` (and `pytorch` for gradient correctness checks in unit tests).
+  - **Minimal Dependencies:** This MLX branch uses `mlx` for core array/tensor work (and `pytorch` for gradient correctness checks in unit tests).
 
 <details>
   <summary><strong>Why build a deep learning library from scratch?</strong></summary>
@@ -88,7 +88,7 @@ Explore the [`examples/`](https://github.com/workofart/ml-by-hand/tree/main/exam
 from autograd.tensor import Tensor
 from autograd.nn import Linear, Module
 from autograd.optim import SGD
-import numpy as np
+import mlx.core as mx
 
 class SimpleNN(Module):
     def __init__(self, input_dim, output_dim):
@@ -146,7 +146,7 @@ gradient = model.fc.parameters["weight"].grad
 print("[After Training] Gradients for fc weights:", gradient)
 print("[After Training] layer weights:", weights)
 print("[After Training] layer bias:", bias)
-assert np.isclose(x.data @ weights + bias, y_true)
+assert mx.allclose(x.data @ weights + bias, y_true).item()
 ```
 </details>
 

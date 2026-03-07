@@ -18,6 +18,7 @@ from autograd.nn import (
     RecurrentBlock,
 )
 from autograd.tensor import Tensor
+from test.helpers import allclose
 
 random.seed(1337)
 mx.random.seed(1337)
@@ -59,20 +60,20 @@ class TestModule(TestCase):
         # 1) Check top-level parameter
         params = self.model.parameters
         assert "main_weight" in params
-        assert mx.allclose(params["main_weight"].data, 0.0)
+        assert allclose(params["main_weight"].data, 0.0)
 
         # 2) Check submodule parameter
         assert "submodule1.sub_weight" in params
-        assert mx.allclose(params["submodule1.sub_weight"].data, 1.0)
+        assert allclose(params["submodule1.sub_weight"].data, 1.0)
 
         # 3) Check top-level state
         states = self.model.states
         assert "top_level_state" in states
-        assert mx.allclose(states["top_level_state"], [99, 99, 99])
+        assert allclose(states["top_level_state"], [99, 99, 99])
 
         # 4) Check submodule state
         assert "submodule1.running_avg" in states
-        assert mx.allclose(states["submodule1.running_avg"], [10.0])
+        assert allclose(states["submodule1.running_avg"], [10.0])
 
     def test_num_parameters(self):
         # main_weight: shape (3,3) => 9 elements
@@ -91,8 +92,8 @@ class TestModule(TestCase):
         # Check that 'main_weight' and 'submodule1.sub_weight' are in 'parameters'
         assert "main_weight" in sd["parameters"]
         assert "submodule1.sub_weight" in sd["parameters"]
-        assert mx.allclose(sd["parameters"]["main_weight"], 0.0)
-        assert mx.allclose(sd["parameters"]["submodule1.sub_weight"], 1.0)
+        assert allclose(sd["parameters"]["main_weight"], 0.0)
+        assert allclose(sd["parameters"]["submodule1.sub_weight"], 1.0)
 
         # 2) Modify the model parameters and states to random values
         self.model.parameters["main_weight"].data[:] = 42
@@ -104,10 +105,10 @@ class TestModule(TestCase):
         self.model.load_state_dict(sd)
 
         # 4) Ensure we are back to the original values
-        assert mx.allclose(self.model.parameters["main_weight"].data, 0.0)
-        assert mx.allclose(self.model.parameters["submodule1.sub_weight"].data, 1.0)
-        assert mx.allclose(self.model.states["top_level_state"], [99, 99, 99])
-        assert mx.allclose(self.model.states["submodule1.running_avg"], [10.0])
+        assert allclose(self.model.parameters["main_weight"].data, 0.0)
+        assert allclose(self.model.parameters["submodule1.sub_weight"].data, 1.0)
+        assert allclose(self.model.states["top_level_state"], [99, 99, 99])
+        assert allclose(self.model.states["submodule1.running_avg"], [10.0])
 
 
 class TestLinear(TestCase):
@@ -128,7 +129,7 @@ class TestLinear(TestCase):
         expected = mx.array(
             [[3.3, 4.2]]
         )  # (2*0.1 + 2*0.3 + 2*0.5 + 2*0.7 + 0.1, 2*0.2 + 2*0.4 + 2*0.6 + 2*0.8 + 0.2)
-        assert mx.allclose(out.data, expected)
+        assert allclose(out.data, expected)
 
         # Test gradient computation
         out.backward()
@@ -136,7 +137,7 @@ class TestLinear(TestCase):
         # Test gradient shapes and properties
         assert linear_layer._parameters["weight"].grad.shape == (4, 2)
         assert linear_layer._parameters["bias"].grad.shape == (2,)
-        assert mx.allclose(linear_layer._parameters["bias"].grad.data, [1, 1])
+        assert allclose(linear_layer._parameters["bias"].grad.data, [1, 1])
         assert mx.all(
             mx.asarray(linear_layer._parameters["weight"].grad.data == 2)
         )  # All gradients should be 2 since input is all 2s
@@ -190,7 +191,7 @@ class TestEmbedding(TestCase):
         assert output.shape == (self.batch_size, self.seq_length, self.embedding_size)
 
         # Compare outputs
-        assert mx.allclose(
+        assert allclose(
             output.data, torch_output.detach().numpy(), rtol=1e-5, atol=1e-5
         ), "Embedding output doesn't match PyTorch's output"
 
@@ -207,7 +208,7 @@ class TestEmbedding(TestCase):
         loss_torch.backward()
 
         # Compare gradients
-        assert mx.allclose(
+        assert allclose(
             self.embedding._parameters["weight"].grad.data,
             self.torch_embedding.weight.grad.numpy(),
             rtol=1e-5,
@@ -222,7 +223,7 @@ class TestEmbedding(TestCase):
         output_single = self.embedding(x_single)
         torch_output_single = self.torch_embedding(x_single_torch)
 
-        assert mx.allclose(
+        assert allclose(
             output_single.data,
             torch_output_single.detach().numpy(),
             rtol=1e-5,
@@ -236,7 +237,7 @@ class TestEmbedding(TestCase):
         output_short = self.embedding(x_short)
         torch_output_short = self.torch_embedding(x_short_torch)
 
-        assert mx.allclose(
+        assert allclose(
             output_short.data, torch_output_short.detach().numpy(), rtol=1e-5, atol=1e-5
         )
 
@@ -266,7 +267,7 @@ class TestEmbedding(TestCase):
         assert mx.all(
             mx.asarray(self.embedding._parameters["weight"].grad.data[0:2] != 0)
         )
-        assert mx.allclose(
+        assert allclose(
             self.embedding._parameters["weight"].grad.data[0:2],
             self.torch_embedding.weight.grad.numpy()[0:2],
             rtol=1e-5,
@@ -308,13 +309,13 @@ class TestBatchNorm(TestCase):
         output_torch = self.torch_bn(x_torch)
 
         # Compare results
-        assert mx.allclose(output.data, output_torch.detach().numpy(), atol=1e-5)
+        assert allclose(output.data, output_torch.detach().numpy(), atol=1e-5)
 
         # Compare running stats
-        assert mx.allclose(
+        assert allclose(
             self.bn.running_mean, self.torch_bn.running_mean.numpy(), atol=1e-5
         )
-        assert mx.allclose(
+        assert allclose(
             self.bn.running_var, self.torch_bn.running_var.numpy(), atol=1e-5
         )
 
@@ -329,13 +330,13 @@ class TestBatchNorm(TestCase):
         output_torch = self.torch_bn(x_torch)
 
         # Compare results in eval mode
-        assert mx.allclose(output.data, output_torch.detach().numpy(), atol=1e-5)
+        assert allclose(output.data, output_torch.detach().numpy(), atol=1e-5)
 
         # Verify running stats haven't changed in eval mode
-        assert mx.allclose(
+        assert allclose(
             self.bn.running_mean, self.torch_bn.running_mean.numpy(), atol=1e-5
         )
-        assert mx.allclose(
+        assert allclose(
             self.bn.running_var, self.torch_bn.running_var.numpy(), atol=1e-5
         )
 
@@ -363,7 +364,7 @@ class TestBatchNorm(TestCase):
 
         # Debug: Print gradients
 
-        assert mx.allclose(x.grad.data, x_torch.grad.numpy(), atol=1e-5)
+        assert allclose(x.grad.data, x_torch.grad.numpy(), atol=1e-5)
 
     def test_batchnorm_components(self):
         x_data = mx.array([[1.0, 2.0], [4.0, 5.0], [7.0, 8.0]], dtype=mx.float32)
@@ -396,9 +397,9 @@ class TestBatchNorm(TestCase):
             output = self.bn(x)
 
         assert "batch size 1" in captured.output[0]
-        assert mx.allclose(self.bn.running_mean, running_mean_before)
-        assert mx.allclose(self.bn.running_var, running_var_before)
-        assert mx.allclose(output.data, mx.zeros_like(x_data), atol=1e-6)
+        assert allclose(self.bn.running_mean, running_mean_before)
+        assert allclose(self.bn.running_var, running_var_before)
+        assert allclose(output.data, mx.zeros_like(x_data), atol=1e-6)
 
 
 class TestLayerNorm(TestCase):
@@ -428,7 +429,9 @@ class TestLayerNorm(TestCase):
         # Create test data
         mx.random.seed(42)
         torch.manual_seed(42)
-        self.x_data = mx.random.randn(self.batch_size, self.seq_length, self.input_size)
+        self.x_data = mx.random.normal(
+            shape=(self.batch_size, self.seq_length, self.input_size)
+        )
         self.x = Tensor(self.x_data)
         self.x_torch = torch.tensor(self.x_data, dtype=torch.float32)
         self.x_torch.requires_grad = True
@@ -439,10 +442,10 @@ class TestLayerNorm(TestCase):
         assert self.layer_norm._parameters["bias"].data.shape == (self.input_size,)
 
         # Test initial values
-        assert mx.allclose(
+        assert allclose(
             self.layer_norm._parameters["gain"].data, mx.ones(self.input_size)
         )
-        assert mx.allclose(
+        assert allclose(
             self.layer_norm._parameters["bias"].data, mx.zeros(self.input_size)
         )
 
@@ -452,7 +455,7 @@ class TestLayerNorm(TestCase):
         torch_output = self.torch_layer_norm(self.x_torch)
 
         # Compare outputs
-        assert mx.allclose(
+        assert allclose(
             output.data, torch_output.detach().numpy(), rtol=1e-4, atol=1e-4
         ), "LayerNorm output doesn't match PyTorch's output"
 
@@ -469,19 +472,19 @@ class TestLayerNorm(TestCase):
         loss_torch.backward()
 
         # Compare input gradients
-        assert mx.allclose(
+        assert allclose(
             self.x.grad.data, self.x_torch.grad.numpy(), rtol=1e-4, atol=1e-4
         ), "Input gradients don't match"
 
         # Compare parameter gradients
-        assert mx.allclose(
+        assert allclose(
             self.layer_norm._parameters["gain"].grad.data,
             self.torch_layer_norm.weight.grad.numpy(),
             rtol=1e-4,
             atol=1e-4,
         ), "Gain/weight gradients don't match"
 
-        assert mx.allclose(
+        assert allclose(
             self.layer_norm._parameters["bias"].grad.data,
             self.torch_layer_norm.bias.grad.numpy(),
             rtol=1e-4,
@@ -500,7 +503,7 @@ class TestLayerNorm(TestCase):
         var = mx.var(x_simple[0, 0])  # should be 1.25
         expected = (x_simple[0, 0] - mean) / mx.sqrt(var + self.epsilon)
 
-        assert mx.allclose(output.data[0, 0], expected, rtol=1e-4, atol=1e-4), (
+        assert allclose(output.data[0, 0], expected, rtol=1e-4, atol=1e-4), (
             "Output doesn't match manual calculation"
         )
 
@@ -514,7 +517,7 @@ class TestLayerNorm(TestCase):
         ]
 
         for shape in shapes:
-            x_data = mx.random.randn(*shape)
+            x_data = mx.random.normal(shape=shape)
             x = Tensor(x_data)
             x_torch = torch.tensor(x_data, dtype=torch.float32)
 
@@ -522,7 +525,7 @@ class TestLayerNorm(TestCase):
             torch_output = self.torch_layer_norm(x_torch)
 
             assert output.shape == shape, f"Wrong output shape for input shape {shape}"
-            assert mx.allclose(
+            assert allclose(
                 output.data, torch_output.detach().numpy(), rtol=1e-4, atol=1e-4
             ), f"Output mismatch for input shape {shape}"
 
@@ -533,16 +536,16 @@ class TestDropout(TestCase):
         dropout.train()
         x = Tensor(mx.array([[1, 2], [3, 4], [5, 6]]))
         output = dropout(x)
-        assert mx.allclose(output.data, mx.array([[0, 0], [0, 0], [0, 0]]))
+        assert allclose(output.data, mx.array([[0, 0], [0, 0], [0, 0]]))
 
         dropout.eval()
         output = dropout(x)
-        assert mx.allclose(output.data, mx.array([[1, 2], [3, 4], [5, 6]]))
+        assert allclose(output.data, mx.array([[1, 2], [3, 4], [5, 6]]))
 
         dropout = Dropout(p=0)
         dropout.train()
         output = dropout(x)
-        assert mx.allclose(output.data, mx.array([[1, 2], [3, 4], [5, 6]]))
+        assert allclose(output.data, mx.array([[1, 2], [3, 4], [5, 6]]))
 
 
 class TestConv2d(TestCase):
@@ -550,14 +553,16 @@ class TestConv2d(TestCase):
         self.conv2d = Conv2d(
             in_channels=2, out_channels=2, kernel_size=3, stride=1, padding_mode="valid"
         )
-        self.x = Tensor(mx.random.randn(1, 2, 6, 6))  # shape: (N, in_channels, H, W)
+        self.x = Tensor(
+            mx.random.normal(shape=(1, 2, 6, 6))
+        )  # shape: (N, in_channels, H, W)
         self.x_torch = torch.tensor(self.x.data, dtype=torch.float32)
         self.torch_conv2d = torch.nn.Conv2d(
             in_channels=2, out_channels=2, kernel_size=3, stride=1, padding=0
         )
 
         # Single channel input
-        self.x_single = Tensor(mx.random.randn(2, 1, 4, 4))
+        self.x_single = Tensor(mx.random.normal(shape=(2, 1, 4, 4)))
         self.x_single_torch = torch.tensor(self.x_single.data, requires_grad=True)
 
         # Copy our weights to PyTorch conv layer
@@ -574,18 +579,20 @@ class TestConv2d(TestCase):
         assert output.data.shape == (1, 2, 4, 4)  # shape: (N, out_channels, H', W')
 
         output_torch = self.torch_conv2d(self.x_torch)
-        assert mx.allclose(output.data, output_torch.detach().numpy(), atol=1e-5)
+        assert allclose(output.data, output_torch.detach().numpy(), atol=1e-5)
 
     def test_backward(self):
         # Create input tensor
-        x = Tensor(mx.random.rand(1, 2, 3, 3))  # shape: (N, in_channels, H, W)
+        x = Tensor(
+            mx.random.uniform(shape=(1, 2, 3, 3))
+        )  # shape: (N, in_channels, H, W)
 
         # Create Conv2d layer
         conv = Conv2d(in_channels=2, out_channels=1, kernel_size=3, padding_mode="same")
 
         # Forward pass
         output = conv(x)
-        target = Tensor(mx.random.randn(*output.data.shape))
+        target = Tensor(mx.random.normal(shape=output.data.shape))
         loss = ((output - target) ** 2).sum()
         loss.backward()
 
@@ -609,13 +616,13 @@ class TestConv2d(TestCase):
         loss_torch.backward()
 
         # Assert gradients match
-        assert mx.allclose(x.grad.data, x_torch.grad.numpy(), rtol=1e-5, atol=1e-5)
+        assert allclose(x.grad.data, x_torch.grad.numpy(), rtol=1e-5, atol=1e-5)
 
     def test_sum_operation(self):
         x = Tensor(mx.array([[1.0, 2.0], [3.0, 4.0]]), requires_grad=True)
         y = x.sum()
         y.backward()
-        assert mx.allclose(x.grad.data, mx.ones_like(x.data)), "Sum gradient incorrect"
+        assert allclose(x.grad.data, mx.ones_like(x.data)), "Sum gradient incorrect"
 
     def test_simple_conv2d(self):
         # Create a simple 1x1x2x2 input
@@ -644,7 +651,7 @@ class TestMaxPool2d(TestConv2d):
         torch_maxpool = torch.nn.MaxPool2d(kernel_size=2, stride=2)
         out_torch = torch_maxpool(self.x_torch)
 
-        assert mx.allclose(out.data, out_torch.detach().numpy(), atol=1e-5)
+        assert allclose(out.data, out_torch.detach().numpy(), atol=1e-5)
 
     def test_different_kernel_stride(self):
         # Test 3x3 kernel with stride 2
@@ -654,7 +661,7 @@ class TestMaxPool2d(TestConv2d):
         torch_maxpool = torch.nn.MaxPool2d(kernel_size=3, stride=2)
         out_torch = torch_maxpool(self.x_torch)
 
-        assert mx.allclose(out.data, out_torch.detach().numpy(), atol=1e-5)
+        assert allclose(out.data, out_torch.detach().numpy(), atol=1e-5)
 
     def test_same_padding(self):
         # Test with 'same' padding
@@ -666,7 +673,7 @@ class TestMaxPool2d(TestConv2d):
         torch_maxpool = torch.nn.MaxPool2d(kernel_size=2, stride=2)
         out_torch = torch_maxpool(pad(self.x_torch))
 
-        assert mx.allclose(out.data, out_torch.detach().numpy(), atol=1e-5)
+        assert allclose(out.data, out_torch.detach().numpy(), atol=1e-5)
 
     def test_single_channel(self):
         # Test with single channel input
@@ -676,11 +683,11 @@ class TestMaxPool2d(TestConv2d):
         torch_maxpool = torch.nn.MaxPool2d(kernel_size=2, stride=2)
         out_torch = torch_maxpool(self.x_single_torch)
 
-        assert mx.allclose(out.data, out_torch.detach().numpy(), atol=1e-5)
+        assert allclose(out.data, out_torch.detach().numpy(), atol=1e-5)
 
     def test_kernel_equals_input(self):
         # Test when kernel size equals input size
-        x = Tensor(mx.random.randn(1, 1, 3, 3))
+        x = Tensor(mx.random.normal(shape=(1, 1, 3, 3)))
         x_torch = torch.tensor(x.data, requires_grad=True)
 
         maxpool = MaxPool2d(kernel_size=3, stride=1)
@@ -689,7 +696,7 @@ class TestMaxPool2d(TestConv2d):
         torch_maxpool = torch.nn.MaxPool2d(kernel_size=3, stride=1)
         out_torch = torch_maxpool(x_torch)
 
-        assert mx.allclose(out.data, out_torch.detach().numpy(), atol=1e-5)
+        assert allclose(out.data, out_torch.detach().numpy(), atol=1e-5)
 
     def test_conv2d_gradient_sign(self):
         # Create small input with positive and negative values
@@ -720,7 +727,7 @@ class TestMaxPool2d(TestConv2d):
         out_torch.sum().backward()
 
         # Compare gradients
-        assert mx.allclose(
+        assert allclose(
             conv._parameters["weight"].grad.data, conv_torch.weight.grad.numpy()
         ), "Weight gradients do not match!"
 
@@ -764,7 +771,7 @@ class TestMaxPool2d(TestConv2d):
         out1_torch = conv_torch(x1_torch)
 
         # Compare outputs
-        assert mx.allclose(out1.data, out1_torch.detach().numpy()), (
+        assert allclose(out1.data, out1_torch.detach().numpy()), (
             "Conv outputs do not match!"
         )
 
@@ -773,7 +780,7 @@ class TestMaxPool2d(TestConv2d):
         out2_torch = conv_torch(x2_torch)
 
         # Compare outputs
-        assert mx.allclose(out2.data, out2_torch.detach().numpy()), (
+        assert allclose(out2.data, out2_torch.detach().numpy()), (
             "Conv outputs do not match!"
         )
 
@@ -782,7 +789,7 @@ class TestMaxPool2d(TestConv2d):
         pool2_torch = pool_torch(out2_torch)
 
         # Compare pooling outputs
-        assert mx.allclose(pool2.data, pool2_torch.detach().numpy()), (
+        assert allclose(pool2.data, pool2_torch.detach().numpy()), (
             "Pooling outputs do not match!"
         )
 
@@ -900,7 +907,7 @@ class TestMaxPool2d(TestConv2d):
         pool_out_torch.sum().backward()
 
         # Compare gradients
-        assert mx.allclose(
+        assert allclose(
             conv_out.grad.data
             if conv_out.grad is not None
             else mx.zeros_like(conv_out.data),
@@ -909,11 +916,11 @@ class TestMaxPool2d(TestConv2d):
             else mx.zeros_like(conv_out_torch.data),
         ), "Conv output gradients do not match!"
 
-        assert mx.allclose(x2.grad.data, x2_torch.grad.numpy()), (
+        assert allclose(x2.grad.data, x2_torch.grad.numpy()), (
             "Input gradients do not match!"
         )
 
-        assert mx.allclose(
+        assert allclose(
             conv._parameters["weight"].grad.data, conv_torch.weight.grad.numpy()
         ), "Weight gradients do not match!"
 
@@ -964,7 +971,7 @@ class TestRecurrentNetwork(TestCase):
         torch.manual_seed(42)
 
         # Use smaller dimensions for easier debugging
-        x_data = mx.random.randn(2, 3, self.input_size)  # batch=2, seq=3
+        x_data = mx.random.normal(shape=(2, 3, self.input_size))  # batch=2, seq=3
         x = Tensor(x_data)
         x_torch = torch.tensor(x_data, dtype=torch.float32)
 
@@ -1003,7 +1010,7 @@ class TestRecurrentNetwork(TestCase):
         output = self.rnn(x)
         torch_output = torch_linear(torch_output[:, -1, :])
 
-        assert mx.allclose(
+        assert allclose(
             output.data, torch_output.detach().numpy(), rtol=1e-4, atol=1e-4
         ), "RNN output doesn't match PyTorch's output"
 
@@ -1012,7 +1019,7 @@ class TestRecurrentNetwork(TestCase):
         torch.manual_seed(42)
 
         # Create small input for easier gradient checking
-        x_data = mx.random.randn(2, 3, self.input_size)
+        x_data = mx.random.normal(shape=(2, 3, self.input_size))
         x = Tensor(x_data)
         x_torch = torch.tensor(x_data, dtype=torch.float32).requires_grad_(True)
 
@@ -1056,26 +1063,26 @@ class TestRecurrentNetwork(TestCase):
 
         # Compare gradients
         # Input gradients
-        assert mx.allclose(x.grad.data, x_torch.grad.numpy(), rtol=1e-4, atol=1e-4), (
+        assert allclose(x.grad.data, x_torch.grad.numpy(), rtol=1e-4, atol=1e-4), (
             "Input gradients don't match"
         )
 
         # Weight gradients - need to transpose PyTorch gradients to match our format
-        assert mx.allclose(
+        assert allclose(
             self.rnn._parameters["W_xh"].grad.data,
             torch_rnn.weight_ih_l0.grad.numpy().T,
             rtol=1e-4,
             atol=1e-4,
         ), "W_xh gradients don't match"
 
-        assert mx.allclose(
+        assert allclose(
             self.rnn._parameters["W_hh"].grad.data,
             torch_rnn.weight_hh_l0.grad.numpy().T,
             rtol=1e-4,
             atol=1e-4,
         ), "W_hh gradients don't match"
 
-        assert mx.allclose(
+        assert allclose(
             self.rnn._parameters["W_hy"].grad.data,
             torch_linear.weight.grad.numpy().T,
             rtol=1e-4,
@@ -1083,14 +1090,14 @@ class TestRecurrentNetwork(TestCase):
         ), "W_hy gradients don't match"
 
         # Bias gradients
-        assert mx.allclose(
+        assert allclose(
             self.rnn._parameters["bias"].grad.data,
             torch_rnn.bias_ih_l0.grad.numpy(),
             rtol=1e-4,
             atol=1e-4,
         ), "RNN bias gradients don't match"
 
-        assert mx.allclose(
+        assert allclose(
             self.rnn._parameters["bias_y"].grad.data,
             torch_linear.bias.grad.numpy(),
             rtol=1e-4,
@@ -1119,7 +1126,7 @@ class TestRecurrentNetwork(TestCase):
 
     def test_sequence_length_one(self):
         # Test with sequence length of 1 (edge case)
-        x = Tensor(mx.random.randn(self.batch_size, 1, self.input_size))
+        x = Tensor(mx.random.normal(shape=(self.batch_size, 1, self.input_size)))
 
         output = self.rnn(x)
         assert output.shape == (self.batch_size, self.output_size)
@@ -1148,7 +1155,7 @@ class TestLongShortTermMemoryBlock(TestCase):
         # Create test data
         mx.random.seed(42)
         torch.manual_seed(42)
-        self.x_data = mx.random.randn(2, 3, self.input_size)  # batch=2, seq=3
+        self.x_data = mx.random.normal(shape=(2, 3, self.input_size))  # batch=2, seq=3
         self.x = Tensor(self.x_data)
         self.x_torch = torch.tensor(self.x_data, dtype=torch.float32)
         self.x_torch.requires_grad = True
@@ -1257,7 +1264,7 @@ class TestLongShortTermMemoryBlock(TestCase):
         torch_output, _ = self.torch_lstm(self.x_torch)
         torch_output = self.torch_linear(torch_output[:, -1, :])
 
-        assert mx.allclose(
+        assert allclose(
             hidden_state.data, torch_output.detach().numpy(), rtol=1e-4, atol=1e-4
         ), "LSTM output doesn't match PyTorch's output"
 
@@ -1275,7 +1282,7 @@ class TestLongShortTermMemoryBlock(TestCase):
         loss_torch.backward()
 
         # Compare gradients
-        assert mx.allclose(
+        assert allclose(
             self.x.grad.data, self.x_torch.grad.numpy(), rtol=1e-4, atol=1e-4
         ), "Input gradients don't match"
 
@@ -1289,7 +1296,7 @@ class TestLongShortTermMemoryBlock(TestCase):
             # Input weights
             start_idx = idx * self.hidden_size
             end_idx = (idx + 1) * self.hidden_size
-            assert mx.allclose(
+            assert allclose(
                 self.lstm._parameters[f"W_{gate}"].grad.data[: self.input_size],
                 ih_grad[start_idx:end_idx].T,
                 rtol=1e-4,
@@ -1297,7 +1304,7 @@ class TestLongShortTermMemoryBlock(TestCase):
             ), f"W_{gate} input gradients don't match"
 
             # Hidden weights
-            assert mx.allclose(
+            assert allclose(
                 self.lstm._parameters[f"W_{gate}"].grad.data[self.input_size :],
                 hh_grad[start_idx:end_idx].T,
                 rtol=1e-4,
@@ -1305,7 +1312,7 @@ class TestLongShortTermMemoryBlock(TestCase):
             ), f"W_{gate} hidden gradients don't match"
 
         # Compare output layer gradients
-        assert mx.allclose(
+        assert allclose(
             self.lstm._parameters["W_hy"].grad.data,
             self.torch_linear.weight.grad.numpy().T,
             rtol=1e-4,
@@ -1336,7 +1343,7 @@ class TestLongShortTermMemoryBlock(TestCase):
 
     def test_sequence_length_one(self):
         # Test with sequence length of 1 (edge case)
-        x = Tensor(mx.random.randn(self.batch_size, 1, self.input_size))
+        x = Tensor(mx.random.normal(shape=(self.batch_size, 1, self.input_size)))
 
         hidden_state, cell_output = self.lstm(x)
         assert hidden_state.shape == (self.batch_size, self.output_size)
