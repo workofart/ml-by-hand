@@ -2,16 +2,10 @@ import logging
 import os
 from unittest import TestCase
 
-try:
-    # drop-in replacement for numpy for GPU acceleration
-    import cupy as np  # type: ignore
-
-    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
-except Exception:
-    import numpy as np
 from sklearn.datasets import load_breast_cancer, load_diabetes
 
 from autograd import functional, nn, optim
+from autograd.backend import np
 from autograd.tools.config_schema import GenericTrainingConfig
 from autograd.tools.data import SimpleDataLoader
 from autograd.tools.metrics import accuracy, mean_squared_error

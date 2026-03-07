@@ -3,6 +3,7 @@ import os
 import re
 from collections import defaultdict
 from typing import (
+    TYPE_CHECKING,
     Callable,
     Dict,
     List,
@@ -11,13 +12,10 @@ from typing import (
     Union,
 )
 
-try:
-    # drop-in replacement for numpy for GPU acceleration
-    import cupy as np  # type: ignore
-
-    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
-except Exception:
+if TYPE_CHECKING:
     import numpy as np
+else:
+    from autograd.backend import np
 
 from autograd import nn
 from autograd.functional import Softmax

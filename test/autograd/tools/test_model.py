@@ -2,14 +2,7 @@ import os
 from copy import deepcopy
 from unittest import TestCase
 
-try:
-    # drop-in replacement for numpy for GPU acceleration
-    import cupy as np  # type: ignore
-
-    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
-except Exception:
-    import numpy as np
-
+from autograd.backend import np
 from autograd.init import xavier_uniform
 from autograd.nn import Module
 from autograd.tensor import Tensor

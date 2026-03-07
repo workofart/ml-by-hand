@@ -5,16 +5,10 @@ from collections import Counter
 from multiprocessing import Pool, cpu_count
 from typing import ByteString, Dict, List, Optional, Tuple
 
-try:
-    # drop-in replacement for numpy for GPU acceleration
-    import cupy as np  # type: ignore
-
-    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
-except Exception:
-    import numpy as np
-
 import regex
 from tqdm import tqdm
+
+from autograd.backend import np
 
 logger = logging.getLogger(__name__)
 

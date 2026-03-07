@@ -1,13 +1,10 @@
 import logging
-from typing import Any, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Optional, Tuple, Union
 
-try:
-    # drop-in replacement for numpy for GPU acceleration
-    import cupy as np  # type: ignore
-
-    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
-except Exception:
+if TYPE_CHECKING:
     import numpy as np
+else:
+    from autograd.backend import np
 from autograd.tensor import Function, Tensor
 
 logger = logging.getLogger(__name__)

@@ -26,6 +26,9 @@ include = ["autograd", "autograd.*"]
 [tool.pyright]
 reportIncompatibleMethodOverride = "none"
 exclude = [
+    ".venv",
+    "build",
+    "training_runs",
     "**/test/**",    # Ignore all files in the "test" directory
 ]
 

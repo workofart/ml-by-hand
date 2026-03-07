@@ -1,6 +1,5 @@
-import sys
+import os
 
-import numpy as real_numpy
 import pytest
 import torch
 
@@ -29,5 +28,17 @@ def patch_torch_numpy():
     torch.Tensor.numpy = old_numpy
 
 
-# Replace 'cupy' in sys.modules with numpy
-sys.modules["cupy"] = real_numpy
+def pytest_addoption(parser):
+    parser.addoption(
+        "--backend",
+        action="store",
+        choices=("numpy", "mlx"),
+        default=None,
+        help="Select the autograd array backend for the test run.",
+    )
+
+
+def pytest_configure(config):
+    backend_name = config.getoption("--backend")
+    if backend_name is not None:
+        os.environ["AUTOGRAD_BACKEND"] = backend_name

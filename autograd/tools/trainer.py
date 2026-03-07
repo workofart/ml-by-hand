@@ -4,16 +4,10 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import Any, Callable, Dict, Optional, Tuple
 
-try:
-    # drop-in replacement for numpy for GPU acceleration
-    import cupy as np  # type: ignore
-
-    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
-except Exception:
-    import numpy as np
 from tqdm import tqdm
 
 from autograd import nn, optim
+from autograd.backend import np
 from autograd.tensor import Tensor
 from autograd.text import utils as text_utils
 from autograd.tools.config_schema import (
