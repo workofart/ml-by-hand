@@ -1,9 +1,9 @@
 from unittest import TestCase
 
+import numpy as np
 import torch  # for test comparisons
 
 from autograd import functional
-from autograd.backend import np
 from autograd.tensor import Tensor
 
 

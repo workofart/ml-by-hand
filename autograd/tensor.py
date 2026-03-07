@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 from abc import abstractmethod
 from typing import (
@@ -13,9 +15,10 @@ from typing import (
 if TYPE_CHECKING:
     import numpy as np
 else:
-    from autograd.backend import np
+    import mlx.core as np
 
 logger = logging.getLogger(__name__)
+ARRAY_TYPE = type(np.asarray(0, dtype=np.float32))
 
 
 class Function:
@@ -190,7 +193,10 @@ class Tensor:
         Examples:
             >>> x = Tensor([1, 2, 3]) # Expected: array([1., 2., 3.], dtype=float32)
         """
-        self.data = np.asarray(data, dtype=np.float32)
+        if isinstance(data, ARRAY_TYPE) and data.dtype == np.float32:
+            self.data = data
+        else:
+            self.data = np.asarray(data, dtype=np.float32)
         self._grad: Optional["Tensor"] = None  # Lazily initialized
         self.creator = creator
         self._backward = lambda: None
@@ -211,7 +217,7 @@ class Tensor:
             >>> x = Tensor([1, 2, 3])
             >>> print(x.grad)  # Expected: None
         """
-        if isinstance(self._grad, np.ndarray):
+        if self._grad is not None and not isinstance(self._grad, Tensor):
             return Tensor(self._grad, requires_grad=False)
         return self._grad
 
@@ -241,7 +247,7 @@ class Tensor:
             self._grad = Tensor(value_data, requires_grad=False)
         else:
             value_data = np.broadcast_to(value_data, value_data.shape)
-            value_data = value_data.copy()
+            value_data = np.asarray(value_data, dtype=value_data.dtype)
             # IMPORTANT: this is not the same as self.data + value_data
             # We need to do in-place addition here to preserve any views or references
             # to the original gradient. For example, multiple operations
@@ -377,6 +383,15 @@ class Tensor:
             >>> x = Tensor(np.array([2, 3]))
             >>> y = x ** 3 # Expected: [8, 27]
         """
+        if isinstance(other, int) and other >= 0:
+            if other == 0:
+                return Tensor(np.ones_like(self.data), requires_grad=False)
+
+            result = self
+            for _ in range(other - 1):
+                result = result * self
+            return result
+
         if not isinstance(other, Tensor):
             other = Tensor(other, requires_grad=False)
 
@@ -1029,19 +1044,19 @@ class Tensor:
         return f"Tensor(data={self.data}, grad={self.grad})"
 
     def __lt__(self, other: Union["Tensor", float, int]) -> np.ndarray:
-        return self.data < other
+        return self.data < (other.data if isinstance(other, Tensor) else other)
 
     def __le__(self, other: Union["Tensor", float, int]) -> np.ndarray:
-        return self.data <= other
+        return self.data <= (other.data if isinstance(other, Tensor) else other)
 
     def __gt__(self, other: Union["Tensor", float, int]) -> np.ndarray:
-        return self.data > other
+        return self.data > (other.data if isinstance(other, Tensor) else other)
 
     def __ge__(self, other: Union["Tensor", float, int]) -> np.ndarray:
-        return self.data >= other
+        return self.data >= (other.data if isinstance(other, Tensor) else other)
 
     def __eq__(self, other: Union["Tensor", float, int]) -> np.ndarray:
-        return self.data == other
+        return self.data == (other.data if isinstance(other, Tensor) else other)
 
     def __hash__(self) -> int:
         # Hash is based on the id of the tensor object
@@ -1493,6 +1508,7 @@ class SetItem(Function):
         """
         # Extract numpy array from value
         val_data = value.data if isinstance(value, Tensor) else value
+        val_data = np.squeeze(val_data)
         x[idx] = val_data
         self.idx = idx
         return x
@@ -1635,7 +1651,7 @@ class Sum(Function):
         if reduce_axes is None:
             # Summed over all dims, so grad is scalar, shape=()
             # Just broadcast to original shape:
-            return np.broadcast_to(grad_arr, self.x_shape).copy()
+            return np.asarray(np.broadcast_to(grad_arr, self.x_shape))
 
         if not self.keepdims:
             # Re-insert those axes as size=1 so that broadcasting works
@@ -1645,7 +1661,7 @@ class Sum(Function):
 
         # Now grad has shape (2,8,1) if we did sum over axis=2
         # broadcast to (2,8,5)
-        return np.broadcast_to(grad_arr, self.x_shape).copy()
+        return np.asarray(np.broadcast_to(grad_arr, self.x_shape))
 
 
 class Max(Function):
@@ -1877,7 +1893,9 @@ class Mean(Function):
                 np.array([self.tensors[0].shape[ax] for ax in self.axis])
             )
         else:
-            num_elements = np.prod(self.tensors[0].shape)
+            num_elements = 1
+            for dim in self.tensors[0].shape:
+                num_elements *= dim
         return grad_arr / num_elements
 
 
@@ -1903,7 +1921,8 @@ class Gather(Function):
         Returns:
             np.ndarray: A tensor containing the gathered rows.
         """
-        out = x[index, :]
+        index = np.asarray(index)
+        out = np.take(x, index, axis=0)
         self.x = x
         self.index = index
         return out
@@ -1927,9 +1946,9 @@ class Gather(Function):
             >>> # Backpropagated gradient will be placed in rows 0 and 2 of a zero tensor.
         """
         dx = np.zeros_like(self.x)
-        flat_indices = self.index.ravel()
+        flat_indices = self.index.reshape(-1)
         flat_grads = grad.data.reshape(-1, dx.shape[1])
-        np.add.at(dx, flat_indices, flat_grads)
+        dx = dx.at[flat_indices].add(flat_grads)
         return dx, None
 
 
@@ -2237,16 +2256,16 @@ class Pad(Function):
         # Normalize pad_width to numpy style
         if isinstance(pad_width, int):
             # For int, create tuple of tuples for all dimensions
-            pad_width = tuple((pad_width, pad_width) for _ in range(x.data.ndim))
+            pad_width = tuple((pad_width, pad_width) for _ in range(x.ndim))
         elif isinstance(pad_width, (tuple, list)):
             if len(pad_width) == 2 and not isinstance(pad_width[0], (tuple, list)):
                 # (left, right) -> pad only last dimension
-                pad_width = tuple((0, 0) for _ in range(x.data.ndim - 1)) + (
+                pad_width = tuple((0, 0) for _ in range(x.ndim - 1)) + (
                     tuple(pad_width),
                 )
             elif len(pad_width) == 4 and not isinstance(pad_width[0], (tuple, list)):
                 # (left, right, top, bottom) -> pad last two dimensions
-                pad_width = tuple((0, 0) for _ in range(x.data.ndim - 2)) + (
+                pad_width = tuple((0, 0) for _ in range(x.ndim - 2)) + (
                     (pad_width[2], pad_width[3]),  # height/rows padding
                     (pad_width[0], pad_width[1]),  # width/cols padding
                 )
@@ -2299,8 +2318,8 @@ class Cat(Function):
             np.ndarray: The concatenated tensor.
         """
         self.axis = axis
-        self.original_shapes = [t.data.shape for t in tensors]
-        return np.concatenate([t.data for t in tensors], axis=axis)
+        self.original_shapes = [t.shape for t in tensors]
+        return np.concatenate(tensors, axis=axis)
 
     def backward(self, grad: "Tensor") -> Tuple[Optional[np.ndarray], ...]:
         """Split the gradient among the concatenated tensors.
@@ -2412,7 +2431,7 @@ class Stack(Function):
 
         # Memory optimization: Use numpy.concatenate with expanded dimensions
         # instead of stack to avoid temporary list creation
-        expanded_arrays = [np.expand_dims(t.data, axis=axis) for t in tensors]
+        expanded_arrays = [np.expand_dims(t, axis=axis) for t in tensors]
         stacked_data = np.concatenate(expanded_arrays, axis=axis)
         self.axis = axis
         return stacked_data
@@ -2487,17 +2506,21 @@ class StridedWindows(Function):
         self.batch_size = batch_size
         self.channels = channels
         self.data_shape = x.shape
+        contiguous_strides = [1] * x.ndim
+        for dim in range(x.ndim - 2, -1, -1):
+            contiguous_strides[dim] = contiguous_strides[dim + 1] * x.shape[dim + 1]
+
         # Directly produce (H_out, W_out, batch_size, channels, kernel_size, kernel_size)
-        return np.lib.stride_tricks.as_strided(
+        return np.as_strided(
             x,
             shape=(H_out, W_out, batch_size, channels, kernel_size, kernel_size),
             strides=(
-                x.strides[2] * stride,  # steps in the height dimension
-                x.strides[3] * stride,  # steps in the width dimension
-                x.strides[0],  # batch dimension stride
-                x.strides[1],  # channels dimension stride
-                x.strides[2],  # inside window vertical steps
-                x.strides[3],  # inside window horizontal steps
+                contiguous_strides[2] * stride,  # steps in the height dimension
+                contiguous_strides[3] * stride,  # steps in the width dimension
+                contiguous_strides[0],  # batch dimension stride
+                contiguous_strides[1],  # channels dimension stride
+                contiguous_strides[2],  # inside window vertical steps
+                contiguous_strides[3],  # inside window horizontal steps
             ),
         )
 

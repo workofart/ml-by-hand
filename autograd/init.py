@@ -2,7 +2,8 @@
 Initialization methods for weights of the neural network
 """
 
-from autograd.backend import np
+import mlx.core as np
+
 from autograd.tensor import Tensor
 
 
@@ -40,8 +41,8 @@ def xavier_uniform(tensor: Tensor):
     input_tensor_count, output_tensor_count = compute_in_out_tensor_count(tensor.data)
     limit = np.sqrt(6.0 / (input_tensor_count + output_tensor_count))
 
-    tensor.data[...] = np.random.uniform(
-        low=-limit, high=limit, size=tensor.data.shape
+    tensor.data = np.random.uniform(
+        low=-limit, high=limit, shape=tensor.data.shape
     ).astype(tensor.data.dtype)
     return tensor
 

@@ -1,10 +1,12 @@
+from __future__ import annotations
+
 import logging
 from typing import TYPE_CHECKING, Any, Optional, Tuple, Union
 
 if TYPE_CHECKING:
     import numpy as np
 else:
-    from autograd.backend import np
+    import mlx.core as np
 from autograd.tensor import Function, Tensor
 
 logger = logging.getLogger(__name__)
@@ -531,24 +533,15 @@ class BinaryCrossEntropyWithLogits(Function):
         Returns:
             Tuple[np.ndarray, None]: A tuple containing the gradient with respect to $y_{pred}$ and None for $y_{true}$.
         """
-        # 1) Stable sigmoid computation
-        sig = np.empty_like(self.y_pred, dtype=np.float32)
-
-        # For z >= 0, sigmoid(z) = 1 / (1 + exp(-z))
-        pos_mask = self.y_pred >= 0
-        # clamp to avoid overflow in exp
-        z_pos_clamped = np.clip(self.y_pred[pos_mask], -100, 100)
-        exp_neg_pos = np.exp(-z_pos_clamped)
-        sig[pos_mask] = 1.0 / (1.0 + exp_neg_pos)
-
-        # For z < 0, sigmoid(z) = exp(z) / (1 + exp(z))
-        neg_mask = ~pos_mask
-        z_neg_clamped = np.clip(self.y_pred[neg_mask], -100, 100)
-        exp_pos_neg = np.exp(z_neg_clamped)
-        sig[neg_mask] = exp_pos_neg / (1.0 + exp_pos_neg)
+        # Stable sigmoid without NumPy-style masked mutation.
+        sig = np.where(
+            self.y_pred >= 0,
+            1.0 / (1.0 + np.exp(-self.y_pred)),
+            np.exp(self.y_pred) / (1.0 + np.exp(self.y_pred)),
+        )
 
         # 2) Compute dL/dy_pred = sigmoid(y_pred) - y_true divided by batch_size
-        grad_y_pred = (sig - self.y_true) / np.prod(self.y_pred.shape[0])
+        grad_y_pred = (sig - self.y_true) / self.y_pred.shape[0]
 
         # 3) Multiply by upstream gradient
         grad_y_pred *= grad.data
@@ -686,11 +679,10 @@ class CrossEntropy(Function):
         # 1. Softmax from log-softmax is safe: p_{i,j} = exp(log_sm[i,j])
         softmax_probs = np.exp(self.log_softmax)
 
-        # 2. Prepare the output gradient array with a copy of softmax_probs
-        grad_out = np.copy(softmax_probs)
-
         # 3. Identify which samples are non-padding
         non_pad_idx = np.where(self.non_pad_mask)[0]
+        non_pad_count = max(1, len(non_pad_idx))
+        row_mask = np.expand_dims(self.non_pad_mask.astype(np.float32), axis=1)
 
         # 4. Label Smoothing
         # When label_smoothing > 0, we subtract (1-label_smoothing) or something smaller
@@ -702,18 +694,18 @@ class CrossEntropy(Function):
         # Correct class: 1 - a + a / (num_class - 1) = (1 - a) + a / (num_class - 1)
         # Incorrect class: a / (num_class - 1)
 
-        # 4. (Step 1): All classes
-        grad_out[non_pad_idx, :] -= self.label_smoothing / (self.num_classes - 1)
+        off_value = 0.0
+        if self.num_classes > 1:
+            off_value = self.label_smoothing / (self.num_classes - 1)
 
-        # 4. (Step 2): Correct classes
-        correct_idx = (non_pad_idx, self.y_true[non_pad_idx])
-        grad_out[correct_idx] -= 1.0 - self.label_smoothing
-
-        # 5. For pad positions, set gradient = 0.0
-        grad_out[np.where(~self.non_pad_mask)[0], :] = 0.0
+        target = row_mask * off_value
+        if len(non_pad_idx) > 0:
+            correct_idx = (non_pad_idx, self.y_true[non_pad_idx])
+            target = target.at[correct_idx].add(1.0 - self.label_smoothing - off_value)
 
         # 6. Multiply by upstream grad and average by non-padded positions
-        grad_out *= grad.data / max(1, len(non_pad_idx))
+        grad_out = (softmax_probs - target) * row_mask
+        grad_out *= grad.data / non_pad_count
 
         # 7. Reshape to original shape if 3D
         grad_out = grad_out.reshape(self.original_shape)
@@ -830,7 +822,7 @@ class HingeLoss(Function):
             grad_y_pred /= self.y_pred.size
 
         # Handle scalar gradient (from mean/sum reduction)
-        if np.isscalar(grad.data) or grad.data.size == 1:
+        if grad.data.ndim == 0 or grad.data.size == 1:
             grad_y_pred *= grad.data
         else:
             # For elementwise gradient

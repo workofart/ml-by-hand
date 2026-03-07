@@ -1,8 +1,8 @@
 from unittest import TestCase
 
+import numpy as np
 import torch  # for comparison
 
-from autograd.backend import np
 from autograd.tensor import Tensor
 
 
@@ -100,8 +100,8 @@ class TestTensorOps(TestTensor):
         assert (self.y_scalar - self.x_scalar).data == 1.0
 
     def test_tensor_division(self):
-        assert (self.x_scalar / self.y_scalar).data == 2.0 / 3.0
-        assert (self.y_scalar / self.x_scalar).data == 1.5
+        assert np.isclose((self.x_scalar / self.y_scalar).data, 2.0 / 3.0)
+        assert np.isclose((self.y_scalar / self.x_scalar).data, 1.5)
 
     def test_tensor_exponentiation(self):
         assert (self.x_scalar**self.y_scalar).data == 8.0
@@ -182,7 +182,9 @@ class TestTensorOps(TestTensor):
         result_torch = self.batch_tensor1_torch + self.batch_tensor2_torch
 
         # Check forward pass
-        np.testing.assert_allclose(result.data, result_torch.detach().numpy())
+        np.testing.assert_allclose(
+            result.data, result_torch.detach().numpy(), rtol=1e-6, atol=1e-6
+        )
 
         # Check backward pass
         result.backward(np.ones_like(result.data))
@@ -201,7 +203,9 @@ class TestTensorOps(TestTensor):
         result = self.batch_tensor1 + self.channel_weights
         result_torch = self.batch_tensor1_torch + self.channel_weights_torch
 
-        np.testing.assert_allclose(result.data, result_torch.detach().numpy())
+        np.testing.assert_allclose(
+            result.data, result_torch.detach().numpy(), rtol=1e-6, atol=1e-6
+        )
 
         result.backward(np.ones_like(result.data))
         result_torch.backward(torch.ones_like(result_torch))
