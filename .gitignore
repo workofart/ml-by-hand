@@ -4,6 +4,7 @@
 checkpoints/
 training_data/
 training_runs/
+notes.md
 
 ### Python ###
 # Byte-compiled / optimized / DLL files
