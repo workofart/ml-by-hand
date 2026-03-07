@@ -12,7 +12,14 @@ command -v curl >/dev/null 2>&1 || {
     exit 1
 }
 
-# 2. Install uv if not present
+# 2. Validate supported platform for this branch
+if [ "$(uname)" != "Darwin" ]; then
+    echo "ERROR: This MLX migration branch currently supports macOS only."
+    echo "Use the 'main' branch for the cross-platform NumPy reference implementation."
+    exit 1
+fi
+
+# 3. Install uv if not present
 if ! command -v uv &> /dev/null; then
     echo "Installing uv from https://astral.sh/uv/install.sh ..."
     curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -37,7 +44,7 @@ if ! command -v uv &> /dev/null; then
     fi
 fi
 
-# 3. Create or re-use virtual environment
+# 4. Create or re-use virtual environment
 if [ -d ".venv" ]; then
     if [ -x ".venv/bin/python" ]; then
         INSTALLED_VERSION=$(.venv/bin/python -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')
@@ -63,21 +70,16 @@ fi
 source .venv/bin/activate
 echo "Virtual environment is ready and activated."
 
-# 4. Check GPU and install PyTorch for unit test validation
-if [ "$(uname)" = "Linux" ] && command -v nvidia-smi >/dev/null 2>&1; then
-    echo "NVIDIA GPU detected. Installing PyTorch with CUDA support..."
-    uv pip install torch --index-url https://download.pytorch.org/whl/cu124
-else
-    echo "Installing CPU-only PyTorch..."
-    uv pip install torch --index-url https://download.pytorch.org/whl/cpu
-fi
-
-# 5. Install dev dependencies
-echo "Installing all dependencies (including dev)..."
-if ! uv pip install ".[dev]"; then
-    echo "ERROR: Failed to install dev dependencies."
+# 5. Sync locked project dependencies
+echo "Syncing project dependencies from uv.lock..."
+if ! uv sync --frozen --extra dev; then
+    echo "ERROR: Failed to sync project dependencies from uv.lock."
     exit 1
 fi
+
+# 6. Install PyTorch separately for unit test validation
+echo "Installing CPU-only PyTorch for test validation..."
+uv pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 echo "Success! To start using your environment, run:"
 echo "   source .venv/bin/activate"

@@ -1,10 +1,18 @@
+import os
+import tempfile
 import unittest
 from unittest.mock import patch
 
 import mlx.core as mx
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from autograd.text import utils as text_utils
-from autograd.tools.data import LLMDataLoader, SimpleDataLoader
+from autograd.tools.data import (
+    LLMDataLoader,
+    SimpleDataLoader,
+    load_data,
+)
 
 
 def mock_causal_mask(seq_len, batch_size):
@@ -86,6 +94,53 @@ class TestDataLoaders(unittest.TestCase):
         loader.preprocess(preprocess_func)
         assert mx.array_equal(loader.X, X_orig * 2)
         assert mx.array_equal(loader.y, y_orig * 3)
+
+    def test_load_data_reads_parquet_without_pandas(self):
+        rows = [
+            {
+                "url": "u1",
+                "title": "t1",
+                "summary": "s1",
+                "article": "a1",
+                "step_headers": "h1",
+            },
+            {
+                "url": "u2",
+                "title": "t2",
+                "summary": "s2",
+                "article": "a2",
+                "step_headers": "h2",
+            },
+        ]
+        table = pa.Table.from_pylist(rows)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            parquet_path = os.path.join(tmpdir, "sample.parquet")
+            pq.write_table(table, parquet_path)
+
+            data = load_data("unused", parquet_path, max_rows=1)
+
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]["summary"], "s1")
+        self.assertEqual(data[0]["article"], "a1")
+
+    def test_load_data_reads_csv_without_header(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = os.path.join(tmpdir, "sample.csv")
+            with open(csv_path, "w", encoding="utf-8") as handle:
+                handle.write("review,sentiment\n")
+                handle.write('"great movie, would watch again",positive\n')
+                handle.write('"bad ending",negative\n')
+
+            rows = load_data(csv_path, csv_path)
+
+        self.assertEqual(
+            rows,
+            [
+                ["great movie, would watch again", "positive"],
+                ["bad ending", "negative"],
+            ],
+        )
 
     # Use decorators to patch the text_utils functions for LLMDataLoader tests.
     @patch.object(text_utils, "create_causal_mask", side_effect=mock_causal_mask)

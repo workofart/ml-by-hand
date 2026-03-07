@@ -156,18 +156,21 @@ Check out the modules in this project in the [docs website](https://ml-by-hand.r
 
 ## **Environment Setup**
 
-Run the bootstrap script to install dependencies:
+This branch is the MLX migration branch and currently supports macOS only.
+The [`main`](https://github.com/workofart/ml-by-hand/tree/main) branch remains the NumPy reference implementation and is the cross-platform path for Linux and macOS.
+
+This repo uses `uv.lock` as the source of truth for dependency installation.
+Use the bootstrap script for the intended setup flow:
 ```bash
 ./bootstrap.sh
 source .venv/bin/activate
 ```
-This sets up your virtual environment.
 
 ## Tests
 Comprehensive unit tests and integration tests available in `test/autograd`
 
 ```bash
-python -m pytest
+uv run pytest
 ```
 
 ## Future Work

@@ -109,7 +109,7 @@ def parse_data_into_xy(data) -> tuple[list[str], list[str]]:
         - Reversing the order of the articles to potentially shorten the gradient path during training.
 
     Args:
-        data: An array-like dataset where the summary is in column index 2 and the article is in column index 3.
+        data: A sequence of row dictionaries containing `summary` and `article`.
 
     Returns:
         Tuple[List[str], List[str]]:
@@ -118,13 +118,13 @@ def parse_data_into_xy(data) -> tuple[list[str], list[str]]:
     """
     # Data format
     # url, title, summary, article, step headers
-    print(f"{data.shape=}")
+    print(f"num_rows={len(data)}")
     # Enrich the label summary with start of string and end of string markers
-    summaries = [f"<SOS> {summary} <EOS>" for summary in data[:, 2]]
+    summaries = [f"<SOS> {row['summary']} <EOS>" for row in data]
     # In the paper, reversing the input sentence minimizes the distance between the
     # start of the source sentence and the relevant parts in the output sentence.
     # It shortens the "path" the gradients have to traverse in time.
-    articles = [str(article) for article in data[:, 3][::-1]]
+    articles = [str(row["article"]) for row in reversed(data)]
     return articles, summaries
 
 

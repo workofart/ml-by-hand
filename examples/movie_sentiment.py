@@ -2,13 +2,13 @@ import logging
 import os
 
 import mlx.core as mx
-import pandas as pd
 
 from autograd import functional, nn, optim
 from autograd.text.utils import create_vocabulary, text_to_one_hot_and_sparse
 from autograd.tools.config_schema import GenericTrainingConfig
 from autograd.tools.data import (
     SimpleDataLoader,
+    load_data,
     train_test_split,
 )
 from autograd.tools.trainer import SimpleTrainer
@@ -31,9 +31,11 @@ def process_data(data):
     Returns:
         A tuple containing train/test features, train/test labels, and the vocabulary map.
     """
-    vocab = create_vocabulary(data[:, 0], max_features=6000)
-    features, _ = text_to_one_hot_and_sparse(data[:, 0], vocab, max_sequence_length=25)
-    labels = mx.array([1 if label == "positive" else 0 for label in data[:, 1]])
+    reviews = [row[0] for row in data]
+    sentiments = [row[1] for row in data]
+    vocab = create_vocabulary(reviews, max_features=6000)
+    features, _ = text_to_one_hot_and_sparse(reviews, vocab, max_sequence_length=25)
+    labels = mx.array([1 if label == "positive" else 0 for label in sentiments])
 
     X_train, X_test, y_train, y_test = train_test_split(features, labels, test_size=0.1)
 
@@ -167,7 +169,7 @@ if __name__ == "__main__":
 
     The script performs the following steps:
       1) Checks if the IMDB Dataset CSV file exists locally; if not, downloads and extracts it.
-      2) Reads the dataset using pandas and converts it to an array for preprocessing.
+      2) Reads the dataset using the standard library CSV reader for preprocessing.
       3) Processes the data by creating a vocabulary from the review texts, converting the texts to one-hot
          encoded features (with fixed sequence length), and mapping sentiment labels to binary values.
       4) Splits the processed data into training and testing sets.
@@ -188,7 +190,8 @@ if __name__ == "__main__":
         )
 
     # Process the data (assume process_data returns train/test splits and a vocabulary)
-    data = pd.read_csv("training_data/IMDB Dataset.csv").to_numpy()
+    data = load_data("training_data/IMDB Dataset.csv", "training_data/IMDB Dataset.csv")
+    assert not isinstance(data, str)
     X_train, X_test, y_train, y_test, vocab = process_data(data)
     train_data_loader = SimpleDataLoader(X_train, y_train, batch_size=32, shuffle=True)
     test_data_loader = SimpleDataLoader(X_test, y_test, batch_size=32, shuffle=False)

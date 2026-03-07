@@ -1,11 +1,12 @@
+import csv
 import os
 import random
 from abc import ABC, abstractmethod
 from typing import Any, Iterator, Optional, Tuple, Union
+from urllib.request import urlopen
 
 import mlx.core as mx
 import pyarrow.parquet as pq
-import requests
 
 from autograd.text import utils as text_utils
 
@@ -49,7 +50,7 @@ def train_test_split(
 
 def load_data(
     url: str, filename: str, max_rows: Optional[int] = None
-) -> Union[str, Any]:
+) -> Union[str, list[dict[str, Any]], list[list[str]]]:
     """
     Load data from a file, downloading (GET request) it first if it doesn't exist.
     Automatically handles parquet and text files based on extension.
@@ -62,7 +63,8 @@ def load_data(
     Returns:
         Union[str, Any]:
             - For text files: the file content as a string.
-            - For parquet files: an array containing the data.
+            - For parquet files: a list of row dictionaries.
+            - For CSV files: a list of rows without the header row.
 
     Examples:
         For a parquet file:
@@ -81,14 +83,19 @@ def load_data(
     """
     # Download if file doesn't exist
     if not os.path.exists(filename):
-        response = requests.get(url)
+        with urlopen(url) as response:
+            content = response.read()
         with open(filename, "wb") as f:
-            f.write(response.content)
+            f.write(content)
 
     # Read based on file extension
     if filename.endswith(".parquet"):
-        data = pq.read_table(filename).to_pandas().to_numpy()
-        return mx.array(data[:max_rows] if max_rows else data)
+        data = pq.read_table(filename).to_pylist()
+        return data[:max_rows] if max_rows else data
+    if filename.endswith(".csv"):
+        with open(filename, "r", encoding="utf-8", newline="") as handle:
+            rows = list(csv.reader(handle))
+        return rows[1:] if rows else rows
     else:
         with open(filename, "r", encoding="utf-8") as f:
             return f.read()

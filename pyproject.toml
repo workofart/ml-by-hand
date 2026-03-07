@@ -10,13 +10,12 @@ readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.8"
 dependencies = [
-    "numpy",
     "mlx; platform_system == 'Darwin'",
+    "openml",  # for dataset
+    "pyarrow",
+    "regex",
     "scikit-learn",  # for dataset
     "tqdm",
-    "openml",  # for dataset
-    "regex",
-    "cupy-cuda12x; platform_system == 'Linux'" # Numpy GPU-acceleration
 ]
 
 [tool.setuptools.packages.find]
@@ -36,7 +35,6 @@ exclude = [
 [tool.pytest.ini_options]
 testpaths = ["test"]
 python_files = "test_*.py"
-memray = true
 
 
 [project.optional-dependencies]
