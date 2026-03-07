@@ -1,19 +1,14 @@
-"""
-Utility functions for saving and loading model checkpoints.
-"""
+"""Utilities for saving and loading model checkpoints."""
+
+from __future__ import annotations
 
 import json
 import os
-from typing import TYPE_CHECKING, Any, Dict
+from typing import Any, Dict, cast
 
-import numpy  # need this for loading checkpoint
+import mlx.core as mx
 
-if TYPE_CHECKING:
-    import numpy as np
-else:
-    from autograd.backend import np
-
-from autograd.tensor import Tensor
+from autograd.tensor import ARRAY_TYPE, Tensor
 
 # Define a type for the serialized metadata structure
 SerializedMeta = Dict[str, Any]
@@ -22,7 +17,7 @@ SerializedMeta = Dict[str, Any]
 def save_checkpoint(
     obj: Any, json_path: str = "checkpoint.json", npz_path: str = "checkpoint.npz"
 ) -> None:
-    """Saves a Python object (model state, etc.) into JSON and NPZ files.
+    """Save a Python object (model state, etc.) into JSON and NPZ files.
 
     This function splits the saved content into:
     - A JSON file for the metadata or structure.
@@ -52,14 +47,14 @@ def save_checkpoint(
     """
 
     def _serialize(
-        obj: Any, arrays: Dict[str, np.ndarray], prefix: str = ""
+        obj: Any, arrays: Dict[str, Any], prefix: str = ""
     ) -> SerializedMeta:
         """Recursively serialize a Python object into a structure
         that can be stored as JSON + NPZ.
 
         Args:
             obj: The object (dictionary, list, tuple, Tensor, etc.) to serialize.
-            arrays (Dict[str, np.ndarray]): A dictionary to store array data keyed
+            arrays (Dict[str, Any]): A dictionary to store array data keyed
                 by string identifiers.
             prefix (str): A prefix for naming arrays in `arrays`.
 
@@ -86,13 +81,20 @@ def save_checkpoint(
                 "items": items,
             }
 
-        # Tensor or NumPy array
-        if isinstance(obj, (Tensor, np.ndarray)):
+        # Tensor or backend array
+        if isinstance(obj, Tensor):
             key = prefix if prefix else "root_array"
-            arr = obj.data if isinstance(obj, Tensor) else obj
-            arrays[key] = arr
+            arrays[key] = mx.asarray(obj.data)
             return {
-                "_type": "tensor" if isinstance(obj, Tensor) else "np.ndarray",
+                "_type": "tensor",
+                "key": key,
+            }
+
+        if isinstance(obj, ARRAY_TYPE) or hasattr(obj, "__array__"):
+            key = prefix if prefix else "root_array"
+            arrays[key] = mx.asarray(obj)
+            return {
+                "_type": "array",
                 "key": key,
             }
 
@@ -103,7 +105,7 @@ def save_checkpoint(
         # Fallback for other types
         return {"_type": "raw", "value": str(obj)}
 
-    arrays_dict: Dict[str, np.ndarray] = {}
+    arrays_dict: Dict[str, Any] = {}
     meta: SerializedMeta = _serialize(obj, arrays_dict)
 
     # Save metadata to JSON
@@ -111,7 +113,7 @@ def save_checkpoint(
         json.dump(meta, f, indent=2)
 
     # Save arrays to NPZ
-    np.savez_compressed(npz_path, **arrays_dict)
+    mx.savez_compressed(npz_path, **arrays_dict)
 
 
 def load_checkpoint(
@@ -119,7 +121,7 @@ def load_checkpoint(
     npz_path: str = "checkpoint.npz",
     weights_only: bool = False,
 ) -> Any:
-    """Loads an object from saved checkpoint files.
+    """Load an object from saved checkpoint files.
 
     This function reconstructs the Python object that was previously serialized
     by `save_checkpoint`. It reads:
@@ -148,12 +150,12 @@ def load_checkpoint(
         >>> model_weights = load_checkpoint("my_model.json", "my_model.npz", weights_only=True)
     """
 
-    def _deserialize(meta: SerializedMeta, data: Dict[str, np.ndarray]) -> Any:
+    def _deserialize(meta: SerializedMeta, data: Dict[str, Any]) -> Any:
         """Recursively reconstruct an object from its serialized form.
 
         Args:
             meta (SerializedMeta): The serialized metadata.
-            data (Dict[str, np.ndarray]): A dictionary of array data loaded from NPZ.
+            data (Dict[str, Any]): A dictionary of array data loaded from NPZ.
 
         Returns:
             Any: The reconstructed Python object (dict, list, Tensor, etc.).
@@ -170,9 +172,14 @@ def load_checkpoint(
             items = [_deserialize(x, data) for x in meta["items"]]
             return items if t == "list" else tuple(items)
 
-        if t in ("tensor", "np.ndarray"):
-            arr = data[meta["key"]]
-            return Tensor(arr) if t == "tensor" else arr
+        if t == "tensor":
+            return Tensor(data[meta["key"]])
+
+        if t == "array":
+            return data[meta["key"]]
+
+        if "key" in meta and "items" not in meta and "value" not in meta:
+            return data[meta["key"]]
 
         if t in ("scalar", "raw"):
             return meta["value"]
@@ -193,9 +200,7 @@ def load_checkpoint(
         meta: SerializedMeta = json.load(f)
 
     # Load NPZ data
-    # Need to use numpy's load API
-    with numpy.load(npz_path, allow_pickle=True) as npz_data:
-        data_dict = {key: np.array(npz_data[key]) for key in npz_data.files}
+    data_dict = cast(Dict[str, Any], mx.load(npz_path))
 
     deserialized_data = _deserialize(meta, data_dict)
 

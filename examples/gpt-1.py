@@ -1,13 +1,7 @@
 import logging
 from typing import Any, Optional, Tuple
 
-try:
-    # drop-in replacement for numpy for GPU acceleration
-    import cupy as np  # type: ignore
-
-    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
-except Exception:
-    import numpy as np
+import mlx.core as mx
 
 from autograd import functional, nn, optim
 from autograd.tensor import Tensor
@@ -67,8 +61,8 @@ class GPT1(nn.Module):
         Section 3.1 Unsupervised pre-training
         """
         batch_size, seq_len = tokens.shape
-        positions = np.arange(seq_len)  # shape (seq_len,)
-        positions = np.tile(positions, (batch_size, 1))  # shape (batch, seq_len)
+        positions = mx.arange(seq_len)  # shape (seq_len,)
+        positions = mx.tile(positions, (batch_size, 1))  # shape (batch, seq_len)
 
         token_embedding = self.token_embedding(
             tokens
@@ -213,7 +207,7 @@ if __name__ == "__main__":
     )
 
     train_data_loader = LLMDataLoader(
-        data=np.array(train_data),
+        data=mx.array(train_data),
         bpe=bpe,
         batch_size=CONFIG.batch_size,
         seq_len=trainer.model.max_seq_len,
@@ -223,7 +217,7 @@ if __name__ == "__main__":
         create_padding_masks=CONFIG.create_padding_masks,
     )
     test_data_loader = LLMDataLoader(
-        data=np.array(test_data),
+        data=mx.array(test_data),
         bpe=bpe,
         batch_size=CONFIG.batch_size // 2,
         seq_len=trainer.model.max_seq_len,

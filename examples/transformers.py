@@ -1,13 +1,7 @@
 import logging
 from typing import Any, Optional
 
-try:
-    # drop-in replacement for numpy for GPU acceleration
-    import cupy as np  # type: ignore
-
-    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
-except Exception:
-    import numpy as np
+import mlx.core as mx
 
 from autograd import functional, nn, optim
 from autograd.tensor import Tensor
@@ -445,11 +439,11 @@ class PositionalEncoding(nn.Module):
             dropout_prob (float): Dropout probability.
         """
         super().__init__()
-        pe = np.zeros((max_seq_len, hidden_size), dtype=np.float32)
-        position = np.arange(0, max_seq_len)[:, np.newaxis]
-        inverse_freq = 1.0 / 10000 ** (np.arange(0, hidden_size, 2) / hidden_size)
-        pe[:, 0::2] = np.sin(position * inverse_freq)
-        pe[:, 1::2] = np.cos(position * inverse_freq)
+        pe = mx.zeros((max_seq_len, hidden_size), dtype=mx.float32)
+        position = mx.arange(0, max_seq_len)[:, None]
+        inverse_freq = 1.0 / 10000 ** (mx.arange(0, hidden_size, 2) / hidden_size)
+        pe[:, 0::2] = mx.sin(position * inverse_freq)
+        pe[:, 1::2] = mx.cos(position * inverse_freq)
         # Shape (max_seq_len, hidden_size)
         self._parameters["pe"] = Tensor(pe, requires_grad=False)
         self.dropout = nn.Dropout(p=dropout_prob)
@@ -649,7 +643,7 @@ if __name__ == "__main__":
     )
 
     train_data_loader = LLMDataLoader(
-        data=np.array(train_data),
+        data=mx.array(train_data),
         bpe=bpe,
         batch_size=CONFIG.batch_size,
         seq_len=trainer.model.max_seq_len,
@@ -659,7 +653,7 @@ if __name__ == "__main__":
         create_padding_masks=CONFIG.create_padding_masks,
     )
     test_data_loader = LLMDataLoader(
-        data=np.array(test_data),
+        data=mx.array(test_data),
         bpe=bpe,
         batch_size=CONFIG.batch_size // 2,
         seq_len=trainer.model.max_seq_len,

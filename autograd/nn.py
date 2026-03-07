@@ -1,14 +1,16 @@
+from __future__ import annotations
+
 import logging
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Optional, Tuple, Union, cast
 
-if TYPE_CHECKING:
-    import numpy as np
-else:
-    from autograd.backend import np
+import mlx.core as mx
+
+from autograd.types import ArrayLike
+
 from .functional import relu, sigmoid, softmax, tanh
 from .init import xavier_uniform
-from .tensor import Tensor
+from .tensor import ARRAY_TYPE, Tensor
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +41,7 @@ class Module:
         >>> module = MyModule()
         >>> import cupy as np
         >>> from autograd.tensor import Tensor
-        >>> input_tensor = Tensor(np.array([1, 2, 3]))
+        >>> input_tensor = Tensor(mx.array([1, 2, 3]))
         >>> output = module(input_tensor) # Expected output: [2, 4, 6]
     """
 
@@ -91,7 +93,7 @@ class Module:
             >>> module = MyModule()
             >>> from autograd.tensor import Tensor
             >>> import cupy as np
-            >>> x = Tensor(np.array([1, 2, 3]))
+            >>> x = Tensor(mx.array([1, 2, 3]))
             >>> y = module(x) # Expected: [2, 3, 4]
         """
         raise NotImplementedError
@@ -204,12 +206,12 @@ class Module:
         .. code-block:: json
 
             {
-                "some_state":  "np.ndarray",
-                "submodule1.running_var": "np.ndarray"
+                "some_state": "array",
+                "submodule1.running_var": "array"
             }
 
         Returns:
-            Dict[str, Any]: A dictionary mapping state names to their values (np.ndarray).
+            Dict[str, Any]: A dictionary mapping state names to their values.
 
         Examples:
             >>> # Assuming module has a state 'running_mean' in a BatchNorm submodule.
@@ -219,7 +221,7 @@ class Module:
         return {
             k: v
             for k, v in self._get_attr_nested("_states").items()
-            if isinstance(v, np.ndarray)
+            if isinstance(v, ARRAY_TYPE)
         }
 
     def state_dict(self) -> Dict[str, Dict[str, Any]]:
@@ -227,7 +229,7 @@ class Module:
         Return a state dictionary of the module.
 
         The state dictionary contains two keys:
-          - "parameters": A dictionary mapping parameter names to their raw numpy arrays.
+          - "parameters": A dictionary mapping parameter names to their raw arrays.
           - "states": A dictionary mapping state names to their values.
 
         Returns:
@@ -236,17 +238,17 @@ class Module:
         .. code-block:: json
 
             {
-                "parameters": { "weight": "np.array()", "bias": "np.array()" },
-                "states": { "stateful_states": "np.array()" }
+                "parameters": { "weight": "array", "bias": "array" },
+                "states": { "stateful_states": "array" }
             }
 
         Examples:
             >>> state = module.state_dict()
             >>> print(state.keys())  # Expected output: dict_keys(['parameters', 'states'])
         """
-        # Convert Tensors to raw np.array
+        # Convert Tensors to raw arrays.
         param_arrays = {k: v.data for k, v in self.parameters.items()}
-        state_arrays = self.states  # already np.ndarray
+        state_arrays = self.states  # already arrays
         return {"parameters": param_arrays, "states": state_arrays}
 
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
@@ -258,8 +260,8 @@ class Module:
         .. code-block:: json
 
             {
-                "parameters": { "weight": "np.array()", "bias": "np.array()" },
-                "states": { "stateful_states": "np.array()" }
+                "parameters": { "weight": "array", "bias": "array" },
+                "states": { "stateful_states": "array" }
             }
 
 
@@ -366,9 +368,15 @@ class Module:
                 container[var_name] = Tensor(value) if is_parameter else value
             else:
                 if is_parameter:
-                    container[var_name].data[...] = value
+                    container[var_name].data = value
                 else:
-                    container[var_name] = value
+                    current_value = container[var_name]
+                    if isinstance(current_value, ARRAY_TYPE):
+                        container[var_name] = mx.asarray(
+                            value, dtype=current_value.dtype
+                        )
+                    else:
+                        container[var_name] = value
 
 
 class ModuleList(Module):
@@ -384,7 +392,7 @@ class ModuleList(Module):
         ...         return x + 1
         >>> ml = ModuleList([MyModule(), MyModule()])
         >>> for m in ml:
-        ...     print(m.forward(Tensor(np.array([1]))).data)
+        ...     print(m.forward(Tensor(mx.array([1]))).data)
         [2]
         [2]
     """
@@ -472,7 +480,7 @@ class Linear(Module):
         >>> linear = Linear(4, 2)
         >>> import cupy as np
         >>> from autograd.tensor import Tensor
-        >>> x = Tensor(np.random.randn(3, 4))
+        >>> x = Tensor(mx.random.randn(3, 4))
         >>> y = linear(x) # Expected shape: (3, 2)
     """
 
@@ -489,18 +497,18 @@ class Linear(Module):
 
         # weight is a matrix of shape (input_size, output_size)
         self._parameters["weight"] = xavier_uniform(
-            Tensor(np.zeros((input_size, output_size)))
+            Tensor(mx.zeros((input_size, output_size)))
         )
 
         # bias is always 1-dimensional
-        self._parameters["bias"] = Tensor(np.zeros(output_size, dtype=np.float32))
+        self._parameters["bias"] = Tensor(mx.zeros(output_size, dtype=mx.float32))
 
-    def forward(self, x: Union[Tensor, np.ndarray]) -> Tensor:
+    def forward(self, x: Union[Tensor, ArrayLike]) -> Tensor:
         """
         Compute the forward pass of the Linear layer.
 
         Args:
-            x (Union[Tensor, np.ndarray]): The input tensor.
+            x (Union[Tensor, mx.ndarray]): The input tensor.
 
         Returns:
             Tensor: The result of the linear transformation.
@@ -508,7 +516,7 @@ class Linear(Module):
         Examples:
             >>> linear = Linear(5, 3)
             >>> import cupy as np
-            >>> x = Tensor(np.random.randn(10, 5))
+            >>> x = Tensor(mx.random.randn(10, 5))
             >>> y = linear(x) # Expected: (10, 3)
         """
         if not isinstance(x, Tensor):
@@ -532,7 +540,7 @@ class Conv2d(Module):
         >>> conv = Conv2d(in_channels=3, out_channels=8, kernel_size=3, stride=1, padding_mode="same")
         >>> import cupy as np
         >>> from autograd.tensor import Tensor
-        >>> x = Tensor(np.random.randn(2, 3, 32, 32))
+        >>> x = Tensor(mx.random.randn(2, 3, 32, 32))
         >>> y = conv(x) # Expected shape: (2, 8, 32, 32)
     """
 
@@ -582,7 +590,7 @@ class Conv2d(Module):
         # The resulting tensor will have the shape (out_channels, H', W')
         self._parameters["weight"] = xavier_uniform(
             Tensor(
-                np.zeros(
+                mx.zeros(
                     (
                         self.out_channels,
                         self.in_channels,
@@ -594,15 +602,15 @@ class Conv2d(Module):
         )
         if bias:
             self._parameters["bias"] = Tensor(
-                np.random.rand(self.out_channels)
+                mx.random.uniform(shape=(self.out_channels,))
             )  # one bias per kernel
 
-    def forward(self, x: Union[Tensor, np.ndarray]) -> Tensor:
+    def forward(self, x: Union[Tensor, ArrayLike]) -> Tensor:
         """
         Compute the forward pass of the Conv2d layer.
 
         Args:
-            x (Union[Tensor, np.ndarray]): Input tensor of shape (N, in_channels, H, W).
+            x (Union[Tensor, mx.ndarray]): Input tensor of shape (N, in_channels, H, W).
 
         Returns:
             Tensor: Output tensor after applying the convolution and bias addition.
@@ -611,7 +619,7 @@ class Conv2d(Module):
             >>> conv = Conv2d(3, 8, kernel_size=3, stride=1, padding_mode="same")
             >>> import cupy as np
             >>> from autograd.tensor import Tensor
-            >>> x = Tensor(np.random.randn(2, 3, 32, 32))
+            >>> x = Tensor(mx.random.randn(2, 3, 32, 32))
             >>> y = conv(x) # Expected: (2, 8, 32, 32)
         """
         if not isinstance(x, Tensor):
@@ -674,7 +682,7 @@ class MaxPool2d(Module):
         >>> pool = MaxPool2d(kernel_size=2, stride=2, padding_mode="valid")
         >>> import cupy as np
         >>> from autograd.tensor import Tensor
-        >>> x = Tensor(np.random.randn(1, 3, 32, 32))
+        >>> x = Tensor(mx.random.randn(1, 3, 32, 32))
         >>> y = pool(x) # Expected: (1, 3, 16, 16)
     """
 
@@ -699,12 +707,12 @@ class MaxPool2d(Module):
         self.stride = stride if stride is not None else kernel_size
         self.padding_mode = padding_mode
 
-    def forward(self, x: Union[Tensor, np.ndarray]) -> Tensor:
+    def forward(self, x: Union[Tensor, ArrayLike]) -> Tensor:
         """
         Compute the forward pass of the MaxPool2d layer.
 
         Args:
-            x (Union[Tensor, np.ndarray]): Input tensor.
+            x (Union[Tensor, mx.ndarray]): Input tensor.
 
         Returns:
             Tensor: Tensor after applying max pooling.
@@ -713,7 +721,7 @@ class MaxPool2d(Module):
             >>> pool = MaxPool2d(kernel_size=2, stride=2)
             >>> import cupy as np
             >>> from autograd.tensor import Tensor
-            >>> x = Tensor(np.random.randn(1, 3, 32, 32))
+            >>> x = Tensor(mx.random.randn(1, 3, 32, 32))
             >>> y = pool(x) # Expected: (1, 3, 16, 16)
         """
         if not isinstance(x, Tensor):
@@ -752,7 +760,7 @@ class ResidualBlock(Module):
         >>> res_block = ResidualBlock(16, 16, stride=1)
         >>> import cupy as np
         >>> from autograd.tensor import Tensor
-        >>> x = Tensor(np.random.randn(1, 16, 32, 32))
+        >>> x = Tensor(mx.random.randn(1, 16, 32, 32))
         >>> y = res_block(x) # Expected: (1, 16, 32, 32)
     """
 
@@ -782,12 +790,12 @@ class ResidualBlock(Module):
             in_channels, out_channels, kernel_size=1, stride=stride, padding_mode="same"
         )
 
-    def forward(self, x: Union[Tensor, np.ndarray]) -> Tensor:
+    def forward(self, x: Union[Tensor, ArrayLike]) -> Tensor:
         """
         Compute the forward pass of the ResidualBlock.
 
         Args:
-            x (Union[Tensor, np.ndarray]): Input tensor.
+            x (Union[Tensor, mx.ndarray]): Input tensor.
 
         Returns:
             Tensor: Output tensor after applying the residual block.
@@ -796,7 +804,7 @@ class ResidualBlock(Module):
             >>> res_block = ResidualBlock(16, 16)
             >>> import cupy as np
             >>> from autograd.tensor import Tensor
-            >>> x = Tensor(np.random.randn(1, 16, 32, 32))
+            >>> x = Tensor(mx.random.randn(1, 16, 32, 32))
             >>> y = res_block(x) # Expected: (1, 16, 32, 32)
         """
         identity = self.shortcut(x)
@@ -819,7 +827,7 @@ class RecurrentBlock(Module):
         >>> import cupy as np
         >>> from autograd.tensor import Tensor
         >>> # Create a random sequence: batch_size=3, sequence_length=5, input_size=4
-        >>> x = Tensor(np.random.randn(3, 5, 4))
+        >>> x = Tensor(mx.random.randn(3, 5, 4))
         >>> y = rnn(x) # Expected: (3, 2)
     """
 
@@ -858,28 +866,29 @@ class RecurrentBlock(Module):
         self.dropout = Dropout(p=dropout_prob) if dropout_prob else None
 
         self._parameters["W_xh"] = xavier_uniform(
-            Tensor(np.zeros((input_size, hidden_size)))
+            Tensor(mx.zeros((input_size, hidden_size)))
         )
         self._parameters["W_hh"] = xavier_uniform(
-            Tensor(np.zeros((hidden_size, hidden_size)))
+            Tensor(mx.zeros((hidden_size, hidden_size)))
         )
-        self._parameters["bias"] = Tensor(np.zeros((hidden_size,)))
+        self._parameters["bias"] = Tensor(mx.zeros((hidden_size,)))
 
         if output_size:
             self._parameters["W_hy"] = xavier_uniform(
-                Tensor(np.zeros((hidden_size, output_size)))
+                Tensor(mx.zeros((hidden_size, output_size)))
             )
-            self._parameters["bias_y"] = Tensor(np.zeros((output_size,)))
+            self._parameters["bias_y"] = Tensor(mx.zeros((output_size,)))
         else:
-            self._parameters["W_hy"] = None
-            self._parameters["bias_y"] = None
+            optional_parameters = cast(dict[str, Optional[Tensor]], self._parameters)
+            optional_parameters["W_hy"] = None
+            optional_parameters["bias_y"] = None
 
-    def forward(self, x: Union[Tensor, np.ndarray]) -> Tensor:
+    def forward(self, x: Union[Tensor, ArrayLike]) -> Tensor:
         """
         Perform the forward pass of the RNN.
 
         Args:
-            x (Union[Tensor, np.ndarray]): Input tensor of shape (batch_size, sequence_length, input_size).
+            x (Union[Tensor, mx.ndarray]): Input tensor of shape (batch_size, sequence_length, input_size).
 
         Returns:
             Tensor: Output tensor computed from the final hidden state or the hidden state itself.
@@ -888,7 +897,7 @@ class RecurrentBlock(Module):
             >>> rnn = RecurrentBlock(input_size=4, hidden_size=8, output_size=3)
             >>> import cupy as np
             >>> from autograd.tensor import Tensor
-            >>> x = Tensor(np.random.randn(3, 5, 4))
+            >>> x = Tensor(mx.random.randn(3, 5, 4))
             >>> y = rnn(x) # Expected: (3, 3)
         """
         if not isinstance(x, Tensor):
@@ -896,7 +905,7 @@ class RecurrentBlock(Module):
 
         batch_size = x.shape[0]
         seq_length = x.shape[1]
-        hidden_state = Tensor(np.zeros((batch_size, self.hidden_size)))
+        hidden_state = Tensor(mx.zeros((batch_size, self.hidden_size)))
 
         # Iterate through the sequence (or time dimension)
         for t in range(seq_length):
@@ -938,7 +947,7 @@ class LongShortTermMemoryBlock(Module):
         >>> lstm = LongShortTermMemoryBlock(input_size=4, hidden_size=8, output_size=3)
         >>> import cupy as np
         >>> from autograd.tensor import Tensor
-        >>> x = Tensor(np.random.randn(3, 5, 4))
+        >>> x = Tensor(mx.random.randn(3, 5, 4))
         >>> output, cell_state = lstm(x)
         >>> print(output.data.shape)  # Expected: (3, 3)
         >>> print(cell_state.data.shape)  # Expected: (3, 8)
@@ -982,34 +991,35 @@ class LongShortTermMemoryBlock(Module):
         self.dropout = Dropout(p=dropout_prob) if dropout_prob else None
 
         self._parameters["W_f"] = xavier_uniform(
-            Tensor(np.zeros((input_size + hidden_size, hidden_size)))
+            Tensor(mx.zeros((input_size + hidden_size, hidden_size)))
         )
         self._parameters["W_i"] = xavier_uniform(
-            Tensor(np.zeros((input_size + hidden_size, hidden_size)))
+            Tensor(mx.zeros((input_size + hidden_size, hidden_size)))
         )
         self._parameters["W_c"] = xavier_uniform(
-            Tensor(np.zeros((input_size + hidden_size, hidden_size)))
+            Tensor(mx.zeros((input_size + hidden_size, hidden_size)))
         )
         self._parameters["W_o"] = xavier_uniform(
-            Tensor(np.zeros((input_size + hidden_size, hidden_size)))
+            Tensor(mx.zeros((input_size + hidden_size, hidden_size)))
         )
-        self._parameters["bias_f"] = Tensor(np.zeros((hidden_size,)))
-        self._parameters["bias_i"] = Tensor(np.zeros((hidden_size,)))
-        self._parameters["bias_c"] = Tensor(np.zeros((hidden_size,)))
-        self._parameters["bias_o"] = Tensor(np.zeros((hidden_size,)))
+        self._parameters["bias_f"] = Tensor(mx.zeros((hidden_size,)))
+        self._parameters["bias_i"] = Tensor(mx.zeros((hidden_size,)))
+        self._parameters["bias_c"] = Tensor(mx.zeros((hidden_size,)))
+        self._parameters["bias_o"] = Tensor(mx.zeros((hidden_size,)))
 
         if output_size:
             self._parameters["W_hy"] = xavier_uniform(
-                Tensor(np.zeros((hidden_size, output_size)))
+                Tensor(mx.zeros((hidden_size, output_size)))
             )
-            self._parameters["bias_y"] = Tensor(np.zeros((output_size,)))
+            self._parameters["bias_y"] = Tensor(mx.zeros((output_size,)))
         else:
-            self._parameters["W_hy"] = None
-            self._parameters["bias_y"] = None
+            optional_parameters = cast(dict[str, Optional[Tensor]], self._parameters)
+            optional_parameters["W_hy"] = None
+            optional_parameters["bias_y"] = None
 
     def forward(
         self,
-        x: Union[Tensor, np.ndarray],
+        x: Union[Tensor, ArrayLike],
         hidden_state: Optional[Tensor] = None,
         C_t: Optional[Tensor] = None,
     ) -> Tuple[Tensor, Tensor]:
@@ -1017,7 +1027,7 @@ class LongShortTermMemoryBlock(Module):
         Perform the forward pass of the LSTM.
 
         Args:
-            x (Union[Tensor, np.ndarray]): Input tensor of shape (batch_size, sequence_length, input_size).
+            x (Union[Tensor, mx.ndarray]): Input tensor of shape (batch_size, sequence_length, input_size).
             hidden_state (Optional[Tensor], optional): Initial hidden state. Defaults to zeros.
             C_t (Optional[Tensor], optional): Initial cell state. Defaults to zeros.
 
@@ -1028,7 +1038,7 @@ class LongShortTermMemoryBlock(Module):
             >>> lstm = LongShortTermMemoryBlock(input_size=4, hidden_size=8, output_size=3)
             >>> import cupy as np
             >>> from autograd.tensor import Tensor
-            >>> x = Tensor(np.random.randn(3, 5, 4))
+            >>> x = Tensor(mx.random.randn(3, 5, 4))
             >>> output, cell_state = lstm(x)
             >>> print(output.data.shape)  # Expected: (3, 3)
             >>> print(cell_state.data.shape)  # Expected: (3, 8)
@@ -1041,9 +1051,9 @@ class LongShortTermMemoryBlock(Module):
         hidden_state = (
             hidden_state
             if hidden_state
-            else Tensor(np.zeros((batch_size, self.hidden_size)))
+            else Tensor(mx.zeros((batch_size, self.hidden_size)))
         )
-        C_t = C_t if C_t else Tensor(np.zeros((batch_size, self.hidden_size)))
+        C_t = C_t if C_t else Tensor(mx.zeros((batch_size, self.hidden_size)))
 
         # Iterate through the sequence (or time dimension)
         for t in range(seq_length):
@@ -1117,7 +1127,7 @@ class Embedding(Module):
         >>> import cupy as np
         >>> from autograd.tensor import Tensor
         >>> # Create a batch of indices with shape (batch_size, seq_len)
-        >>> x = Tensor(np.array([[1, 5, 20], [2, 10, 30]]))
+        >>> x = Tensor(mx.array([[1, 5, 20], [2, 10, 30]]))
         >>> y = embed(x) # Expected: (2, 3, 16)
     """
 
@@ -1133,16 +1143,16 @@ class Embedding(Module):
 
         # weight.shape: (input_size, embedding_size)
         self._parameters["weight"] = Tensor(
-            np.random.randn(input_size, embedding_size) * 0.01,
+            mx.random.normal(shape=(input_size, embedding_size)) * 0.01,
             requires_grad=True,
         )
 
-    def forward(self, x: Union[Tensor, np.ndarray]) -> Tensor:
+    def forward(self, x: Union[Tensor, ArrayLike]) -> Tensor:
         """
         Perform the forward pass of the Embedding layer.
 
         Args:
-            x (Union[Tensor, np.ndarray]): Input tensor of shape (batch_size, seq_len).
+            x (Union[Tensor, mx.ndarray]): Input tensor of shape (batch_size, seq_len).
 
         Returns:
             Tensor: Output tensor of shape (batch_size, seq_len, embedding_size).
@@ -1151,7 +1161,7 @@ class Embedding(Module):
             >>> embed = Embedding(input_size=50, embedding_size=8)
             >>> import cupy as np
             >>> from autograd.tensor import Tensor
-            >>> x = Tensor(np.array([[0, 1, 2], [3, 4, 5]]))
+            >>> x = Tensor(mx.array([[0, 1, 2], [3, 4, 5]]))
             >>> y = embed(x)  # Expected: (2, 3, 8)
         """
         if not isinstance(x, Tensor):
@@ -1159,7 +1169,9 @@ class Embedding(Module):
 
         # indices.shape: (batch_size, seq_len)
         # result.shape: (batch_size, seq_len, embedding_size)
-        return self._parameters["weight"].gather(index=x.data.astype(np.int32))
+        return self._parameters["weight"].gather(
+            index=cast(Any, cast(Any, x.data).astype(mx.int32))
+        )
 
 
 class LayerNorm(Module):
@@ -1173,7 +1185,7 @@ class LayerNorm(Module):
         >>> ln = LayerNorm(input_size=10)
         >>> import cupy as np
         >>> from autograd.tensor import Tensor
-        >>> x = Tensor(np.random.randn(4, 10))
+        >>> x = Tensor(mx.random.randn(4, 10))
         >>> y = ln(x) # Expected: (4, 10)
     """
 
@@ -1188,8 +1200,8 @@ class LayerNorm(Module):
         """
         super().__init__(**kwargs)
         self.epsilon = epsilon
-        self._parameters["gain"] = Tensor(np.ones((input_size,)))
-        self._parameters["bias"] = Tensor(np.zeros((input_size,)))
+        self._parameters["gain"] = Tensor(mx.ones((input_size,)))
+        self._parameters["bias"] = Tensor(mx.zeros((input_size,)))
 
     def forward(self, x: Tensor) -> Tensor:
         """
@@ -1205,7 +1217,7 @@ class LayerNorm(Module):
             >>> ln = LayerNorm(input_size=10)
             >>> import cupy as np
             >>> from autograd.tensor import Tensor
-            >>> x = Tensor(np.random.randn(2, 10))
+            >>> x = Tensor(mx.random.randn(2, 10))
             >>> y = ln(x)  # Expected: (2, 10)
         """
         # Equation 4 in section 3.1 in the paper
@@ -1237,7 +1249,7 @@ class BatchNorm(Module):
         >>> bn = BatchNorm(input_size=10)
         >>> import cupy as np
         >>> from autograd.tensor import Tensor
-        >>> x = Tensor(np.random.randn(4, 10))
+        >>> x = Tensor(mx.random.randn(4, 10))
         >>> y = bn(x) # Expected: (4, 10)
     """
 
@@ -1263,14 +1275,14 @@ class BatchNorm(Module):
         self.epsilon = epsilon  # small constant for numeric stability
 
         # Running stats (used for inference)
-        self.running_mean = np.zeros(input_size)
-        self.running_var = np.ones(input_size)
+        self.running_mean = mx.zeros(input_size)
+        self.running_var = mx.ones(input_size)
 
         # gamma and beta are learnable parameters
         # gamma is responsible for scaling the normalized input
         # beta is responsible for shifting the normalized input
-        self._parameters["weight"] = Tensor(np.ones(input_size, dtype=np.float32))
-        self._parameters["bias"] = Tensor(np.zeros(input_size, dtype=np.float32))
+        self._parameters["weight"] = Tensor(mx.ones(input_size, dtype=mx.float32))
+        self._parameters["bias"] = Tensor(mx.zeros(input_size, dtype=mx.float32))
 
     def forward(self, x: Tensor) -> Tensor:
         """
@@ -1289,7 +1301,7 @@ class BatchNorm(Module):
             >>> bn = BatchNorm(input_size=10)
             >>> import cupy as np
             >>> from autograd.tensor import Tensor
-            >>> x = Tensor(np.random.randn(4, 10))
+            >>> x = Tensor(mx.random.randn(4, 10))
             >>> y = bn(x) # Expected: (4, 10)
         """
         if self._is_training:
@@ -1297,25 +1309,34 @@ class BatchNorm(Module):
             batch_mean = x.mean(axis=0)
             diff = x - batch_mean
             var = (diff**2).sum(axis=0)
+            batch_size = x.data.shape[0]
 
-            biased_batch_var = var / x.data.shape[0]
-            # Unbiased variance (divide by N-1) is based on Bessel's correction
-            unbiased_batch_var = var / (x.data.shape[0] - 1)
+            biased_batch_var = var / batch_size
             std_dev = (biased_batch_var + self.epsilon) ** 0.5
 
             # Update running statistics
-            self.running_mean = (
-                1 - self.momentum
-            ) * self.running_mean + self.momentum * batch_mean.data
-            self.running_var = (
-                1 - self.momentum
-            ) * self.running_var + self.momentum * unbiased_batch_var.data
+            if batch_size <= 1:
+                logger.warning(
+                    "BatchNorm received batch size 1 during training; "
+                    "skipping running-stat updates for this batch."
+                )
+            else:
+                # Unbiased variance (divide by N-1) is based on Bessel's correction.
+                unbiased_batch_var = var / (batch_size - 1)
+                self.running_mean = (
+                    1 - self.momentum
+                ) * self.running_mean + self.momentum * batch_mean.data
+                self.running_var = (
+                    1 - self.momentum
+                ) * self.running_var + self.momentum * unbiased_batch_var.data
 
             normalized = diff / std_dev
         else:
-            normalized = (x - self.running_mean) / np.sqrt(
-                self.running_var + self.epsilon
+            running_mean = Tensor(self.running_mean, requires_grad=False)
+            running_std = Tensor(
+                mx.sqrt(self.running_var + self.epsilon), requires_grad=False
             )
+            normalized = (x - running_mean) / running_std
 
         # Scale and shift
         return normalized * self._parameters["weight"].expand(
@@ -1335,7 +1356,7 @@ class Dropout(Module):
         >>> dropout = Dropout(p=0.5)
         >>> import cupy as np
         >>> from autograd.tensor import Tensor
-        >>> x = Tensor(np.ones((4, 4)))
+        >>> x = Tensor(mx.ones((4, 4)))
         >>> dropout.train()  # Set to training mode to apply dropout
         >>> y = dropout(x) # Approximately half of the elements should be 0
     """
@@ -1366,11 +1387,11 @@ class Dropout(Module):
             >>> dropout.train()
             >>> import cupy as np
             >>> from autograd.tensor import Tensor
-            >>> x = Tensor(np.ones((2, 2)))
+            >>> x = Tensor(mx.ones((2, 2)))
             >>> y = dropout(x) # Approximately half of the values in y should be zero
         """
         if self._is_training:
-            mask = np.random.binomial(1, 1 - self.p, size=x.data.shape)
+            mask = mx.random.bernoulli(float(1 - self.p), shape=x.data.shape)
             return (
                 x
                 * mask
@@ -1399,9 +1420,9 @@ class ScaledDotProductAttention(Module):
         >>> import cupy as np
         >>> from autograd.tensor import Tensor
         >>> # Create dummy query, key, value tensors with shape (batch_size, num_heads, seq_len, key_dim)
-        >>> query = Tensor(np.random.randn(2, 2, 4, 8))
-        >>> key = Tensor(np.random.randn(2, 2, 4, 8))
-        >>> value = Tensor(np.random.randn(2, 2, 4, 8))
+        >>> query = Tensor(mx.random.randn(2, 2, 4, 8))
+        >>> key = Tensor(mx.random.randn(2, 2, 4, 8))
+        >>> value = Tensor(mx.random.randn(2, 2, 4, 8))
         >>> y = attn(query, key, value) # Expected shape: (2, 2, 4, 8)
     """
 
@@ -1434,9 +1455,9 @@ class ScaledDotProductAttention(Module):
             >>> attn = ScaledDotProductAttention()
             >>> import cupy as np
             >>> from autograd.tensor import Tensor
-            >>> query = Tensor(np.random.randn(2, 2, 4, 8))
-            >>> key = Tensor(np.random.randn(2, 2, 4, 8))
-            >>> value = Tensor(np.random.randn(2, 2, 4, 8))
+            >>> query = Tensor(mx.random.randn(2, 2, 4, 8))
+            >>> key = Tensor(mx.random.randn(2, 2, 4, 8))
+            >>> value = Tensor(mx.random.randn(2, 2, 4, 8))
             >>> output = attn(query, key, value) # Expected: (2, 2, 4, 8)
         """
         attention_size = Tensor(key.shape[-1])
@@ -1466,7 +1487,7 @@ class MultiHeadAttention(Module):
         >>> import cupy as np
         >>> from autograd.tensor import Tensor
         >>> # Create dummy input tensors with shape (batch_size, seq_len, hidden_size)
-        >>> x = Tensor(np.random.randn(2, 5, 16))
+        >>> x = Tensor(mx.random.randn(2, 5, 16))
         >>> output = mha(x, x, x) # Expected: (2, 5, 16)
     """
 
@@ -1514,7 +1535,7 @@ class MultiHeadAttention(Module):
             >>> mha = MultiHeadAttention(num_heads=2, hidden_size=16)
             >>> import cupy as np
             >>> from autograd.tensor import Tensor
-            >>> x = Tensor(np.random.randn(2, 5, 16))
+            >>> x = Tensor(mx.random.randn(2, 5, 16))
             >>> output = mha(x, x, x) # Expected: (2, 5, 16)
         """
         batch_size = query.shape[0]
@@ -1635,7 +1656,7 @@ class AbstractLLMForwardFn(ABC):
 
 
 def extract_windows(
-    x: Union[Tensor, np.ndarray],
+    x: Union[Tensor, ArrayLike],
     kernel_size: int,
     stride: int,
     padding_mode: str = "valid",
@@ -1644,7 +1665,7 @@ def extract_windows(
     Extract sliding windows from the input tensor while maintaining the computational graph.
 
     Args:
-        x (Union[Tensor, np.ndarray]): Input tensor of shape (batch_size, channels, height, width).
+        x (Union[Tensor, mx.ndarray]): Input tensor of shape (batch_size, channels, height, width).
         kernel_size (int): Size of the sliding window.
         stride (int): Step size between windows.
         padding_mode (str, optional): Padding mode ("valid" or "same"). Defaults to "valid".
@@ -1657,7 +1678,7 @@ def extract_windows(
     Examples:
         >>> import cupy as np
         >>> from autograd.tensor import Tensor
-        >>> x = Tensor(np.random.randn(2, 3, 32, 32))
+        >>> x = Tensor(mx.random.randn(2, 3, 32, 32))
         >>> windows, output_shape = extract_windows(x, kernel_size=3, stride=1, padding_mode="same")
         >>> print(windows.data.shape)  # Expected: (H_out, W_out, 2, 3, 3, 3)
         >>> print(output_shape)        # Expected: (32, 32) when padding_mode is "same"

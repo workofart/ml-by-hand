@@ -1,9 +1,11 @@
 import logging
+import math
 from abc import abstractmethod
 from collections import defaultdict
 from typing import Any, Callable, Dict, Optional
 
-from autograd.backend import np
+import mlx.core as mx
+
 from autograd.tensor import Tensor
 
 logger = logging.getLogger(__name__)
@@ -86,7 +88,7 @@ class CosineScheduler(LRScheduler):
         decay_ratio = (step - self.warmup_steps) / (
             self.lr_decay_iters - self.warmup_steps
         )
-        coeff = 0.5 * (1.0 + np.cos(np.pi * decay_ratio))
+        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
         return self.min_lr + coeff * (initial_lr - self.min_lr)
 
 
@@ -247,7 +249,7 @@ class Optimizer:
         for param in self.model_parameters.values():
             if param.grad is not None:
                 grad_data = param.grad.data
-                total_norm += (np.abs(grad_data) ** norm_type).sum()
+                total_norm += (mx.abs(grad_data) ** norm_type).sum().item()
 
         # Take the appropriate root of the total_norm
         total_norm = total_norm ** (1.0 / norm_type)
@@ -462,4 +464,4 @@ class Adam(Optimizer):
             # Weight decay step (decoupled)
             if weight_decay > 0.0:
                 param.data = param.data - self.lr * weight_decay * param.data
-            param.data -= self.lr * m_hat / (np.sqrt(v_hat) + epsilon)
+            param.data -= self.lr * m_hat / (mx.sqrt(v_hat) + epsilon)

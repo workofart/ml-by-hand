@@ -2,7 +2,8 @@ import re
 from unittest import TestCase
 from unittest.mock import MagicMock, patch
 
-from autograd.backend import np
+import mlx.core as mx
+
 from autograd.text.utils import (
     clean_and_tokenize,
     create_causal_mask,
@@ -80,12 +81,12 @@ class TestTextUtils(TestCase):
         self.assertEqual(matrix[0, 3], pad_idx)
 
     def test_create_padding_mask_default_dims(self):
-        token_indices = np.array(
+        token_indices = mx.array(
             [
                 [1, 2, 0, 0],  # 0 => pad
                 [3, 4, 5, 0],
             ],
-            dtype=np.int32,
+            dtype=mx.int32,
         )
 
         mask = create_padding_mask(token_indices, pad_idx=0, dims=None)
@@ -94,11 +95,11 @@ class TestTextUtils(TestCase):
 
         # 1.0 where token_indices==0
         # first row => positions 2,3 are 1
-        np.testing.assert_array_equal(mask[0, 0, 0], [0, 0, 1, 1])
-        np.testing.assert_array_equal(mask[1, 0, 0], [0, 0, 0, 1])
+        assert mx.array_equal(mask[0, 0, 0], mx.array([0, 0, 1, 1]))
+        assert mx.array_equal(mask[1, 0, 0], mx.array([0, 0, 0, 1]))
 
     def test_create_padding_mask_custom_dims(self):
-        token_indices = np.array([[1, 0, 0], [2, 2, 0]], dtype=np.int32)
+        token_indices = mx.array([[1, 0, 0], [2, 2, 0]], dtype=mx.int32)
 
         # Suppose we want dims = (batch_size, 1, 3)
         # i.e. (2, 1, 3) => effectively shape for broadcasting
@@ -106,9 +107,9 @@ class TestTextUtils(TestCase):
 
         self.assertEqual(mask.shape, (2, 1, 3))
         # For first row => [1,0,0] => pad=0 => positions 1,2 => mask=1 => [0,1,1]
-        np.testing.assert_array_equal(mask[0, 0], [0, 1, 1])
+        assert mx.array_equal(mask[0, 0], mx.array([0, 1, 1]))
         # For second row => [2,2,0] => only last is 0 => [0,0,1]
-        np.testing.assert_array_equal(mask[1, 0], [0, 0, 1])
+        assert mx.array_equal(mask[1, 0], mx.array([0, 0, 1]))
 
     def test_create_causal_mask_lookforward(self):
         seq_len = 4
@@ -121,12 +122,12 @@ class TestTextUtils(TestCase):
         self.assertEqual(mask.shape, (2, 1, 4, 4))
         # For lookforward, upper triangle is masked.
         # Because mask_diagonal=True, diagonal is included in the mask.
-        expected_single = np.array(
-            [[1, 1, 1, 1], [0, 1, 1, 1], [0, 0, 1, 1], [0, 0, 0, 1]], dtype=np.float32
+        expected_single = mx.array(
+            [[1, 1, 1, 1], [0, 1, 1, 1], [0, 0, 1, 1], [0, 0, 0, 1]], dtype=mx.float32
         )
 
         for b in range(batch_size):
-            np.testing.assert_array_equal(mask[b, 0], expected_single)
+            assert mx.array_equal(mask[b, 0], expected_single)
 
         mask = create_causal_mask(
             seq_len, batch_size, lookback=False, mask_diagonal=False
@@ -136,12 +137,12 @@ class TestTextUtils(TestCase):
         self.assertEqual(mask.shape, (2, 1, 4, 4))
         # For lookforward, upper triangle is not masked.
         # Because mask_diagonal=False, diagonal is not included in the mask.
-        expected_single = np.array(
-            [[0, 1, 1, 1], [0, 0, 1, 1], [0, 0, 0, 1], [0, 0, 0, 0]], dtype=np.float32
+        expected_single = mx.array(
+            [[0, 1, 1, 1], [0, 0, 1, 1], [0, 0, 0, 1], [0, 0, 0, 0]], dtype=mx.float32
         )
 
         for b in range(batch_size):
-            np.testing.assert_array_equal(mask[b, 0], expected_single)
+            assert mx.array_equal(mask[b, 0], expected_single)
 
     def test_create_causal_mask_lookback(self):
         seq_len = 3
@@ -152,18 +153,18 @@ class TestTextUtils(TestCase):
         # shape => (1, 1, 3, 3)
         # For lookback, we mask the lower triangle.  mask_diagonal=False => diagonal is not masked.
         # So the result should mask strictly below diagonal
-        expected = np.array([[[[0, 0, 0], [1, 0, 0], [1, 1, 0]]]], dtype=np.float32)
+        expected = mx.array([[[[0, 0, 0], [1, 0, 0], [1, 1, 0]]]], dtype=mx.float32)
         self.assertEqual(mask.shape, (1, 1, 3, 3))
-        np.testing.assert_array_equal(mask, expected)
+        assert mx.array_equal(mask, expected)
 
         mask = create_causal_mask(
             seq_len, batch_size, lookback=True, mask_diagonal=True
         )
         # For lookback, we mask the lower triangle.  mask_diagonal=True => diagonal is masked.
         # So the result should mask including diagonal
-        expected = np.array([[[[1, 0, 0], [1, 1, 0], [1, 1, 1]]]], dtype=np.float32)
+        expected = mx.array([[[[1, 0, 0], [1, 1, 0], [1, 1, 1]]]], dtype=mx.float32)
         self.assertEqual(mask.shape, (1, 1, 3, 3))
-        np.testing.assert_array_equal(mask, expected)
+        assert mx.array_equal(mask, expected)
 
     def test_clean_and_tokenize_default(self):
         text = "Hello, World! (Testing) \n new-lines?"
@@ -194,11 +195,11 @@ class TestTextUtils(TestCase):
         self.assertIn(",", tokens)
         self.assertIn("!", tokens)
 
-    @patch("numpy.random.choice")
+    @patch("autograd.text.utils.mx.random.categorical")
     def test_normal_inference(self, mock_choice):
         """
         In normal (auto-regressive) mode, we expect the inference loop to use sampling.
-        We patch np.random.choice to always return 1. Also, we simulate the prediction_func
+        We patch mx.random.categorical to always return 1. Also, we simulate the prediction_func
         with a MagicMock that returns a dummy object with a proper 'data' attribute.
         """
 
@@ -206,8 +207,8 @@ class TestTextUtils(TestCase):
             # Determine the current sequence length.
             seq_len = batch_data.shape[1]
             # Build a dummy array of shape (1, seq_len, vocab_size); the values don't matter
-            # because np.random.choice is patched.
-            dummy_arr = np.zeros((1, seq_len, 10))
+            # because mx.random.categorical is patched.
+            dummy_arr = mx.zeros((1, seq_len, 10))
             dummy_obj = MagicMock()
             dummy_obj.data = dummy_arr
             return dummy_obj
@@ -239,11 +240,11 @@ class TestTextUtils(TestCase):
     def test_teacher_forcing_inference(self):
         """
         In teacher forcing mode, the inference function should use argmax (temperature=0).
-        We simulate a prediction function that returns dummy logits such that np.argmax
+        We simulate a prediction function that returns dummy logits such that mx.argmax
         returns the next groundtruth token.
         For groundtruth [0, 1, 2, 3], we expect the output tokens to be 0 then 1, 2, and 3.
         """
-        groundtruth = np.array([0, 1, 2, 3])
+        groundtruth = mx.array([0, 1, 2, 3])
 
         def fake_prediction_teacher(model, batch_data, mode):
             # x is an array of shape (1, seq_len). The current seq_len tells us which token to predict.
@@ -253,10 +254,10 @@ class TestTextUtils(TestCase):
                 seq_len
             ]  # e.g., for seq_len=1, predict groundtruth[1] which is 1.
             # Create logits with a high value at the desired token.
-            logits = np.full(10, -100.0)
+            logits = mx.full(10, -100.0)
             logits[token] = 100.0
             # Build an array of shape (1, seq_len, 10) and place logits at the last position.
-            pred_arr = np.zeros((1, seq_len, 10))
+            pred_arr = mx.zeros((1, seq_len, 10))
             pred_arr[0, -1] = logits
             mock_tensor = MagicMock()
             mock_tensor.data = pred_arr
@@ -285,7 +286,7 @@ class TestTextUtils(TestCase):
         If groundtruth_data contains only one token, the inference loop should not be entered.
         The output should exactly match the decoded single token, and the prediction function should not be called.
         """
-        groundtruth = np.array([65])
+        groundtruth = mx.array([65])
         prediction_func = MagicMock()
         result = inference(
             model=MagicMock(),

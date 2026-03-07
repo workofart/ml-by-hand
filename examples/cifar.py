@@ -47,10 +47,10 @@ class CifarMulticlassClassifier(nn.Module):
         and finally outputs raw logits.
 
         Args:
-            x (np.ndarray): A batch of flattened CIFAR-10 images of shape (batch_size, 3072).
+            x: A batch of flattened CIFAR-10 images of shape (batch_size, 3072).
 
         Returns:
-            np.ndarray: Logits of shape (batch_size, num_classes).
+            Tensor: Logits of shape (batch_size, num_classes).
         """
         x = functional.relu(self.bn1(self.h1(x)))
         x = self.dropout(x)
@@ -92,10 +92,10 @@ class CifarResNet(nn.Module):
         Finally, the output is flattened and passed through a linear layer.
 
         Args:
-            x (np.ndarray): A batch of flattened CIFAR-10 images of shape (batch_size, 3072).
+            x: A batch of flattened CIFAR-10 images of shape (batch_size, 3072).
 
         Returns:
-            np.ndarray: Logits of shape (batch_size, num_classes).
+            Tensor: Logits of shape (batch_size, num_classes).
         """
         batch_size = x.shape[0]
         x = x.reshape(batch_size, 3, 32, 32)  # (N, in_channels, H, W)
@@ -153,10 +153,10 @@ class CifarConvolutionalClassifier(nn.Module):
         mapped to class logits via a linear layer.
 
         Args:
-            x (np.ndarray): A batch of flattened CIFAR-10 images of shape (batch_size, 3072).
+            x: A batch of flattened CIFAR-10 images of shape (batch_size, 3072).
 
         Returns:
-            np.ndarray: Logits of shape (batch_size, num_classes).
+            Tensor: Logits of shape (batch_size, num_classes).
         """
         batch_size = x.shape[0]
         # cifar-10 image has shape 32 x 32 x 3 (color channels)

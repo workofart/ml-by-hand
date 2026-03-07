@@ -1,23 +1,16 @@
 import logging
 
-from autograd.tools.config_schema import GenericTrainingConfig
-
-try:
-    # drop-in replacement for numpy for GPU acceleration
-    import cupy as np  # type: ignore
-
-    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
-except Exception:
-    import numpy as np
+import mlx.core as mx
 from openml.datasets import get_dataset
 
 from autograd import functional, nn, optim
+from autograd.tools.config_schema import GenericTrainingConfig
 from autograd.tools.data import SimpleDataLoader, train_test_split
 from autograd.tools.metrics import accuracy, precision
 from autograd.tools.trainer import SimpleTrainer
 
 logger = logging.getLogger(__name__)
-np.random.seed(1337)
+mx.random.seed(1337)
 
 
 class MnistResNet(nn.Module):
@@ -53,11 +46,11 @@ class MnistResNet(nn.Module):
         Forward pass of the MnistResNet network.
 
         Args:
-            x (np.ndarray): A batch of MNIST images of shape (N, 784),
+            x: A batch of MNIST images of shape (N, 784),
                 which is reshaped to (N, 1, 28, 28) for further processing.
 
         Returns:
-            np.ndarray: Logits of shape (N, 10).
+            Tensor: Logits of shape (N, 10).
         """
         batch_size = x.shape[0]
         x = x.reshape(batch_size, 1, 28, 28)  # (N, in_channels, H, W)
@@ -99,10 +92,10 @@ class MnistMultiClassClassifier(nn.Module):
         Forward pass of the MnistMultiClassClassifier network.
 
         Args:
-            x (np.ndarray): Batch of MNIST images (N, 784).
+            x: Batch of MNIST images (N, 784).
 
         Returns:
-            np.ndarray: Output logits (N, 10).
+            Tensor: Output logits (N, 10).
         """
         x = self.h1(x)
         if self.batch_norm:
@@ -162,11 +155,11 @@ class MnistConvolutionalClassifier(nn.Module):
         Forward pass of the MnistConvolutionalClassifier network.
 
         Args:
-            x (np.ndarray): A batch of MNIST images of shape (N, 784),
+            x: A batch of MNIST images of shape (N, 784),
                 reshaped internally to (N, 1, 28, 28).
 
         Returns:
-            np.ndarray: Output logits (N, 10).
+            Tensor: Output logits (N, 10).
         """
         batch_size = x.shape[0]
         x = x.reshape(batch_size, 1, 28, 28)  # (N, in_channels, H, W)
@@ -213,11 +206,11 @@ class MnistOneVsRestBinaryClassifier(nn.Module):
         Forward pass for the one-vs-rest binary classifier.
 
         Args:
-            x (np.ndarray): Input data of shape (N, 784) representing MNIST images.
+            x: Input data of shape (N, 784) representing MNIST images.
 
         Returns:
-            np.ndarray: If output_logits is True, shape is (N, 1) of raw logits.
-                        Otherwise, shape is (N, 1) of post-sigmoid probabilities.
+            Tensor: If output_logits is True, shape is (N, 1) of raw logits.
+                Otherwise, shape is (N, 1) of post-sigmoid probabilities.
         """
         x = functional.relu(self.h1(x))
         x = functional.relu(self.h2(x))
@@ -239,10 +232,10 @@ def train_mnist_with_hinge_loss(
     MnistOneVsRestBinaryClassifier models, each trained with hinge loss.
 
     Args:
-      X_train (np.ndarray): Training images, shaped (N, 784) for N samples.
-      y_train (np.ndarray): Training labels, shaped (N,).
-      X_test (np.ndarray): Test images, shaped (M, 784).
-      y_test (np.ndarray): Test labels, shaped (M,).
+      X_train: Training images, shaped (N, 784) for N samples.
+      y_train: Training labels, shaped (N,).
+      X_test: Test images, shaped (M, 784).
+      y_test: Test labels, shaped (M,).
       batch_size (int): Batch size for training each classifier.
       epochs (int): Number of epochs to train each classifier.
 
@@ -295,10 +288,10 @@ def train_mnist_with_hinge_loss(
         one_vs_rest_models.append(trainer.model)
 
     logger.info("Training complete! Now evaluating on the original test set...")
-    predictions_by_digit = np.array(
+    predictions_by_digit = mx.array(
         [model(X_test).data for model in one_vs_rest_models]
     )
-    predictions_by_digit = np.transpose(predictions_by_digit, (1, 0, 2)).squeeze(-1)
+    predictions_by_digit = mx.transpose(predictions_by_digit, (1, 0, 2)).squeeze(-1)
     pred_digits = predictions_by_digit.argmax(axis=1)
     acc_val = accuracy(pred_digits, y_test.astype(int))
     prec_val = precision(pred_digits, y_test.astype(int))
@@ -318,10 +311,10 @@ def train_mnist_one_vs_rest_model(
     MnistOneVsRestBinaryClassifier models, each trained with binary cross-entropy.
 
     Args:
-      X_train (np.ndarray): Training images, shaped (N, 784).
-      y_train (np.ndarray): Training labels (N,).
-      X_test (np.ndarray): Test images, shaped (M, 784).
-      y_test (np.ndarray): Test labels (M,).
+      X_train: Training images, shaped (N, 784).
+      y_train: Training labels (N,).
+      X_test: Test images, shaped (M, 784).
+      y_test: Test labels (M,).
       batch_size (int): Batch size for training each classifier.
       epochs (int): Number of epochs to train each classifier.
 
@@ -374,10 +367,10 @@ def train_mnist_one_vs_rest_model(
         one_vs_rest_models.append(trainer.model)
 
     logger.info("Training complete! Now evaluating on the original test set...")
-    predictions_by_digit = np.array(
+    predictions_by_digit = mx.array(
         [model(X_test).data for model in one_vs_rest_models]
     )
-    predictions_by_digit = np.transpose(predictions_by_digit, (1, 0, 2)).squeeze(-1)
+    predictions_by_digit = mx.transpose(predictions_by_digit, (1, 0, 2)).squeeze(-1)
     pred_digits = predictions_by_digit.argmax(axis=1)
     acc_val = accuracy(pred_digits, y_test.astype(int))
     prec_val = precision(pred_digits, y_test.astype(int))

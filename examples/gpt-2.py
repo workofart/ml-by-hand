@@ -1,13 +1,7 @@
 import logging
 from typing import Any, Optional
 
-try:
-    # drop-in replacement for numpy for GPU acceleration
-    import cupy as np  # type: ignore
-
-    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
-except Exception:
-    import numpy as np
+import mlx.core as mx
 
 from autograd import functional, nn, optim
 from autograd.tensor import Tensor
@@ -86,8 +80,8 @@ class GPT2(nn.Module):
         batch_size, seq_len = tokens.shape
 
         # Create positions [0,1,2,...,seq_len-1], repeated for each batch
-        positions = np.arange(seq_len)  # shape (seq_len, )
-        positions = np.tile(positions, (batch_size, 1))  # shape (batch_size, seq_len)
+        positions = mx.arange(seq_len)  # shape (seq_len, )
+        positions = mx.tile(positions, (batch_size, 1))  # shape (batch_size, seq_len)
 
         token_emb = self.token_embedding(tokens)  # shape: (batch, seq_len, hidden_dim)
         pos_emb = self.position_embedding(
@@ -119,7 +113,7 @@ class GPT2(nn.Module):
         so we want to prevent outputs from blowing up in magnitude early in training.
         """
         if module.__class__.__name__ == "Linear":
-            module.parameters["weight"] /= np.sqrt(number_of_layers)
+            module.parameters["weight"] /= mx.sqrt(number_of_layers)
 
 
 class DecoderSublayer(nn.Module):
@@ -321,7 +315,7 @@ if __name__ == "__main__":
     )
 
     train_data_loader = LLMDataLoader(
-        data=np.array(train_data),
+        data=mx.array(train_data),
         bpe=bpe,
         batch_size=CONFIG.batch_size,
         seq_len=trainer.model.max_seq_len,
@@ -331,7 +325,7 @@ if __name__ == "__main__":
         create_padding_masks=CONFIG.create_padding_masks,
     )
     test_data_loader = LLMDataLoader(
-        data=np.array(test_data),
+        data=mx.array(test_data),
         bpe=bpe,
         batch_size=CONFIG.batch_size // 2,
         seq_len=trainer.model.max_seq_len,

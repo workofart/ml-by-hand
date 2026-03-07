@@ -2,12 +2,12 @@ import logging
 import os
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple, cast
 
+import mlx.core as mx
 from tqdm import tqdm
 
 from autograd import nn, optim
-from autograd.backend import np
 from autograd.tensor import Tensor
 from autograd.text import utils as text_utils
 from autograd.tools.config_schema import (
@@ -166,12 +166,18 @@ class AbstractTrainer(ABC):
         run_name = self.config.training_run_name or "default"
         filename = f"{self.model.__class__.__name__}_{run_name}.npz"
         path = os.path.join(self.METRICS_DIR, filename)
-        metrics_np = {k: np.array(v) for k, v in self.metrics.items()}
-        np.savez_compressed(path, **metrics_np)
+        metrics_mx = {}
+        for key, values in self.metrics.items():
+            if any(value is None for value in values):
+                values = [float("nan") if value is None else value for value in values]
+                metrics_mx[key] = mx.asarray(values, dtype=mx.float32)
+            else:
+                metrics_mx[key] = mx.asarray(values)
+        mx.savez_compressed(path, **metrics_mx)
         logger.info(f"Saved training metrics to {path}")
 
     @abstractmethod
-    def train_step(self, batch_data) -> float:
+    def train_step(self, batch_data, data_loader=None) -> float:
         """Performs a single training step and returns the loss as a float.
 
         Subclasses must implement the forward pass, loss computation, and backward pass here.
@@ -430,15 +436,16 @@ class SimpleTrainer(AbstractTrainer):
         avg_val_loss = total_loss / max(batch_count, 1)
 
         # Compute additional metrics for classification or regression
-        y_pred_full = np.concatenate([p.data for p in all_preds], axis=0)
-        y_true_full = np.concatenate([t.data for t in all_targets], axis=0)
+        y_pred_full = mx.concatenate([p.data for p in all_preds], axis=0)
+        y_true_full = mx.concatenate(all_targets, axis=0)
 
         if self.problem_type == "classification":
             y_pred_proc, y_true_proc = self._post_process_classification(
                 y_pred_full, y_true_full
             )
             acc_val = accuracy(
-                y_pred_proc.reshape(-1), y_true_proc.reshape(-1).astype(int)
+                mx.asarray(y_pred_proc).reshape(-1),
+                mx.array(y_true_proc, dtype=mx.int32).reshape(-1),
             )
             self.metrics["val_accuracy"].append(acc_val)
 
@@ -446,10 +453,15 @@ class SimpleTrainer(AbstractTrainer):
                 self.sample_predictions
                 and epoch % (self.config.total_epochs // 10) == 0
             ):
-                logger.info("Sample Predictions on Validation Batch:")
-                for i in range(min(5, len(y_pred_proc))):
+                sample_count = min(5, len(y_pred_proc))
+                if sample_count > 0:
+                    sample_lines = [
+                        f"Predicted: {y_pred_proc[i]}\nActual: {y_true_proc[i]}"
+                        for i in range(sample_count)
+                    ]
                     logger.info(
-                        f"\nPredicted: {y_pred_proc[i]}\nActual: {y_true_proc[i]}"
+                        "Sample Predictions on Validation Batch:\n"
+                        + "\n".join(sample_lines)
                     )
 
         else:
@@ -459,26 +471,23 @@ class SimpleTrainer(AbstractTrainer):
         self.model.train()
         return avg_val_loss
 
-    def _post_process_classification(self, y_pred, y_true):
+    def _post_process_classification(
+        self, y_pred: mx.array, y_true: mx.array
+    ) -> Tuple[mx.array, mx.array]:
         """Post-processes outputs for classification tasks.
 
         Args:
-            y_pred (np.ndarray): Predicted logits or probabilities.
-            y_true (np.ndarray): Ground truth labels.
+            y_pred: Predicted logits or probabilities as an MLX array.
+            y_true: Ground truth labels as an MLX array.
 
         Returns:
-            Tuple[np.ndarray, np.ndarray]: Processed predictions and targets
+            Tuple[Any, Any]: Processed predictions and targets
                 (e.g., for use in accuracy calculation).
         """
-        if isinstance(y_pred, Tensor):
-            y_pred = y_pred.data
-        if isinstance(y_true, Tensor):
-            y_true = y_true.data
-
         if self.output_type in ["logits", "softmax"]:
-            return np.argmax(y_pred, axis=-1), y_true
+            return mx.argmax(y_pred, axis=-1), y_true
         elif self.output_type == "sigmoid":
-            return (y_pred >= 0.5).astype(int), (y_true >= 0.5).astype(int)
+            return (y_pred >= 0.5).astype(mx.int32), (y_true >= 0.5).astype(mx.int32)
         else:
             return y_pred, y_true
 
@@ -576,6 +585,9 @@ class LLMTrainer(AbstractTrainer):
             **kwargs: Additional arguments passed to the parent trainer.
         """
         super().__init__(model_cls, optimizer_cls, loss_fn, config=config, **kwargs)
+        self.config: TransformerTrainingConfig = cast(
+            TransformerTrainingConfig, self.config
+        )
         self.forward_fn = forward_fn
 
     def train_step(self, batch_data, data_loader) -> float:
@@ -598,7 +610,7 @@ class LLMTrainer(AbstractTrainer):
             pred_probs,
             y,
             pad_idx=data_loader.pad_idx,
-            label_smoothing=self.config.label_smoothing,  # type: ignore
+            label_smoothing=self.config.label_smoothing,
         )
         loss.backward()
         return float(loss.detach().data)

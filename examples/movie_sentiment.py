@@ -1,14 +1,7 @@
+import logging
 import os
 
-try:
-    # drop-in replacement for numpy for GPU acceleration
-    import cupy as np  # type: ignore
-
-    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
-except Exception:
-    import numpy as np
-import logging
-
+import mlx.core as mx
 import pandas as pd
 
 from autograd import functional, nn, optim
@@ -20,8 +13,10 @@ from autograd.tools.data import (
 )
 from autograd.tools.trainer import SimpleTrainer
 
+logger = logging.getLogger(__name__)
 
-def process_data(data: np.ndarray):
+
+def process_data(data):
     """
     Processes raw text and sentiment label data for movie sentiment analysis.
 
@@ -31,19 +26,14 @@ def process_data(data: np.ndarray):
     Finally, it splits the features and labels into training and testing sets.
 
     Args:
-        data (np.ndarray): A 2D numpy array where the first column contains text and the second column contains sentiment labels.
+        data: A 2D array-like object where the first column contains text and the second column contains sentiment labels.
 
     Returns:
-        Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict[str, int]]:
-            - X_train: One-hot encoded training features.
-            - X_test: One-hot encoded testing features.
-            - y_train: Training labels as binary integers.
-            - y_test: Testing labels as binary integers.
-            - vocab: The vocabulary mapping words to integer indices.
+        A tuple containing train/test features, train/test labels, and the vocabulary map.
     """
     vocab = create_vocabulary(data[:, 0], max_features=6000)
     features, _ = text_to_one_hot_and_sparse(data[:, 0], vocab, max_sequence_length=25)
-    labels = np.array([1 if label == "positive" else 0 for label in data[:, 1]])
+    labels = mx.array([1 if label == "positive" else 0 for label in data[:, 1]])
 
     X_train, X_test, y_train, y_test = train_test_split(features, labels, test_size=0.1)
 
@@ -82,10 +72,10 @@ class RNN(nn.Module):
         Compute the forward pass of the RNN model.
 
         Args:
-            x (np.ndarray): The input tensor for the recurrent network.
+            x: The input tensor for the recurrent network.
 
         Returns:
-            np.ndarray: The output probability produced by applying sigmoid to the linear layer.
+            Tensor: The output probability produced by applying sigmoid to the linear layer.
         """
         x = self.rnn(x)
         x = self.batchnorm(x)
@@ -127,10 +117,10 @@ class LSTM(nn.Module):
         Compute the forward pass of the LSTM model.
 
         Args:
-            x (np.ndarray): The input tensor for the LSTM, expected to be sequential.
+            x: The input tensor for the LSTM, expected to be sequential.
 
         Returns:
-            np.ndarray: The output probability computed by applying a sigmoid activation.
+            Tensor: The output probability computed by applying a sigmoid activation.
         """
         x, C_t = self.rnn(x)  # hidden_state, last_cell_state
         x = self.batchnorm(x)
@@ -177,7 +167,7 @@ if __name__ == "__main__":
 
     The script performs the following steps:
       1) Checks if the IMDB Dataset CSV file exists locally; if not, downloads and extracts it.
-      2) Reads the dataset using pandas and converts it to a NumPy array.
+      2) Reads the dataset using pandas and converts it to an array for preprocessing.
       3) Processes the data by creating a vocabulary from the review texts, converting the texts to one-hot
          encoded features (with fixed sequence length), and mapping sentiment labels to binary values.
       4) Splits the processed data into training and testing sets.
@@ -186,8 +176,6 @@ if __name__ == "__main__":
       7) Trains the RNN model followed by the LSTM model using the main training function.
       8) Logs training progress, checkpoints, and evaluation metrics.
     """
-    logger = logging.getLogger(__name__)
-
     # Check if data exist; if not, download and extract.
     if not os.path.exists("training_data/IMDB Dataset.csv"):
         print("Downloading data...")

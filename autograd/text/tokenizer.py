@@ -3,12 +3,11 @@ import os
 import pickle
 from collections import Counter
 from multiprocessing import Pool, cpu_count
-from typing import ByteString, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
+import mlx.core as mx
 import regex
 from tqdm import tqdm
-
-from autograd.backend import np
 
 logger = logging.getLogger(__name__)
 
@@ -53,9 +52,9 @@ class BytePairEncoder:
         self.encoded_data_path = encoded_data_path
 
         # For storing vocab: char -> int
-        self._unicode_to_int_vocab: Dict[ByteString, int] = {}
+        self._unicode_to_int_vocab: Dict[bytes, int] = {}
         # For storing reverse vocab: int -> char
-        self._int_to_unicode_vocab: Dict[int, ByteString] = {}
+        self._int_to_unicode_vocab: Dict[int, bytes] = {}
         # Store merges: list of ((tokenA, tokenB), new_id)
         self.learned_merges: List[Tuple[Tuple[int, int], int]] = []
 
@@ -123,11 +122,11 @@ class BytePairEncoder:
             }
             self.learned_merges = []
 
-    def _construct_unicode_to_int_vocab(self) -> Dict[ByteString, int]:
+    def _construct_unicode_to_int_vocab(self) -> Dict[bytes, int]:
         """Constructs a base vocabulary for all single-byte values plus special tokens.
 
         Returns:
-            Dict[ByteString, int]: A dictionary mapping each single-byte (0..255) and special tokens
+            Dict[bytes, int]: A dictionary mapping each single-byte (0..255) and special tokens
             to unique integer IDs.
 
         Examples:
@@ -135,7 +134,7 @@ class BytePairEncoder:
             >>> vocab = bpe._construct_unicode_to_int_vocab()
             >>> print(list(vocab.items())[:5])  # Show first 5 items in the vocabulary
         """
-        unicode_to_int_vocab: Dict[ByteString, int] = {}
+        unicode_to_int_vocab: Dict[bytes, int] = {}
         for i in range(256):
             unicode_to_int_vocab[bytes([i])] = i
         # Add special tokens
@@ -149,12 +148,12 @@ class BytePairEncoder:
         overwrite_vocabulary_file: bool = False,
         overwrite_encoded_data: bool = False,
         split_token: str = "<|endoftext|>",
-    ) -> np.ndarray:
-        """Trains and applies BPE on raw_text, returning encoded token IDs as a NumPy array.
+    ) -> Any:
+        """Trains and applies BPE on raw_text, returning encoded token IDs as an array.
 
         This method:
           1) Trains (or loads) the BPE vocabulary on the given raw_text.
-          2) Encodes the text into a NumPy array of token IDs (in parallel).
+          2) Encodes the text into an array of token IDs (in parallel).
           3) Caches the result to an .npz file unless already existing and not overwritten.
 
         Args:
@@ -164,7 +163,7 @@ class BytePairEncoder:
             split_token (str): A token (usually in SPECIAL_TOKENS) used as a delimiter.
 
         Returns:
-            np.ndarray: An array of token IDs representing the BPE-encoded text.
+            Any: An array of token IDs representing the BPE-encoded text.
 
         Example:
             >>> raw_text = "Hello world! This is a test."
@@ -182,8 +181,8 @@ class BytePairEncoder:
                 f"Found existing encoded data at '{self.encoded_data_path}', "
                 f"loading it instead of re-encoding."
             )
-            with np.load(self.encoded_data_path, allow_pickle=True) as npz_data:
-                encoded_data = npz_data["arr_0"]
+            encoded_archive = cast(dict[str, mx.array], mx.load(self.encoded_data_path))
+            encoded_data = encoded_archive["arr_0"]
         else:
             # 3) Parallel encoding
             chunk_size = max(1, len(raw_text) // self.n_workers)
@@ -195,14 +194,14 @@ class BytePairEncoder:
             with Pool(self.n_workers) as pool:
                 partial_encoded = pool.map(self.encode, text_chunks)
 
-            encoded_data = np.array([], dtype=np.int32)
+            encoded_data = mx.array([], dtype=mx.int32)
             for part in partial_encoded:
-                encoded_data = np.concatenate(
-                    (encoded_data, np.array(part, dtype=np.int32))
+                encoded_data = mx.concatenate(
+                    [encoded_data, mx.array(part, dtype=mx.int32)]
                 )
 
             # 4) Save to disk
-            np.savez_compressed(self.encoded_data_path, encoded_data)
+            mx.savez_compressed(self.encoded_data_path, arr_0=encoded_data)
 
         logger.info(f"Vocabulary size: {len(self._unicode_to_int_vocab)}")
         logger.info(f"Encoded data length: {len(encoded_data)}")
@@ -212,7 +211,7 @@ class BytePairEncoder:
 
     def train_vocabulary(
         self, input_text: str, overwrite_saved_file: bool = False
-    ) -> Tuple[Dict[ByteString, int], Dict[int, ByteString]]:
+    ) -> Tuple[Dict[bytes, int], Dict[int, bytes]]:
         """Trains the BPE vocabulary on the given input_text.
 
         The learned merges and vocabulary are saved to `vocab_file_path`.
@@ -222,7 +221,7 @@ class BytePairEncoder:
             overwrite_saved_file (bool): If True, re-trains and overwrites any existing vocabulary file.
 
         Returns:
-            Tuple[Dict[ByteString, int], Dict[int, ByteString]]:
+            Tuple[Dict[bytes, int], Dict[int, bytes]]:
                 A tuple containing:
                 - A dictionary mapping byte sequences or special tokens to integer IDs.
                 - A dictionary mapping integer IDs back to byte sequences.
@@ -264,7 +263,7 @@ class BytePairEncoder:
             if not pair_counts:
                 break
 
-            best_pair = max(pair_counts, key=pair_counts.get)
+            best_pair = max(pair_counts, key=pair_counts.__getitem__)
             best_pair_count = pair_counts[best_pair]
 
             # If best pair is not frequent enough, stop merging
@@ -373,7 +372,7 @@ class BytePairEncoder:
         """
         result_bytes = []
         for t in encoded_tokens:
-            if isinstance(t, np.ndarray):  # handle NumPy scalar
+            if not isinstance(t, int) and hasattr(t, "item"):  # handle array scalars
                 t = t.item()
             if t in self._int_to_unicode_vocab:
                 result_bytes.append(self._int_to_unicode_vocab[t])
@@ -519,7 +518,7 @@ class BytePairEncoder:
     # ------------- Some helper functions for building vocabulary and encoding data ----------
     @staticmethod
     def _merge_pairs(
-        pair: Tuple[int, int], new_idx: int, corpus: List[int]
+        pair: Tuple[int, int], new_idx: int, corpus: Sequence[int]
     ) -> Tuple[int, ...]:
         """Merges occurrences of `pair` in a list of token IDs with the token ID `new_idx`.
 

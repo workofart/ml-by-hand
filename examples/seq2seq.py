@@ -1,10 +1,3 @@
-try:
-    # drop-in replacement for numpy for GPU acceleration
-    import cupy as np  # type: ignore
-
-    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
-except Exception:
-    import numpy as np
 from autograd import functional, nn, optim, tensor
 from autograd.text.utils import create_vocabulary, text_to_one_hot_and_sparse
 from autograd.tools.config_schema import GenericTrainingConfig
@@ -79,7 +72,7 @@ class Seq2Seq(nn.Module):
         output is projected to logits via a linear layer.
 
         Args:
-            x (np.ndarray): Input tensor of shape (batch_size, sequence_length, input_size).
+            x: Input tensor of shape (batch_size, sequence_length, input_size).
 
         Returns:
             Tensor: A tensor of shape (batch_size, max_output_len, input_size) containing the output logits.
@@ -98,13 +91,13 @@ class Seq2Seq(nn.Module):
             output.append(logits)
             # TODO: If all the predicted tokens in the batch are <EOS>,
             # we can stop decoding the batch
-            # pred_token_indices = np.argmax(functional.softmax(logits).data, axis=1)
-            # if np.all(pred_token_indices == 0):
+            # pred_token_indices = logits.data.argmax(axis=1)
+            # if (pred_token_indices == 0).all():
             #     break
         return tensor.Tensor.stack(output, axis=1)
 
 
-def parse_data_into_xy(data: np.ndarray):
+def parse_data_into_xy(data):
     """
     Parse raw input data into source and target sequences for the Seq2Seq model.
 
@@ -116,7 +109,7 @@ def parse_data_into_xy(data: np.ndarray):
         - Reversing the order of the articles to potentially shorten the gradient path during training.
 
     Args:
-        data (np.ndarray): A numpy array containing the dataset, where the summary is in column index 2 and the article is in column index 3.
+        data: An array-like dataset where the summary is in column index 2 and the article is in column index 3.
 
     Returns:
         Tuple[List[str], List[str]]:

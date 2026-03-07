@@ -1,10 +1,4 @@
-try:
-    # drop-in replacement for numpy for GPU acceleration
-    import cupy as np  # type: ignore
-
-    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
-except Exception:
-    import numpy as np
+import mlx.core as mx
 
 from autograd import functional, nn, optim
 from autograd.tensor import Tensor
@@ -48,7 +42,7 @@ class Memory:
             batch_size (int): The number of samples in the batch. Defaults to 1.
         """
         self._memory = Tensor(
-            data=np.zeros((batch_size, self.memory_length, self.memory_dim)),
+            data=mx.zeros((batch_size, self.memory_length, self.memory_dim)),
             requires_grad=False,
         )
 
@@ -264,7 +258,7 @@ class NeuralTuringMachine(nn.Module):
             outputs:           (batch_size, seq_len, output_size)
 
         Args:
-            x (np.ndarray): Input tensor of shape (batch_size, sequence_length, input_size).
+            x: Input tensor of shape (batch_size, sequence_length, input_size).
 
         Returns:
             Tensor: Stacked outputs from each time step, of shape (batch_size, sequence_length, output_size).
@@ -272,10 +266,10 @@ class NeuralTuringMachine(nn.Module):
         batch_size, seq_len, input_size = x.shape
         self.memory.reset_memory(batch_size)
 
-        h_t = Tensor(np.zeros((batch_size, self.hidden_size)))
-        cell_state = Tensor(np.zeros((batch_size, self.hidden_size)))
+        h_t = Tensor(mx.zeros((batch_size, self.hidden_size)))
+        cell_state = Tensor(mx.zeros((batch_size, self.hidden_size)))
         read_weights = Tensor(
-            np.ones((batch_size, self.memory_length)) / self.memory_length,
+            mx.ones((batch_size, self.memory_length)) / self.memory_length,
             requires_grad=False,
         )
         outputs = []
@@ -462,14 +456,12 @@ def generate_copy_data(n_samples=100, seq_len=5, input_size=4):
         input_size (int): Range of token IDs is [0, input_size-1].
 
     Returns:
-        Tuple[np.ndarray, np.ndarray]:
-            - X: A (n_samples, seq_len) array of input token IDs in [0..input_size-1]
-            - Y: A copy of X, serving as the target output.
+        A pair `(X, Y)` where both arrays have shape `(n_samples, seq_len)`.
     """
     # Generate random integer sequences
-    X_data = np.random.randint(0, input_size, size=(n_samples, seq_len))
+    X_data = mx.random.randint(0, input_size, shape=(n_samples, seq_len))
     # For the copy task, the label is the same
-    Y_data = X_data.copy()
+    Y_data = mx.array(X_data)
     return X_data, Y_data
 
 
@@ -478,14 +470,14 @@ def to_one_hot(sequence_batch, vocab_size):
     Convert a batch of token index sequences into one-hot encoded representations.
 
     Args:
-        sequence_batch (np.ndarray): Array of shape (batch_size, seq_len) containing integer token IDs each entry is [0..vocab_size-1]
+        sequence_batch: Array of shape (batch_size, seq_len) containing integer token IDs.
         vocab_size (int): Total number of tokens in the vocabulary.
 
     Returns:
-        np.ndarray: One-hot encoded tensor of shape (batch_size, seq_len, vocab_size).
+        A one-hot encoded array of shape (batch_size, seq_len, vocab_size).
     """
     bsz, seq_len = sequence_batch.shape
-    one_hot = np.zeros((bsz, seq_len, vocab_size), dtype=np.float32)
+    one_hot = mx.zeros((bsz, seq_len, vocab_size), dtype=mx.float32)
     for i in range(bsz):
         for t in range(seq_len):
             token = sequence_batch[i, t]
@@ -523,15 +515,15 @@ class LSTM(nn.Module):
         and cell state, and collecting the output at each step.
 
         Args:
-            x (np.ndarray): Input tensor of shape (batch_size, seq_len, input_size).
+            x: Input tensor of shape (batch_size, seq_len, input_size).
 
         Returns:
             Tensor: Stacked outputs of shape (batch_size, seq_len, output_size).
         """
         batch_size, seq_len, input_size = x.shape
         outputs = []
-        h_t = Tensor(np.zeros((batch_size, self.hidden_size)))
-        cell_state = Tensor(np.zeros((batch_size, self.hidden_size)))
+        h_t = Tensor(mx.zeros((batch_size, self.hidden_size)))
+        cell_state = Tensor(mx.zeros((batch_size, self.hidden_size)))
 
         for t in range(seq_len):
             x_t = Tensor(x[:, t, :])  # (batch_size, 1, input_size)

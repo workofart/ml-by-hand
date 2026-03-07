@@ -1,11 +1,9 @@
 import os
+import random
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Iterator, Optional, Tuple, Union
+from typing import Any, Iterator, Optional, Tuple, Union
 
-if TYPE_CHECKING:
-    import numpy as np
-else:
-    from autograd.backend import np
+import mlx.core as mx
 import pyarrow.parquet as pq
 import requests
 
@@ -13,36 +11,35 @@ from autograd.text import utils as text_utils
 
 
 def train_test_split(
-    X: np.ndarray,
-    y: np.ndarray,
+    X: Any,
+    y: Any,
     test_size: float = 0.2,
     random_state: Optional[int] = None,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[Any, Any, Any, Any]:
     """
     Splits arrays or matrices into random train and test subsets.
 
     Args:
-        X (np.ndarray): Feature array.
-        y (np.ndarray): Labels array.
+        X (Any): Feature array.
+        y (Any): Labels array.
         test_size (float): Proportion of the dataset to include in the test split.
         random_state (Optional[int]): Seed for the random number generator.
 
     Returns:
-        Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        Tuple[Any, Any, Any, Any]:
             The training features, test features, training labels, and test labels.
 
     Examples:
-        >>> import cupy as np
-        >>> X = np.arange(100).reshape(50, 2)
-        >>> y = np.arange(50)
+        >>> import mlx.core as mx
+        >>> X = mx.arange(100).reshape(50, 2)
+        >>> y = mx.arange(50)
         >>> X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
         >>> X_train.shape, X_test.shape
         ((40, 2), (10, 2))
     """
     if random_state is not None:
-        np.random.seed(random_state)
-    indices = np.arange(X.shape[0])
-    np.random.shuffle(indices)
+        mx.random.seed(random_state)
+    indices = mx.random.permutation(X.shape[0])
 
     num_test = int(len(indices) * test_size)
     X_train, X_test = X[indices[num_test:]], X[indices[:num_test]]
@@ -52,7 +49,7 @@ def train_test_split(
 
 def load_data(
     url: str, filename: str, max_rows: Optional[int] = None
-) -> Union[str, np.ndarray]:
+) -> Union[str, Any]:
     """
     Load data from a file, downloading (GET request) it first if it doesn't exist.
     Automatically handles parquet and text files based on extension.
@@ -63,16 +60,16 @@ def load_data(
         max_rows (Optional[int]): Maximum number of rows (only applies to parquet files).
 
     Returns:
-        Union[str, np.ndarray]:
+        Union[str, Any]:
             - For text files: the file content as a string.
-            - For parquet files: a numpy array containing the data.
+            - For parquet files: an array containing the data.
 
     Examples:
         For a parquet file:
         >>> url = "http://example.com/data.parquet"
         >>> filename = "data.parquet"
         >>> data = load_data(url, filename)
-        >>> isinstance(data, np.ndarray)
+        >>> hasattr(data, "shape")
         True
 
         For a text file:
@@ -91,7 +88,7 @@ def load_data(
     # Read based on file extension
     if filename.endswith(".parquet"):
         data = pq.read_table(filename).to_pandas().to_numpy()
-        return data[:max_rows] if max_rows else data
+        return mx.array(data[:max_rows] if max_rows else data)
     else:
         with open(filename, "r", encoding="utf-8") as f:
             return f.read()
@@ -149,11 +146,11 @@ class SimpleDataLoader(AbstractDataLoader):
       - Batching data into (batch_X, batch_y) pairs.
 
     Examples:
-        >>> import cupy as np
+        >>> import mlx.core as mx
         >>> from your_module import SimpleDataLoader  # Replace 'your_module' with your actual module name.
         >>> # Create dummy data: 100 samples, each with 10 features.
-        >>> X = np.random.rand(100, 10)
-        >>> y = np.random.randint(0, 2, size=(100, 1))
+        >>> X = mx.random.uniform(shape=(100, 10))
+        >>> y = mx.random.randint(0, 2, shape=(100, 1))
         >>> # Instantiate the data loader with a batch size of 32.
         >>> loader = SimpleDataLoader(X, y, batch_size=32, shuffle=True)
         >>> # Iterate over batches.
@@ -164,8 +161,8 @@ class SimpleDataLoader(AbstractDataLoader):
 
     def __init__(
         self,
-        X: np.ndarray,
-        y: np.ndarray,
+        X: Any,
+        y: Any,
         batch_size: int = 32,
         shuffle: bool = True,
     ) -> None:
@@ -173,14 +170,14 @@ class SimpleDataLoader(AbstractDataLoader):
         self.X = X
         self.y = y
         self.num_samples = len(X)
-        self.indices = np.arange(self.num_samples)
+        self.indices = mx.arange(self.num_samples)
 
     def on_epoch_start(self) -> None:
         # Shuffle the index array if needed.
         if self.shuffle:
-            np.random.shuffle(self.indices)
+            self.indices = mx.random.permutation(self.num_samples)
 
-    def __iter__(self) -> Iterator[Tuple[np.ndarray, np.ndarray]]:
+    def __iter__(self) -> Iterator[Tuple[Any, Any]]:
         for start in range(0, self.num_samples, self.batch_size):
             batch_indices = self.indices[start : start + self.batch_size]
             yield self.X[batch_indices], self.y[batch_indices]
@@ -218,7 +215,7 @@ class LLMDataLoader(AbstractDataLoader):
         Otherwise, batches can be yielded infinitely.
 
     Examples:
-        >>> import cupy as np
+        >>> import mlx.core as mx
         >>> from your_module import LLMDataLoader  # Replace 'your_module' with your actual module name.
         >>> # Define a dummy Byte Pair Encoder (BPE) with minimal encode/decode functionality.
         >>> class DummyBPE:
@@ -230,7 +227,7 @@ class LLMDataLoader(AbstractDataLoader):
         >>> bpe = DummyBPE()
         >>>
         >>> # Create dummy token data: an array of token IDs (integers).
-        >>> token_data = np.random.randint(0, 100, 1000)  # 1000 tokens.
+        >>> token_data = mx.random.randint(0, 100, shape=(1000,))  # 1000 tokens.
         >>>
         >>> # Instantiate the LLMDataLoader.
         >>> loader = LLMDataLoader(
@@ -254,7 +251,7 @@ class LLMDataLoader(AbstractDataLoader):
 
     def __init__(
         self,
-        data: np.ndarray,  # array of token IDs
+        data: Any,  # array of token IDs
         bpe,
         batch_size: int,
         seq_len: int,
@@ -267,7 +264,7 @@ class LLMDataLoader(AbstractDataLoader):
     ) -> None:
         """
         Args:
-            data (np.ndarray): Tokenized integer IDs of the entire dataset.
+            data (Any): Tokenized integer IDs of the entire dataset.
             bpe: BytePairEncoder or other tokenizer with .encode() / .decode().
             batch_size (int): Number of sequences per batch.
             seq_len (int): Length of each sequence (X) fed to the model.
@@ -282,7 +279,7 @@ class LLMDataLoader(AbstractDataLoader):
         """
         super().__init__(batch_size=batch_size, shuffle=shuffle)
 
-        self.data = np.array(data)
+        self.data = mx.asarray(data)
         self.bpe = bpe
         self.seq_len = seq_len
         self.steps_per_epoch = steps_per_epoch
@@ -304,19 +301,18 @@ class LLMDataLoader(AbstractDataLoader):
         For random chunking, reseeds the RNG to ensure different random offsets each epoch if shuffle is True.
         """
         if self.shuffle:
-            # Reseeding ensures different random offsets each epoch.
-            np.random.seed()
+            mx.random.seed(random.randrange(2**31))
 
     def __iter__(
         self,
     ) -> Iterator[
         Tuple[
-            np.ndarray,  # X_chunk: (batch_size, seq_len)
-            Optional[np.ndarray],  # dec_inp: (batch_size, seq_len) or None
-            np.ndarray,  # Y_chunk: (batch_size, seq_len)
-            Optional[np.ndarray],  # source mask (e.g., padding mask)
-            Optional[np.ndarray],  # target mask (e.g., causal + padding)
-            Optional[np.ndarray],  # causal mask
+            Any,  # X_chunk: (batch_size, seq_len)
+            Optional[Any],  # dec_inp: (batch_size, seq_len) or None
+            Any,  # Y_chunk: (batch_size, seq_len)
+            Optional[Any],  # source mask (e.g., padding mask)
+            Optional[Any],  # target mask (e.g., causal + padding)
+            Optional[Any],  # causal mask
         ]
     ]:
         step = 0
@@ -331,11 +327,16 @@ class LLMDataLoader(AbstractDataLoader):
                 )
 
             # Randomly choose starting offsets for each sequence in the batch.
-            offsets = np.random.randint(low=0, high=max_offset, size=self.batch_size)
+            offsets = mx.random.randint(
+                low=0, high=max_offset, shape=(self.batch_size,), dtype=mx.int32
+            )
             # Extract chunks of (seq_len+1) tokens.
-            batch_chunks = [self.data[o : o + self.seq_len + 1] for o in offsets]
+            batch_chunks = [
+                self.data[int(offset) : int(offset) + self.seq_len + 1]
+                for offset in offsets
+            ]
             # Stack to shape: (batch_size, seq_len+1)
-            batch = np.stack(batch_chunks, axis=0)
+            batch = mx.stack(batch_chunks, axis=0)
 
             # Prepare input (X) and target (Y) by shifting the sequence.
             X_chunk = batch[:, :-1]  # (batch_size, seq_len)
@@ -343,9 +344,11 @@ class LLMDataLoader(AbstractDataLoader):
 
             # Optionally create a decoder input by prepending the SOS token.
             if self.include_decoder_input:
-                dec_inp = np.zeros_like(Y_chunk)
-                dec_inp[:, 0] = self.sos_idx
-                dec_inp[:, 1:] = Y_chunk[:, :-1]
+                assert self.sos_idx is not None
+                sos_column = mx.full(
+                    (self.batch_size, 1), self.sos_idx, dtype=Y_chunk.dtype
+                )
+                dec_inp = mx.concatenate([sos_column, Y_chunk[:, :-1]], axis=1)
             else:
                 dec_inp = None
 

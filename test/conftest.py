@@ -1,5 +1,3 @@
-import os
-
 import pytest
 import torch
 
@@ -26,19 +24,3 @@ def patch_torch_numpy():
 
     # revert back after tests
     torch.Tensor.numpy = old_numpy
-
-
-def pytest_addoption(parser):
-    parser.addoption(
-        "--backend",
-        action="store",
-        choices=("numpy", "mlx"),
-        default=None,
-        help="Select the autograd array backend for the test run.",
-    )
-
-
-def pytest_configure(config):
-    backend_name = config.getoption("--backend")
-    if backend_name is not None:
-        os.environ["AUTOGRAD_BACKEND"] = backend_name
