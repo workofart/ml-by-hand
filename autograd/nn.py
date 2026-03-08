@@ -2,15 +2,147 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, Optional, Tuple, Union, cast
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Literal,
+    Optional,
+    Tuple,
+    Union,
+    cast,
+)
 
-from autograd.backend import ARRAY_TYPE, ArrayLike, xp
+from autograd.backend import ARRAY_TYPE, Array, ArrayLike, xp
 
 from .functional import relu, sigmoid, softmax, tanh
 from .init import xavier_uniform
-from .tensor import Tensor
+from .tensor import Function, Tensor
 
 logger = logging.getLogger(__name__)
+
+
+#
+# Milestone context:
+# - M0 needs a repo-owned reference path that can call MLX's official SDPA
+#   without changing the public attention API or the default dense contract.
+# - Later milestones replace this oracle-style forward-only path with the
+#   custom kernel path and then add backward parity.
+#
+class _ScaledDotProductAttentionMLXReference(Function):
+    @staticmethod
+    def prepare_mask(
+        mask: Optional[ArrayLike],
+        *,
+        query_shape: Tuple[int, ...],
+        key_shape: Tuple[int, ...],
+    ) -> Tuple[
+        Literal[
+            "none", "causal", "explicit_bool", "explicit_additive", "dense_fallback"
+        ],
+        Optional[Array],
+    ]:
+        """
+        Translate repo mask semantics into the narrower MLX reference contract.
+
+        The MLX reference path is the only consumer of this translation, so the
+        logic lives here to keep the backend-specific behavior self-contained.
+        The outer attention module uses the result only to decide whether it can
+        safely take the MLX reference lane or must remain on the dense contract.
+        """
+        if mask is None:
+            return "none", None
+
+        raw_mask = xp.array(mask)
+        target_shape = (
+            int(query_shape[0]),
+            int(query_shape[1]),
+            int(query_shape[-2]),
+            int(key_shape[-2]),
+        )
+        if raw_mask.ndim > 4:
+            return "dense_fallback", None
+
+        try:
+            broadcast_mask = xp.broadcast_to(raw_mask, target_shape)
+        except ValueError:
+            return "dense_fallback", None
+
+        if broadcast_mask.dtype == xp.bool_:
+            # MLX bool masks use "True means keep". Fully-masked rows stay on the
+            # dense path because that remains the milestone-0 contract oracle.
+            if xp.to_scalar(xp.any(xp.all(~broadcast_mask, axis=-1))):
+                return "dense_fallback", None
+            return "explicit_bool", raw_mask
+
+        float_mask = xp.array(broadcast_mask, dtype=xp.float32)
+        seq_q = target_shape[-2]
+        seq_k = target_shape[-1]
+        standard_causal = xp.broadcast_to(
+            xp.triu(xp.ones((seq_q, seq_k), dtype=xp.float32), k=1),
+            target_shape,
+        )
+        if xp.to_scalar(xp.all(float_mask == standard_causal)):
+            return "causal", None
+
+        unsupported_structural_masks = (
+            xp.triu(xp.ones((seq_q, seq_k), dtype=xp.float32), k=0),
+            xp.tril(xp.ones((seq_q, seq_k), dtype=xp.float32), k=-1),
+            xp.tril(xp.ones((seq_q, seq_k), dtype=xp.float32), k=0),
+        )
+        if any(
+            xp.to_scalar(
+                xp.all(float_mask == xp.broadcast_to(structural_mask, target_shape))
+            )
+            for structural_mask in unsupported_structural_masks
+        ):
+            return "dense_fallback", None
+
+        if xp.to_scalar(xp.any(xp.all(float_mask > 0, axis=-1))):
+            return "dense_fallback", None
+
+        return "explicit_additive", xp.array(raw_mask, dtype=xp.float32) * -1e9
+
+    def forward(
+        self,
+        query: Array,
+        key: Array,
+        value: Array,
+        *,
+        mask_kind: Literal["none", "causal", "explicit_bool", "explicit_additive"],
+        mask: Optional[Array] = None,
+    ) -> Array:
+        try:
+            import mlx.core.fast as mx_fast  # pyright: ignore[reportMissingImports]
+
+            from autograd.backend import NAME
+        except ModuleNotFoundError as exc:  # pragma: no cover - platform dependent
+            raise RuntimeError("mlx_fast_reference requires the MLX backend") from exc
+
+        if NAME != "mlx":
+            raise RuntimeError("mlx_fast_reference requires the MLX backend")
+
+        if mask_kind == "none":
+            mask = None
+        elif mask_kind == "causal":
+            mask = "causal"
+        elif mask_kind not in ("explicit_bool", "explicit_additive"):
+            raise ValueError(f"Unsupported MLX reference mask kind: {mask_kind}")
+
+        output = mx_fast.scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            # Attention logits are scaled by 1 / sqrt(head_dim) so their magnitude
+            # stays controlled as the per-head dimension grows.
+            scale=float(key.shape[-1]) ** -0.5,
+            mask=mask,
+        )
+        return output
+
+    def backward(self, grad: Tensor) -> Array:
+        # TODO: replace this explicit failure once milestone 3 adds backward parity.
+        raise NotImplementedError("mlx_fast_reference is forward-only in milestone 0")
 
 
 class Module:
@@ -1422,7 +1554,11 @@ class ScaledDotProductAttention(Module):
         >>> y = attn(query, key, value) # Expected shape: (2, 2, 4, 8)
     """
 
-    def __init__(self, dropout_prob: float = 0.1) -> None:
+    def __init__(
+        self,
+        dropout_prob: float = 0.1,
+        _implementation: Literal["dense", "mlx_fast_reference"] = "dense",
+    ) -> None:
         """
         Initialize the ScaledDotProductAttention layer.
 
@@ -1430,6 +1566,7 @@ class ScaledDotProductAttention(Module):
             dropout_prob (float, optional): Dropout probability applied after softmax. Defaults to 0.1.
         """
         super().__init__()
+        self._implementation = _implementation
         self.dropout = Dropout(p=dropout_prob)
 
     def forward(
@@ -1456,6 +1593,35 @@ class ScaledDotProductAttention(Module):
             >>> value = Tensor(xp.random.randn(2, 2, 4, 8))
             >>> output = attn(query, key, value) # Expected: (2, 2, 4, 8)
         """
+        if self._implementation == "dense":
+            pass
+        elif self._implementation == "mlx_fast_reference":
+            if self.dropout.p != 0:
+                raise RuntimeError("mlx_fast_reference requires dropout_prob == 0")
+
+            raw_mask = mask.data if isinstance(mask, Tensor) else mask
+            mask_kind, prepared_mask = (
+                _ScaledDotProductAttentionMLXReference.prepare_mask(
+                    raw_mask,
+                    query_shape=query.shape,
+                    key_shape=key.shape,
+                )
+            )
+            if mask_kind != "dense_fallback":
+                return _ScaledDotProductAttentionMLXReference.apply(
+                    query,
+                    key,
+                    value,
+                    mask_kind=mask_kind,
+                    mask=prepared_mask,
+                )
+            # Dense remains the fallback for unsupported, ambiguous, or degenerate
+            # mask cases in milestone 0.
+        else:
+            raise ValueError(
+                f"Unknown attention implementation: {self._implementation}"
+            )
+
         attention_size = Tensor(key.shape[-1])
 
         # scaled dot product
