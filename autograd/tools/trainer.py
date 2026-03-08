@@ -491,11 +491,11 @@ class SimpleTrainer(AbstractTrainer):
         """Post-processes outputs for classification tasks.
 
         Args:
-            y_pred: Predicted logits or probabilities as an MLX array.
-            y_true: Ground truth labels as an MLX array.
+            y_pred: Predicted logits or probabilities as a backend array.
+            y_true: Ground truth labels as a backend array.
 
         Returns:
-            Tuple[Any, Any]: Processed predictions and targets
+            Tuple[Array, Array]: Processed predictions and targets
                 (e.g., for use in accuracy calculation).
         """
         if self.output_type in ["logits", "softmax"]:

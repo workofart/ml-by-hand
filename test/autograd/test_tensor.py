@@ -243,7 +243,10 @@ class TestTensorOps(TestTensor):
         z_torch.backward(torch.ones_like(z_torch))
 
         # Use allclose instead of array_equal for floating point comparison
-        assert allclose(x.grad.data, x_torch.grad.numpy(), rtol=1e-4)
+        # MLX and PyTorch can accumulate batched float32 matmuls in different
+        # orders. A small absolute tolerance keeps this check focused on real
+        # gradient mistakes instead of backend-specific roundoff noise.
+        assert allclose(x.grad.data, x_torch.grad.numpy(), rtol=1e-4, atol=1e-5)
         assert allclose(w.grad.data, w_torch.grad.numpy(), rtol=1e-4, atol=2e-4)
 
     def test_batched_matmul_gradient_computation(self):

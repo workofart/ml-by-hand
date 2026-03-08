@@ -146,7 +146,7 @@ def _as_strided_view(x, *, shape, strides):
 # ---------------------------------------------------------------------------
 
 
-def sample_categorical(logits):
+def _sample_categorical(logits):
     # This helper intentionally supports only the 1-D logits case used in the
     # repo. Batched/axis-aware categorical sampling should use the backend API
     # directly once we need that wider surface.
@@ -244,6 +244,7 @@ if not hasattr(xp, "scatter_add"):
 
 xp.to_scalar = _to_scalar
 xp.as_strided_view = _as_strided_view
+xp.sample_categorical = _sample_categorical
 xp.random.normal = _random_normal
 xp.random.bernoulli = _random_bernoulli
 xp.to_numpy = _to_numpy

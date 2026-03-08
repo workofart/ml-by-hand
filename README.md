@@ -21,7 +21,7 @@ We are creating a deep learning library from scratch (that evolved from a simple
   - **Learn By Doing:** All formulas and calculations are derived in code, so you see exactly how gradients (or derivatives) are computed—no hidden black boxes!
   - **Learning Over Optimization:** Focus on understanding the underlying mathematics and algorithms, rather than optimizing for speed or memory usage (though we can still train GPT models on a single CPU)
   - **PyTorch-Like API:** API interface closely mirrors [PyTorch](https://github.com/pytorch/pytorch/tree/main) for low adoption overhead
-  - **Minimal Dependencies:** The repo uses `numpy` by default, can use `mlx` on macOS or `cupy` on CUDA Linux hosts, and uses `pytorch` for gradient correctness checks in unit tests.
+  - **Minimal Dependencies:** User code and examples should go through `autograd.backend.xp`; that alias binds to `numpy` by default, `mlx` on macOS when available, or `cupy` on CUDA Linux hosts. `pytorch` is used for gradient correctness checks in unit tests.
 
 <details>
   <summary><strong>Why build a deep learning library from scratch?</strong></summary>
@@ -88,7 +88,7 @@ Explore the [`examples/`](https://github.com/workofart/ml-by-hand/tree/main/exam
 from autograd.tensor import Tensor
 from autograd.nn import Linear, Module
 from autograd.optim import SGD
-import mlx.core as mx
+from autograd.backend import xp
 
 class SimpleNN(Module):
     def __init__(self, input_dim, output_dim):
@@ -146,7 +146,7 @@ gradient = model.fc.parameters["weight"].grad
 print("[After Training] Gradients for fc weights:", gradient)
 print("[After Training] layer weights:", weights)
 print("[After Training] layer bias:", bias)
-assert mx.allclose(x.data @ weights + bias, y_true).item()
+assert xp.to_scalar(xp.allclose(x.data @ weights + bias, y_true))
 ```
 </details>
 
@@ -163,7 +163,7 @@ Use the bootstrap script for the intended setup flow:
 source .venv/bin/activate
 ```
 
-Backend selection happens automatically:
+Backend selection happens automatically. In user code, import and use `autograd.backend.xp`; the alias is then bound to one of these backends:
 - `mlx` is preferred when available on macOS
 - `cupy` is preferred on Linux when a CUDA device is detected and CuPy is installed
 - otherwise the repo falls back to `numpy`

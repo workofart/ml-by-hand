@@ -194,7 +194,7 @@ class TestTextUtils(TestCase):
         self.assertIn(",", tokens)
         self.assertIn("!", tokens)
 
-    @patch("autograd.text.utils.sample_categorical")
+    @patch("autograd.text.utils.xp.sample_categorical")
     def test_normal_inference(self, mock_choice):
         """
         In normal (auto-regressive) mode, we expect the inference loop to use sampling.

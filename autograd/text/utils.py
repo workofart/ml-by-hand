@@ -3,7 +3,6 @@ import os
 import re
 from collections import defaultdict
 from typing import (
-    Any,
     Callable,
     Dict,
     List,
@@ -13,7 +12,7 @@ from typing import (
 )
 
 from autograd import nn
-from autograd.backend import sample_categorical, xp
+from autograd.backend import Array, xp
 from autograd.text.tokenizer import BytePairEncoder
 
 logger = logging.getLogger(__name__)
@@ -63,7 +62,7 @@ def text_to_one_hot_and_sparse(
     vocabulary: Dict[str, int],
     max_sequence_length: int,
     pad_str: str = "<PAD>",
-) -> Tuple[Any, Any]:
+) -> Tuple[Array, Array]:
     """
     Convert list of texts into a sequential feature matrix using the vocabulary.
     It will do the padding/truncation based on max_sequence_length, then convert to one-hot encoding
@@ -77,8 +76,8 @@ def text_to_one_hot_and_sparse(
         pad_str (str): The padding string.
 
     Returns:
-        one_hot (Any): shape (batch_size, max_sequence_length, vocab_size)
-        matrix  (Any): shape (batch_size, max_sequence_length) of integer IDs
+        one_hot (Array): shape (batch_size, max_sequence_length, vocab_size)
+        matrix  (Array): shape (batch_size, max_sequence_length) of integer IDs
 
     Examples:
         >>> texts = ["Hello world", "Hello there"]
@@ -121,7 +120,7 @@ def create_causal_mask(
     batch_size: int,
     lookback: bool = False,
     mask_diagonal: bool = False,
-) -> Any:
+) -> Array:
     """
     Creates a causal mask that prevents positions from attending to future (lookforward)
     or past (lookback) positions. 1.0 => masked.
@@ -133,7 +132,7 @@ def create_causal_mask(
         mask_diagonal (bool): If True, the main diagonal is also masked.
 
     Returns:
-        Any: shape (batch_size, 1, seq_len, seq_len) with 1.0 in masked positions.
+        Array: shape (batch_size, 1, seq_len, seq_len) with 1.0 in masked positions.
 
     Examples:
         >>> mask = create_causal_mask(seq_len=5, batch_size=2)
@@ -165,20 +164,20 @@ def create_causal_mask(
 
 
 def create_padding_mask(
-    token_indices: Any,
+    token_indices: Array,
     pad_idx: int = 0,
     dims: Optional[Tuple[int, ...]] = None,
-) -> Any:
+) -> Array:
     """
     Creates a padding mask with configurable output dimensions.
 
     Args:
-        token_indices (Any): shape (batch_size, seq_len) containing token indices
+        token_indices (Array): shape (batch_size, seq_len) containing token indices
         pad_idx (int): Integer indicating the padding token index
         dims (tuple or None): Desired shape. If None, (batch_size, 1, 1, seq_len).
 
     Returns:
-        Any: A mask array where positions of 'pad_idx' are 1.0
+        Array: A mask array where positions of 'pad_idx' are 1.0
 
     Examples:
         >>> token_indices = np.array([[1, 0, 2], [0, 3, 4]])
@@ -226,7 +225,7 @@ def clean_and_tokenize(
     return [token for token in tokens if token not in {" ", "\n"}]
 
 
-def validate_batches(x: Any, y: Any) -> None:
+def validate_batches(x: Array, y: Array) -> None:
     batch_size, seq_len = x.shape
     for b in range(min(4, batch_size)):
         for seq_idx in range(seq_len):
@@ -237,7 +236,7 @@ def validate_batches(x: Any, y: Any) -> None:
 def token_batch_to_indices(
     token_batch: List[List[str]],
     vocab: Dict[Union[str, bytes], int],
-) -> Any:
+) -> Array:
     """
     Convert a batch of token lists to a matrix of token indices using a given vocabulary.
 
@@ -246,7 +245,7 @@ def token_batch_to_indices(
         vocab (Dict[Union[str, bytes], int]): A vocabulary mapping tokens to integer indices.
 
     Returns:
-        Any: A matrix of shape (batch_size, sequence_length) containing token indices.
+        Array: A matrix of shape (batch_size, sequence_length) containing token indices.
 
     Examples:
         >>> token_batch = [["hello", "world"], ["this", "test"]]
@@ -270,7 +269,7 @@ def inference(
     prediction_func: nn.AbstractLLMForwardFn,
     bpe: BytePairEncoder,
     start_tokens: Optional[str] = None,
-    groundtruth_data: Optional[Any] = None,
+    groundtruth_data: Optional[Array] = None,
     max_length: int = 50,
     temperature: float = 1.0,
     top_k: Optional[int] = None,
@@ -291,7 +290,7 @@ def inference(
         prediction_func (nn.AbstractLLMForwardFn): The forward function that implements the AbstractLLMForwardFn interface.
         bpe (BytePairEncoder): BPE tokenizer.
         start_tokens (Optional[str]): The initial token string (e.g. "<SOS>").
-        groundtruth_data (Optional[Any]): If provided, teacher forcing mode is used.
+        groundtruth_data (Optional[Array]): If provided, teacher forcing mode is used.
         max_length (int): The maximum length of tokens to run.
         temperature (float): The amount of randomness in sampling
             > 1.0 => more random
@@ -316,7 +315,7 @@ def inference(
         >>> print(prediction_text)
     """
 
-    def sample_next_token(logits: Any, temp: float, k: Optional[int]) -> int:
+    def sample_next_token(logits: Array, temp: float, k: Optional[int]) -> int:
         logits = xp.array(logits, dtype=xp.float32)
         # If temp <= 0 (teacher forcing), use argmax.
         if temp <= 0:
@@ -330,7 +329,7 @@ def inference(
                 scaled_logits,
                 xp.full(scaled_logits.shape, -float("inf"), dtype=scaled_logits.dtype),
             )
-        return int(sample_categorical(scaled_logits))
+        return int(xp.sample_categorical(scaled_logits))
 
     # Determine mode and set up initial values.
     teacher_forcing = groundtruth_data is not None

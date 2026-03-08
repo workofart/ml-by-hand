@@ -30,7 +30,7 @@ def xavier_uniform(tensor: Tensor) -> Tensor:
         Tensor: The same tensor after in-place initialization.
 
     Examples:
-        >>> import mlx.core as mx
+        >>> from autograd.backend import xp
         >>> from autograd.tensor import Tensor
         >>> # Create an uninitialized tensor with shape (3, 4)
         >>> tensor = Tensor(xp.empty((3, 4)))
@@ -75,7 +75,7 @@ def compute_in_out_tensor_count(tensor: Tensor) -> tuple[int, int]:
         ValueError: If the tensor has fewer than 2 dimensions.
 
     Examples:
-        >>> import mlx.core as mx
+        >>> from autograd.backend import xp
         >>> from autograd.tensor import Tensor
         >>> # Example for a fully-connected layer weight matrix with shape (fan_in, fan_out)
         >>> tensor_fc = Tensor(xp.empty((5, 10)))

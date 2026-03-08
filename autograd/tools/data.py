@@ -6,31 +6,31 @@ from urllib.request import urlopen
 
 from pyarrow import parquet as pq  # pyright: ignore[reportMissingImports]
 
-from autograd.backend import xp
+from autograd.backend import Array, xp
 from autograd.text import utils as text_utils
 
 
 def train_test_split(
-    X: Any,
-    y: Any,
+    X: Array,
+    y: Array,
     test_size: float = 0.2,
     random_state: Optional[int] = None,
-) -> Tuple[Any, Any, Any, Any]:
+) -> Tuple[Array, Array, Array, Array]:
     """
     Splits arrays or matrices into random train and test subsets.
 
     Args:
-        X (Any): Feature array.
-        y (Any): Labels array.
+        X (Array): Feature array.
+        y (Array): Labels array.
         test_size (float): Proportion of the dataset to include in the test split.
         random_state (Optional[int]): Seed for the random number generator.
 
     Returns:
-        Tuple[Any, Any, Any, Any]:
+        Tuple[Array, Array, Array, Array]:
             The training features, test features, training labels, and test labels.
 
     Examples:
-        >>> import mlx.core as mx
+        >>> from autograd.backend import xp
         >>> X = xp.arange(100).reshape(50, 2)
         >>> y = xp.arange(50)
         >>> X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
@@ -152,7 +152,7 @@ class SimpleDataLoader(AbstractDataLoader):
       - Batching data into (batch_X, batch_y) pairs.
 
     Examples:
-        >>> import mlx.core as mx
+        >>> from autograd.backend import xp
         >>> from your_module import SimpleDataLoader  # Replace 'your_module' with your actual module name.
         >>> # Create dummy data: 100 samples, each with 10 features.
         >>> X = xp.random.uniform(0.0, 1.0, (100, 10))
@@ -167,8 +167,8 @@ class SimpleDataLoader(AbstractDataLoader):
 
     def __init__(
         self,
-        X: Any,
-        y: Any,
+        X: Array,
+        y: Array,
         batch_size: int = 32,
         shuffle: bool = True,
     ) -> None:
@@ -183,7 +183,7 @@ class SimpleDataLoader(AbstractDataLoader):
         if self.shuffle:
             self.indices = xp.random.permutation(self.num_samples)
 
-    def __iter__(self) -> Iterator[Tuple[Any, Any]]:
+    def __iter__(self) -> Iterator[Tuple[Array, Array]]:
         for start in range(0, self.num_samples, self.batch_size):
             batch_indices = self.indices[start : start + self.batch_size]
             yield self.X[batch_indices], self.y[batch_indices]
@@ -221,7 +221,7 @@ class LLMDataLoader(AbstractDataLoader):
         Otherwise, batches can be yielded infinitely.
 
     Examples:
-        >>> import mlx.core as mx
+        >>> from autograd.backend import xp
         >>> from your_module import LLMDataLoader  # Replace 'your_module' with your actual module name.
         >>> # Define a dummy Byte Pair Encoder (BPE) with minimal encode/decode functionality.
         >>> class DummyBPE:
@@ -257,7 +257,7 @@ class LLMDataLoader(AbstractDataLoader):
 
     def __init__(
         self,
-        data: Any,  # array of token IDs
+        data: Array,  # array of token IDs
         bpe,
         batch_size: int,
         seq_len: int,
@@ -270,7 +270,7 @@ class LLMDataLoader(AbstractDataLoader):
     ) -> None:
         """
         Args:
-            data (Any): Tokenized integer IDs of the entire dataset.
+            data (Array): Tokenized integer IDs of the entire dataset.
             bpe: BytePairEncoder or other tokenizer with .encode() / .decode().
             batch_size (int): Number of sequences per batch.
             seq_len (int): Length of each sequence (X) fed to the model.
@@ -313,12 +313,12 @@ class LLMDataLoader(AbstractDataLoader):
         self,
     ) -> Iterator[
         Tuple[
-            Any,  # X_chunk: (batch_size, seq_len)
-            Optional[Any],  # dec_inp: (batch_size, seq_len) or None
-            Any,  # Y_chunk: (batch_size, seq_len)
-            Optional[Any],  # source mask (e.g., padding mask)
-            Optional[Any],  # target mask (e.g., causal + padding)
-            Optional[Any],  # causal mask
+            Array,  # X_chunk: (batch_size, seq_len)
+            Optional[Array],  # dec_inp: (batch_size, seq_len) or None
+            Array,  # Y_chunk: (batch_size, seq_len)
+            Optional[Array],  # source mask (e.g., padding mask)
+            Optional[Array],  # target mask (e.g., causal + padding)
+            Optional[Array],  # causal mask
         ]
     ]:
         step = 0

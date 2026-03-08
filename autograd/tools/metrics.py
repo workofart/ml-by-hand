@@ -19,7 +19,7 @@ def accuracy(y_pred, y_true):
         AssertionError: If the length of y_pred and y_true differ.
 
     Example:
-        >>> import mlx.core as mx
+        >>> from autograd.backend import xp
         >>> y_pred = xp.array([1, 0, 1, 1])
         >>> y_true = xp.array([1, 1, 1, 0])
         >>> accuracy(y_pred, y_true)
@@ -47,7 +47,7 @@ def precision(y_pred, y_true):
         AssertionError: If the length of y_pred and y_true differ.
 
     Example:
-        >>> import mlx.core as mx
+        >>> from autograd.backend import xp
         >>> y_pred = xp.array([1, 0, 1, 1])
         >>> y_true = xp.array([1, 1, 1, 0])
         >>> precision(y_pred, y_true)
@@ -83,7 +83,7 @@ def mean_squared_error(y_pred, y_true):
         AssertionError: If the length of y_pred and y_true differ.
 
     Example:
-        >>> import mlx.core as mx
+        >>> from autograd.backend import xp
         >>> y_pred = xp.array([2.5, 0.0, 2, 8])
         >>> y_true = xp.array([3.0, -0.5, 2, 7])
         >>> mean_squared_error(y_pred, y_true)
