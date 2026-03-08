@@ -1,14 +1,60 @@
 import importlib
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from autograd.backend import (
     xp,
 )
 from autograd.nn import extract_windows
 from autograd.tensor import Tensor
+
+
+def _load_backend_module(monkeypatch, *, env_backend=None, fake_cupy=None):
+    backend_path = Path(__file__).resolve().parents[2] / "autograd" / "backend.py"
+    real_import_module = importlib.import_module
+
+    if env_backend is None:
+        monkeypatch.delenv("AUTOGRAD_BACKEND", raising=False)
+    else:
+        monkeypatch.setenv("AUTOGRAD_BACKEND", env_backend)
+
+    def tracking_import(module_name: str, package: str | None = None):
+        if module_name == "mlx.core":
+            raise ModuleNotFoundError(module_name)
+        if module_name == "cupy" and fake_cupy is not None:
+            return fake_cupy
+        return real_import_module(module_name, package)
+
+    monkeypatch.setattr(importlib, "import_module", tracking_import)
+
+    spec = importlib.util.spec_from_file_location("_backend_test_module", backend_path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _fake_cupy_module(device_count: int):
+    random = SimpleNamespace(
+        normal=np.random.normal,
+        binomial=np.random.binomial,
+        choice=np.random.choice,
+    )
+    return SimpleNamespace(
+        ndarray=np.ndarray,
+        array=np.array,
+        asarray=np.asarray,
+        random=random,
+        cuda=SimpleNamespace(
+            runtime=SimpleNamespace(getDeviceCount=lambda: device_count)
+        ),
+        asnumpy=np.asarray,
+    )
 
 
 def test_scatter_add_accumulates_repeated_indices():
@@ -86,9 +132,8 @@ def test_tensor_item_uses_backend_scalar_conversion():
 
 
 def test_env_override_skips_backend_detection(monkeypatch):
-    backend_path = Path(__file__).resolve().parents[2] / "autograd" / "backend.py"
-    real_import_module = importlib.import_module
     probed: list[str] = []
+    real_import_module = importlib.import_module
 
     def tracking_import(module_name: str, package: str | None = None):
         if module_name in {"mlx.core", "cupy"}:
@@ -98,6 +143,7 @@ def test_env_override_skips_backend_detection(monkeypatch):
     monkeypatch.setenv("AUTOGRAD_BACKEND", "numpy")
     monkeypatch.setattr(importlib, "import_module", tracking_import)
 
+    backend_path = Path(__file__).resolve().parents[2] / "autograd" / "backend.py"
     spec = importlib.util.spec_from_file_location(
         "_backend_env_override_test", backend_path
     )
@@ -108,3 +154,34 @@ def test_env_override_skips_backend_detection(monkeypatch):
 
     assert module.NAME == "numpy"
     assert probed == []
+
+
+def test_auto_detect_selects_cupy_when_cuda_is_available(monkeypatch):
+    module = _load_backend_module(
+        monkeypatch,
+        fake_cupy=_fake_cupy_module(device_count=1),
+    )
+
+    assert module.NAME == "cupy"
+    assert module.IS_CUPY is True
+
+
+def test_auto_detect_skips_cupy_without_cuda_device(monkeypatch):
+    module = _load_backend_module(
+        monkeypatch,
+        fake_cupy=_fake_cupy_module(device_count=0),
+    )
+
+    assert module.NAME == "numpy"
+    assert module.IS_NUMPY is True
+
+
+def test_cupy_override_requires_cuda_device(monkeypatch):
+    with pytest.raises(
+        RuntimeError, match="AUTOGRAD_BACKEND=cupy requested, but no CUDA device"
+    ):
+        _load_backend_module(
+            monkeypatch,
+            env_backend="cupy",
+            fake_cupy=_fake_cupy_module(device_count=0),
+        )

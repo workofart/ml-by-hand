@@ -48,7 +48,16 @@ def _discover_backend_name() -> str:
 _env_backend = os.getenv("AUTOGRAD_BACKEND")
 # Important: only call `_discover_backend_name()` when the env var is absent.
 # That lets `AUTOGRAD_BACKEND=numpy` skip MLX/CuPy probing entirely.
-NAME = (_env_backend if _env_backend is not None else _discover_backend_name()).lower()
+if _env_backend is not None:
+    NAME = _env_backend.lower()
+    if NAME == "cupy":
+        cp = importlib.import_module("cupy")
+        if cp.cuda.runtime.getDeviceCount() <= 0:
+            raise RuntimeError(
+                "AUTOGRAD_BACKEND=cupy requested, but no CUDA device was detected"
+            )
+else:
+    NAME = _discover_backend_name()
 IS_MLX = NAME == "mlx"
 IS_NUMPY = NAME == "numpy"
 IS_CUPY = NAME == "cupy"

@@ -21,7 +21,7 @@ We are creating a deep learning library from scratch (that evolved from a simple
   - **Learn By Doing:** All formulas and calculations are derived in code, so you see exactly how gradients (or derivatives) are computed—no hidden black boxes!
   - **Learning Over Optimization:** Focus on understanding the underlying mathematics and algorithms, rather than optimizing for speed or memory usage (though we can still train GPT models on a single CPU)
   - **PyTorch-Like API:** API interface closely mirrors [PyTorch](https://github.com/pytorch/pytorch/tree/main) for low adoption overhead
-  - **Minimal Dependencies:** This MLX branch uses `mlx` for core array/tensor work (and `pytorch` for gradient correctness checks in unit tests).
+  - **Minimal Dependencies:** The repo uses `numpy` by default, can use `mlx` on macOS or `cupy` on CUDA Linux hosts, and uses `pytorch` for gradient correctness checks in unit tests.
 
 <details>
   <summary><strong>Why build a deep learning library from scratch?</strong></summary>
@@ -156,9 +156,6 @@ Check out the modules in this project in the [docs website](https://ml-by-hand.r
 
 ## **Environment Setup**
 
-This branch is the MLX migration branch and currently supports macOS only.
-The [`main`](https://github.com/workofart/ml-by-hand/tree/main) branch remains the NumPy reference implementation and is the cross-platform path for Linux and macOS.
-
 This repo uses `uv.lock` as the source of truth for dependency installation.
 Use the bootstrap script for the intended setup flow:
 ```bash
@@ -166,12 +163,40 @@ Use the bootstrap script for the intended setup flow:
 source .venv/bin/activate
 ```
 
+Backend selection happens automatically:
+- `mlx` is preferred when available on macOS
+- `cupy` is preferred on Linux when a CUDA device is detected and CuPy is installed
+- otherwise the repo falls back to `numpy`
+
+You can also force a backend explicitly:
+```bash
+AUTOGRAD_BACKEND=numpy uv run pytest
+AUTOGRAD_BACKEND=mlx uv run pytest
+AUTOGRAD_BACKEND=cupy uv run pytest
+```
+
+## CuPy Setup
+
+CuPy is optional and only used when a CUDA device is detected.
+
+- `bootstrap.sh` auto-detects CUDA on Linux and syncs one of the pinned extras: `cuda11`, `cuda12`, or `cuda13`.
+- Manual installs are also available through `pyproject.toml` extras:
+```bash
+uv sync --extra dev --extra cuda12
+```
+- Pick exactly one CUDA extra that matches your installed CUDA major version.
+
 ## Tests
 Comprehensive unit tests and integration tests available in `test/autograd`
 
 ```bash
 uv run pytest
 ```
+
+CI exercises both backend paths:
+- MLX on `macos-latest`
+- NumPy on `ubuntu-latest`
+- CuPy auto-detection is available on CUDA Linux hosts, but is not covered by the current GitHub Actions matrix.
 
 ## Future Work
 
