@@ -3,16 +3,10 @@ import os
 import time
 from unittest import TestCase
 
-try:
-    # drop-in replacement for numpy for GPU acceleration
-    import cupy as np  # type: ignore
-
-    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
-except Exception:
-    import numpy as np
 import psutil
 
 from autograd import functional, nn, optim
+from autograd.backend import xp
 from autograd.tensor import Tensor
 
 logger = logging.getLogger(__name__)
@@ -142,11 +136,12 @@ class CIPipelinePerformanceTest(TestCase):
 
     def _compute_stats(self, metrics_list):
         """Compute mean, std, min, max statistics for a given list of values."""
+        metrics_array = xp.asarray(metrics_list)
         return {
-            "mean": np.mean(metrics_list),
-            "std": np.std(metrics_list),
-            "min": np.min(metrics_list),
-            "max": np.max(metrics_list),
+            "mean": xp.mean(metrics_array),
+            "std": xp.std(metrics_array),
+            "min": xp.min(metrics_array),
+            "max": xp.max(metrics_array),
         }
 
     def _log_performance_metrics(self, metrics, model_name):
@@ -155,19 +150,19 @@ class CIPipelinePerformanceTest(TestCase):
         """
         logger.info(f"\nPerformance Metrics for {model_name}:")
 
-        forward_stats = self._compute_stats(np.array(metrics["forward_times"]))
-        backward_stats = self._compute_stats(np.array(metrics["backward_times"]))
+        forward_stats = self._compute_stats(xp.array(metrics["forward_times"]))
+        backward_stats = self._compute_stats(xp.array(metrics["backward_times"]))
 
         logger.info("Timing (seconds):")
         logger.info("Forward Pass:")
         logger.info(
-            f"  Mean: {forward_stats['mean']:.6f} ± {forward_stats['std']:.6f} "
-            f"(Min: {forward_stats['min']:.6f}, Max: {forward_stats['max']:.6f})"
+            f"  Mean: {float(forward_stats['mean']):.6f} ± {float(forward_stats['std']):.6f} "
+            f"(Min: {float(forward_stats['min']):.6f}, Max: {float(forward_stats['max']):.6f})"
         )
         logger.info("Backward Pass:")
         logger.info(
-            f"  Mean: {backward_stats['mean']:.6f} ± {backward_stats['std']:.6f} "
-            f"(Min: {backward_stats['min']:.6f}, Max: {backward_stats['max']:.6f})"
+            f"  Mean: {float(backward_stats['mean']):.6f} ± {float(backward_stats['std']):.6f} "
+            f"(Min: {float(backward_stats['min']):.6f}, Max: {float(backward_stats['max']):.6f})"
         )
 
     def _test_complex_mlp(self, total_epochs):
@@ -179,8 +174,8 @@ class CIPipelinePerformanceTest(TestCase):
         batch_size = 1024
 
         # Generate random input and labels
-        X = np.random.randn(batch_size, input_size).astype(np.float32)
-        y = np.random.randint(0, output_size, size=(batch_size,)).astype(np.int64)
+        X = xp.random.normal(shape=(batch_size, input_size)).astype(xp.float32)
+        y = xp.random.randint(0, output_size, (batch_size,), dtype=xp.int64)
 
         # Initialize model and optimizer
         mlp_model = ComplexMLP(input_size, hidden_size, num_layers, output_size)
@@ -209,10 +204,10 @@ class CIPipelinePerformanceTest(TestCase):
         batch_size = 256
 
         # Generate random input and labels
-        X = np.random.randn(batch_size, input_channels, image_size, image_size).astype(
-            np.float32
-        )
-        y = np.random.randint(0, num_classes, size=(batch_size,)).astype(np.int64)
+        X = xp.random.normal(
+            shape=(batch_size, input_channels, image_size, image_size)
+        ).astype(xp.float32)
+        y = xp.random.randint(0, num_classes, (batch_size,), dtype=xp.int64)
 
         # Initialize model and optimizer
         cnn_model = DeepCNN(input_channels, image_size, num_classes)
@@ -237,7 +232,7 @@ class CIPipelinePerformanceTest(TestCase):
         Test that focuses on raw computational time for forward and backward passes
         for both a complex MLP and a deep CNN model.
         """
-        np.random.seed(42)
+        xp.random.seed(42)
         total_epochs = 10
         logger.info(f"Running {total_epochs} epochs for performance measurement...")
 

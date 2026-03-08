@@ -2,7 +2,7 @@
 
 <div align="center">
 <img src="https://github.com/user-attachments/assets/0655f743-6bb0-46c8-9cdf-ec3a8c84058a" width="400" height="400">
-  
+
 [![Unit Tests](https://github.com/workofart/ml-by-hand/actions/workflows/test.yml/badge.svg)](https://github.com/workofart/ml-by-hand/actions/workflows/test.yml) |
 📝 [Blog Post](https://www.henrypan.com/blog/2025-02-06-ml-by-hand/)
 
@@ -10,7 +10,7 @@
 
 
 
-We are creating a deep learning library from scratch (that evolved from a simple autograd engine). It is designed to demystify the inner workings of building deep learning models by exposing every mathematical detail and stripping down the abstractions shiny ML libraries (e.g. PyTorch/TensorFlow) have. **This project tries to provide an opportunity to learn deep learning from first-principles. And use the hand-built library to create and train state-of-art models (such as [GPT-2](https://github.com/workofart/ml-by-hand/blob/main/examples/gpt-2.py))).**
+We are creating a deep learning library from scratch (that evolved from a simple autograd engine). It is designed to demystify the inner workings of building deep learning models by exposing every mathematical detail and stripping down the abstractions shiny ML libraries (e.g. PyTorch/TensorFlow) have. **This project tries to provide an opportunity to learn deep learning from first-principles. And use the hand-built library to create and train state-of-art models (such as [GPT-2](https://github.com/workofart/ml-by-hand/blob/main/examples/gpt_2.py))).**
 
 
 
@@ -21,7 +21,7 @@ We are creating a deep learning library from scratch (that evolved from a simple
   - **Learn By Doing:** All formulas and calculations are derived in code, so you see exactly how gradients (or derivatives) are computed—no hidden black boxes!
   - **Learning Over Optimization:** Focus on understanding the underlying mathematics and algorithms, rather than optimizing for speed or memory usage (though we can still train GPT models on a single CPU)
   - **PyTorch-Like API:** API interface closely mirrors [PyTorch](https://github.com/pytorch/pytorch/tree/main) for low adoption overhead
-  - **Minimal Dependencies:** Only uses `numpy` (and `pytorch` for gradient correctness checks in unit tests).
+  - **Minimal Dependencies:** User code and examples should go through `autograd.backend.xp`; that alias binds to `numpy` by default, `mlx` on macOS when available, or `cupy` on CUDA Linux hosts. `pytorch` is used for gradient correctness checks in unit tests.
 
 <details>
   <summary><strong>Why build a deep learning library from scratch?</strong></summary>
@@ -46,7 +46,7 @@ Explore the [`examples/`](https://github.com/workofart/ml-by-hand/tree/main/exam
   - Original Transformers [(Code)](https://github.com/workofart/ml-by-hand/blob/main/examples/transformers.py)
   - Byte Pair Encoder (BPE) Tokenizer [(Code)](https://github.com/workofart/ml-by-hand/blob/main/autograd/text/tokenizer.py)
   - GPT-1 [(Code)](https://github.com/workofart/ml-by-hand/blob/main/examples/gpt-1.py)
-  - GPT-2 [(Code)](https://github.com/workofart/ml-by-hand/blob/main/examples/gpt-2.py)
+  - GPT-2 [(Code)](https://github.com/workofart/ml-by-hand/blob/main/examples/gpt_2.py)
 
 <details>
   <summary><strong>Click to see all other examples</strong></summary>
@@ -88,7 +88,7 @@ Explore the [`examples/`](https://github.com/workofart/ml-by-hand/tree/main/exam
 from autograd.tensor import Tensor
 from autograd.nn import Linear, Module
 from autograd.optim import SGD
-import numpy as np
+from autograd.backend import xp
 
 class SimpleNN(Module):
     def __init__(self, input_dim, output_dim):
@@ -146,7 +146,7 @@ gradient = model.fc.parameters["weight"].grad
 print("[After Training] Gradients for fc weights:", gradient)
 print("[After Training] layer weights:", weights)
 print("[After Training] layer bias:", bias)
-assert np.isclose(x.data @ weights + bias, y_true)
+assert xp.to_scalar(xp.allclose(x.data @ weights + bias, y_true))
 ```
 </details>
 
@@ -156,19 +156,47 @@ Check out the modules in this project in the [docs website](https://ml-by-hand.r
 
 ## **Environment Setup**
 
-Run the bootstrap script to install dependencies:
+This repo uses `uv.lock` as the source of truth for dependency installation.
+Use the bootstrap script for the intended setup flow:
 ```bash
 ./bootstrap.sh
 source .venv/bin/activate
 ```
-This sets up your virtual environment.
+
+Backend selection happens automatically. In user code, import and use `autograd.backend.xp`; the alias is then bound to one of these backends:
+- `mlx` is preferred when available on macOS
+- `cupy` is preferred on Linux when a CUDA device is detected and CuPy is installed
+- otherwise the repo falls back to `numpy`
+
+You can also force a backend explicitly:
+```bash
+AUTOGRAD_BACKEND=numpy uv run pytest
+AUTOGRAD_BACKEND=mlx uv run pytest
+AUTOGRAD_BACKEND=cupy uv run pytest
+```
+
+## CuPy Setup
+
+CuPy is optional and only used when a CUDA device is detected.
+
+- `bootstrap.sh` auto-detects CUDA on Linux and syncs one of the pinned extras: `cuda11`, `cuda12`, or `cuda13`.
+- Manual installs are also available through `pyproject.toml` extras:
+```bash
+uv sync --extra dev --extra cuda12
+```
+- Pick exactly one CUDA extra that matches your installed CUDA major version.
 
 ## Tests
 Comprehensive unit tests and integration tests available in `test/autograd`
 
 ```bash
-python -m pytest
+uv run pytest
 ```
+
+CI exercises both backend paths:
+- MLX on `macos-latest`
+- NumPy on `ubuntu-latest`
+- CuPy auto-detection is available on CUDA Linux hosts, but is not covered by the current GitHub Actions matrix.
 
 ## Future Work
 

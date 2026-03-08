@@ -1,12 +1,5 @@
-try:
-    # drop-in replacement for numpy for GPU acceleration
-    import cupy as np  # type: ignore
-
-    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
-except Exception:
-    import numpy as np
-
 from autograd import functional, nn, optim
+from autograd.backend import xp
 from autograd.tensor import Tensor
 from autograd.tools import data, trainer
 from autograd.tools.config_schema import GenericTrainingConfig
@@ -37,8 +30,8 @@ class Memory:
         """
         self.memory_length = memory_length
         self.memory_dim = memory_dim
-        self.reset_memory()
         self._memory = None
+        self.reset_memory()
 
     def reset_memory(self, batch_size=1):
         """
@@ -48,7 +41,7 @@ class Memory:
             batch_size (int): The number of samples in the batch. Defaults to 1.
         """
         self._memory = Tensor(
-            data=np.zeros((batch_size, self.memory_length, self.memory_dim)),
+            data=xp.zeros((batch_size, self.memory_length, self.memory_dim)),
             requires_grad=False,
         )
 
@@ -59,6 +52,8 @@ class Memory:
         Returns:
             Tensor: The memory matrix of shape (batch_size, memory_length, memory_dim).
         """
+        if self._memory is None:
+            raise RuntimeError("Memory has not been initialized.")
         return self._memory
 
     def write(self, new_memory):
@@ -91,7 +86,7 @@ class ReadHead(nn.Module):
         self.memory = memory
 
     def forward(self, read_weights):
-        """
+        r"""
         Computes the read vector from the memory using the read weights.
 
         r_t = \sum_i w_t(i) M_t(i)
@@ -264,7 +259,7 @@ class NeuralTuringMachine(nn.Module):
             outputs:           (batch_size, seq_len, output_size)
 
         Args:
-            x (np.ndarray): Input tensor of shape (batch_size, sequence_length, input_size).
+            x: Input tensor of shape (batch_size, sequence_length, input_size).
 
         Returns:
             Tensor: Stacked outputs from each time step, of shape (batch_size, sequence_length, output_size).
@@ -272,10 +267,10 @@ class NeuralTuringMachine(nn.Module):
         batch_size, seq_len, input_size = x.shape
         self.memory.reset_memory(batch_size)
 
-        h_t = Tensor(np.zeros((batch_size, self.hidden_size)))
-        cell_state = Tensor(np.zeros((batch_size, self.hidden_size)))
+        h_t = Tensor(xp.zeros((batch_size, self.hidden_size)))
+        cell_state = Tensor(xp.zeros((batch_size, self.hidden_size)))
         read_weights = Tensor(
-            np.ones((batch_size, self.memory_length)) / self.memory_length,
+            xp.ones((batch_size, self.memory_length)) / self.memory_length,
             requires_grad=False,
         )
         outputs = []
@@ -289,7 +284,7 @@ class NeuralTuringMachine(nn.Module):
                 [Tensor(x[:, t, :]), read_vector], axis=1
             )  # (batch_size, 1, input_size + memory_dim)
             combined_input = combined_input.view(
-                (combined_input.shape[0], 1, combined_input.shape[1])
+                combined_input.shape[0], 1, combined_input.shape[1]
             )
 
             # 3. LSTM (controller) forward. Controller output shift logits and next token
@@ -462,14 +457,12 @@ def generate_copy_data(n_samples=100, seq_len=5, input_size=4):
         input_size (int): Range of token IDs is [0, input_size-1].
 
     Returns:
-        Tuple[np.ndarray, np.ndarray]:
-            - X: A (n_samples, seq_len) array of input token IDs in [0..input_size-1]
-            - Y: A copy of X, serving as the target output.
+        A pair `(X, Y)` where both arrays have shape `(n_samples, seq_len)`.
     """
     # Generate random integer sequences
-    X_data = np.random.randint(0, input_size, size=(n_samples, seq_len))
+    X_data = xp.random.randint(0, input_size, (n_samples, seq_len))
     # For the copy task, the label is the same
-    Y_data = X_data.copy()
+    Y_data = xp.array(X_data)
     return X_data, Y_data
 
 
@@ -478,14 +471,14 @@ def to_one_hot(sequence_batch, vocab_size):
     Convert a batch of token index sequences into one-hot encoded representations.
 
     Args:
-        sequence_batch (np.ndarray): Array of shape (batch_size, seq_len) containing integer token IDs each entry is [0..vocab_size-1]
+        sequence_batch: Array of shape (batch_size, seq_len) containing integer token IDs.
         vocab_size (int): Total number of tokens in the vocabulary.
 
     Returns:
-        np.ndarray: One-hot encoded tensor of shape (batch_size, seq_len, vocab_size).
+        A one-hot encoded array of shape (batch_size, seq_len, vocab_size).
     """
     bsz, seq_len = sequence_batch.shape
-    one_hot = np.zeros((bsz, seq_len, vocab_size), dtype=np.float32)
+    one_hot = xp.zeros((bsz, seq_len, vocab_size), dtype=xp.float32)
     for i in range(bsz):
         for t in range(seq_len):
             token = sequence_batch[i, t]
@@ -523,19 +516,19 @@ class LSTM(nn.Module):
         and cell state, and collecting the output at each step.
 
         Args:
-            x (np.ndarray): Input tensor of shape (batch_size, seq_len, input_size).
+            x: Input tensor of shape (batch_size, seq_len, input_size).
 
         Returns:
             Tensor: Stacked outputs of shape (batch_size, seq_len, output_size).
         """
         batch_size, seq_len, input_size = x.shape
         outputs = []
-        h_t = Tensor(np.zeros((batch_size, self.hidden_size)))
-        cell_state = Tensor(np.zeros((batch_size, self.hidden_size)))
+        h_t = Tensor(xp.zeros((batch_size, self.hidden_size)))
+        cell_state = Tensor(xp.zeros((batch_size, self.hidden_size)))
 
         for t in range(seq_len):
             x_t = Tensor(x[:, t, :])  # (batch_size, 1, input_size)
-            x_t = x_t.view((x_t.shape[0], 1, x_t.shape[1]))
+            x_t = x_t.view(x_t.shape[0], 1, x_t.shape[1])
             h_t, cell_state = self.lstm(
                 x=x_t, hidden_state=h_t, C_t=cell_state
             )  # hidden state, cell state for this timestep
@@ -564,7 +557,7 @@ if __name__ == "__main__":
     memory_length = 60
     memory_dim = 60
     hidden_size = 10
-    output_size = 24  # one-hot dimension size
+    output_size = 24
     epochs = 30
 
     # Generate dummy data
@@ -573,7 +566,9 @@ if __name__ == "__main__":
 
     # Generate a longer sequence to test generalization
     X_val, y_val = generate_copy_data(
-        n_samples=10, seq_len=seq_len * 5, input_size=input_size
+        n_samples=10,
+        seq_len=seq_len * 5,
+        input_size=input_size,
     )
     X_val = to_one_hot(X_val, input_size)
 

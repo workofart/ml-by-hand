@@ -11,11 +11,12 @@ license = { file = "LICENSE" }
 requires-python = ">=3.8"
 dependencies = [
     "numpy",
+    "mlx; platform_system == 'Darwin'",
+    "openml",  # for dataset
+    "pyarrow",
+    "regex",
     "scikit-learn",  # for dataset
     "tqdm",
-    "openml",  # for dataset
-    "regex",
-    "cupy-cuda12x; platform_system == 'Linux'" # Numpy GPU-acceleration
 ]
 
 [tool.setuptools.packages.find]
@@ -26,13 +27,15 @@ include = ["autograd", "autograd.*"]
 [tool.pyright]
 reportIncompatibleMethodOverride = "none"
 exclude = [
+    ".venv",
+    "build",
+    "training_runs",
     "**/test/**",    # Ignore all files in the "test" directory
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["test"]
 python_files = "test_*.py"
-memray = true
 
 
 [project.optional-dependencies]
@@ -43,4 +46,13 @@ dev = [
     "pyright",
     "pytest",
     "ruff",
+]
+cuda11 = [
+    "cupy-cuda11x; platform_system == 'Linux'",
+]
+cuda12 = [
+    "cupy-cuda12x; platform_system == 'Linux'",
+]
+cuda13 = [
+    "cupy-cuda13x; platform_system == 'Linux' and python_version >= '3.9'",
 ]

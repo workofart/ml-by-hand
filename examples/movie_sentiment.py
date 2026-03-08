@@ -1,49 +1,77 @@
+import logging
 import os
 
-try:
-    # drop-in replacement for numpy for GPU acceleration
-    import cupy as np  # type: ignore
-
-    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
-except Exception:
-    import numpy as np
-import logging
-
-import pandas as pd
-
 from autograd import functional, nn, optim
-from autograd.text.utils import create_vocabulary, text_to_one_hot_and_sparse
+from autograd.backend import xp
+from autograd.text.utils import create_vocabulary
 from autograd.tools.config_schema import GenericTrainingConfig
 from autograd.tools.data import (
     SimpleDataLoader,
+    load_data,
     train_test_split,
 )
 from autograd.tools.trainer import SimpleTrainer
 
+logger = logging.getLogger(__name__)
 
-def process_data(data: np.ndarray):
+
+def reviews_to_token_ids(reviews, vocabulary, max_sequence_length, pad_str="<PAD>"):
+    """Tokenize reviews into a dense integer ID matrix without MLX scalar writes."""
+    pad_idx = vocabulary[pad_str]
+    unk_idx = vocabulary.get("<UNK>", pad_idx)
+    matrix = []
+
+    for review in reviews:
+        token_ids = [pad_idx] * max_sequence_length
+        words = review.lower().split()[:max_sequence_length]
+        for idx, word in enumerate(words):
+            token_ids[idx] = vocabulary.get(word, unk_idx)
+        matrix.append(token_ids)
+
+    return xp.array(matrix, dtype=xp.int32)
+
+
+class OneHotMovieSentimentDataLoader(SimpleDataLoader):
+    """Keep token IDs in memory and materialize one-hot features per batch."""
+
+    def __init__(self, X, y, vocab_size, batch_size=32, shuffle=True) -> None:
+        super().__init__(X, y, batch_size=batch_size, shuffle=shuffle)
+        self.vocab_size = vocab_size
+
+    def __iter__(self):
+        # TODO: replace batch-time one-hot with direct token-id model inputs.
+        eye = xp.eye(self.vocab_size, dtype=xp.float32)
+        for batch_indices in self._batch_indices():
+            batch_tokens = self.X[batch_indices]
+            yield eye[batch_tokens], self.y[batch_indices]
+
+    def _batch_indices(self):
+        for start in range(0, self.num_samples, self.batch_size):
+            yield self.indices[start : start + self.batch_size]
+
+
+def process_data(data):
     """
     Processes raw text and sentiment label data for movie sentiment analysis.
 
     This function creates a vocabulary from the text column of the input data,
-    converts the text into one-hot encoded features (with padding/truncation to a fixed length),
+    converts the text into token IDs (with padding/truncation to a fixed length),
     and transforms the sentiment labels into binary values (1 for "positive", 0 otherwise).
     Finally, it splits the features and labels into training and testing sets.
 
     Args:
-        data (np.ndarray): A 2D numpy array where the first column contains text and the second column contains sentiment labels.
+        data: A 2D array-like object where the first column contains text and the second column contains sentiment labels.
 
     Returns:
-        Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Dict[str, int]]:
-            - X_train: One-hot encoded training features.
-            - X_test: One-hot encoded testing features.
-            - y_train: Training labels as binary integers.
-            - y_test: Testing labels as binary integers.
-            - vocab: The vocabulary mapping words to integer indices.
+        A tuple containing train/test token IDs, train/test labels, and the vocabulary map.
     """
-    vocab = create_vocabulary(data[:, 0], max_features=6000)
-    features, _ = text_to_one_hot_and_sparse(data[:, 0], vocab, max_sequence_length=25)
-    labels = np.array([1 if label == "positive" else 0 for label in data[:, 1]])
+    reviews = [row[0] for row in data]
+    sentiments = [row[1] for row in data]
+    vocab = create_vocabulary(reviews, max_features=6000)
+    features = reviews_to_token_ids(reviews, vocab, max_sequence_length=25)
+    labels = xp.array(
+        [1 if label == "positive" else 0 for label in sentiments], dtype=xp.int32
+    )
 
     X_train, X_test, y_train, y_test = train_test_split(features, labels, test_size=0.1)
 
@@ -82,10 +110,10 @@ class RNN(nn.Module):
         Compute the forward pass of the RNN model.
 
         Args:
-            x (np.ndarray): The input tensor for the recurrent network.
+            x: The input tensor for the recurrent network.
 
         Returns:
-            np.ndarray: The output probability produced by applying sigmoid to the linear layer.
+            Tensor: The output probability produced by applying sigmoid to the linear layer.
         """
         x = self.rnn(x)
         x = self.batchnorm(x)
@@ -127,10 +155,10 @@ class LSTM(nn.Module):
         Compute the forward pass of the LSTM model.
 
         Args:
-            x (np.ndarray): The input tensor for the LSTM, expected to be sequential.
+            x: The input tensor for the LSTM, expected to be sequential.
 
         Returns:
-            np.ndarray: The output probability computed by applying a sigmoid activation.
+            Tensor: The output probability computed by applying a sigmoid activation.
         """
         x, C_t = self.rnn(x)  # hidden_state, last_cell_state
         x = self.batchnorm(x)
@@ -177,17 +205,15 @@ if __name__ == "__main__":
 
     The script performs the following steps:
       1) Checks if the IMDB Dataset CSV file exists locally; if not, downloads and extracts it.
-      2) Reads the dataset using pandas and converts it to a NumPy array.
-      3) Processes the data by creating a vocabulary from the review texts, converting the texts to one-hot
-         encoded features (with fixed sequence length), and mapping sentiment labels to binary values.
+      2) Reads the dataset using the standard library CSV reader for preprocessing.
+      3) Processes the data by creating a vocabulary from the review texts, converting the texts to token IDs
+         (with fixed sequence length), and mapping sentiment labels to binary values.
       4) Splits the processed data into training and testing sets.
-      5) Creates SimpleDataLoader objects for training and testing.
+      5) Creates dataloaders that materialize one-hot features lazily per batch.
       6) Constructs training configurations for both RNN and LSTM models using GenericTrainingConfig.
       7) Trains the RNN model followed by the LSTM model using the main training function.
       8) Logs training progress, checkpoints, and evaluation metrics.
     """
-    logger = logging.getLogger(__name__)
-
     # Check if data exist; if not, download and extract.
     if not os.path.exists("training_data/IMDB Dataset.csv"):
         print("Downloading data...")
@@ -199,18 +225,34 @@ if __name__ == "__main__":
             "unzip training_data/imdb-dataset-of-50k-movie-reviews.zip -d training_data"
         )
 
-    # Process the data (assume process_data returns train/test splits and a vocabulary)
-    data = pd.read_csv("training_data/IMDB Dataset.csv").to_numpy()
+    data = load_data("training_data/IMDB Dataset.csv", "training_data/IMDB Dataset.csv")
+    assert not isinstance(data, str)
     X_train, X_test, y_train, y_test, vocab = process_data(data)
-    train_data_loader = SimpleDataLoader(X_train, y_train, batch_size=32, shuffle=True)
-    test_data_loader = SimpleDataLoader(X_test, y_test, batch_size=32, shuffle=False)
+    train_data_loader = OneHotMovieSentimentDataLoader(
+        X_train,
+        y_train,
+        vocab_size=len(vocab),
+        batch_size=32,
+        shuffle=True,
+    )
+    test_data_loader = OneHotMovieSentimentDataLoader(
+        X_test,
+        y_test,
+        vocab_size=len(vocab),
+        batch_size=32,
+        shuffle=False,
+    )
 
     # Train the RNN model.
     config_rnn = GenericTrainingConfig(
         training_run_name="movie_sentiment_rnn",
         total_epochs=15,
         checkpoint_freq=15,
-        model_kwargs={"input_size": len(vocab), "hidden_size": 32, "output_size": 1},
+        model_kwargs={
+            "input_size": len(vocab),
+            "hidden_size": 32,
+            "output_size": 1,
+        },
         optimizer_kwargs={"lr": 0.001},
     )
     main(RNN, train_data_loader, test_data_loader, config_rnn)
@@ -220,7 +262,11 @@ if __name__ == "__main__":
         training_run_name="movie_sentiment_rnn",
         total_epochs=15,
         checkpoint_freq=15,
-        model_kwargs={"input_size": len(vocab), "hidden_size": 64, "output_size": 1},
+        model_kwargs={
+            "input_size": len(vocab),
+            "hidden_size": 64,
+            "output_size": 1,
+        },
         optimizer_kwargs={"lr": 0.001, "max_grad_norm": 1.0},
     )
     main(LSTM, train_data_loader, test_data_loader, config_lstm)

@@ -2,18 +2,16 @@ import logging
 import os
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple, cast
 
-try:
-    # drop-in replacement for numpy for GPU acceleration
-    import cupy as np  # type: ignore
-
-    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
-except Exception:
-    import numpy as np
 from tqdm import tqdm
 
 from autograd import nn, optim
+from autograd.backend import (
+    Array,
+    eval,
+    xp,
+)
 from autograd.tensor import Tensor
 from autograd.text import utils as text_utils
 from autograd.tools.config_schema import (
@@ -105,7 +103,11 @@ class AbstractTrainer(ABC):
             self._on_epoch_end(epoch, train_loss, val_loss)
 
             if (
-                epoch % (self.config.total_epochs // min(20, self.config.total_epochs))
+                epoch
+                % max(
+                    1,
+                    self.config.total_epochs // min(20, self.config.total_epochs),
+                )
                 == 0
             ):
                 self._save_metrics()
@@ -172,12 +174,19 @@ class AbstractTrainer(ABC):
         run_name = self.config.training_run_name or "default"
         filename = f"{self.model.__class__.__name__}_{run_name}.npz"
         path = os.path.join(self.METRICS_DIR, filename)
-        metrics_np = {k: np.array(v) for k, v in self.metrics.items()}
-        np.savez_compressed(path, **metrics_np)
+        metrics_mx = {}
+        for key, values in self.metrics.items():
+            if any(value is None for value in values):
+                values = [float("nan") if value is None else value for value in values]
+                metrics_mx[key] = xp.array(values, dtype=xp.float32)
+            else:
+                metrics_mx[key] = xp.array(values)
+        eval(*metrics_mx.values())
+        xp.savez_compressed(path, **metrics_mx)
         logger.info(f"Saved training metrics to {path}")
 
     @abstractmethod
-    def train_step(self, batch_data) -> float:
+    def train_step(self, batch_data, data_loader=None) -> float:
         """Performs a single training step and returns the loss as a float.
 
         Subclasses must implement the forward pass, loss computation, and backward pass here.
@@ -408,7 +417,7 @@ class SimpleTrainer(AbstractTrainer):
         y_pred = self.model(batch_X)
         loss = self.loss_fn(y_pred, batch_y)
         loss.backward()
-        return float(loss.detach().data)
+        return float(loss.item())
 
     def evaluate(self, train_data_loader, val_data_loader, epoch) -> float:
         """Evaluates the model on the validation data loader.
@@ -429,33 +438,44 @@ class SimpleTrainer(AbstractTrainer):
             batch_X, batch_y = batch_data
             y_pred = self.model(batch_X)
             loss = self.loss_fn(y_pred, batch_y)
-            total_loss += float(loss.detach().data)
+            total_loss += float(loss.item())
             batch_count += 1
             all_preds.append(y_pred)
             all_targets.append(batch_y)
         avg_val_loss = total_loss / max(batch_count, 1)
 
         # Compute additional metrics for classification or regression
-        y_pred_full = np.concatenate([p.data for p in all_preds], axis=0)
-        y_true_full = np.concatenate([t.data for t in all_targets], axis=0)
+        y_pred_full = xp.concatenate([p.data for p in all_preds], axis=0)
+        y_true_full = xp.concatenate(all_targets, axis=0)
 
         if self.problem_type == "classification":
             y_pred_proc, y_true_proc = self._post_process_classification(
                 y_pred_full, y_true_full
             )
             acc_val = accuracy(
-                y_pred_proc.reshape(-1), y_true_proc.reshape(-1).astype(int)
+                xp.array(y_pred_proc).reshape(-1),
+                xp.array(y_true_proc, dtype=xp.int32).reshape(-1),
             )
             self.metrics["val_accuracy"].append(acc_val)
 
             if (
                 self.sample_predictions
-                and epoch % (self.config.total_epochs // 10) == 0
+                and epoch
+                % max(
+                    1,
+                    self.config.total_epochs // min(10, self.config.total_epochs),
+                )
+                == 0
             ):
-                logger.info("Sample Predictions on Validation Batch:")
-                for i in range(min(5, len(y_pred_proc))):
+                sample_count = min(5, len(y_pred_proc))
+                if sample_count > 0:
+                    sample_lines = [
+                        f"Predicted: {y_pred_proc[i]}\nActual: {y_true_proc[i]}"
+                        for i in range(sample_count)
+                    ]
                     logger.info(
-                        f"\nPredicted: {y_pred_proc[i]}\nActual: {y_true_proc[i]}"
+                        "Sample Predictions on Validation Batch:\n"
+                        + "\n".join(sample_lines)
                     )
 
         else:
@@ -465,26 +485,23 @@ class SimpleTrainer(AbstractTrainer):
         self.model.train()
         return avg_val_loss
 
-    def _post_process_classification(self, y_pred, y_true):
+    def _post_process_classification(
+        self, y_pred: Array, y_true: Array
+    ) -> Tuple[Array, Array]:
         """Post-processes outputs for classification tasks.
 
         Args:
-            y_pred (np.ndarray): Predicted logits or probabilities.
-            y_true (np.ndarray): Ground truth labels.
+            y_pred: Predicted logits or probabilities as a backend array.
+            y_true: Ground truth labels as a backend array.
 
         Returns:
-            Tuple[np.ndarray, np.ndarray]: Processed predictions and targets
+            Tuple[Array, Array]: Processed predictions and targets
                 (e.g., for use in accuracy calculation).
         """
-        if isinstance(y_pred, Tensor):
-            y_pred = y_pred.data
-        if isinstance(y_true, Tensor):
-            y_true = y_true.data
-
         if self.output_type in ["logits", "softmax"]:
-            return np.argmax(y_pred, axis=-1), y_true
+            return xp.argmax(y_pred, axis=-1), y_true
         elif self.output_type == "sigmoid":
-            return (y_pred >= 0.5).astype(int), (y_true >= 0.5).astype(int)
+            return (y_pred >= 0.5).astype(xp.int32), (y_true >= 0.5).astype(xp.int32)
         else:
             return y_pred, y_true
 
@@ -582,6 +599,9 @@ class LLMTrainer(AbstractTrainer):
             **kwargs: Additional arguments passed to the parent trainer.
         """
         super().__init__(model_cls, optimizer_cls, loss_fn, config=config, **kwargs)
+        self.config: TransformerTrainingConfig = cast(
+            TransformerTrainingConfig, self.config
+        )
         self.forward_fn = forward_fn
 
     def train_step(self, batch_data, data_loader) -> float:
@@ -604,10 +624,10 @@ class LLMTrainer(AbstractTrainer):
             pred_probs,
             y,
             pad_idx=data_loader.pad_idx,
-            label_smoothing=self.config.label_smoothing,  # type: ignore
+            label_smoothing=self.config.label_smoothing,
         )
         loss.backward()
-        return float(loss.detach().data)
+        return float(loss.item())
 
     def evaluate(self, train_data_loader, val_data_loader, epoch) -> float:
         """Evaluates the model on the validation data loader for language modeling.
@@ -627,7 +647,7 @@ class LLMTrainer(AbstractTrainer):
         for batch_data in tqdm(val_data_loader, desc="Evaluation", leave=False):
             pred_probs, y = self.forward_fn(self.model, batch_data, mode="train")
             loss = self.loss_fn(pred_probs, y, pad_idx=val_data_loader.pad_idx)
-            total_loss += float(loss.detach().data)
+            total_loss += float(loss.item())
             batch_count += 1
         avg_val_loss = total_loss / max(batch_count, 1)
 
@@ -691,4 +711,4 @@ def grad_l2_norm(parameters: Dict[str, Tensor]) -> float:
     for p in parameters.values():
         if p.grad is not None:
             grad_norm += (p.grad.data**2).sum()
-    return float(grad_norm**0.5)
+    return float(xp.to_scalar(grad_norm**0.5))

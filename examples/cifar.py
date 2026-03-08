@@ -1,6 +1,6 @@
 import logging
 
-from openml.datasets import get_dataset
+from openml.datasets import get_dataset  # pyright: ignore[reportMissingImports]
 
 from autograd import functional, nn, optim
 from autograd.tools.config_schema import GenericTrainingConfig
@@ -47,10 +47,10 @@ class CifarMulticlassClassifier(nn.Module):
         and finally outputs raw logits.
 
         Args:
-            x (np.ndarray): A batch of flattened CIFAR-10 images of shape (batch_size, 3072).
+            x: A batch of flattened CIFAR-10 images of shape (batch_size, 3072).
 
         Returns:
-            np.ndarray: Logits of shape (batch_size, num_classes).
+            Tensor: Logits of shape (batch_size, num_classes).
         """
         x = functional.relu(self.bn1(self.h1(x)))
         x = self.dropout(x)
@@ -92,10 +92,10 @@ class CifarResNet(nn.Module):
         Finally, the output is flattened and passed through a linear layer.
 
         Args:
-            x (np.ndarray): A batch of flattened CIFAR-10 images of shape (batch_size, 3072).
+            x: A batch of flattened CIFAR-10 images of shape (batch_size, 3072).
 
         Returns:
-            np.ndarray: Logits of shape (batch_size, num_classes).
+            Tensor: Logits of shape (batch_size, num_classes).
         """
         batch_size = x.shape[0]
         x = x.reshape(batch_size, 3, 32, 32)  # (N, in_channels, H, W)
@@ -153,10 +153,10 @@ class CifarConvolutionalClassifier(nn.Module):
         mapped to class logits via a linear layer.
 
         Args:
-            x (np.ndarray): A batch of flattened CIFAR-10 images of shape (batch_size, 3072).
+            x: A batch of flattened CIFAR-10 images of shape (batch_size, 3072).
 
         Returns:
-            np.ndarray: Logits of shape (batch_size, num_classes).
+            Tensor: Logits of shape (batch_size, num_classes).
         """
         batch_size = x.shape[0]
         # cifar-10 image has shape 32 x 32 x 3 (color channels)
@@ -247,6 +247,7 @@ if __name__ == "__main__":
     X, y, _, __ = get_dataset(dataset_id=40927, download_data=True).get_data(
         target="class", dataset_format="array"
     )
+    assert y is not None
     X = X / 255.0  # Normalize to [0, 1] to speed up convergence
 
     # To speed up the training on local machine
@@ -320,6 +321,7 @@ if __name__ == "__main__":
     X, y, _, __ = get_dataset(dataset_id=41983, download_data=True).get_data(
         target="class", dataset_format="array"
     )
+    assert y is not None
     X = X / 255.0  # Normalize to [0, 1]
     X = X[:5000]
     y = y[:5000]

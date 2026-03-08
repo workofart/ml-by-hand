@@ -1,16 +1,10 @@
 import logging
+import math
 from abc import abstractmethod
 from collections import defaultdict
 from typing import Any, Callable, Dict, Optional
 
-try:
-    # drop-in replacement for numpy for GPU acceleration
-    import cupy as np  # type: ignore
-
-    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
-except Exception:
-    import numpy as np
-
+from autograd.backend import xp
 from autograd.tensor import Tensor
 
 logger = logging.getLogger(__name__)
@@ -93,7 +87,7 @@ class CosineScheduler(LRScheduler):
         decay_ratio = (step - self.warmup_steps) / (
             self.lr_decay_iters - self.warmup_steps
         )
-        coeff = 0.5 * (1.0 + np.cos(np.pi * decay_ratio))
+        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
         return self.min_lr + coeff * (initial_lr - self.min_lr)
 
 
@@ -146,8 +140,17 @@ class Optimizer:
         self._hyperparams["lr"] = lr
         self.initial_lr = lr
         if lr_scheduler_kwargs:
-            lr_scheduler_cls = eval(lr_scheduler_kwargs["lr_scheduler_cls"])
-            self.lr_scheduler = lr_scheduler_cls(**lr_scheduler_kwargs)
+            scheduler_kwargs = dict(lr_scheduler_kwargs)
+            scheduler_spec = scheduler_kwargs.pop("lr_scheduler_cls")
+
+            if isinstance(scheduler_spec, str):
+                if scheduler_spec not in globals():
+                    raise ValueError(f"Unknown lr scheduler class: {scheduler_spec}")
+                lr_scheduler_cls = globals()[scheduler_spec]
+            else:
+                lr_scheduler_cls = scheduler_spec
+
+            self.lr_scheduler = lr_scheduler_cls(**scheduler_kwargs)
         else:
             self.lr_scheduler = None
 
@@ -254,7 +257,7 @@ class Optimizer:
         for param in self.model_parameters.values():
             if param.grad is not None:
                 grad_data = param.grad.data
-                total_norm += (np.abs(grad_data) ** norm_type).sum()
+                total_norm += (xp.abs(grad_data) ** norm_type).sum().item()
 
         # Take the appropriate root of the total_norm
         total_norm = total_norm ** (1.0 / norm_type)
@@ -469,4 +472,4 @@ class Adam(Optimizer):
             # Weight decay step (decoupled)
             if weight_decay > 0.0:
                 param.data = param.data - self.lr * weight_decay * param.data
-            param.data -= self.lr * m_hat / (np.sqrt(v_hat) + epsilon)
+            param.data -= self.lr * m_hat / (xp.sqrt(v_hat) + epsilon)

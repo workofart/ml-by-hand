@@ -1,10 +1,3 @@
-try:
-    # drop-in replacement for numpy for GPU acceleration
-    import cupy as np  # type: ignore
-
-    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
-except Exception:
-    import numpy as np
 from autograd import functional, nn, optim, tensor
 from autograd.text.utils import create_vocabulary, text_to_one_hot_and_sparse
 from autograd.tools.config_schema import GenericTrainingConfig
@@ -79,7 +72,7 @@ class Seq2Seq(nn.Module):
         output is projected to logits via a linear layer.
 
         Args:
-            x (np.ndarray): Input tensor of shape (batch_size, sequence_length, input_size).
+            x: Input tensor of shape (batch_size, sequence_length, input_size).
 
         Returns:
             Tensor: A tensor of shape (batch_size, max_output_len, input_size) containing the output logits.
@@ -90,7 +83,7 @@ class Seq2Seq(nn.Module):
         h_t, cell_t = self.encoder(x)
         for t in range(self.max_output_len):
             x_t = x[:, t, :]
-            x_t = x_t.view((x_t.shape[0], 1, x_t.shape[1]))
+            x_t = x_t.view(x_t.shape[0], 1, x_t.shape[1])
             # We will initialize the decoder with the encoder's final hidden state
             h_t, cell_t = self.decoder(x=x_t, hidden_state=h_t, C_t=cell_t)
             # Get the final projection in logits format
@@ -98,13 +91,13 @@ class Seq2Seq(nn.Module):
             output.append(logits)
             # TODO: If all the predicted tokens in the batch are <EOS>,
             # we can stop decoding the batch
-            # pred_token_indices = np.argmax(functional.softmax(logits).data, axis=1)
-            # if np.all(pred_token_indices == 0):
+            # pred_token_indices = logits.data.argmax(axis=1)
+            # if (pred_token_indices == 0).all():
             #     break
         return tensor.Tensor.stack(output, axis=1)
 
 
-def parse_data_into_xy(data: np.ndarray):
+def parse_data_into_xy(data) -> tuple[list[str], list[str]]:
     """
     Parse raw input data into source and target sequences for the Seq2Seq model.
 
@@ -116,7 +109,7 @@ def parse_data_into_xy(data: np.ndarray):
         - Reversing the order of the articles to potentially shorten the gradient path during training.
 
     Args:
-        data (np.ndarray): A numpy array containing the dataset, where the summary is in column index 2 and the article is in column index 3.
+        data: A sequence of row dictionaries containing `summary` and `article`.
 
     Returns:
         Tuple[List[str], List[str]]:
@@ -125,13 +118,13 @@ def parse_data_into_xy(data: np.ndarray):
     """
     # Data format
     # url, title, summary, article, step headers
-    print(f"{data.shape=}")
+    print(f"num_rows={len(data)}")
     # Enrich the label summary with start of string and end of string markers
-    summaries = [f"<SOS> {summary} <EOS>" for summary in data[:, 2]]
+    summaries = [f"<SOS> {row['summary']} <EOS>" for row in data]
     # In the paper, reversing the input sentence minimizes the distance between the
     # start of the source sentence and the relevant parts in the output sentence.
     # It shortens the "path" the gradients have to traverse in time.
-    articles = data[:, 3][::-1]
+    articles = [str(row["article"]) for row in reversed(data)]
     return articles, summaries
 
 
@@ -158,6 +151,8 @@ def main():
 
     train_data = load_data(train_data_url, train_filename, max_rows=1024)
     test_data = load_data(test_data_url, test_filename, max_rows=1024)
+    assert not isinstance(train_data, str)
+    assert not isinstance(test_data, str)
 
     train_X, train_y = parse_data_into_xy(train_data)
     test_X, test_y = parse_data_into_xy(test_data)

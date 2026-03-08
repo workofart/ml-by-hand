@@ -11,16 +11,8 @@ from typing import (
     Union,
 )
 
-try:
-    # drop-in replacement for numpy for GPU acceleration
-    import cupy as np  # type: ignore
-
-    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
-except Exception:
-    import numpy as np
-
 from autograd import nn
-from autograd.functional import Softmax
+from autograd.backend import Array, xp
 from autograd.text.tokenizer import BytePairEncoder
 
 logger = logging.getLogger(__name__)
@@ -42,7 +34,7 @@ def create_vocabulary(
         >>> print(vocab)
         {'hello': 0, 'world': 1, 'there': 2, 'peace': 3}  # Order and exact indices may vary.
     """
-    token_freq = defaultdict(int)
+    token_freq = defaultdict(float)
     for text in texts:
         if custom_tokenizer is None:
             tokens = text.lower().split()
@@ -70,7 +62,7 @@ def text_to_one_hot_and_sparse(
     vocabulary: Dict[str, int],
     max_sequence_length: int,
     pad_str: str = "<PAD>",
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> Tuple[Array, Array]:
     """
     Convert list of texts into a sequential feature matrix using the vocabulary.
     It will do the padding/truncation based on max_sequence_length, then convert to one-hot encoding
@@ -84,8 +76,8 @@ def text_to_one_hot_and_sparse(
         pad_str (str): The padding string.
 
     Returns:
-        one_hot (np.ndarray): shape (batch_size, max_sequence_length, vocab_size)
-        matrix  (np.ndarray): shape (batch_size, max_sequence_length) of integer IDs
+        one_hot (Array): shape (batch_size, max_sequence_length, vocab_size)
+        matrix  (Array): shape (batch_size, max_sequence_length) of integer IDs
 
     Examples:
         >>> texts = ["Hello world", "Hello there"]
@@ -103,9 +95,7 @@ def text_to_one_hot_and_sparse(
 
     # Create an integer matrix of shape (batch_size, max_sequence_length)
     # filled with pad_idx initially, then we overwrite with actual indices later
-    matrix = np.full(
-        (batch_size, max_sequence_length), fill_value=pad_idx, dtype=np.int32
-    )
+    matrix = xp.full((batch_size, max_sequence_length), pad_idx, dtype=xp.int32)
 
     for i, text in enumerate(texts):
         # Split text into words and convert to indices
@@ -121,12 +111,7 @@ def text_to_one_hot_and_sparse(
 
     # Convert to one-hot encoding
     # Shape: (batch_size, sequence_length, vocab_size)
-    one_hot = np.zeros((batch_size, max_sequence_length, vocab_size))
-    for i in range(batch_size):
-        for j in range(max_sequence_length):
-            idx_in_vocab = matrix[i, j]
-            one_hot[i, j, idx_in_vocab] = 1
-
+    one_hot = xp.eye(vocab_size, dtype=xp.float32)[matrix]
     return one_hot, matrix
 
 
@@ -135,7 +120,7 @@ def create_causal_mask(
     batch_size: int,
     lookback: bool = False,
     mask_diagonal: bool = False,
-) -> np.ndarray:
+) -> Array:
     """
     Creates a causal mask that prevents positions from attending to future (lookforward)
     or past (lookback) positions. 1.0 => masked.
@@ -147,7 +132,7 @@ def create_causal_mask(
         mask_diagonal (bool): If True, the main diagonal is also masked.
 
     Returns:
-        np.ndarray: shape (batch_size, 1, seq_len, seq_len) with 1.0 in masked positions.
+        Array: shape (batch_size, 1, seq_len, seq_len) with 1.0 in masked positions.
 
     Examples:
         >>> mask = create_causal_mask(seq_len=5, batch_size=2)
@@ -163,36 +148,36 @@ def create_causal_mask(
         # If mask_diagonal=False => strictly below diagonal => i>j
         k_ = 0 if mask_diagonal else -1
         # np.tril(..., k=0) includes diagonal; np.tril(..., k=-1) excludes diagonal
-        mask_2d = np.tril(np.ones((seq_len, seq_len), dtype=np.float32), k=k_)
+        mask_2d = xp.tril(xp.ones((seq_len, seq_len), dtype=xp.float32), k=k_)
     else:
         # Mask the upper triangle => i<j => can't attend to "future"
         # If mask_diagonal=True => includes diagonal => i<=j => so we do k=0 in np.triu
         # If mask_diagonal=False => strictly above diagonal => i<j => so we do k=1
         k_ = 0 if mask_diagonal else 1
-        mask_2d = np.triu(np.ones((seq_len, seq_len), dtype=np.float32), k=k_)
+        mask_2d = xp.triu(xp.ones((seq_len, seq_len), dtype=xp.float32), k=k_)
 
     # "mask" means 1.0 in forbidden positions.
     # Add batch dimension: (batch_size, 1, seq_len, seq_len)
-    mask_4d = mask_2d[np.newaxis, np.newaxis, :, :]
-    mask_4d = np.repeat(mask_4d, batch_size, axis=0)
+    mask_4d = xp.expand_dims(xp.expand_dims(mask_2d, axis=0), axis=0)
+    mask_4d = xp.repeat(mask_4d, batch_size, axis=0)
     return mask_4d
 
 
 def create_padding_mask(
-    token_indices: np.ndarray,
+    token_indices: Array,
     pad_idx: int = 0,
     dims: Optional[Tuple[int, ...]] = None,
-) -> np.ndarray:
+) -> Array:
     """
     Creates a padding mask with configurable output dimensions.
 
     Args:
-        token_indices (np.ndarray): shape (batch_size, seq_len) containing token indices
+        token_indices (Array): shape (batch_size, seq_len) containing token indices
         pad_idx (int): Integer indicating the padding token index
         dims (tuple or None): Desired shape. If None, (batch_size, 1, 1, seq_len).
 
     Returns:
-        np.ndarray: A mask array where positions of 'pad_idx' are 1.0
+        Array: A mask array where positions of 'pad_idx' are 1.0
 
     Examples:
         >>> token_indices = np.array([[1, 0, 2], [0, 3, 4]])
@@ -200,11 +185,12 @@ def create_padding_mask(
         >>> print(mask.shape)
         (2, 1, 1, 3)
     """
-    pad_positions = (token_indices == pad_idx).astype(np.float32)
+    token_indices = xp.array(token_indices)
+    pad_positions = (token_indices == pad_idx).astype(xp.float32)
 
     if dims is None:
         # Default shape for standard attention: (batch_size, 1, 1, seq_len)
-        return pad_positions[:, np.newaxis, np.newaxis, :]
+        return xp.expand_dims(xp.expand_dims(pad_positions, axis=1), axis=1)
     else:
         # We will simply reshape pad_positions to the desired dims
         # assuming the number of elements matches.
@@ -233,17 +219,13 @@ def clean_and_tokenize(
         >>> print(tokens)
         ['hello', ',', 'world', '!', 'new', 'line', '.']
     """
-    tokens = np.array(re.findall(pattern, text))
-
+    tokens = re.findall(pattern, text)
     if lowercase:
-        tokens = np.vectorize(str.lower)(tokens)
-
-    # Filter out whitespace tokens
-    tokens = tokens[(tokens != " ") & (tokens != "\n")]
-    return tokens.tolist()
+        tokens = [token.lower() for token in tokens]
+    return [token for token in tokens if token not in {" ", "\n"}]
 
 
-def validate_batches(x: np.ndarray, y: np.ndarray) -> None:
+def validate_batches(x: Array, y: Array) -> None:
     batch_size, seq_len = x.shape
     for b in range(min(4, batch_size)):
         for seq_idx in range(seq_len):
@@ -254,7 +236,7 @@ def validate_batches(x: np.ndarray, y: np.ndarray) -> None:
 def token_batch_to_indices(
     token_batch: List[List[str]],
     vocab: Dict[Union[str, bytes], int],
-) -> np.ndarray:
+) -> Array:
     """
     Convert a batch of token lists to a matrix of token indices using a given vocabulary.
 
@@ -263,7 +245,7 @@ def token_batch_to_indices(
         vocab (Dict[Union[str, bytes], int]): A vocabulary mapping tokens to integer indices.
 
     Returns:
-        np.ndarray: A matrix of shape (batch_size, sequence_length) containing token indices.
+        Array: A matrix of shape (batch_size, sequence_length) containing token indices.
 
     Examples:
         >>> token_batch = [["hello", "world"], ["this", "test"]]
@@ -279,7 +261,7 @@ def token_batch_to_indices(
         for token in batch:
             seq.append(vocab.get(token, vocab[b"<UNK>"]))
         X.append(seq)
-    return np.array(X, dtype=np.int32)
+    return xp.array(X, dtype=xp.int32)
 
 
 def inference(
@@ -287,7 +269,7 @@ def inference(
     prediction_func: nn.AbstractLLMForwardFn,
     bpe: BytePairEncoder,
     start_tokens: Optional[str] = None,
-    groundtruth_data: Optional[np.ndarray] = None,
+    groundtruth_data: Optional[Array] = None,
     max_length: int = 50,
     temperature: float = 1.0,
     top_k: Optional[int] = None,
@@ -308,7 +290,7 @@ def inference(
         prediction_func (nn.AbstractLLMForwardFn): The forward function that implements the AbstractLLMForwardFn interface.
         bpe (BytePairEncoder): BPE tokenizer.
         start_tokens (Optional[str]): The initial token string (e.g. "<SOS>").
-        groundtruth_data (Optional[np.ndarray]): If provided, teacher forcing mode is used.
+        groundtruth_data (Optional[Array]): If provided, teacher forcing mode is used.
         max_length (int): The maximum length of tokens to run.
         temperature (float): The amount of randomness in sampling
             > 1.0 => more random
@@ -333,19 +315,21 @@ def inference(
         >>> print(prediction_text)
     """
 
-    def sample_next_token(logits: np.ndarray, temp: float, k: Optional[int]) -> int:
+    def sample_next_token(logits: Array, temp: float, k: Optional[int]) -> int:
+        logits = xp.array(logits, dtype=xp.float32)
         # If temp <= 0 (teacher forcing), use argmax.
         if temp <= 0:
-            return int(np.argmax(logits))
+            return int(xp.argmax(logits))
         # Otherwise, apply temperature scaling and top-k filtering.
         scaled_logits = logits / temp
         if k is not None and k < len(scaled_logits):
-            top_indices = np.argpartition(scaled_logits, -k)[-k:]
-            filtered_logits = np.full_like(scaled_logits, -np.inf)
-            filtered_logits[top_indices] = scaled_logits[top_indices]
-            scaled_logits = filtered_logits
-        probabilities = Softmax().forward(scaled_logits)
-        return int(np.random.choice(len(probabilities), size=1, p=probabilities))
+            threshold = xp.sort(scaled_logits)[-k]
+            scaled_logits = xp.where(
+                scaled_logits >= threshold,
+                scaled_logits,
+                xp.full(scaled_logits.shape, -float("inf"), dtype=scaled_logits.dtype),
+            )
+        return int(xp.sample_categorical(scaled_logits))
 
     # Determine mode and set up initial values.
     teacher_forcing = groundtruth_data is not None
@@ -355,8 +339,9 @@ def inference(
         num_steps = max(0, min(max_length, len(groundtruth_data)) - 1)
         output_ids = [int(groundtruth_data[0])]
 
+        groundtruth_tokens = [int(token) for token in groundtruth_data.tolist()]
         groundtruth_text = "\n".join(
-            bpe.decode(groundtruth_data.tolist()).split("<|endoftext|>")
+            bpe.decode(groundtruth_tokens).split("<|endoftext|>")
         )
         logger.info(f"Teacher forcing mode on!!\nGroundtruth:\n{groundtruth_text}")
     else:
@@ -368,9 +353,11 @@ def inference(
     # Main loop: decide input tokens based on the mode.
     for i in range(min(num_steps, 100)):
         current_input = groundtruth_data[: i + 1] if teacher_forcing else output_ids
-        logits = prediction_func(
-            model=model, batch_data=np.array([current_input]), mode="sample"
-        )[0].data[0, -1]
+        batch_data = xp.expand_dims(xp.array(current_input, dtype=xp.int32), axis=0)
+        prediction = prediction_func(model=model, batch_data=batch_data, mode="sample")
+        if isinstance(prediction, tuple):
+            prediction = prediction[0]
+        logits = prediction.data[0, -1]
         # Sample the next token once and use it for both appending and printing.
         next_token = sample_next_token(logits, temperature, top_k)
         output_ids.append(next_token)
@@ -401,6 +388,7 @@ def load_wiki_simple() -> str:
         "training_data/wiki_simple_english.txt",
         "training_data/wiki_simple_english.txt",
     )
+    assert isinstance(data, str)
     logger.info(f"{len(data)} characters in the entire dataset. Sample: \n{data[:100]}")
     return data
 
@@ -412,5 +400,6 @@ def load_shakespeare_mini() -> str:
         "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt",
         "training_data/tinyshakespeare.txt",
     )
+    assert isinstance(data, str)
     logger.info(f"{len(data)} characters in the entire dataset. Sample: \n{data[:100]}")
     return data

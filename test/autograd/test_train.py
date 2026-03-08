@@ -2,16 +2,10 @@ import logging
 import os
 from unittest import TestCase
 
-try:
-    # drop-in replacement for numpy for GPU acceleration
-    import cupy as np  # type: ignore
-
-    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
-except Exception:
-    import numpy as np
 from sklearn.datasets import load_breast_cancer, load_diabetes
 
 from autograd import functional, nn, optim
+from autograd.backend import xp
 from autograd.tools.config_schema import GenericTrainingConfig
 from autograd.tools.data import SimpleDataLoader
 from autograd.tools.metrics import accuracy, mean_squared_error
@@ -19,7 +13,7 @@ from autograd.tools.trainer import SimpleTrainer
 
 logger = logging.getLogger(__name__)
 
-np.random.seed(42)
+xp.random.seed(42)
 
 
 class Classifier(nn.Module):
@@ -101,14 +95,14 @@ class TestTrain(TestCase):
         y_pred = trainer.model(X).data
 
         # compare y_pred and y on the classification accuracy
-        acc = accuracy((y_pred > 0.5).astype(int).squeeze(), y)
+        acc = accuracy(xp.asarray(y_pred > 0.5).astype(xp.int32).squeeze(), y)
         logger.info(f"Accuracy: {acc}")
         assert acc > 0.9
 
     def test_regression(self):
         X, y = load_diabetes(return_X_y=True)
         logger.info(f"Dataset: {X.shape=}, {y.shape=}")
-        logger.info(f"y unique values: {np.unique(y)}")
+        logger.info(f"y unique values: {sorted(set(y.tolist()))}")
 
         CONFIG = GenericTrainingConfig(
             training_run_name="default",

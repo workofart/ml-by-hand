@@ -10,32 +10,47 @@ permissions:
 
 jobs:
   build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            backend: mlx
+          - os: ubuntu-latest
+            backend: numpy
 
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    env:
+      AUTOGRAD_BACKEND: ${{ matrix.backend }}
 
     steps:
     - name: Check out code
       uses: actions/checkout@v4
     - name: Set up Python 3.12
-      uses: actions/setup-python@v3
+      uses: actions/setup-python@v5
       with:
         python-version: "3.12"
-    - name: Cache python packages
+    - name: Install uv
+      run: curl -LsSf https://astral.sh/uv/install.sh | sh
+    - name: Add uv to PATH
+      run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+    - name: Cache uv packages
       uses: actions/cache@v4
       with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        path: ~/.cache/uv
+        key: ${{ runner.os }}-${{ matrix.backend }}-uv-${{ hashFiles('uv.lock') }}
         restore-keys: |
-          ${{ runner.os }}-pip-
-    - name: Install dependencies
+          ${{ runner.os }}-${{ matrix.backend }}-uv-
+    - name: Show selected backend
+      run: echo "AUTOGRAD_BACKEND=${AUTOGRAD_BACKEND}"
+    - name: Sync locked dependencies
       run: |
-        python -m pip install --upgrade pip
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-        pip install torch
+        uv sync --frozen --extra dev
+        uv pip install torch --index-url https://download.pytorch.org/whl/cpu
     - name: Lint and format with Ruff
       run: |
-        ruff check .
-        ruff format . --check
+        uv run ruff check .
+        uv run ruff format . --check
     - name: Test with pytest
       run: |
-        python -m pytest
+        uv run python -m pytest

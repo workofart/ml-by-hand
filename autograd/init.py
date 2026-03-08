@@ -1,19 +1,12 @@
-"""
-Initialization methods for weights of the neural network
-"""
+"""Weight initialization methods for neural network parameters."""
 
-try:
-    # drop-in replacement for numpy for GPU acceleration
-    import cupy as np  # type: ignore
+import math
 
-    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
-except Exception:
-    import numpy as np
-
+from autograd.backend import xp
 from autograd.tensor import Tensor
 
 
-def xavier_uniform(tensor: Tensor):
+def xavier_uniform(tensor: Tensor) -> Tensor:
     r"""
     Applies in-place Xavier Uniform Initialization to the given tensor.
 
@@ -31,29 +24,29 @@ def xavier_uniform(tensor: Tensor):
     $$
 
     Args:
-        tensor (Tensor): The tensor to be initialized. Its underlying data should be a NumPy array.
+        tensor (Tensor): The tensor to initialize. Its underlying data should be an array.
 
     Returns:
         Tensor: The same tensor after in-place initialization.
 
     Examples:
-        >>> import cupy as np
+        >>> from autograd.backend import xp
         >>> from autograd.tensor import Tensor
         >>> # Create an uninitialized tensor with shape (3, 4)
-        >>> tensor = Tensor(np.empty((3, 4)))
+        >>> tensor = Tensor(xp.empty((3, 4)))
         >>> # Initialize the tensor using Xavier Uniform initialization
         >>> tensor = xavier_uniform(tensor)
     """
-    input_tensor_count, output_tensor_count = compute_in_out_tensor_count(tensor.data)
-    limit = np.sqrt(6.0 / (input_tensor_count + output_tensor_count))
+    input_tensor_count, output_tensor_count = compute_in_out_tensor_count(tensor)
+    limit = math.sqrt(6.0 / (input_tensor_count + output_tensor_count))
 
-    tensor.data[...] = np.random.uniform(
-        low=-limit, high=limit, size=tensor.data.shape
-    ).astype(tensor.data.dtype)
+    tensor.data = xp.random.uniform(-limit, limit, tensor.data.shape).astype(
+        tensor.data.dtype
+    )
     return tensor
 
 
-def compute_in_out_tensor_count(tensor: Tensor):
+def compute_in_out_tensor_count(tensor: Tensor) -> tuple[int, int]:
     r"""
     Computes the number of input and output tensor counts for the given tensor.
 
@@ -82,15 +75,15 @@ def compute_in_out_tensor_count(tensor: Tensor):
         ValueError: If the tensor has fewer than 2 dimensions.
 
     Examples:
-        >>> import cupy as np
+        >>> from autograd.backend import xp
         >>> from autograd.tensor import Tensor
         >>> # Example for a fully-connected layer weight matrix with shape (fan_in, fan_out)
-        >>> tensor_fc = Tensor(np.empty((5, 10)))
+        >>> tensor_fc = Tensor(xp.empty((5, 10)))
         >>> compute_in_out_tensor_count(tensor_fc.data)
         (5, 10)
         >>> # Example for a convolution kernel with shape
         >>> # (output_channels, input_channels, kernel_height, kernel_width)
-        >>> tensor_conv = Tensor(np.empty((16, 3, 3, 3)))
+        >>> tensor_conv = Tensor(xp.empty((16, 3, 3, 3)))
         >>> # The receptive field size is 3*3 = 9
         >>> # So, input tensor count = 16 * 9 = 144, output tensor count = 3 * 9 = 27
         >>> compute_in_out_tensor_count(tensor_conv.data)

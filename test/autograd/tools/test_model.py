@@ -1,15 +1,9 @@
+import json
 import os
 from copy import deepcopy
 from unittest import TestCase
 
-try:
-    # drop-in replacement for numpy for GPU acceleration
-    import cupy as np  # type: ignore
-
-    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
-except Exception:
-    import numpy as np
-
+from autograd.backend import xp
 from autograd.init import xavier_uniform
 from autograd.nn import Module
 from autograd.tensor import Tensor
@@ -19,10 +13,10 @@ from autograd.tools.model import load_checkpoint, save_checkpoint
 class MockModule(Module):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self._parameters["weight"] = xavier_uniform(Tensor(np.zeros((4, 5))))
-        self._parameters["bias"] = xavier_uniform(Tensor(np.zeros((1, 1))))
+        self._parameters["weight"] = xavier_uniform(Tensor(xp.zeros((4, 5))))
+        self._parameters["bias"] = xavier_uniform(Tensor(xp.zeros((1, 1))))
 
-        self.stateful_states = np.array([1, 1, 1])
+        self.stateful_states = xp.array([1, 1, 1])
         self.arg0 = args[0]
         self.kwarg0 = kwargs["kwarg0"]
 
@@ -43,6 +37,21 @@ class TestModel(TestCase):
             if os.path.exists(f):
                 os.remove(f)
 
+    def _meta_types(self, node):
+        types = []
+        if isinstance(node, dict):
+            node_type = node.get("_type")
+            if node_type is not None:
+                types.append(node_type)
+            items = node.get("items")
+            if isinstance(items, dict):
+                for value in items.values():
+                    types.extend(self._meta_types(value))
+            elif isinstance(items, list):
+                for value in items:
+                    types.extend(self._meta_types(value))
+        return types
+
     def test_save_load_model(self):
         # 1. Save the original parameters
         original_params = deepcopy(self.model.parameters)
@@ -52,7 +61,7 @@ class TestModel(TestCase):
         )
 
         # 2. Perform a forward/backward pass to change the parameters
-        x = Tensor(np.ones((5, 4)) + 1.234)
+        x = Tensor(xp.ones((5, 4)) + 1.234)
         out = self.model.forward(x)
         out.backward()
 
@@ -64,13 +73,13 @@ class TestModel(TestCase):
         # Check that parameters have indeed changed
         for name, p in self.model.parameters.items():
             self.assertFalse(
-                np.allclose(original_params[name].data, p.data),
+                xp.allclose(original_params[name].data, p.data),
                 f"Parameter {name} did not change after update.",
             )
 
         # But states have not changed by this update
         self.assertTrue(
-            np.allclose(self.model.stateful_states, np.array([1, 1, 1])),
+            xp.allclose(self.model.stateful_states, xp.array([1, 1, 1])),
             "States should not change with parameter updates.",
         )
 
@@ -81,12 +90,12 @@ class TestModel(TestCase):
         # Check that parameters are back to original
         for name, p in self.model.parameters.items():
             self.assertTrue(
-                np.allclose(original_params[name].data, p.data),
+                xp.allclose(original_params[name].data, p.data),
                 f"Parameter {name} did not restore to original.",
             )
         # Check states are also back to original
         self.assertTrue(
-            np.allclose(self.model.stateful_states, np.array([1, 1, 1])),
+            xp.allclose(self.model.stateful_states, xp.array([1, 1, 1])),
             "Stateful array did not restore to original.",
         )
 
@@ -100,7 +109,7 @@ class TestModel(TestCase):
         )
 
         # Manually change the new model's states from the default
-        new_model.stateful_states = np.array([999, 999, 999])
+        new_model.stateful_states = xp.array([999, 999, 999])
 
         # 2. Load only weights (parameters) from the checkpoint, ignoring states
         weights_only_data = load_checkpoint(
@@ -111,12 +120,57 @@ class TestModel(TestCase):
         # 3. Parameters should match original
         for name, p in new_model.parameters.items():
             self.assertTrue(
-                np.allclose(original_params[name].data, p.data),
+                xp.allclose(original_params[name].data, p.data),
                 f"Parameter {name} did not match original in new model with weights-only load.",
             )
 
         # But states should remain the custom value we set (999,999,999)
         self.assertTrue(
-            np.allclose(new_model.stateful_states, np.array([999, 999, 999])),
+            xp.allclose(new_model.stateful_states, xp.array([999, 999, 999])),
             "States should NOT have been overwritten in weights-only scenario.",
+        )
+
+    def test_save_checkpoint_uses_backend_neutral_array_metadata(self):
+        save_checkpoint(
+            self.model.state_dict(), json_path=self.json_path, npz_path=self.npz_path
+        )
+
+        with open(self.json_path, "r", encoding="utf-8") as handle:
+            meta = json.load(handle)
+
+        meta_types = self._meta_types(meta)
+        self.assertIn("array", meta_types)
+        self.assertNotIn("np.ndarray", meta_types)
+
+    def test_load_checkpoint_accepts_legacy_np_ndarray_metadata(self):
+        save_checkpoint(
+            self.model.state_dict(), json_path=self.json_path, npz_path=self.npz_path
+        )
+
+        with open(self.json_path, "r", encoding="utf-8") as handle:
+            meta = json.load(handle)
+
+        def replace_array_with_legacy_label(node):
+            if not isinstance(node, dict):
+                return
+            if node.get("_type") == "array":
+                node["_type"] = "np.ndarray"
+            items = node.get("items")
+            if isinstance(items, dict):
+                for value in items.values():
+                    replace_array_with_legacy_label(value)
+            elif isinstance(items, list):
+                for value in items:
+                    replace_array_with_legacy_label(value)
+
+        replace_array_with_legacy_label(meta)
+
+        with open(self.json_path, "w", encoding="utf-8") as handle:
+            json.dump(meta, handle)
+
+        loaded_sd = load_checkpoint(json_path=self.json_path, npz_path=self.npz_path)
+        self.model.load_state_dict(loaded_sd)
+        self.assertTrue(
+            xp.allclose(self.model.stateful_states, xp.array([1, 1, 1])),
+            "Legacy array metadata should still deserialize correctly.",
         )

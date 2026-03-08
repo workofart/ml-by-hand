@@ -1,21 +1,16 @@
 from unittest import TestCase
 
-try:
-    # drop-in replacement for numpy for GPU acceleration
-    import cupy as np  # type: ignore
-
-    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
-except Exception:
-    import numpy as np
 import torch  # for comparison
 
+from autograd.backend import xp
 from autograd.tensor import Tensor
+from test.helpers import allclose, array_equal, isclose
 
 
 class TestTensor(TestCase):
     def setUp(self) -> None:
         torch.manual_seed(42)
-        np.random.seed(42)
+        xp.random.seed(42)
 
         self.x_scalar = Tensor(2.0, requires_grad=True)
         self.y_scalar = Tensor(3.0, requires_grad=True)
@@ -37,10 +32,10 @@ class TestTensor(TestCase):
             requires_grad=True,
         )
         self.four_d_matrix = Tensor([[[[1.0, 2.0], [3.0, 4.0]]]], requires_grad=True)
-        self.batch_tensor1 = Tensor(np.random.randn(2, 3, 4, 4))
-        self.batch_tensor2 = Tensor(np.random.randn(2, 3, 4, 4))
+        self.batch_tensor1 = Tensor(xp.random.normal(shape=(2, 3, 4, 4)))
+        self.batch_tensor2 = Tensor(xp.random.normal(shape=(2, 3, 4, 4)))
         self.channel_weights = Tensor(
-            np.random.randn(3, 1, 1), requires_grad=True
+            xp.random.normal(shape=(3, 1, 1)), requires_grad=True
         )  # (C,1,1) for broadcasting
 
         # Torch tensors for comparison
@@ -89,14 +84,14 @@ class TestTensorOps(TestTensor):
 
     def test_tensor_addition(self):
         assert (self.x_scalar + self.y_scalar).data == 5.0
-        assert np.array_equal(
+        assert array_equal(
             list((self.x_scalar + self.y_scalar).creator.tensors),
             [self.x_scalar, self.y_scalar],
         )
 
     def test_tensor_multiplication(self):
         assert (self.x_scalar * self.y_scalar).data == 6.0
-        assert np.array_equal(
+        assert array_equal(
             list((self.x_scalar * self.y_scalar).creator.tensors),
             [self.x_scalar, self.y_scalar],
         )
@@ -106,8 +101,8 @@ class TestTensorOps(TestTensor):
         assert (self.y_scalar - self.x_scalar).data == 1.0
 
     def test_tensor_division(self):
-        assert (self.x_scalar / self.y_scalar).data == 2.0 / 3.0
-        assert (self.y_scalar / self.x_scalar).data == 1.5
+        assert isclose((self.x_scalar / self.y_scalar).data, 2.0 / 3.0)
+        assert isclose((self.y_scalar / self.x_scalar).data, 1.5)
 
     def test_tensor_exponentiation(self):
         assert (self.x_scalar**self.y_scalar).data == 8.0
@@ -121,7 +116,7 @@ class TestTensorOps(TestTensor):
 
     def test_tensor_matrix_multiplication(self):
         z = self.x_vector @ self.y_vector
-        assert np.array_equal(z.data, 1.0 * 3.0 + 2.0 * 4.0)
+        assert array_equal(z.data, 1.0 * 3.0 + 2.0 * 4.0)
 
     def test_complex_tensor_ops(self):
         x = Tensor(2.0, requires_grad=True)
@@ -134,7 +129,7 @@ class TestTensorOps(TestTensor):
         z = self.x_scalar * self.y_scalar
 
         assert z.data == 6.0
-        assert np.array_equal(
+        assert array_equal(
             list((self.x_scalar * self.y_scalar).creator.tensors),
             [self.x_scalar, self.y_scalar],
         )
@@ -142,18 +137,18 @@ class TestTensorOps(TestTensor):
 
         # Call backward and check the gradients
         z.backward()
-        assert np.allclose(z.grad.data, 1.0)
-        assert np.allclose(self.y_scalar.grad.data, 2.0)  # dz/dy = d(y*x)/dy = x = 2.0
-        assert np.allclose(self.x_scalar.grad.data, 3.0)  # dz/dx = d(y*x)/dx = y = 3.0
+        assert allclose(z.grad.data, 1.0)
+        assert allclose(self.y_scalar.grad.data, 2.0)  # dz/dy = d(y*x)/dy = x = 2.0
+        assert allclose(self.x_scalar.grad.data, 3.0)  # dz/dx = d(y*x)/dx = y = 3.0
 
     def test_backward_division(self):
         z = self.x_scalar / self.y_scalar
         z.backward()
-        assert np.allclose(z.grad.data, 1.0)
-        assert np.isclose(
+        assert allclose(z.grad.data, 1.0)
+        assert isclose(
             self.x_scalar.grad.data, 1.0 / 3.0, atol=1e-5
         )  # dz/dx = d(x/y)/dx = 1/y = 1/3
-        assert np.isclose(
+        assert isclose(
             self.y_scalar.grad.data, -2.0 / 9.0, atol=1e-5
         )  # dz/dy = d(x/y)/dy = -x/y^2 = -2/9
 
@@ -166,20 +161,18 @@ class TestTensorOps(TestTensor):
         z = self.x_vector @ self.y_vector
         z.backward()
         assert z.grad.data == 1
-        assert np.array_equal(self.x_vector.grad.data, np.array([3.0, 4.0]).T)
-        assert np.array_equal(self.y_vector.grad.data, np.array([1.0, 2.0]).T)
+        assert array_equal(self.x_vector.grad.data, xp.array([3.0, 4.0]).T)
+        assert array_equal(self.y_vector.grad.data, xp.array([1.0, 2.0]).T)
 
     def test_backward_matrix_matrix_matmul(self):
         z = self.x_matrix @ self.y_matrix
         z.backward()
-        assert np.array_equal(z.data, np.array([[19.0, 22.0], [43.0, 50.0]]))
-        assert np.array_equal(
-            self.x_matrix.grad.data, np.array([[11.0, 15.0], [11.0, 15.0]])
+        assert array_equal(z.data, xp.array([[19.0, 22.0], [43.0, 50.0]]))
+        assert array_equal(
+            self.x_matrix.grad.data, xp.array([[11.0, 15.0], [11.0, 15.0]])
         )
-        assert np.array_equal(
-            self.y_matrix.grad.data, np.array([[4.0, 4.0], [6.0, 6.0]])
-        )
-        assert np.array_equal(z.grad.data, np.array([[1, 1], [1, 1]]))
+        assert array_equal(self.y_matrix.grad.data, xp.array([[4.0, 4.0], [6.0, 6.0]]))
+        assert array_equal(z.grad.data, xp.array([[1, 1], [1, 1]]))
 
     def test_batch_addition(self):
         """Test addition with batched tensors"""
@@ -188,16 +181,18 @@ class TestTensorOps(TestTensor):
         result_torch = self.batch_tensor1_torch + self.batch_tensor2_torch
 
         # Check forward pass
-        np.testing.assert_allclose(result.data, result_torch.detach().numpy())
+        assert allclose(
+            result.data, result_torch.detach().numpy(), rtol=1e-6, atol=1e-6
+        )
 
         # Check backward pass
-        result.backward(np.ones_like(result.data))
+        result.backward(xp.ones_like(result.data))
         result_torch.backward(torch.ones_like(result_torch))
 
-        np.testing.assert_allclose(
+        assert allclose(
             self.batch_tensor1.grad.data, self.batch_tensor1_torch.grad.numpy()
         )
-        np.testing.assert_allclose(
+        assert allclose(
             self.batch_tensor2.grad.data, self.batch_tensor2_torch.grad.numpy()
         )
 
@@ -207,15 +202,17 @@ class TestTensorOps(TestTensor):
         result = self.batch_tensor1 + self.channel_weights
         result_torch = self.batch_tensor1_torch + self.channel_weights_torch
 
-        np.testing.assert_allclose(result.data, result_torch.detach().numpy())
+        assert allclose(
+            result.data, result_torch.detach().numpy(), rtol=1e-6, atol=1e-6
+        )
 
-        result.backward(np.ones_like(result.data))
+        result.backward(xp.ones_like(result.data))
         result_torch.backward(torch.ones_like(result_torch))
 
-        np.testing.assert_allclose(
+        assert allclose(
             self.batch_tensor1.grad.data, self.batch_tensor1_torch.grad.numpy()
         )
-        np.testing.assert_allclose(
+        assert allclose(
             self.channel_weights.grad.data, self.channel_weights_torch.grad.numpy()
         )
 
@@ -224,14 +221,14 @@ class TestTensorOps(TestTensor):
         batch_size, windows, features = 3, 784, 144
         out_channels = 32
 
-        x = Tensor(np.random.randn(batch_size, windows, features))
-        w = Tensor(np.random.randn(out_channels, features))
+        x = Tensor(xp.random.normal(shape=(batch_size, windows, features)))
+        w = Tensor(xp.random.normal(shape=(out_channels, features)))
 
         # Forward: (3, 784, 144) @ (32, 144).T -> (3, 784, 32)
         z = x @ w.T
 
         # Backward
-        grad = np.ones_like(z.data)
+        grad = xp.ones_like(z.data)
         z.backward(grad)
 
         # Verify gradient shapes
@@ -246,44 +243,47 @@ class TestTensorOps(TestTensor):
         z_torch.backward(torch.ones_like(z_torch))
 
         # Use allclose instead of array_equal for floating point comparison
-        np.testing.assert_allclose(x.grad.data, x_torch.grad.numpy(), rtol=1e-4)
-        np.testing.assert_allclose(w.grad.data, w_torch.grad.numpy(), rtol=1e-4)
+        # MLX and PyTorch can accumulate batched float32 matmuls in different
+        # orders. A small absolute tolerance keeps this check focused on real
+        # gradient mistakes instead of backend-specific roundoff noise.
+        assert allclose(x.grad.data, x_torch.grad.numpy(), rtol=1e-4, atol=1e-5)
+        assert allclose(w.grad.data, w_torch.grad.numpy(), rtol=1e-4, atol=2e-4)
 
     def test_batched_matmul_gradient_computation(self):
         # Create small batch example with explicit float dtype
         batch_size = 2
         x = Tensor(
-            np.array(
+            xp.array(
                 [  # (2, 2, 2)
                     [[1.0, 1.0], [1.0, 1.0]],
                     [[1.0, 1.0], [1.0, 1.0]],
                 ],
-                dtype=np.float64,
+                dtype=xp.float32,
             )
         )
         w = Tensor(
-            np.array(
+            xp.array(
                 [  # (2, 2)
                     [1.0, 1.0],
                     [1.0, 1.0],
                 ],
-                dtype=np.float64,
+                dtype=xp.float32,
             )
         )
 
         # Manual batch-wise computation
-        manual_x_grad = np.zeros_like(x.data)  # (2, 2, 2)
-        manual_w_grad = np.zeros_like(w.data)  # (2, 2)
+        manual_x_grad = xp.zeros_like(x.data)  # (2, 2, 2)
+        manual_w_grad = xp.zeros_like(w.data)  # (2, 2)
 
         for b in range(batch_size):
             # Compute gradient for each batch separately
-            batch_grad = np.ones((2, 2), dtype=np.float64)  # gradient for this batch
+            batch_grad = xp.ones((2, 2), dtype=xp.float32)  # gradient for this batch
 
             # Gradient for x[b]
-            manual_x_grad[b] = np.matmul(batch_grad, w.data)  # (2,2) @ (2,2)
+            manual_x_grad[b] = xp.matmul(batch_grad, w.data)  # (2,2) @ (2,2)
 
             # Accumulate gradient for w
-            manual_w_grad += np.matmul(x.data[b].T, batch_grad)  # (2,2).T @ (2,2)
+            manual_w_grad += xp.matmul(x.data[b].T, batch_grad)  # (2,2).T @ (2,2)
 
         # Compare with PyTorch
         x_torch = torch.tensor(x.data, requires_grad=True)
@@ -292,23 +292,23 @@ class TestTensorOps(TestTensor):
         z_torch.backward(torch.ones_like(z_torch))
 
         # Verify our manual computation matches PyTorch
-        np.testing.assert_array_equal(manual_x_grad, x_torch.grad.numpy())
-        np.testing.assert_array_equal(manual_w_grad, w_torch.grad.numpy())
+        assert array_equal(manual_x_grad, x_torch.grad.numpy())
+        assert array_equal(manual_w_grad, w_torch.grad.numpy())
 
     def test_batch_multiplication(self):
         """Test element-wise multiplication with batched tensors"""
         result = self.batch_tensor1 * self.batch_tensor2
         result_torch = self.batch_tensor1_torch * self.batch_tensor2_torch
 
-        np.testing.assert_allclose(result.data, result_torch.detach().numpy())
+        assert allclose(result.data, result_torch.detach().numpy())
 
-        result.backward(np.ones_like(result.data))
+        result.backward(xp.ones_like(result.data))
         result_torch.backward(torch.ones_like(result_torch))
 
-        np.testing.assert_allclose(
+        assert allclose(
             self.batch_tensor1.grad.data, self.batch_tensor1_torch.grad.numpy()
         )
-        np.testing.assert_allclose(
+        assert allclose(
             self.batch_tensor2.grad.data, self.batch_tensor2_torch.grad.numpy()
         )
 
@@ -318,17 +318,17 @@ class TestTensorOps(TestTensor):
         result = self.batch_tensor1**2
         result_torch = self.batch_tensor1_torch**2
 
-        np.testing.assert_allclose(result.data, result_torch.detach().numpy())
+        assert allclose(result.data, result_torch.detach().numpy())
 
-        result.backward(np.ones_like(result.data))
+        result.backward(xp.ones_like(result.data))
         result_torch.backward(torch.ones_like(result_torch))
 
-        np.testing.assert_allclose(
+        assert allclose(
             self.batch_tensor1.grad.data, self.batch_tensor1_torch.grad.numpy()
         )
 
     def test_shift_invariance(self):
-        x_data = np.array([[1.0, 2.0], [4.0, 5.0], [7.0, 8.0]], dtype=np.float32)
+        x_data = xp.array([[1.0, 2.0], [4.0, 5.0], [7.0, 8.0]], dtype=xp.float32)
         x = Tensor(x_data)
 
         # Original computation
@@ -350,19 +350,19 @@ class TestTensorOps(TestTensor):
         biased_batch_var_shifted = var_shifted / x_shifted.data.shape[0]
         std_dev_shifted = (biased_batch_var_shifted + 1e-5) ** 0.5
         normalized_shifted = diff_shifted / std_dev_shifted
-        assert np.allclose(normalized.data, normalized_shifted.data)
+        assert allclose(normalized.data, normalized_shifted.data)
 
 
 class TestTensorSqrt(TestTensor):
     def test_sqrt(self):
         x_sqrt = self.x_matrix.sqrt()
         x_sqrt_torch = self.x_matrix_torch.sqrt()
-        assert np.allclose(x_sqrt.data, x_sqrt_torch.data)
+        assert allclose(x_sqrt.data, x_sqrt_torch.data)
 
         x_sqrt.backward()
         x_sqrt_torch.sum().backward()  # apply sum() as a no-op because when you do loss.backward(), it is a shortcut for loss.backward(torch.Tensor([1])). This in only valid if loss is a tensor containing a single element.
 
-        assert np.allclose(self.x_matrix.grad.data, self.x_matrix_torch.grad.data)
+        assert allclose(self.x_matrix.grad.data, self.x_matrix_torch.grad.data)
 
 
 class TestTensorSum(TestTensor):
@@ -374,7 +374,7 @@ class TestTensorSum(TestTensor):
     def test_1d_tensor_sum_global(self):
         s = self.x_vector.sum()
         assert s.data == 3.0
-        assert np.array_equal(s.creator.tensors[0].data, self.x_vector.data)
+        assert array_equal(s.creator.tensors[0].data, self.x_vector.data)
 
     def test_1d_tensor_sum_axis(self):
         s = self.x_vector.sum(axis=0)
@@ -386,20 +386,20 @@ class TestTensorSum(TestTensor):
 
     def test_2d_tensor_sum_axis_0(self):
         s = self.x_matrix.sum(axis=0)  # (2, 2) -> (2,)
-        assert np.array_equal(s.data, [4.0, 6.0])
+        assert array_equal(s.data, [4.0, 6.0])
 
     def test_2d_tensor_sum_axis_1(self):
         s = self.x_matrix.sum(axis=1)  # (2, 2) -> (2,)
-        assert np.array_equal(s.data, [3.0, 7.0])
+        assert array_equal(s.data, [3.0, 7.0])
 
     def test_2d_tensor_sum_keepdims(self):
         s = self.x_matrix.sum(axis=0, keepdims=True)
         assert s.data.shape == (1, 2)  # (2,2) -> (1,2)
-        assert np.array_equal(s.data, [[4.0, 6.0]])
+        assert array_equal(s.data, [[4.0, 6.0]])
 
     def test_3d_tensor_sum(self):
         s = self.three_d_matrix.sum(axis=(1, 2))  # (2,2,2) -> (2,)
-        assert np.array_equal(s.data, [10.0, 26.0])
+        assert array_equal(s.data, [10.0, 26.0])
 
     def test_requires_grad_propagation(self):
         s = self.x_vector_no_grad.sum()
@@ -430,7 +430,7 @@ class TestTensorMean(TestTensor):
 
         # Backward: each element should get a gradient of 1/2.
         m.backward()
-        np.testing.assert_allclose(self.x_vector.grad.data, [0.5, 0.5])
+        assert allclose(self.x_vector.grad.data, [0.5, 0.5])
 
     def test_1d_tensor_mean_axis(self):
         # Even though mean(axis=0) on a 1D tensor returns the same scalar value,
@@ -438,7 +438,7 @@ class TestTensorMean(TestTensor):
         m = self.x_vector.mean(axis=0)
         assert m.data == 1.5
         m.backward()
-        np.testing.assert_allclose(self.x_vector.grad.data, [0.5, 0.5])
+        assert allclose(self.x_vector.grad.data, [0.5, 0.5])
 
     def test_2d_tensor_mean_global(self):
         m = self.x_matrix.mean()  # self.x_matrix.data is [[1, 2], [3, 4]]
@@ -447,46 +447,42 @@ class TestTensorMean(TestTensor):
 
         # Backward: each element should receive a gradient of 1/4.
         m.backward()
-        np.testing.assert_allclose(
-            self.x_matrix.grad.data, [[0.25, 0.25], [0.25, 0.25]]
-        )
+        assert allclose(self.x_matrix.grad.data, [[0.25, 0.25], [0.25, 0.25]])
 
     def test_2d_tensor_mean_axis_0(self):
         m = self.x_matrix.mean(axis=0)  # (2,2) -> (2,)
         # Forward: [ (1+3)/2, (2+4)/2 ] = [2.0, 3.0]
-        np.testing.assert_allclose(m.data, [2.0, 3.0])
+        assert allclose(m.data, [2.0, 3.0])
         m.backward()
         # Each column: each element gets a gradient of 1/2.
-        np.testing.assert_allclose(self.x_matrix.grad.data, [[0.5, 0.5], [0.5, 0.5]])
+        assert allclose(self.x_matrix.grad.data, [[0.5, 0.5], [0.5, 0.5]])
 
     def test_2d_tensor_mean_axis_1(self):
         m = self.x_matrix.mean(axis=1)  # (2,2) -> (2,)
         # Forward: [ (1+2)/2, (3+4)/2 ] = [1.5, 3.5]
-        np.testing.assert_allclose(m.data, [1.5, 3.5])
+        assert allclose(m.data, [1.5, 3.5])
         m.backward()
         # For each row, each element gets 1/2.
-        np.testing.assert_allclose(self.x_matrix.grad.data, [[0.5, 0.5], [0.5, 0.5]])
+        assert allclose(self.x_matrix.grad.data, [[0.5, 0.5], [0.5, 0.5]])
 
     def test_2d_tensor_mean_keepdims(self):
         m = self.keepdims_tensor.mean(axis=0, keepdims=True)
         # Forward: shape (1,2) and data [[(1+3)/2, (2+4)/2]] = [[2.0, 3.0]]
         assert m.data.shape == (1, 2)
-        np.testing.assert_allclose(m.data, [[2.0, 3.0]])
+        assert allclose(m.data, [[2.0, 3.0]])
         m.backward()
         # Since the reduction was over axis=0 (2 elements), each input element gets gradient 1/2.
-        np.testing.assert_allclose(
-            self.keepdims_tensor.grad.data, [[0.5, 0.5], [0.5, 0.5]]
-        )
+        assert allclose(self.keepdims_tensor.grad.data, [[0.5, 0.5], [0.5, 0.5]])
 
     def test_3d_tensor_mean(self):
         m = self.three_d_matrix.mean(axis=(1, 2))  # three_d_matrix shape is (2,2,2)
         # For each 2x2 slice, mean = (sum of four elements)/4.
         # For example, if the slice is [[1,2],[3,4]] then mean = 2.5.
-        np.testing.assert_allclose(m.data, [2.5, 6.5])
+        assert allclose(m.data, [2.5, 6.5])
         m.backward()
         # For each 2x2 slice, each element's gradient should be 1/4.
-        expected_grad = np.full((2, 2, 2), 0.25)
-        np.testing.assert_allclose(self.three_d_matrix.grad.data, expected_grad)
+        expected_grad = xp.full((2, 2, 2), 0.25)
+        assert allclose(self.three_d_matrix.grad.data, expected_grad)
 
     def test_multiple_axis_mean(self):
         m = self.three_d_matrix.mean(
@@ -497,12 +493,12 @@ class TestTensorMean(TestTensor):
         #   [[[1,2],[3,4]], [[5,6],[7,8]]]
         # then mean over axis (0,1) gives:
         #   [ (1+3+5+7)/4, (2+4+6+8)/4 ] = [4.0, 5.0]
-        np.testing.assert_allclose(m.data, [4.0, 5.0])
+        assert allclose(m.data, [4.0, 5.0])
         m.backward()
         # The gradient from m (shape (2,)) will be broadcast back over the axes (0,1).
         # Since each output element is the average of 4 elements, each input gets 1/4.
-        expected_grad = np.full(self.three_d_matrix.data.shape, 0.25)
-        np.testing.assert_allclose(self.three_d_matrix.grad.data, expected_grad)
+        expected_grad = xp.full(self.three_d_matrix.data.shape, 0.25)
+        assert allclose(self.three_d_matrix.grad.data, expected_grad)
 
     def test_requires_grad_propagation(self):
         m = self.no_grad_tensor.mean()
@@ -519,35 +515,35 @@ class TestTensorMean(TestTensor):
         # Call backward (default seed gradient is ones with the same shape as m, i.e. scalar 1.0)
         m.backward()
         # The gradient for each element should be 1/4 = 0.25.
-        np.testing.assert_allclose(t.grad.data, [0.25, 0.25, 0.25, 0.25])
+        assert allclose(t.grad.data, [0.25, 0.25, 0.25, 0.25])
 
 
 class TestTensorMaximum(TestTensor):
     def test_maximum_basic_vector(self):
         z = self.x_vector.maximum(self.y_vector)
         z_torch = torch.maximum(self.x_vector_torch, self.y_vector_torch)
-        assert np.array_equal(z.data, z_torch.detach().numpy())
+        assert array_equal(z.data, z_torch.detach().numpy())
         z.backward()
         z_torch.backward(torch.ones_like(z_torch))
-        assert np.array_equal(self.x_vector.grad.data, self.x_vector_torch.grad.numpy())
-        assert np.array_equal(self.y_vector.grad.data, self.y_vector_torch.grad.numpy())
+        assert array_equal(self.x_vector.grad.data, self.x_vector_torch.grad.numpy())
+        assert array_equal(self.y_vector.grad.data, self.y_vector_torch.grad.numpy())
 
     def test_maximum_with_scalar(self):
         z = self.x_vector.maximum(2.0)
         z_torch = torch.maximum(self.x_vector_torch, torch.tensor(2.0))
-        assert np.array_equal(z.data, z_torch.detach().numpy())
+        assert array_equal(z.data, z_torch.detach().numpy())
         z.backward()
         z_torch.backward(torch.ones_like(z_torch))
-        assert np.array_equal(self.x_vector.grad.data, self.x_vector_torch.grad.numpy())
+        assert array_equal(self.x_vector.grad.data, self.x_vector_torch.grad.numpy())
 
     def test_2d_tensor_maximum(self):
         z = self.x_matrix.maximum(self.y_matrix)
         z_torch = torch.maximum(self.x_matrix_torch, self.y_matrix_torch)
-        assert np.array_equal(z.data, z_torch.detach().numpy())
+        assert array_equal(z.data, z_torch.detach().numpy())
         z.backward()
         z_torch.backward(torch.ones_like(z_torch))
-        assert np.array_equal(self.x_matrix.grad.data, self.x_matrix_torch.grad.numpy())
-        assert np.array_equal(self.y_matrix.grad.data, self.y_matrix_torch.grad.numpy())
+        assert array_equal(self.x_matrix.grad.data, self.x_matrix_torch.grad.numpy())
+        assert array_equal(self.y_matrix.grad.data, self.y_matrix_torch.grad.numpy())
 
     def test_broadcasting(self):
         # Change the order of arguments for consistent broadcasting
@@ -555,11 +551,11 @@ class TestTensorMaximum(TestTensor):
             self.x_matrix
         )  # y_vector shape: (2,) will be broadcast to (2,2)
         z_torch = torch.maximum(self.y_vector_torch, self.x_matrix_torch)
-        assert np.array_equal(z.data, z_torch.detach().numpy())
+        assert array_equal(z.data, z_torch.detach().numpy())
         z.backward()
         z_torch.backward(torch.ones_like(z_torch))
-        assert np.array_equal(self.x_matrix.grad.data, self.x_matrix_torch.grad.numpy())
-        assert np.array_equal(self.y_vector.grad.data, self.y_vector_torch.grad.numpy())
+        assert array_equal(self.x_matrix.grad.data, self.x_matrix_torch.grad.numpy())
+        assert array_equal(self.y_vector.grad.data, self.y_vector_torch.grad.numpy())
 
     def test_requires_grad_propagation(self):
         z = self.x_vector_no_grad.maximum(self.y_vector_no_grad)
@@ -580,21 +576,21 @@ class TestTensorMaximum(TestTensor):
         z2_torch = torch.maximum(self.x_vector_torch, self.y_vector_torch)
         (z1 + z2).backward()
         (z1_torch + z2_torch).backward(torch.ones_like(z1_torch + z2_torch))
-        assert np.array_equal(self.x_vector.grad.data, self.x_vector_torch.grad.numpy())
-        assert np.array_equal(self.y_vector.grad.data, self.y_vector_torch.grad.numpy())
+        assert array_equal(self.x_vector.grad.data, self.x_vector_torch.grad.numpy())
+        assert array_equal(self.y_vector.grad.data, self.y_vector_torch.grad.numpy())
 
     def test_maximum_with_negative_numbers(self):
         z = self.x_vector_negative.maximum(self.y_vector_negative)
         z_torch = torch.maximum(
             self.x_vector_negative_torch, self.y_vector_negative_torch
         )
-        assert np.array_equal(z.data, z_torch.detach().numpy())
+        assert array_equal(z.data, z_torch.detach().numpy())
         z.backward()
         z_torch.backward(torch.ones_like(z_torch))
-        assert np.array_equal(
+        assert array_equal(
             self.x_vector_negative.grad.data, self.x_vector_negative_torch.grad.numpy()
         )
-        assert np.array_equal(
+        assert array_equal(
             self.y_vector_negative.grad.data, self.y_vector_negative_torch.grad.numpy()
         )
 
@@ -603,15 +599,15 @@ class TestTensorMaximum(TestTensor):
         result = self.batch_tensor1.maximum(self.batch_tensor2)
         result_torch = torch.maximum(self.batch_tensor1_torch, self.batch_tensor2_torch)
 
-        np.testing.assert_allclose(result.data, result_torch.detach().numpy())
+        assert allclose(result.data, result_torch.detach().numpy())
 
-        result.backward(np.ones_like(result.data))
+        result.backward(xp.ones_like(result.data))
         result_torch.backward(torch.ones_like(result_torch))
 
-        np.testing.assert_allclose(
+        assert allclose(
             self.batch_tensor1.grad.data, self.batch_tensor1_torch.grad.numpy()
         )
-        np.testing.assert_allclose(
+        assert allclose(
             self.batch_tensor2.grad.data, self.batch_tensor2_torch.grad.numpy()
         )
 
@@ -620,32 +616,32 @@ class TestTensorMax(TestTensor):
     def test_max_1d(self):
         z = self.x_vector.max()
         assert z.data == 2.0
-        assert np.array_equal(z.creator.tensors[0].data, self.x_vector.data)
+        assert array_equal(z.creator.tensors[0].data, self.x_vector.data)
 
         z.backward()
-        assert np.array_equal(self.x_vector.grad.data, [0.0, 1.0])
+        assert array_equal(self.x_vector.grad.data, [0.0, 1.0])
 
     def test_max_axis_0(self):
         z = self.x_matrix.max(axis=0)  # Should return maximum along each column
-        assert np.array_equal(z.data, [3.0, 4.0])
+        assert array_equal(z.data, [3.0, 4.0])
 
     def test_max_axis_0_keepdims(self):
         z = self.x_matrix.max(axis=0, keepdims=True)
         assert z.data.shape == (1, 2)
-        assert np.array_equal(z.data, [[3.0, 4.0]])
+        assert array_equal(z.data, [[3.0, 4.0]])
 
     def test_max_axis_1(self):
         z = self.x_matrix.max(axis=1)
-        assert np.array_equal(z.data, [2.0, 4.0])
+        assert array_equal(z.data, [2.0, 4.0])
 
     def test_max_axis_1_keepdims(self):
         z = self.x_matrix.max(axis=1, keepdims=True)
         assert z.data.shape == (2, 1)  # (2,3) -> (2,1)
-        assert np.array_equal(z.data, [[2.0], [4.0]])
+        assert array_equal(z.data, [[2.0], [4.0]])
 
     def test_max_multiple_axes(self):
         # Create 2D tensor with multiple equal maxima
-        x = Tensor(np.array([[4.0, 4.0, 2.0], [4.0, 4.0, 3.0], [2.0, 1.0, 4.0]]))
+        x = Tensor(xp.array([[4.0, 4.0, 2.0], [4.0, 4.0, 3.0], [2.0, 1.0, 4.0]]))
 
         # Test max over both axes (-2, -1)
         y = x.max(axis=(-2, -1))
@@ -662,11 +658,11 @@ class TestTensorMax(TestTensor):
         print("PyTorch gradient:\n", x_torch.grad.numpy())
 
         # Compare gradients
-        assert np.allclose(x.grad.data, x_torch.grad.numpy()), "Gradients do not match!"
+        assert allclose(x.grad.data, x_torch.grad.numpy()), "Gradients do not match!"
 
     def test_max_first_occurrence(self):
         # Create tensor with multiple equal maxima
-        x = Tensor(np.array([[4.0, 4.0, 2.0, 4.0]]))
+        x = Tensor(xp.array([[4.0, 4.0, 2.0, 4.0]]))
 
         # Forward pass
         y = x.max(axis=-1)
@@ -685,14 +681,14 @@ class TestTensorMax(TestTensor):
         print("PyTorch gradient:", x_torch.grad.numpy())
 
         # Compare gradients
-        assert np.allclose(x.grad.data, x_torch.grad.numpy()), "Gradients do not match!"
+        assert allclose(x.grad.data, x_torch.grad.numpy()), "Gradients do not match!"
 
 
 class TestTensorGather(TestTensor):
     def test_basic_gather(self):
         # Create embedding matrix (V x E)
         embeddings = Tensor(
-            np.array(
+            xp.array(
                 [
                     [1.0, 2.0],  # id 0
                     [3.0, 4.0],  # id 1
@@ -703,32 +699,33 @@ class TestTensorGather(TestTensor):
         )
 
         # Create indices tensor (B x S)
-        indices = np.array([[0, 2], [1, 0]])  # batch_size=2, seq_len=2
+        indices = xp.array([[0, 2], [1, 0]])  # batch_size=2, seq_len=2
 
         # Forward pass
         gathered = embeddings.gather(indices)
 
         # Compare with PyTorch
         embeddings_torch = torch.tensor(embeddings.data, requires_grad=True)
-        gathered_torch = embeddings_torch[indices]
+        indices_torch = torch.tensor(indices.tolist(), dtype=torch.long)
+        gathered_torch = embeddings_torch[indices_torch]
 
         # Check forward pass
         assert gathered.shape == gathered_torch.shape, (
             f"Shape mismatch: {gathered.shape} vs {gathered_torch.shape}"
         )
-        assert np.allclose(gathered.data, gathered_torch.detach().numpy())
+        assert allclose(gathered.data, gathered_torch.detach().numpy())
 
         # Backward pass
-        gathered.backward(np.ones_like(gathered.data))
+        gathered.backward(xp.ones_like(gathered.data))
         gathered_torch.backward(torch.ones_like(gathered_torch))
 
         # Check gradients
-        assert np.allclose(embeddings.grad.data, embeddings_torch.grad.numpy())
+        assert allclose(embeddings.grad.data, embeddings_torch.grad.numpy())
 
     def test_gather_repeated_indices(self):
         # Test case where same index is gathered multiple times
         embeddings = Tensor(
-            np.array(
+            xp.array(
                 [
                     [1.0, 2.0],
                     [3.0, 4.0],
@@ -739,29 +736,30 @@ class TestTensorGather(TestTensor):
         )
 
         # Repeat index 1 multiple times
-        indices = np.array([[1, 1], [1, 1]])
+        indices = xp.array([[1, 1], [1, 1]])
 
         # Forward pass
         gathered = embeddings.gather(indices)
 
         # Compare with PyTorch
         embeddings_torch = torch.tensor(embeddings.data, requires_grad=True)
-        gathered_torch = embeddings_torch[indices]
+        indices_torch = torch.tensor(indices.tolist(), dtype=torch.long)
+        gathered_torch = embeddings_torch[indices_torch]
 
         # Backward pass with gradient that varies by position
-        grad = np.array([[[1.0, 1.0], [2.0, 2.0]], [[3.0, 3.0], [4.0, 4.0]]])
+        grad = xp.array([[[1.0, 1.0], [2.0, 2.0]], [[3.0, 3.0], [4.0, 4.0]]])
         gathered.backward(grad)
-        gathered_torch.backward(torch.tensor(grad))
+        gathered_torch.backward(torch.tensor(grad.tolist()))
 
         # Check gradients - index 1 should accumulate all gradients
-        assert np.allclose(embeddings.grad.data, embeddings_torch.grad.numpy())
+        assert allclose(embeddings.grad.data, embeddings_torch.grad.numpy())
         # Specifically check that index 1's gradient is sum of all gradients
-        assert np.allclose(embeddings.grad.data[1], np.array([10.0, 10.0]))
+        assert allclose(embeddings.grad.data[1], xp.array([10.0, 10.0]))
 
     def test_gather_no_grad(self):
         # Test gathering from tensor that doesn't require gradients
         embeddings = Tensor(
-            np.array(
+            xp.array(
                 [
                     [1.0, 2.0],
                     [3.0, 4.0],
@@ -770,19 +768,19 @@ class TestTensorGather(TestTensor):
             requires_grad=False,
         )
 
-        indices = np.array([[0, 1]])
+        indices = xp.array([[0, 1]])
         gathered = embeddings.gather(indices)
 
         # Check that gathered tensor doesn't require gradients
         assert not gathered.requires_grad
 
         # Forward pass should still work
-        expected = np.array([[[1.0, 2.0], [3.0, 4.0]]])
-        assert np.allclose(gathered.data, expected)
+        expected = xp.array([[[1.0, 2.0], [3.0, 4.0]]])
+        assert allclose(gathered.data, expected)
 
     def test_gather_empty_indices(self):
         embeddings = Tensor(
-            np.array(
+            xp.array(
                 [
                     [1.0, 2.0],
                     [3.0, 4.0],
@@ -792,7 +790,7 @@ class TestTensorGather(TestTensor):
         )
 
         # Empty indices tensor
-        indices = np.array([[]], dtype=np.int64)
+        indices = xp.array([[]], dtype=xp.int64)
         gathered = embeddings.gather(indices)
 
         # Check shape is correct (should be [1, 0, 2])
@@ -800,37 +798,54 @@ class TestTensorGather(TestTensor):
 
         # Compare with PyTorch
         embeddings_torch = torch.tensor(embeddings.data, requires_grad=True)
-        gathered_torch = embeddings_torch[indices]
+        indices_torch = torch.tensor(indices.tolist(), dtype=torch.long)
+        gathered_torch = embeddings_torch[indices_torch]
 
         assert gathered.shape == tuple(gathered_torch.shape)
+
+    def test_gather_raises_on_out_of_bounds_mlx_indices(self):
+        embeddings = Tensor(
+            xp.array(
+                [
+                    [1.0, 2.0],
+                    [3.0, 4.0],
+                ]
+            ),
+            requires_grad=True,
+        )
+
+        indices = xp.array([0, 2], dtype=xp.int32)
+
+        with self.assertRaises(IndexError):
+            embeddings.gather(indices)
 
 
 class TestTensorTranspose(TestTensor):
     def test_transpose_2d(self):
         y = self.x_matrix.transpose()  # Default behavior should reverse dims
-        assert np.array_equal(y.data, [[1.0, 3.0], [2.0, 4.0]])
+        assert array_equal(y.data, [[1.0, 3.0], [2.0, 4.0]])
         y.backward()
-        assert np.array_equal(self.x_matrix.grad.data, np.ones_like(self.x_matrix.data))
+        assert array_equal(self.x_matrix.grad.data, xp.ones_like(self.x_matrix.data))
 
         # PyTorch comparison
         y_torch = self.x_matrix_torch.transpose(0, 1)
-        assert np.array_equal(y.data, y_torch.detach().numpy())
+        assert array_equal(y.data, y_torch.detach().numpy())
         y_torch.backward(torch.ones_like(y_torch))
-        assert np.array_equal(self.x_matrix.grad.data, self.x_matrix_torch.grad.numpy())
+        assert array_equal(self.x_matrix.grad.data, self.x_matrix_torch.grad.numpy())
 
     def test_transpose_gradient_accumulation(self):
         y1 = self.x_matrix.transpose()
         y2 = self.x_matrix.transpose()
         (y1 + y2).backward()
-        assert np.array_equal(
-            self.x_matrix.grad.data, 2 * np.ones_like(self.x_matrix.data)
+        assert array_equal(
+            self.x_matrix.grad.data, 2 * xp.ones_like(self.x_matrix.data)
         )
 
         # PyTorch comparison
         y1_torch = self.x_matrix_torch.transpose(0, 1)
         y2_torch = self.x_matrix_torch.transpose(0, 1)
         (y1_torch + y2_torch).backward(torch.ones_like(y1_torch + y2_torch))
-        assert np.array_equal(self.x_matrix.grad.data, self.x_matrix_torch.grad.numpy())
+        assert array_equal(self.x_matrix.grad.data, self.x_matrix_torch.grad.numpy())
 
     def test_transpose_1d(self):
         # For 1D tensors, transpose with explicit dims is not valid in PyTorch
@@ -851,29 +866,29 @@ class TestTensorTranspose(TestTensor):
         sliced_torch = self.three_by_three_matrix_torch[:2, 1:]
         y_torch = sliced_torch.transpose(0, 1)
 
-        assert np.array_equal(y.data, y_torch.detach().numpy())
+        assert array_equal(y.data, y_torch.detach().numpy())
 
         # Test backward pass
-        y.backward(np.ones_like(y.data))
+        y.backward(xp.ones_like(y.data))
         y_torch.backward(torch.ones_like(y_torch))
-        assert np.array_equal(
+        assert array_equal(
             self.three_by_three_matrix.grad.data,
             self.three_by_three_matrix_torch.grad.numpy(),
         )
 
     def test_transpose_multiple(self):
         y = self.x_matrix.transpose(0, 1).transpose(0, 1)  # Should get back original
-        assert np.array_equal(y.data, self.x_matrix.data)
+        assert array_equal(y.data, self.x_matrix.data)
         y.backward()
-        assert np.array_equal(self.x_matrix.grad.data, np.ones_like(self.x_matrix.data))
+        assert array_equal(self.x_matrix.grad.data, xp.ones_like(self.x_matrix.data))
 
         # PyTorch comparison
         y_torch = self.x_matrix_torch.transpose(0, 1).transpose(
             0, 1
         )  # Should get back original
-        assert np.array_equal(y.data, y_torch.detach().numpy())
+        assert array_equal(y.data, y_torch.detach().numpy())
         y_torch.backward(torch.ones_like(y_torch))
-        assert np.array_equal(self.x_matrix.grad.data, self.x_matrix_torch.grad.numpy())
+        assert array_equal(self.x_matrix.grad.data, self.x_matrix_torch.grad.numpy())
 
     def test_transpose_requires_grad_false(self):
         x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=False)
@@ -891,20 +906,20 @@ class TestTensorCat(TestTensor):
         z = Tensor.cat([self.x_vector, self.y_vector])
         z_torch = torch.cat([self.x_vector_torch, self.y_vector_torch])
 
-        assert np.array_equal(z.data, z_torch.detach().numpy())
+        assert array_equal(z.data, z_torch.detach().numpy())
         z.backward()
         z_torch.backward(torch.ones_like(z_torch))
-        assert np.array_equal(self.x_vector.grad.data, self.x_vector_torch.grad.numpy())
-        assert np.array_equal(self.y_vector.grad.data, self.y_vector_torch.grad.numpy())
+        assert array_equal(self.x_vector.grad.data, self.x_vector_torch.grad.numpy())
+        assert array_equal(self.y_vector.grad.data, self.y_vector_torch.grad.numpy())
 
     def test_cat_2d(self):
         z = Tensor.cat([self.x_matrix, self.y_matrix])
         z_torch = torch.cat([self.x_matrix_torch, self.y_matrix_torch])
-        assert np.array_equal(z.data, z_torch.detach().numpy())
+        assert array_equal(z.data, z_torch.detach().numpy())
         z.backward()
         z_torch.backward(torch.ones_like(z_torch))
-        assert np.array_equal(self.x_matrix.grad.data, self.x_matrix_torch.grad.numpy())
-        assert np.array_equal(self.y_matrix.grad.data, self.y_matrix_torch.grad.numpy())
+        assert array_equal(self.x_matrix.grad.data, self.x_matrix_torch.grad.numpy())
+        assert array_equal(self.y_matrix.grad.data, self.y_matrix_torch.grad.numpy())
 
 
 class TestTensorGetitem(TestTensor):
@@ -917,7 +932,7 @@ class TestTensorGetitem(TestTensor):
         assert y.data == y_torch.item()
         y.backward()
         y_torch.backward()
-        assert np.array_equal(self.x_matrix.grad.data, self.x_matrix_torch.grad.numpy())
+        assert array_equal(self.x_matrix.grad.data, self.x_matrix_torch.grad.numpy())
 
     def test_getitem_slice(self):
         """Test getting elements using slice indexing"""
@@ -925,10 +940,10 @@ class TestTensorGetitem(TestTensor):
         # PyTorch equivalent
         z_torch = self.x_matrix_torch[:2, 1]
 
-        assert np.array_equal(z.data, z_torch.detach().numpy())
+        assert array_equal(z.data, z_torch.detach().numpy())
         z.backward()
         z_torch.backward(torch.ones_like(z_torch))
-        assert np.array_equal(self.x_matrix.grad.data, self.x_matrix_torch.grad.numpy())
+        assert array_equal(self.x_matrix.grad.data, self.x_matrix_torch.grad.numpy())
 
     def test_getitem_row(self):
         """Test getting an entire row"""
@@ -936,10 +951,10 @@ class TestTensorGetitem(TestTensor):
         # PyTorch equivalent
         a_torch = self.x_matrix_torch[0]
 
-        assert np.array_equal(a.data, a_torch.detach().numpy())
+        assert array_equal(a.data, a_torch.detach().numpy())
         a.backward()
         a_torch.backward(torch.ones_like(a_torch))
-        assert np.array_equal(self.x_matrix.grad.data, self.x_matrix_torch.grad.numpy())
+        assert array_equal(self.x_matrix.grad.data, self.x_matrix_torch.grad.numpy())
 
     def test_getitem_negative_index(self):
         """Test getting elements using negative indexing"""
@@ -948,8 +963,24 @@ class TestTensorGetitem(TestTensor):
         assert b.data == 4.0
         assert c.data == 8.0
         c.backward()
-        expected_grad = np.array([[0.0, 0.0], [0.0, 2.0]])
-        assert np.array_equal(self.x_matrix.grad.data, expected_grad)
+        expected_grad = xp.array([[0.0, 0.0], [0.0, 2.0]])
+        assert array_equal(self.x_matrix.grad.data, expected_grad)
+
+    def test_getitem_repeated_indices_accumulate_gradients(self):
+        x = Tensor(xp.array([10.0, 20.0, 30.0], dtype=xp.float32), requires_grad=True)
+        y = x[[1, 1]]
+
+        y.backward(xp.array([2.0, 3.0], dtype=xp.float32))
+
+        x_torch = torch.tensor(
+            [10.0, 20.0, 30.0], dtype=torch.float32, requires_grad=True
+        )
+        y_torch = x_torch[[1, 1]]
+        y_torch.backward(torch.tensor([2.0, 3.0], dtype=torch.float32))
+
+        assert array_equal(y.data, y_torch.detach().numpy())
+        assert array_equal(x.grad.data, x_torch.grad.numpy())
+        assert array_equal(x.grad.data, xp.array([0.0, 5.0, 0.0], dtype=xp.float32))
 
 
 class TestTensorSetitem(TestTensor):
@@ -957,47 +988,47 @@ class TestTensorSetitem(TestTensor):
         # Scalar assignment
         x = Tensor([1.0, 2.0, 3.0], requires_grad=True)
         x[0] = Tensor([4.0], requires_grad=True)
-        assert np.array_equal(x.data, [4.0, 2.0, 3.0])
+        assert array_equal(x.data, [4.0, 2.0, 3.0])
 
         # Slice assignment
         x = Tensor([1.0, 2.0, 3.0, 4.0], requires_grad=True)
         x[1:3] = Tensor([5.0, 6.0], requires_grad=True)
-        assert np.array_equal(x.data, [1.0, 5.0, 6.0, 4.0])
+        assert array_equal(x.data, [1.0, 5.0, 6.0, 4.0])
 
         # Non-tensor assignment
         x = Tensor([1.0, 2.0, 3.0], requires_grad=True)
         x[0] = 4.0
-        assert np.array_equal(x.data, [4.0, 2.0, 3.0])
+        assert array_equal(x.data, [4.0, 2.0, 3.0])
 
         # Multidimensional assignment
         x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
         x[0, 1] = Tensor([5.0], requires_grad=True)
-        assert np.array_equal(x.data, [[1.0, 5.0], [3.0, 4.0]])
+        assert array_equal(x.data, [[1.0, 5.0], [3.0, 4.0]])
 
 
 class TestTensorIAdd(TestTensor):
     def test_iadd_basic(self):
         """Test basic in-place addition between two tensors"""
         self.x_vector += self.y_vector
-        assert np.array_equal(self.x_vector.data, [4.0, 6.0])
+        assert array_equal(self.x_vector.data, [4.0, 6.0])
         self.x_vector.backward()
-        assert np.array_equal(self.x_vector.grad.data, [1.0, 1.0])
-        assert np.array_equal(self.y_vector.grad.data, [1.0, 1.0])
+        assert array_equal(self.x_vector.grad.data, [1.0, 1.0])
+        assert array_equal(self.y_vector.grad.data, [1.0, 1.0])
 
     def test_iadd_scalar(self):
         """Test in-place addition with a scalar"""
         self.x_vector += 2.0
-        assert np.array_equal(self.x_vector.data, [3.0, 4.0])
+        assert array_equal(self.x_vector.data, [3.0, 4.0])
         self.x_vector.backward()
-        assert np.array_equal(self.x_vector.grad.data, [1.0, 1.0])
+        assert array_equal(self.x_vector.grad.data, [1.0, 1.0])
 
     def test_iadd_broadcasting(self):
         """Test in-place addition with broadcasting"""
         self.x_matrix += self.x_vector
-        assert np.array_equal(self.x_matrix.data, [[2.0, 4.0], [4.0, 6.0]])
+        assert array_equal(self.x_matrix.data, [[2.0, 4.0], [4.0, 6.0]])
         self.x_matrix.backward()
-        assert np.array_equal(self.x_matrix.grad.data, [[1.0, 1.0], [1.0, 1.0]])
-        assert np.array_equal(
+        assert array_equal(self.x_matrix.grad.data, [[1.0, 1.0], [1.0, 1.0]])
+        assert array_equal(
             self.x_vector.grad.data, [2.0, 2.0]
         )  # Sum across broadcasted dimension
 
@@ -1007,9 +1038,9 @@ class TestTensorIAdd(TestTensor):
         assert (
             self.x_vector_no_grad.requires_grad
         )  # Should be True because y requires grad
-        assert np.array_equal(self.x_vector_no_grad.data, [4.0, 6.0])
+        assert array_equal(self.x_vector_no_grad.data, [4.0, 6.0])
         self.x_vector_no_grad.backward()
-        assert np.array_equal(self.y_vector.grad.data, [1.0, 1.0])
+        assert array_equal(self.y_vector.grad.data, [1.0, 1.0])
 
 
 class TestTensorStack(TestTensor):
@@ -1017,11 +1048,11 @@ class TestTensorStack(TestTensor):
         z = Tensor.stack([self.x_vector, self.y_vector])
         z_torch = torch.stack([self.x_vector_torch, self.y_vector_torch])
 
-        assert np.array_equal(z.data, z_torch.detach().numpy())
+        assert array_equal(z.data, z_torch.detach().numpy())
         z.backward()
         z_torch.backward(torch.ones_like(z_torch))
-        assert np.array_equal(self.x_vector.grad.data, self.x_vector_torch.grad.numpy())
-        assert np.array_equal(self.y_vector.grad.data, self.y_vector_torch.grad.numpy())
+        assert array_equal(self.x_vector.grad.data, self.x_vector_torch.grad.numpy())
+        assert array_equal(self.y_vector.grad.data, self.y_vector_torch.grad.numpy())
 
 
 class TestTensorPad(TestTensor):
@@ -1030,20 +1061,20 @@ class TestTensorPad(TestTensor):
         y = self.x_vector.pad((1, 1))  # pad both sides by 1
         y_torch = torch.nn.functional.pad(self.x_vector_torch, (1, 1))
 
-        assert np.array_equal(y.data, y_torch.detach().numpy())
+        assert array_equal(y.data, y_torch.detach().numpy())
         y.backward()
         y_torch.backward(torch.ones_like(y_torch))
-        assert np.array_equal(self.x_vector.grad.data, self.x_vector_torch.grad.numpy())
+        assert array_equal(self.x_vector.grad.data, self.x_vector_torch.grad.numpy())
 
     def test_pad_2d(self):
         """Test 2D tensor padding"""
         y = self.x_matrix.pad((1, 1, 1, 1))  # pad all sides by 1
         y_torch = torch.nn.functional.pad(self.x_matrix_torch, (1, 1, 1, 1))
 
-        assert np.array_equal(y.data, y_torch.detach().numpy())
+        assert array_equal(y.data, y_torch.detach().numpy())
         y.backward()
         y_torch.backward(torch.ones_like(y_torch))
-        assert np.array_equal(self.x_matrix.grad.data, self.x_matrix_torch.grad.numpy())
+        assert array_equal(self.x_matrix.grad.data, self.x_matrix_torch.grad.numpy())
 
     def test_pad_3d(self):
         """Test 3D tensor padding (e.g., single-channel image)"""
@@ -1052,10 +1083,10 @@ class TestTensorPad(TestTensor):
         )  # no padding on first dim, pad others by 1
         y_torch = torch.nn.functional.pad(self.three_d_matrix_torch, (1, 1, 1, 1, 0, 0))
 
-        assert np.array_equal(y.data, y_torch.detach().numpy())
+        assert array_equal(y.data, y_torch.detach().numpy())
         y.backward()
         y_torch.backward(torch.ones_like(y_torch))
-        assert np.array_equal(
+        assert array_equal(
             self.three_d_matrix.grad.data, self.three_d_matrix_torch.grad.numpy()
         )
 
@@ -1068,10 +1099,10 @@ class TestTensorPad(TestTensor):
             self.four_d_matrix_torch, (1, 1, 1, 1, 0, 0, 0, 0)
         )
 
-        assert np.array_equal(y.data, y_torch.detach().numpy())
+        assert array_equal(y.data, y_torch.detach().numpy())
         y.backward()
         y_torch.backward(torch.ones_like(y_torch))
-        assert np.array_equal(
+        assert array_equal(
             self.four_d_matrix.grad.data, self.four_d_matrix_torch.grad.numpy()
         )
 
@@ -1080,27 +1111,27 @@ class TestTensorPad(TestTensor):
         y = self.x_matrix.pad((0, 1, 1, 0))  # pad right by 1, top by 1
         y_torch = torch.nn.functional.pad(self.x_matrix_torch, (0, 1, 1, 0))
 
-        assert np.array_equal(y.data, y_torch.detach().numpy())
+        assert array_equal(y.data, y_torch.detach().numpy())
         y.backward()
         y_torch.backward(torch.ones_like(y_torch))
-        assert np.array_equal(self.x_matrix.grad.data, self.x_matrix_torch.grad.numpy())
+        assert array_equal(self.x_matrix.grad.data, self.x_matrix_torch.grad.numpy())
 
     def test_pad_constant_value(self):
         """Test padding with constant value"""
         y = self.x_vector.pad((1, 1), constant_values=5.0)
         y_torch = torch.nn.functional.pad(self.x_vector_torch, (1, 1), value=5.0)
 
-        assert np.array_equal(y.data, y_torch.detach().numpy())
+        assert array_equal(y.data, y_torch.detach().numpy())
         y.backward()
         y_torch.backward(torch.ones_like(y_torch))
-        assert np.array_equal(self.x_vector.grad.data, self.x_vector_torch.grad.numpy())
+        assert array_equal(self.x_vector.grad.data, self.x_vector_torch.grad.numpy())
 
     def test_pad_requires_grad_false(self):
         """Test padding with requires_grad=False"""
         y = self.x_matrix_no_grad.pad((1, 1))
         y_torch = torch.nn.functional.pad(self.x_matrix_no_grad_torch, (1, 1))
 
-        assert np.array_equal(y.data, y_torch.detach().numpy())
+        assert array_equal(y.data, y_torch.detach().numpy())
         assert not y.requires_grad
 
     def test_pad_integer(self):
@@ -1108,10 +1139,10 @@ class TestTensorPad(TestTensor):
         y = self.x_matrix.pad(1)  # pad all sides by 1
         y_torch = torch.nn.functional.pad(self.x_matrix_torch, (1, 1, 1, 1))
 
-        assert np.array_equal(y.data, y_torch.detach().numpy())
+        assert array_equal(y.data, y_torch.detach().numpy())
         y.backward()
         y_torch.backward(torch.ones_like(y_torch))
-        assert np.array_equal(self.x_matrix.grad.data, self.x_matrix_torch.grad.numpy())
+        assert array_equal(self.x_matrix.grad.data, self.x_matrix_torch.grad.numpy())
 
 
 class TestTensorView(TestTensor):
@@ -1121,12 +1152,12 @@ class TestTensorView(TestTensor):
         y_torch = self.x_matrix_torch.view(4)
 
         # Check view operation
-        assert np.array_equal(y.data, y_torch.detach().numpy())
+        assert array_equal(y.data, y_torch.detach().numpy())
 
         # Check backward pass
         y.backward()
         y_torch.backward(torch.ones_like(y_torch))
-        assert np.array_equal(self.x_matrix.grad.data, self.x_matrix_torch.grad.numpy())
+        assert array_equal(self.x_matrix.grad.data, self.x_matrix_torch.grad.numpy())
 
     def test_view_modification(self):
         """Test view modification affects base tensor"""
@@ -1139,10 +1170,10 @@ class TestTensorView(TestTensor):
         y_torch_detached = y_torch.detach()
         y_torch_detached[0] = 5.0
 
-        assert np.array_equal(y.data, y_torch.detach().numpy())
+        assert array_equal(y.data, y_torch.detach().numpy())
         y.backward()
         y_torch.backward(torch.ones_like(y_torch))
-        assert np.array_equal(self.x_matrix.grad.data, self.x_matrix_torch.grad.numpy())
+        assert array_equal(self.x_matrix.grad.data, self.x_matrix_torch.grad.numpy())
 
     def test_view_matmul(self):
         """Test matrix multiplication with views"""
@@ -1158,12 +1189,12 @@ class TestTensorView(TestTensor):
         xy = x_view @ y
         xy_torch = x_torch_view @ y_torch
 
-        assert np.array_equal(xy.data, xy_torch.detach().numpy())
+        assert array_equal(xy.data, xy_torch.detach().numpy())
         xy.backward()
         xy_torch.backward(torch.ones_like(xy_torch))
 
-        assert np.array_equal(x.grad.data, x_torch.grad.numpy())
-        assert np.array_equal(y.grad.data, y_torch.grad.numpy())
+        assert array_equal(x.grad.data, x_torch.grad.numpy())
+        assert array_equal(y.grad.data, y_torch.grad.numpy())
 
     def test_view_power(self):
         """Test power operation on views"""
@@ -1173,36 +1204,36 @@ class TestTensorView(TestTensor):
         y = x_view**2
         y_torch = x_torch_view**2
 
-        assert np.array_equal(y.data, y_torch.detach().numpy())
+        assert array_equal(y.data, y_torch.detach().numpy())
         y.backward()
         y_torch.backward(torch.ones_like(y_torch))
 
-        assert np.array_equal(self.x_matrix.grad.data, self.x_matrix_torch.grad.numpy())
+        assert array_equal(self.x_matrix.grad.data, self.x_matrix_torch.grad.numpy())
 
 
 class TestTensorPermute(TestTensor):
     def setUp(self):
-        self.x_nchw = Tensor(np.random.randn(2, 3, 4, 5))  # NCHW
-        self.x_nhwc = Tensor(np.random.randn(1, 3, 32, 32))  # NCHW
+        self.x_nchw = Tensor(xp.random.normal(shape=(2, 3, 4, 5)))  # NCHW
+        self.x_nhwc = Tensor(xp.random.normal(shape=(1, 3, 32, 32)))  # NCHW
 
     def test_basic_permute(self):
         # Test basic permutation
         y = self.x_nchw.permute(0, 2, 3, 1)  # NHWC
 
         assert y.shape == (2, 4, 5, 3)
-        assert np.allclose(y.data, np.transpose(self.x_nchw.data, (0, 2, 3, 1)))
+        assert allclose(y.data, xp.transpose(self.x_nchw.data, (0, 2, 3, 1)))
 
         # Test gradient
         loss = y.sum()
         loss.backward()
 
         # Gradient should be ones permuted back
-        expected_grad = np.ones_like(self.x_nchw.data)
-        assert np.allclose(self.x_nchw.grad.data, expected_grad)
+        expected_grad = xp.ones_like(self.x_nchw.data)
+        assert allclose(self.x_nchw.grad.data, expected_grad)
 
     def test_permute_chain(self):
         # Create same input in both frameworks
-        np_data = np.random.randn(2, 3, 4, 5)
+        np_data = xp.random.normal(shape=(2, 3, 4, 5))
         x_torch = torch.tensor(np_data, requires_grad=True)
         x_ours = Tensor(np_data)
 
@@ -1236,7 +1267,7 @@ class TestTensorPermute(TestTensor):
         )
 
     def test_invalid_permute(self):
-        x = Tensor(np.random.randn(2, 3, 4, 5))
+        x = Tensor(xp.random.normal(shape=(2, 3, 4, 5)))
 
         # Test wrong number of dimensions
         try:
@@ -1268,16 +1299,16 @@ class TestTensorPermute(TestTensor):
         loss = y.sum()
         loss.backward()
 
-        expected_grad = np.ones_like(self.x_nhwc.data) * 2
-        assert np.allclose(self.x_nhwc.grad.data, expected_grad)
+        expected_grad = xp.ones_like(self.x_nhwc.data) * 2
+        assert allclose(self.x_nhwc.grad.data, expected_grad)
 
 
 class TestTensorStridedWindows(TestTensor):
     def test_window_coverage(self):
         x = (
-            np.array([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]])
+            xp.array([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]])
             .reshape(1, 1, 4, 4)
-            .astype(np.float32)
+            .astype(xp.float32)
         )
         tensor = Tensor(x, requires_grad=True)
 
@@ -1292,35 +1323,35 @@ class TestTensorStridedWindows(TestTensor):
         # Check first window content
         # windows[0,0,0,0] -> (3,3) slice of the first window
         expected_window = x[0, 0, 0:3, 0:3]
-        assert np.array_equal(windows.data[0, 0, 0, 0], expected_window)
+        assert array_equal(windows.data[0, 0, 0, 0], expected_window)
 
     def test_gradient_contribution(self):
         x = (
-            np.array([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]])
+            xp.array([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]])
             .reshape(1, 1, 4, 4)
-            .astype(np.float32)
+            .astype(xp.float32)
         )
         tensor = Tensor(x, requires_grad=True)
 
         windows = tensor.strided_windows(kernel_size=3, stride=1)
         # windows shape: (2,2,1,1,3,3)
 
-        grad_data = np.zeros_like(windows.data)
+        grad_data = xp.zeros_like(windows.data)
         # To set gradient for the first window:
         # Indexing: windows[H_out_idx, W_out_idx, batch_idx, channel_idx, :, :]
         # The first window: (0,0,0,0) -> shape (3,3)
-        grad_data[0, 0, 0, 0] = np.ones((3, 3))
+        grad_data[0, 0, 0, 0] = xp.ones((3, 3))
         windows.backward(grad_data)
 
         # Check that gradient propagated correctly
         # This should add ones to the top-left 3x3 region of tensor.grad
-        assert np.array_equal(tensor.grad.data[0, 0, :3, :3], np.ones((3, 3)))
+        assert array_equal(tensor.grad.data[0, 0, :3, :3], xp.ones((3, 3)))
 
     def test_weight_impact(self):
         x = (
-            np.array([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]])
+            xp.array([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]])
             .reshape(1, 1, 4, 4)
-            .astype(np.float32)
+            .astype(xp.float32)
         )
         tensor = Tensor(x, requires_grad=True)
 
@@ -1330,7 +1361,7 @@ class TestTensorStridedWindows(TestTensor):
         num_windows = H_out * W_out
 
         # Create weights matching the number of windows
-        weights = np.arange(1, num_windows + 1, dtype=np.float32).reshape(
+        weights = xp.arange(1, num_windows + 1, dtype=xp.float32).reshape(
             H_out, W_out, 1, 1, 1, 1
         )
 
@@ -1352,9 +1383,9 @@ class TestTensorStridedWindows(TestTensor):
 
     def test_custom_strided_windows(self):
         x = (
-            np.array([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]])
+            xp.array([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]])
             .reshape(1, 1, 4, 4)
-            .astype(np.float32)
+            .astype(xp.float32)
         )
 
         tensor = Tensor(x, requires_grad=True)
@@ -1363,7 +1394,7 @@ class TestTensorStridedWindows(TestTensor):
         windows_2x2 = tensor.strided_windows(kernel_size=2, stride=1)
         H_out, W_out, b, c, kH, kW = windows_2x2.shape
         num_windows = H_out * W_out
-        weights = np.arange(1, num_windows + 1, dtype=np.float32).reshape(
+        weights = xp.arange(1, num_windows + 1, dtype=xp.float32).reshape(
             H_out, W_out, 1, 1, 1, 1
         )
         loss = (windows_2x2 * weights).sum()
@@ -1399,7 +1430,7 @@ class TestTensorStridedWindows(TestTensor):
         windows_3x3 = tensor.strided_windows(kernel_size=3, stride=1)
         H_out, W_out, b, c, kH, kW = windows_3x3.shape
         num_windows = H_out * W_out
-        weights_3x3 = np.arange(1, num_windows + 1, dtype=np.float32).reshape(
+        weights_3x3 = xp.arange(1, num_windows + 1, dtype=xp.float32).reshape(
             H_out, W_out, 1, 1, 1, 1
         )
         loss_3x3 = (windows_3x3 * weights_3x3).sum()
@@ -1446,17 +1477,17 @@ class TestTensorStridedWindows(TestTensor):
 
     def test_strided_windows_cnn_gradients(self):
         x = (
-            np.array([[1, 0, 0, 1], [0, 1, 1, 0], [0, 1, 1, 0], [1, 0, 0, 1]])
+            xp.array([[1, 0, 0, 1], [0, 1, 1, 0], [0, 1, 1, 0], [1, 0, 0, 1]])
             .reshape(1, 1, 4, 4)
-            .astype(np.float32)
+            .astype(xp.float32)
         )
 
         tensor = Tensor(x, requires_grad=True)
         windows = tensor.strided_windows(kernel_size=2, stride=1)
         H_out, W_out, b, c, kH, kW = windows.shape
-        grad_window = np.zeros_like(windows.data)
+        grad_window = xp.zeros_like(windows.data)
         # Set a corner-like gradient pattern in the top-left window (0,0)
-        grad_window[0, 0, 0, 0] = np.array([[1, -1], [-1, 1]], dtype=np.float32)
+        grad_window[0, 0, 0, 0] = xp.array([[1, -1], [-1, 1]], dtype=xp.float32)
         windows.backward(grad_window)
 
         # Check a specific gradient value after backprop
@@ -1472,9 +1503,9 @@ class TestTensorRoll(TestTensor):
             shifts=1, dims=0
         )
 
-        assert np.allclose(x_rolled.data, x_rolled_torch.data)
+        assert allclose(x_rolled.data, x_rolled_torch.data)
 
         x_rolled.backward()
         x_rolled_torch.sum().backward()  # apply sum() as a no-op because when you do loss.backward(), it is a shortcut for loss.backward(torch.Tensor([1])). This in only valid if loss is a tensor containing a single element.
 
-        assert np.allclose(self.x_matrix.grad.data, self.x_matrix_torch.grad.data)
+        assert allclose(self.x_matrix.grad.data, self.x_matrix_torch.grad.data)

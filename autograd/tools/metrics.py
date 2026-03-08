@@ -1,14 +1,6 @@
-"""
-Metrics for evaluating model predictions.
-"""
+"""Metrics for evaluating model predictions."""
 
-try:
-    # drop-in replacement for numpy for GPU acceleration
-    import cupy as np  # type: ignore
-
-    _ = np.cuda.runtime.getDeviceCount()  # Check if a CUDA device is available
-except Exception:
-    import numpy as np
+from autograd.backend import xp
 
 
 def accuracy(y_pred, y_true):
@@ -27,14 +19,16 @@ def accuracy(y_pred, y_true):
         AssertionError: If the length of y_pred and y_true differ.
 
     Example:
-        >>> import numpy as np
-        >>> y_pred = np.array([1, 0, 1, 1])
-        >>> y_true = np.array([1, 1, 1, 0])
+        >>> from autograd.backend import xp
+        >>> y_pred = xp.array([1, 0, 1, 1])
+        >>> y_true = xp.array([1, 1, 1, 0])
         >>> accuracy(y_pred, y_true)
         0.5
     """
+    y_true = xp.array(y_true)
+    y_pred = xp.array(y_pred)
     assert len(y_true) == len(y_pred)
-    return np.sum(y_pred == y_true) / len(y_true)
+    return float(xp.to_scalar(xp.sum(xp.array(y_pred == y_true)))) / len(y_true)
 
 
 def precision(y_pred, y_true):
@@ -53,17 +47,23 @@ def precision(y_pred, y_true):
         AssertionError: If the length of y_pred and y_true differ.
 
     Example:
-        >>> import numpy as np
-        >>> y_pred = np.array([1, 0, 1, 1])
-        >>> y_true = np.array([1, 1, 1, 0])
+        >>> from autograd.backend import xp
+        >>> y_pred = xp.array([1, 0, 1, 1])
+        >>> y_true = xp.array([1, 1, 1, 0])
         >>> precision(y_pred, y_true)
         0.6666666666666666
     """
     assert len(y_true) == len(y_pred)
-    y_true = np.asarray(y_true)
-    y_pred = np.asarray(y_pred)
-    true_positives = np.sum((y_true == 1) & (y_pred == 1))
-    predicted_positives = np.sum(y_pred == 1)
+    y_true = xp.array(y_true)
+    y_pred = xp.array(y_pred)
+    true_positives = int(
+        float(
+            xp.to_scalar(
+                xp.sum(xp.logical_and(xp.array(y_true == 1), xp.array(y_pred == 1)))
+            )
+        )
+    )
+    predicted_positives = int(float(xp.to_scalar(xp.sum(xp.array(y_pred == 1)))))
     return true_positives / predicted_positives if predicted_positives != 0 else 0.0
 
 
@@ -83,11 +83,13 @@ def mean_squared_error(y_pred, y_true):
         AssertionError: If the length of y_pred and y_true differ.
 
     Example:
-        >>> import numpy as np
-        >>> y_pred = np.array([2.5, 0.0, 2, 8])
-        >>> y_true = np.array([3.0, -0.5, 2, 7])
+        >>> from autograd.backend import xp
+        >>> y_pred = xp.array([2.5, 0.0, 2, 8])
+        >>> y_true = xp.array([3.0, -0.5, 2, 7])
         >>> mean_squared_error(y_pred, y_true)
         0.375
     """
+    y_true = xp.array(y_true)
+    y_pred = xp.array(y_pred)
     assert len(y_true) == len(y_pred)
-    return np.mean((y_pred - y_true) ** 2)
+    return float(xp.to_scalar(xp.mean((y_pred - y_true) ** 2)))
