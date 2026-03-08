@@ -3,11 +3,12 @@ import os
 import pickle
 from collections import Counter
 from multiprocessing import Pool, cpu_count
-from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-import mlx.core as mx
 import regex
 from tqdm import tqdm
+
+from autograd.backend import xp
 
 logger = logging.getLogger(__name__)
 
@@ -181,7 +182,7 @@ class BytePairEncoder:
                 f"Found existing encoded data at '{self.encoded_data_path}', "
                 f"loading it instead of re-encoding."
             )
-            encoded_archive = cast(dict[str, mx.array], mx.load(self.encoded_data_path))
+            encoded_archive: Any = xp.load(self.encoded_data_path)
             encoded_data = encoded_archive["arr_0"]
         else:
             # 3) Parallel encoding
@@ -194,14 +195,14 @@ class BytePairEncoder:
             with Pool(self.n_workers) as pool:
                 partial_encoded = pool.map(self.encode, text_chunks)
 
-            encoded_data = mx.array([], dtype=mx.int32)
+            encoded_data = xp.array([], dtype=xp.int32)
             for part in partial_encoded:
-                encoded_data = mx.concatenate(
-                    [encoded_data, mx.array(part, dtype=mx.int32)]
+                encoded_data = xp.concatenate(
+                    [encoded_data, xp.array(part, dtype=xp.int32)]
                 )
 
             # 4) Save to disk
-            mx.savez_compressed(self.encoded_data_path, arr_0=encoded_data)
+            xp.savez_compressed(self.encoded_data_path, arr_0=encoded_data)
 
         logger.info(f"Vocabulary size: {len(self._unicode_to_int_vocab)}")
         logger.info(f"Encoded data length: {len(encoded_data)}")

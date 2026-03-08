@@ -4,10 +4,12 @@ import logging
 import math
 from typing import Any, Optional, Tuple, Union, cast
 
-import mlx.core as mx
-
+from autograd.backend import (
+    Array,
+    ArrayLike,
+    xp,
+)
 from autograd.tensor import Function, Tensor
-from autograd.types import ArrayLike
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +64,7 @@ def softmax(x: Tensor) -> Tensor:
     Examples:
         >>> from autograd.tensor import Tensor
         >>> import cupy as np
-        >>> x = Tensor(mx.array([2.0, 1.0, 0.1]))
+        >>> x = Tensor(xp.array([2.0, 1.0, 0.1]))
         >>> y = softmax(x) # Expected output: probabilities that sum to 1
     """
     return Softmax.apply(x)
@@ -127,20 +129,20 @@ class Relu(Function):
         >>> y = Relu.apply(x) # Expected output: [0, 0, 3]
     """
 
-    def forward(self, x: mx.array) -> mx.array:
+    def forward(self, x: Array) -> Array:
         """
         Computes the forward pass of the ReLU activation function.
 
         Args:
-            x (mx.ndarray): Input array.
+            x (xp.ndarray): Input array.
 
         Returns:
-            mx.ndarray: The result of applying ReLU to the input.
+            xp.ndarray: The result of applying ReLU to the input.
         """
         self.x = x
-        return mx.maximum(x, 0)
+        return xp.maximum(x, 0)
 
-    def backward(self, grad: Tensor) -> mx.array:
+    def backward(self, grad: Tensor) -> Array:
         """
         Computes the backward pass of the ReLU activation function.
 
@@ -148,7 +150,7 @@ class Relu(Function):
             grad (Tensor): Upstream gradient.
 
         Returns:
-            mx.ndarray: The gradient of the loss with respect to the input.
+            xp.ndarray: The gradient of the loss with respect to the input.
         """
         return grad.data * (self.x > 0)
 
@@ -174,21 +176,21 @@ class Gelu(Function):
         >>> y = Gelu.apply(x) # Expected output: approximate GELU values
     """
 
-    def forward(self, x: mx.array) -> mx.array:
+    def forward(self, x: Array) -> Array:
         """
         Computes the forward pass of the GELU activation function.
 
         Args:
-            x (mx.ndarray): Input array.
+            x (xp.ndarray): Input array.
 
         Returns:
-            mx.ndarray: The output array after applying GELU.
+            xp.ndarray: The output array after applying GELU.
         """
         self.x = x  # Save for backward
         coeff = math.sqrt(2.0 / math.pi)
-        return 0.5 * x * (1.0 + mx.tanh(coeff * (x + 0.044715 * x**3)))
+        return 0.5 * x * (1.0 + xp.tanh(coeff * (x + 0.044715 * x**3)))
 
-    def backward(self, grad: mx.array) -> mx.array:
+    def backward(self, grad: Array) -> Array:
         r"""
         Computes the backward pass of the GELU activation function.
 
@@ -206,16 +208,16 @@ class Gelu(Function):
         $$
 
         Args:
-            grad (mx.ndarray): Upstream gradient.
+            grad (xp.ndarray): Upstream gradient.
 
         Returns:
-            mx.ndarray: The gradient of the loss with respect to the input.
+            xp.ndarray: The gradient of the loss with respect to the input.
         """
         coeff = math.sqrt(2.0 / math.pi)
         alpha = coeff * (self.x + 0.044715 * self.x**3)
 
         # Compute tanh(alpha)
-        tanh_alpha = mx.tanh(alpha)
+        tanh_alpha = xp.tanh(alpha)
 
         # Compute derivative of alpha: alpha'(x)
         alpha_prime = coeff * (1.0 + 3.0 * 0.044715 * self.x**2)
@@ -248,20 +250,20 @@ class Sigmoid(Function):
         >>> y = Sigmoid.apply(x) # Expected output: [0.5, ~0.88]
     """
 
-    def forward(self, x: mx.array) -> mx.array:
+    def forward(self, x: Array) -> Array:
         """
         Computes the forward pass of the sigmoid function.
 
         Args:
-            x (mx.ndarray): Input array.
+            x (xp.ndarray): Input array.
 
         Returns:
-            mx.ndarray: The output after applying the sigmoid function.
+            xp.ndarray: The output after applying the sigmoid function.
         """
-        self.out = 1 / (1 + mx.exp(mx.clip(-x, -709, 709)))
+        self.out = 1 / (1 + xp.exp(xp.clip(-x, -709, 709)))
         return self.out
 
-    def backward(self, grad: Tensor) -> mx.array:
+    def backward(self, grad: Tensor) -> Array:
         """
         Computes the backward pass of the sigmoid function.
 
@@ -269,7 +271,7 @@ class Sigmoid(Function):
             grad (Tensor): Upstream gradient.
 
         Returns:
-            mx.ndarray: The gradient of the loss with respect to the input.
+            xp.ndarray: The gradient of the loss with respect to the input.
         """
         return grad.data * self.out * (1 - self.out)
 
@@ -289,25 +291,25 @@ class Softmax(Function):
     Examples:
         >>> from autograd.tensor import Tensor
         >>> import cupy as np
-        >>> x = Tensor(mx.array([1.0, 2.0, 3.0]))
+        >>> x = Tensor(xp.array([1.0, 2.0, 3.0]))
         >>> y = Softmax.apply(x) # Expected output: probabilities that sum to 1
     """
 
-    def forward(self, x: mx.array) -> mx.array:
+    def forward(self, x: Array) -> Array:
         """
         Computes the forward pass of the softmax activation function.
 
         Args:
-            x (mx.ndarray): Input array of logits.
+            x (xp.ndarray): Input array of logits.
 
         Returns:
-            mx.ndarray: The softmax probabilities.
+            xp.ndarray: The softmax probabilities.
         """
-        exp_x = mx.exp(x - mx.max(x, axis=-1, keepdims=True))
-        self.probs = exp_x / mx.sum(exp_x, axis=-1, keepdims=True)
+        exp_x = xp.exp(x - xp.max(x, axis=-1, keepdims=True))
+        self.probs = exp_x / xp.sum(exp_x, axis=-1, keepdims=True)
         return self.probs
 
-    def backward(self, grad: Tensor) -> mx.array:
+    def backward(self, grad: Tensor) -> Array:
         """
         Computes the backward pass of the softmax activation function.
 
@@ -317,7 +319,7 @@ class Softmax(Function):
             grad (Tensor): Upstream gradient.
 
         Returns:
-            mx.ndarray: The gradient of the loss with respect to the input logits.
+            xp.ndarray: The gradient of the loss with respect to the input logits.
         """
         # There are two cases for this gradient because each element in the matrix affects
         # every other elements' gradient due to the fact of sum(e^x) in the denominator.
@@ -328,7 +330,7 @@ class Softmax(Function):
         # d(softmax(x))/dx_i = -softmax(x)_i * softmax(x)_j
 
         # dL/dx = y * (dL/dy - sum(dL/dy * y, axis=-1, keepdims=True))
-        sum_term = mx.sum(grad.data * self.probs, axis=-1, keepdims=True)
+        sum_term = xp.sum(grad.data * self.probs, axis=-1, keepdims=True)
         dLdx = self.probs * (grad.data - sum_term)
         return dLdx
 
@@ -351,26 +353,26 @@ class Tanh(Function):
         >>> y = Tanh.apply(x) # Expected output: [0, tanh(1)]
     """
 
-    def forward(self, x: mx.array) -> mx.array:
+    def forward(self, x: Array) -> Array:
         """
         Computes the forward pass of the tanh activation function.
 
         Args:
-            x (mx.ndarray): Input array.
+            x (xp.ndarray): Input array.
 
         Returns:
-            mx.ndarray: The output after applying the tanh function.
+            xp.ndarray: The output after applying the tanh function.
         """
         # For numerical stability, use the fact that tanh(x) = 2*sigmoid(2x) - 1
         # This avoids computing large exponentials directly
         x = 2 * x
         # Clip x to avoid overflow in exp(-x)
-        x = mx.clip(x, -88.72, 88.72)  # ln(max float32) ≈ 88.72
-        sigmoid_2x = 1 / (1 + mx.exp(-x))
+        x = xp.clip(x, -88.72, 88.72)  # ln(max float32) ≈ 88.72
+        sigmoid_2x = 1 / (1 + xp.exp(-x))
         self.out = 2 * sigmoid_2x - 1
         return self.out
 
-    def backward(self, grad: Tensor) -> mx.array:
+    def backward(self, grad: Tensor) -> Array:
         """
         Computes the backward pass of the tanh activation function.
         $$
@@ -381,7 +383,7 @@ class Tanh(Function):
             grad (Tensor): Upstream gradient.
 
         Returns:
-            mx.ndarray: The gradient of the loss with respect to the input.
+            xp.ndarray: The gradient of the loss with respect to the input.
         """
         return grad.data * (1 - self.out**2)
 
@@ -406,20 +408,20 @@ class BinaryCrossEntropy(Function):
         >>> loss = BinaryCrossEntropy.apply(y_pred, y_true) # Expected output: a small loss value
     """
 
-    def forward(self, y_pred: mx.array, y_true: mx.array, **kwargs: Any) -> mx.array:
+    def forward(self, y_pred: Array, y_true: Array, **kwargs: Any) -> Array:
         """
         Computes the binary cross entropy loss.
 
         Args:
-            y_pred (mx.ndarray): Predicted probabilities.
-            y_true (mx.ndarray): True binary labels.
+            y_pred (xp.ndarray): Predicted probabilities.
+            y_true (xp.ndarray): True binary labels.
             **kwargs: Additional keyword arguments.
 
         Returns:
             float: The computed binary cross entropy loss.
         """
-        y_true = mx.asarray(y_true, dtype=mx.float32)
-        y_pred = mx.asarray(y_pred, dtype=mx.float32)
+        y_true = xp.array(y_true, dtype=xp.float32)
+        y_pred = xp.array(y_pred, dtype=xp.float32)
 
         # If labels come in as (batch_size,), explicitly reshaping them to (batch_size, 1) avoids shape mismatch, and certain elementwise operations will broadcast in unintended ways
         if y_true.ndim == 1 and y_pred.ndim == 1:
@@ -431,14 +433,14 @@ class BinaryCrossEntropy(Function):
             raise ValueError("y_pred and y_true must have the same shape")
 
         self.y_true = y_true
-        self.y_pred_prob = mx.clip(y_pred, 1e-7, 1 - 1e-7)
-        loss = -mx.mean(
-            y_true * mx.log(self.y_pred_prob)
-            + (1 - y_true) * mx.log(1 - self.y_pred_prob)
+        self.y_pred_prob = xp.clip(y_pred, 1e-7, 1 - 1e-7)
+        loss = -xp.mean(
+            y_true * xp.log(self.y_pred_prob)
+            + (1 - y_true) * xp.log(1 - self.y_pred_prob)
         )
         return loss
 
-    def backward(self, grad: Tensor) -> Tuple[mx.array, None]:
+    def backward(self, grad: Tensor) -> Tuple[Array, None]:
         r"""
         Computes the gradient of the binary cross entropy loss with respect to $y_{pred}$.
 
@@ -451,10 +453,10 @@ class BinaryCrossEntropy(Function):
             grad (Tensor): Upstream gradient.
 
         Returns:
-            Tuple[mx.ndarray, None]: A tuple containing the gradient with respect to $y_{pred}$ and None for $y_{true}$.
+            Tuple[xp.ndarray, None]: A tuple containing the gradient with respect to $y_{pred}$ and None for $y_{true}$.
         """
         # Avoid division by zero by clipping probabilities away from 0 and 1
-        y_pred_prob = mx.clip(self.y_pred_prob, 1e-7, 1 - 1e-7)
+        y_pred_prob = xp.clip(self.y_pred_prob, 1e-7, 1 - 1e-7)
         grad_y_pred = -(
             (self.y_true / y_pred_prob) - ((1 - self.y_true) / (1 - y_pred_prob))
         )
@@ -478,19 +480,19 @@ class BinaryCrossEntropyWithLogits(Function):
         >>> loss = BinaryCrossEntropyWithLogits.apply(y_pred, y_true) # Expected output: a loss value computed using logits
     """
 
-    def forward(self, y_pred: mx.array, y_true: mx.array) -> mx.array:
+    def forward(self, y_pred: Array, y_true: Array) -> Array:
         """
         Computes the binary cross entropy loss with logits input.
 
         Args:
-            y_pred (mx.ndarray): shape (N, ...) Unbounded real-valued logits.
-            y_true (mx.ndarray): True binary labels (0 or 1), same shape as y_pred.
+            y_pred (xp.ndarray): shape (N, ...) Unbounded real-valued logits.
+            y_true (xp.ndarray): True binary labels (0 or 1), same shape as y_pred.
 
         Returns:
             float: The computed binary cross entropy loss.
         """
-        y_true = mx.asarray(y_true, dtype=mx.float32)
-        y_pred = mx.asarray(y_pred, dtype=mx.float32)
+        y_true = xp.array(y_true, dtype=xp.float32)
+        y_pred = xp.array(y_pred, dtype=xp.float32)
 
         # If labels come in as (batch_size,), explicitly reshaping them to (batch_size, 1) avoids shape mismatch, and certain elementwise operations will broadcast in unintended ways
         if y_true.ndim == 1 and y_pred.ndim == 1:
@@ -503,17 +505,17 @@ class BinaryCrossEntropyWithLogits(Function):
 
         # compute loss
         # loss_i = max(y_pred, 0) - y_pred * y_true + log(1 + exp(-|y_pred|))
-        loss = mx.mean(
-            mx.maximum(y_pred, 0.0)
+        loss = xp.mean(
+            xp.maximum(y_pred, 0.0)
             - y_pred * y_true
-            + mx.log1p(mx.exp(-mx.abs(y_pred)))
+            + xp.log1p(xp.exp(-xp.abs(y_pred)))
         )
 
         self.y_pred = y_pred
         self.y_true = y_true
         return loss
 
-    def backward(self, grad: Tensor) -> Tuple[mx.array, None]:
+    def backward(self, grad: Tensor) -> Tuple[Array, None]:
         r"""
         Computes the gradient of the binary cross entropy loss with logits with respect to $y_{pred}$.
 
@@ -531,13 +533,13 @@ class BinaryCrossEntropyWithLogits(Function):
             grad (Tensor): Upstream gradient.
 
         Returns:
-            Tuple[mx.ndarray, None]: A tuple containing the gradient with respect to $y_{pred}$ and None for $y_{true}$.
+            Tuple[xp.ndarray, None]: A tuple containing the gradient with respect to $y_{pred}$ and None for $y_{true}$.
         """
         # Stable sigmoid without NumPy-style masked mutation.
-        sig = mx.where(
+        sig = xp.where(
             self.y_pred >= 0,
-            1.0 / (1.0 + mx.exp(-self.y_pred)),
-            mx.exp(self.y_pred) / (1.0 + mx.exp(self.y_pred)),
+            1.0 / (1.0 + xp.exp(-self.y_pred)),
+            xp.exp(self.y_pred) / (1.0 + xp.exp(self.y_pred)),
         )
 
         # 2) Compute dL/dy_pred = sigmoid(y_pred) - y_true divided by batch_size
@@ -559,25 +561,25 @@ class CrossEntropy(Function):
     Examples:
         >>> import cupy as np
         >>> from autograd.tensor import Tensor
-        >>> y_pred = Tensor(mx.array([[2.0, 1.0, 0.1]]))
-        >>> y_true = Tensor(mx.array([0]))
+        >>> y_pred = Tensor(xp.array([[2.0, 1.0, 0.1]]))
+        >>> y_true = Tensor(xp.array([0]))
         >>> loss = CrossEntropy.apply(y_pred, y_true, pad_idx=-1, label_smoothing=0.1) # Expected output: a loss value for the given logits and target
     """
 
     def forward(
         self,
-        y_pred: mx.array,
-        y_true: mx.array,
+        y_pred: Array,
+        y_true: Array,
         pad_idx: Optional[int] = 0,
         label_smoothing: float = 0.0,
         **kwargs: Any,
-    ) -> Union[mx.array, float]:
+    ) -> Union[Array, float]:
         r"""
         Computes the cross-entropy loss with optional padding and label smoothing.
 
         Args:
-            y_pred (mx.ndarray): Raw logits. Shape can be $(batch\_size, feature\_dim)$ or $(batch\_size, seq\_len, feature\_dim)$.
-            y_true (Union[mx.ndarray, Tensor]): True class indices. If $y_{pred}$ is 2D, shape is $(batch\_size,)$; if 3D, shape is $(batch\_size, seq\_len)$.
+            y_pred (xp.ndarray): Raw logits. Shape can be $(batch\_size, feature\_dim)$ or $(batch\_size, seq\_len, feature\_dim)$.
+            y_true (Union[xp.ndarray, Tensor]): True class indices. If $y_{pred}$ is 2D, shape is $(batch\_size,)$; if 3D, shape is $(batch\_size, seq\_len)$.
             pad_idx (int, optional): Padding index to ignore in the loss. Defaults to 0.
             label_smoothing (float, optional): Label smoothing factor. Defaults to 0.0. Label smoothing is applied if $label\_smoothing > 0$
             **kwargs: Additional keyword arguments.
@@ -609,10 +611,10 @@ class CrossEntropy(Function):
         (Ref: "Rethinking the Inception Architecture for Computer Vision", https://arxiv.org/abs/1512.00567)
 
         Returns:
-            Union[mx.array, float]: The average cross-entropy loss over non-padding positions.
+            Union[xp.array, float]: The average cross-entropy loss over non-padding positions.
         """
 
-        y_true = mx.asarray(y_true, dtype=mx.int64)
+        y_true = xp.array(y_true, dtype=xp.int64)
 
         # 1. If 3D logits, flatten them for simpler processing while preserving
         # the original shape for the backward pass.
@@ -626,10 +628,10 @@ class CrossEntropy(Function):
 
         # 2. Create a mask for non-pad positions (where y_true != pad_idx).
         if pad_idx is None:
-            self.non_pad_mask = mx.ones(y_true.shape, dtype=mx.int32) == 1
+            self.non_pad_mask = xp.ones(y_true.shape, dtype=xp.int32) == 1
         else:
             self.non_pad_mask = y_true != pad_idx
-        non_pad_weights = cast(Any, self.non_pad_mask).astype(mx.float32)
+        non_pad_weights = cast(Any, self.non_pad_mask).astype(xp.float32)
         non_pad_count = max(1, int(non_pad_weights.sum()))
 
         # 3. Compute stable log-softmax:
@@ -637,7 +639,7 @@ class CrossEntropy(Function):
         # However, log(sum(exp(y_pred))) can overflow if y_pred is large.
         # To avoid this, we use the following trick:
         # shifted = y_pred - max(y_pred) along each row
-        shifted = y_pred - mx.max(y_pred, axis=1, keepdims=True)
+        shifted = y_pred - xp.max(y_pred, axis=1, keepdims=True)
 
         # Going back to the log-softmax formula:
         # log(softmax(y_pred)) = y_pred - log(sum(exp(y_pred)))
@@ -645,9 +647,9 @@ class CrossEntropy(Function):
         # exp(shifted) = exp(y_pred - max(y_pred)) = exp(y_pred) / exp(max(y_pred))
         # Then we have: log(softmax(shifted)) = shifted - log(sum(exp(shifted)))
         # the largest value in shifted is 0, so sum(exp(shifted)) is safe to compute.
-        log_softmax = shifted - mx.log(mx.sum(mx.exp(shifted), axis=1, keepdims=True))
+        log_softmax = shifted - xp.log(xp.sum(xp.exp(shifted), axis=1, keepdims=True))
 
-        """
+        r"""
         4. Compute the label-smoothed cross-entropy for each element i.
         $$
         q'(k \mid x) = (1 - \epsilon)\,\delta_{k,y} + \frac{\epsilon}{K}
@@ -663,14 +665,14 @@ class CrossEntropy(Function):
         Here $p_{i,j}$ is the model probability for example i and class j.
         """
         # We implement the second line directly using log-softmax.
-        log_p_correct = log_softmax[mx.arange(len(y_true)), y_true]
-        mean_log_p = mx.mean(log_softmax, axis=1)
+        log_p_correct = log_softmax[xp.arange(len(y_true)), y_true]
+        mean_log_p = xp.mean(log_softmax, axis=1)
         losses = -(
             (1.0 - label_smoothing) * log_p_correct + label_smoothing * mean_log_p
         )
 
         # 5) Average the loss only over non-pad positions.
-        loss_val = mx.sum(losses * non_pad_weights) / non_pad_count
+        loss_val = xp.sum(losses * non_pad_weights) / non_pad_count
 
         # 6) Store for backward pass:
         self.log_softmax = log_softmax
@@ -680,7 +682,7 @@ class CrossEntropy(Function):
         self.num_classes = num_classes
         return loss_val
 
-    def backward(self, grad: Tensor) -> Tuple[mx.array, None]:
+    def backward(self, grad: Tensor) -> Tuple[Array, None]:
         r"""
         Computes the backward pass for the cross-entropy loss with label smoothing.
 
@@ -703,18 +705,18 @@ class CrossEntropy(Function):
             grad (Tensor): Upstream gradient.
 
         Returns:
-            Tuple[mx.ndarray, None]: A tuple containing the gradient with respect to the logits and None for $y_{true}$.
+            Tuple[xp.ndarray, None]: A tuple containing the gradient with respect to the logits and None for $y_{true}$.
         """
         # 1. Softmax from log-softmax is safe: p_{i,j} = exp(log_sm[i,j])
-        softmax_probs = mx.exp(self.log_softmax)
+        softmax_probs = xp.exp(self.log_softmax)
 
         # 3. Identify which samples are non-padding
-        row_mask = mx.expand_dims(
-            cast(Any, self.non_pad_mask).astype(mx.float32), axis=1
+        row_mask = xp.expand_dims(
+            cast(Any, self.non_pad_mask).astype(xp.float32), axis=1
         )
         non_pad_count = max(1, int(row_mask.sum()))
 
-        """
+        r"""
         4. Label smoothing target distribution.
         $$
         q'(k \mid x) = (1 - \epsilon)\,\delta_{k,y} + \frac{\epsilon}{K}
@@ -724,9 +726,9 @@ class CrossEntropy(Function):
         then add the remaining (1 - eps) mass to the correct class.
         """
         off_value = self.label_smoothing / self.num_classes
-        target = mx.ones_like(softmax_probs) * off_value
-        correct_idx = (mx.arange(self.y_true.shape[0]), self.y_true)
-        target = cast(Any, target).at[correct_idx].add(1.0 - self.label_smoothing)
+        target = xp.ones_like(softmax_probs) * off_value
+        correct_idx = (xp.arange(self.y_true.shape[0]), self.y_true)
+        target = xp.scatter_add(target, correct_idx, 1.0 - self.label_smoothing)
         target *= row_mask
 
         # 6. Multiply by upstream grad and average by non-padded positions
@@ -769,24 +771,24 @@ class HingeLoss(Function):
 
     def forward(
         self,
-        y_pred: mx.array,
-        y_true: mx.array,
+        y_pred: Array,
+        y_true: Array,
         reduction: str = "none",
         **kwargs: Any,
-    ) -> Union[mx.array, float]:
+    ) -> Union[Array, float]:
         """
         Computes the hinge loss.
 
         Args:
-            y_pred (mx.ndarray): Predicted scores.
-            y_true (Union[mx.ndarray, Tensor]): True labels.
+            y_pred (xp.ndarray): Predicted scores.
+            y_true (Union[xp.ndarray, Tensor]): True labels.
             reduction (str, optional): "none", "mean", or "sum". Defaults to "none".
             **kwargs: Additional keyword arguments.
 
         Returns:
-            Union[mx.array, float]: The computed hinge loss.
+            Union[xp.array, float]: The computed hinge loss.
         """
-        y_true = mx.asarray(y_true, dtype=mx.float32)
+        y_true = xp.array(y_true, dtype=xp.float32)
 
         # Reshape y_true to match y_pred if needed
         if y_pred.shape != y_true.shape:
@@ -798,19 +800,19 @@ class HingeLoss(Function):
 
         # hinge loss = max(0, 1 - y_true * y_pred)
         self.margins = 1 - y_true * y_pred
-        loss_data = mx.maximum(0, self.margins)
+        loss_data = xp.maximum(0, self.margins)
 
         if reduction == "mean":
-            loss_data = mx.mean(loss_data)
+            loss_data = xp.mean(loss_data)
         elif reduction == "sum":
-            loss_data = mx.sum(loss_data)
+            loss_data = xp.sum(loss_data)
         elif reduction == "none":
             pass
         else:
             raise ValueError(f"Invalid reduction: {reduction}")
         return loss_data
 
-    def backward(self, grad: Tensor) -> Tuple[mx.array, None]:
+    def backward(self, grad: Tensor) -> Tuple[Array, None]:
         r"""
         Computes the gradient of the hinge loss with respect to the predictions.
 
@@ -834,13 +836,13 @@ class HingeLoss(Function):
             grad (Tensor): Upstream gradient.
 
         Returns:
-            Tuple[mx.ndarray, None]: A tuple containing the gradient with respect to $y_{pred}$ and None for $y_{true}$.
+            Tuple[xp.ndarray, None]: A tuple containing the gradient with respect to $y_{pred}$ and None for $y_{true}$.
         """
-        grad_y_pred = mx.zeros_like(self.y_pred)
+        grad_y_pred = xp.zeros_like(self.y_pred)
 
         # Where margin > 0, gradient is -y_true
         margin_violated = self.margins > 0
-        grad_y_pred = mx.where(margin_violated, -self.y_true, 0)
+        grad_y_pred = xp.where(margin_violated, -self.y_true, 0)
 
         if self.reduction == "mean":
             grad_y_pred /= self.y_pred.size
@@ -871,13 +873,13 @@ class MeanSquaredLoss(Function):
         >>> loss = MeanSquaredLoss.apply(y_pred, y_true) # Expected output: 0.5
     """
 
-    def forward(self, y_pred: mx.array, y_true: mx.array, **kwargs: Any) -> mx.array:
+    def forward(self, y_pred: Array, y_true: Array, **kwargs: Any) -> Array:
         """
         Computes the Mean Squared Error loss.
 
         Args:
-            y_pred (mx.ndarray): Predicted values.
-            y_true (mx.ndarray): True values.
+            y_pred (xp.ndarray): Predicted values.
+            y_true (xp.ndarray): True values.
             **kwargs: Additional keyword arguments.
 
         Returns:
@@ -885,9 +887,9 @@ class MeanSquaredLoss(Function):
         """
         self.y_pred = y_pred
         self.y_true = y_true
-        return mx.mean((y_pred - y_true) ** 2)
+        return xp.mean((y_pred - y_true) ** 2)
 
-    def backward(self, grad: Tensor) -> mx.array:
+    def backward(self, grad: Tensor) -> Array:
         r"""
         Computes the gradient of the Mean Squared Error loss with respect to the predictions.
 
@@ -900,7 +902,7 @@ class MeanSquaredLoss(Function):
             grad (Tensor): Upstream gradient.
 
         Returns:
-            mx.ndarray: The gradient with respect to y_pred.
+            xp.ndarray: The gradient with respect to y_pred.
         """
         return 2 * (self.y_pred - self.y_true) * grad.data
 
@@ -989,8 +991,8 @@ def cross_entropy(
     Examples:
         >>> import cupy as np
         >>> from autograd.tensor import Tensor
-        >>> y_pred = Tensor(mx.array([[2.0, 1.0, 0.1]]))
-        >>> y_true = Tensor(mx.array([0]))
+        >>> y_pred = Tensor(xp.array([[2.0, 1.0, 0.1]]))
+        >>> y_true = Tensor(xp.array([0]))
         >>> loss = cross_entropy(y_pred, y_true, pad_idx=-1, label_smoothing=0.1)
     """
     if not isinstance(y_true, Tensor):

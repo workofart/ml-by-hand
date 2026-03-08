@@ -1,9 +1,8 @@
 import logging
 import os
 
-import mlx.core as mx
-
 from autograd import functional, nn, optim
+from autograd.backend import xp
 from autograd.text.utils import create_vocabulary
 from autograd.tools.config_schema import GenericTrainingConfig
 from autograd.tools.data import (
@@ -29,7 +28,7 @@ def reviews_to_token_ids(reviews, vocabulary, max_sequence_length, pad_str="<PAD
             token_ids[idx] = vocabulary.get(word, unk_idx)
         matrix.append(token_ids)
 
-    return mx.array(matrix, dtype=mx.int32)
+    return xp.array(matrix, dtype=xp.int32)
 
 
 class OneHotMovieSentimentDataLoader(SimpleDataLoader):
@@ -41,7 +40,7 @@ class OneHotMovieSentimentDataLoader(SimpleDataLoader):
 
     def __iter__(self):
         # TODO: replace batch-time one-hot with direct token-id model inputs.
-        eye = mx.eye(self.vocab_size, dtype=mx.float32)
+        eye = xp.eye(self.vocab_size, dtype=xp.float32)
         for batch_indices in self._batch_indices():
             batch_tokens = self.X[batch_indices]
             yield eye[batch_tokens], self.y[batch_indices]
@@ -70,7 +69,9 @@ def process_data(data):
     sentiments = [row[1] for row in data]
     vocab = create_vocabulary(reviews, max_features=6000)
     features = reviews_to_token_ids(reviews, vocab, max_sequence_length=25)
-    labels = mx.array([1 if label == "positive" else 0 for label in sentiments])
+    labels = xp.array(
+        [1 if label == "positive" else 0 for label in sentiments], dtype=xp.int32
+    )
 
     X_train, X_test, y_train, y_test = train_test_split(features, labels, test_size=0.1)
 
@@ -224,7 +225,6 @@ if __name__ == "__main__":
             "unzip training_data/imdb-dataset-of-50k-movie-reviews.zip -d training_data"
         )
 
-    # Process the data (assume process_data returns train/test splits and a vocabulary)
     data = load_data("training_data/IMDB Dataset.csv", "training_data/IMDB Dataset.csv")
     assert not isinstance(data, str)
     X_train, X_test, y_train, y_test, vocab = process_data(data)
@@ -248,7 +248,11 @@ if __name__ == "__main__":
         training_run_name="movie_sentiment_rnn",
         total_epochs=15,
         checkpoint_freq=15,
-        model_kwargs={"input_size": len(vocab), "hidden_size": 32, "output_size": 1},
+        model_kwargs={
+            "input_size": len(vocab),
+            "hidden_size": 32,
+            "output_size": 1,
+        },
         optimizer_kwargs={"lr": 0.001},
     )
     main(RNN, train_data_loader, test_data_loader, config_rnn)
@@ -258,7 +262,11 @@ if __name__ == "__main__":
         training_run_name="movie_sentiment_rnn",
         total_epochs=15,
         checkpoint_freq=15,
-        model_kwargs={"input_size": len(vocab), "hidden_size": 64, "output_size": 1},
+        model_kwargs={
+            "input_size": len(vocab),
+            "hidden_size": 64,
+            "output_size": 1,
+        },
         optimizer_kwargs={"lr": 0.001, "max_grad_norm": 1.0},
     )
     main(LSTM, train_data_loader, test_data_loader, config_lstm)

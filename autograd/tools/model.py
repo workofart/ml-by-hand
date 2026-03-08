@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict, cast
+from typing import Any, Dict
 
-import mlx.core as mx
-
-from autograd.tensor import ARRAY_TYPE, Tensor
+from autograd.backend import ARRAY_TYPE, xp
+from autograd.tensor import Tensor
 
 # Define a type for the serialized metadata structure
 SerializedMeta = Dict[str, Any]
@@ -84,7 +83,7 @@ def save_checkpoint(
         # Tensor or backend array
         if isinstance(obj, Tensor):
             key = prefix if prefix else "root_array"
-            arrays[key] = mx.asarray(obj.data)
+            arrays[key] = xp.array(obj.data)
             return {
                 "_type": "tensor",
                 "key": key,
@@ -92,7 +91,7 @@ def save_checkpoint(
 
         if isinstance(obj, ARRAY_TYPE) or hasattr(obj, "__array__"):
             key = prefix if prefix else "root_array"
-            arrays[key] = mx.asarray(obj)
+            arrays[key] = xp.array(obj)
             return {
                 "_type": "array",
                 "key": key,
@@ -113,7 +112,7 @@ def save_checkpoint(
         json.dump(meta, f, indent=2)
 
     # Save arrays to NPZ
-    mx.savez_compressed(npz_path, **arrays_dict)
+    xp.savez_compressed(npz_path, **arrays_dict)
 
 
 def load_checkpoint(
@@ -200,7 +199,7 @@ def load_checkpoint(
         meta: SerializedMeta = json.load(f)
 
     # Load NPZ data
-    data_dict = cast(Dict[str, Any], mx.load(npz_path))
+    data_dict: Any = xp.load(npz_path)
 
     deserialized_data = _deserialize(meta, data_dict)
 

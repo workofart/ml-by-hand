@@ -1,16 +1,16 @@
 import logging
 
-import mlx.core as mx
-from openml.datasets import get_dataset
+from openml.datasets import get_dataset  # pyright: ignore[reportMissingImports]
 
 from autograd import functional, nn, optim
+from autograd.backend import xp
 from autograd.tools.config_schema import GenericTrainingConfig
 from autograd.tools.data import SimpleDataLoader, train_test_split
 from autograd.tools.metrics import accuracy, precision
 from autograd.tools.trainer import SimpleTrainer
 
 logger = logging.getLogger(__name__)
-mx.random.seed(1337)
+xp.random.seed(1337)
 
 
 class MnistResNet(nn.Module):
@@ -251,17 +251,13 @@ def train_mnist_with_hinge_loss(
 
     def preprocess_for_digit(x, y, digit):
         # Convert y into {+1, -1}
-        y_bin = 2 * (y == digit).astype(int) - 1
+        y_bin = 2 * (y == digit).astype(xp.int32) - 1
         return x, y_bin
 
     for digit in range(10):
         logger.info(f"Training digit={digit}")
-        train_loader = SimpleDataLoader(
-            X_train.copy(), y_train.copy(), batch_size, shuffle=True
-        )
-        test_loader = SimpleDataLoader(
-            X_test.copy(), y_test.copy(), batch_size, shuffle=False
-        )
+        train_loader = SimpleDataLoader(X_train, y_train, batch_size, shuffle=True)
+        test_loader = SimpleDataLoader(X_test, y_test, batch_size, shuffle=False)
 
         # Use a lambda with a default parameter to capture the current digit.
         train_loader.preprocess(lambda x, y, d=digit: preprocess_for_digit(x, y, d))
@@ -288,13 +284,13 @@ def train_mnist_with_hinge_loss(
         one_vs_rest_models.append(trainer.model)
 
     logger.info("Training complete! Now evaluating on the original test set...")
-    predictions_by_digit = mx.array(
+    predictions_by_digit = xp.array(
         [model(X_test).data for model in one_vs_rest_models]
     )
-    predictions_by_digit = mx.transpose(predictions_by_digit, (1, 0, 2)).squeeze(-1)
+    predictions_by_digit = xp.transpose(predictions_by_digit, (1, 0, 2)).squeeze(-1)
     pred_digits = predictions_by_digit.argmax(axis=1)
-    acc_val = accuracy(pred_digits, y_test.astype(int))
-    prec_val = precision(pred_digits, y_test.astype(int))
+    acc_val = accuracy(pred_digits, y_test.astype(xp.int32))
+    prec_val = precision(pred_digits, y_test.astype(xp.int32))
 
     logger.info(f"Final Test Accuracy: {acc_val:.4f}")
     logger.info(f"Final Test Precision: {prec_val:.4f}")
@@ -330,18 +326,14 @@ def train_mnist_one_vs_rest_model(
 
     def preprocess_for_digit(x, y, digit):
         # Convert y into {0, 1}
-        y_bin = (y == digit).astype(int)
+        y_bin = (y == digit).astype(xp.int32)
         return x, y_bin
 
     for digit in range(10):
         logger.info(f"Training digit={digit}")
         # Create fresh data loaders for each digit
-        train_loader = SimpleDataLoader(
-            X_train.copy(), y_train.copy(), batch_size, shuffle=True
-        )
-        test_loader = SimpleDataLoader(
-            X_test.copy(), y_test.copy(), batch_size, shuffle=False
-        )
+        train_loader = SimpleDataLoader(X_train, y_train, batch_size, shuffle=True)
+        test_loader = SimpleDataLoader(X_test, y_test, batch_size, shuffle=False)
 
         # Freeze the current digit in the lambda via a default parameter.
         train_loader.preprocess(lambda x, y, d=digit: preprocess_for_digit(x, y, d))
@@ -367,13 +359,13 @@ def train_mnist_one_vs_rest_model(
         one_vs_rest_models.append(trainer.model)
 
     logger.info("Training complete! Now evaluating on the original test set...")
-    predictions_by_digit = mx.array(
+    predictions_by_digit = xp.array(
         [model(X_test).data for model in one_vs_rest_models]
     )
-    predictions_by_digit = mx.transpose(predictions_by_digit, (1, 0, 2)).squeeze(-1)
+    predictions_by_digit = xp.transpose(predictions_by_digit, (1, 0, 2)).squeeze(-1)
     pred_digits = predictions_by_digit.argmax(axis=1)
-    acc_val = accuracy(pred_digits, y_test.astype(int))
-    prec_val = precision(pred_digits, y_test.astype(int))
+    acc_val = accuracy(pred_digits, y_test.astype(xp.int32))
+    prec_val = precision(pred_digits, y_test.astype(xp.int32))
     logger.info(f"Final Test Accuracy: {acc_val:.4f}")
     logger.info(f"Final Test Precision: {prec_val:.4f}")
 

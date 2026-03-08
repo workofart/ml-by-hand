@@ -1,16 +1,16 @@
 from unittest import TestCase
 
-import mlx.core as mx
 import torch  # for test comparisons
 
 from autograd import functional
+from autograd.backend import xp
 from autograd.tensor import Tensor
 from test.helpers import allclose
 
 
 class TestActivationFunctions(TestCase):
     def setUp(self) -> None:
-        self.X = Tensor(data=mx.array([[1, 1, 1], [2, 2, 2]]), requires_grad=True)
+        self.X = Tensor(data=xp.array([[1, 1, 1], [2, 2, 2]]), requires_grad=True)
 
     def test_sigmoid_forward(self):
         assert allclose(
@@ -20,7 +20,7 @@ class TestActivationFunctions(TestCase):
 
     def test_sigmoid_backward(self):
         out_custom = functional.sigmoid(self.X)
-        grad_dummy = mx.ones_like(out_custom.data)
+        grad_dummy = xp.ones_like(out_custom.data)
         out_custom.backward(grad_dummy)
 
         X_torch = torch.tensor(self.X.data, requires_grad=True)
@@ -39,7 +39,7 @@ class TestActivationFunctions(TestCase):
 
     def test_relu_backward(self):
         out_custom = functional.relu(self.X)
-        grad_dummy = mx.ones_like(out_custom.data)
+        grad_dummy = xp.ones_like(out_custom.data)
         out_custom.backward(grad_dummy)
 
         X_torch = torch.tensor(self.X.data, requires_grad=True)
@@ -61,7 +61,7 @@ class TestActivationFunctions(TestCase):
 
     def test_softmax_backward(self):
         out_custom = functional.softmax(self.X)
-        grad_dummy = mx.ones_like(out_custom.data)
+        grad_dummy = xp.ones_like(out_custom.data)
         out_custom.backward(grad_dummy)
 
         X_torch = torch.tensor(self.X.data, requires_grad=True)
@@ -80,7 +80,7 @@ class TestActivationFunctions(TestCase):
 
     def test_tanh_backward(self):
         out_custom = functional.tanh(self.X)
-        grad_dummy = mx.ones_like(out_custom.data)
+        grad_dummy = xp.ones_like(out_custom.data)
         out_custom.backward(grad_dummy)
 
         X_torch = torch.tensor(self.X.data, requires_grad=True)
@@ -103,7 +103,7 @@ class TestActivationFunctions(TestCase):
 
     def test_gelu_backward(self):
         out_custom = functional.gelu(self.X)
-        grad_dummy = mx.ones_like(out_custom.data)  # dL/dY = 1
+        grad_dummy = xp.ones_like(out_custom.data)  # dL/dY = 1
         out_custom.backward(grad_dummy)
 
         gelu_torch = torch.nn.GELU(approximate="tanh")
@@ -118,15 +118,15 @@ class TestActivationFunctions(TestCase):
 
 class TestBinaryCrossEntropy(TestCase):
     def setUp(self) -> None:
-        self.y_pred_logits = Tensor(data=mx.array([1.0, 2.0, 3.0]), requires_grad=True)
+        self.y_pred_logits = Tensor(data=xp.array([1.0, 2.0, 3.0]), requires_grad=True)
         self.y_pred_logits_torch = torch.tensor(
             self.y_pred_logits.data, requires_grad=True
         )
-        self.y_pred_probs = Tensor(data=mx.array([0.2, 0.3, 0.1]), requires_grad=True)
+        self.y_pred_probs = Tensor(data=xp.array([0.2, 0.3, 0.1]), requires_grad=True)
         self.y_pred_probs_torch = torch.tensor(
             self.y_pred_probs.data, requires_grad=True
         )
-        self.y_true = mx.array([0.0, 0.0, 1.0])
+        self.y_true = xp.array([0.0, 0.0, 1.0])
 
     def test_binary_cross_entropy_with_probs(self):
         bce_loss = functional.binary_cross_entropy(self.y_pred_probs, self.y_true)
@@ -173,13 +173,13 @@ class TestBinaryCrossEntropy(TestCase):
 class TestCrossEntropy(TestCase):
     def test_cross_entropy_accepts_none_pad_idx(self):
         logits = Tensor(
-            data=mx.array([[2.0, 0.5, -1.0], [0.1, 0.2, 3.0]], dtype=mx.float32),
+            data=xp.array([[2.0, 0.5, -1.0], [0.1, 0.2, 3.0]], dtype=xp.float32),
             requires_grad=True,
         )
         logits_torch = torch.tensor(
             logits.data, dtype=torch.float32, requires_grad=True
         )
-        targets = mx.array([0, 2], dtype=mx.int64)
+        targets = xp.array([0, 2], dtype=xp.int64)
 
         loss = functional.cross_entropy(logits, targets, pad_idx=None)
         torch_loss = torch.nn.functional.cross_entropy(
@@ -194,16 +194,16 @@ class TestCrossEntropy(TestCase):
 
     def test_cross_entropy_label_smoothing_matches_pytorch_for_2d_logits(self):
         logits = Tensor(
-            data=mx.array(
+            data=xp.array(
                 [[1.5409961, -0.2934289], [-2.1787894, 0.56843126]],
-                dtype=mx.float32,
+                dtype=xp.float32,
             ),
             requires_grad=True,
         )
         logits_torch = torch.tensor(
             logits.data, dtype=torch.float32, requires_grad=True
         )
-        targets = mx.array([0, 1], dtype=mx.int64)
+        targets = xp.array([0, 1], dtype=xp.int64)
 
         loss = functional.cross_entropy(logits, targets, label_smoothing=0.2)
         torch_loss = torch.nn.functional.cross_entropy(
@@ -219,18 +219,18 @@ class TestCrossEntropy(TestCase):
         assert allclose(logits.grad.data, logits_torch.grad.detach().numpy(), atol=1e-6)
 
     def test_cross_entropy_label_smoothing_matches_pytorch_for_3d_logits(self):
-        logits_data = mx.array(
+        logits_data = xp.array(
             [
                 [[2.0, 0.5, -1.0], [0.1, 0.2, 3.0]],
                 [[-0.4, 1.2, 0.7], [1.5, -0.3, 0.0]],
             ],
-            dtype=mx.float32,
+            dtype=xp.float32,
         )
         logits = Tensor(data=logits_data, requires_grad=True)
         logits_torch = torch.tensor(
             logits.data, dtype=torch.float32, requires_grad=True
         )
-        targets = mx.array([[0, 2], [1, 0]], dtype=mx.int64)
+        targets = xp.array([[0, 2], [1, 0]], dtype=xp.int64)
 
         loss = functional.cross_entropy(
             logits, targets, pad_idx=None, label_smoothing=0.1
@@ -251,19 +251,19 @@ class TestCrossEntropy(TestCase):
 class TestHingeLoss(TestCase):
     def setUp(self):
         # Pytorch doesn't have hinge loss
-        self.y_pred = Tensor(data=mx.array([1.0, 2.0, 3.0]), requires_grad=True)
-        self.y_true = mx.array([1.0, -1.0, 1.0])
+        self.y_pred = Tensor(data=xp.array([1.0, 2.0, 3.0]), requires_grad=True)
+        self.y_true = xp.array([1.0, -1.0, 1.0])
 
     def test_hinge_loss_none(self):
         hinge_loss_none = functional.hinge_loss(
             self.y_pred, self.y_true, reduction="none"
         )
-        expected_none = mx.maximum(0, 1 - self.y_true * self.y_pred.data)  # [0, 3, 0]
+        expected_none = xp.maximum(0, 1 - self.y_true * self.y_pred.data)  # [0, 3, 0]
         assert allclose(hinge_loss_none.data, expected_none)
 
         # Test gradients for no reduction
         hinge_loss_none.backward()
-        expected_grad_none = mx.where(
+        expected_grad_none = xp.where(
             1 - self.y_true * self.y_pred.data > 0, -self.y_true, 0
         )  # [0, 1, 0]
         assert allclose(self.y_pred.grad.data, expected_grad_none)
@@ -272,15 +272,15 @@ class TestHingeLoss(TestCase):
         hinge_loss_mean = functional.hinge_loss(
             self.y_pred, self.y_true, reduction="mean"
         )
-        expected_mean = mx.mean(
-            mx.maximum(0, 1 - self.y_true * self.y_pred.data)
+        expected_mean = xp.mean(
+            xp.maximum(0, 1 - self.y_true * self.y_pred.data)
         )  # 1.0
         assert allclose(hinge_loss_mean.data, expected_mean)
 
         # Test gradients for mean reduction
         self.y_pred.grad = None  # Reset gradients
         hinge_loss_mean.backward()
-        expected_grad_mean = mx.where(
+        expected_grad_mean = xp.where(
             1 - self.y_true * self.y_pred.data > 0, -self.y_true, 0
         ) / len(self.y_true)  # [0, 1/3, 0]
         assert allclose(self.y_pred.grad.data, expected_grad_mean)
@@ -289,13 +289,13 @@ class TestHingeLoss(TestCase):
         hinge_loss_sum = functional.hinge_loss(
             self.y_pred, self.y_true, reduction="sum"
         )
-        expected_sum = mx.sum(mx.maximum(0, 1 - self.y_true * self.y_pred.data))  # 3.0
+        expected_sum = xp.sum(xp.maximum(0, 1 - self.y_true * self.y_pred.data))  # 3.0
         assert allclose(hinge_loss_sum.data, expected_sum)
 
         # Test gradients for sum reduction
         self.y_pred.grad = None  # Reset gradients
         hinge_loss_sum.backward()
-        expected_grad_sum = mx.where(
+        expected_grad_sum = xp.where(
             1 - self.y_true * self.y_pred.data > 0, -self.y_true, 0
         )  # [0, 1, 0]
         assert allclose(self.y_pred.grad.data, expected_grad_sum)
@@ -309,9 +309,9 @@ class TestMeanSquaredLoss(TestCase):
     def setUp(self):
         # Explicitly use float32 dtype
         self.y_pred = Tensor(
-            data=mx.array([1.0, 2.0, 3.0], dtype=mx.float32), requires_grad=True
+            data=xp.array([1.0, 2.0, 3.0], dtype=xp.float32), requires_grad=True
         )
-        self.y_true = mx.array([1.0, 2.0, 3.0], dtype=mx.float32)
+        self.y_true = xp.array([1.0, 2.0, 3.0], dtype=xp.float32)
         self.y_pred_torch = torch.tensor(
             self.y_pred.data, dtype=torch.float32, requires_grad=True
         )

@@ -1,14 +1,13 @@
 from unittest import TestCase
 
-import mlx.core as mx
-
+from autograd.backend import xp
 from autograd.tools.data import train_test_split
 from autograd.tools.metrics import accuracy, precision
 
 
 class TestUtils(TestCase):
     def setUp(self) -> None:
-        self.X = mx.array(
+        self.X = xp.array(
             [
                 [1, 2],
                 [3, 4],
@@ -17,10 +16,10 @@ class TestUtils(TestCase):
                 [9, 10],
             ]
         )
-        self.y = mx.array([0, 1, 0, 1, 0])
+        self.y = xp.array([0, 1, 0, 1, 0])
 
-        self.X_empty = mx.array([])
-        self.y_empty = mx.array([])
+        self.X_empty = xp.array([])
+        self.y_empty = xp.array([])
 
     def test_train_test_split(self):
         X_train, X_test, y_train, y_test = train_test_split(
@@ -36,10 +35,10 @@ class TestUtils(TestCase):
         X_train, X_test, y_train, y_test = train_test_split(
             self.X_empty, self.y_empty, test_size=0.2
         )
-        assert mx.array_equal(X_train, self.X_empty)
-        assert mx.array_equal(X_test, self.X_empty)
-        assert mx.array_equal(y_train, self.y_empty)
-        assert mx.array_equal(y_test, self.y_empty)
+        assert xp.array_equal(X_train, self.X_empty)
+        assert xp.array_equal(X_test, self.X_empty)
+        assert xp.array_equal(y_train, self.y_empty)
+        assert xp.array_equal(y_test, self.y_empty)
 
     def test_accuracy(self):
         self.assertEqual(accuracy(self.y, self.y), 1.0)

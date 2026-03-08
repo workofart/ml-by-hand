@@ -1,41 +1,46 @@
 import numbers
 
-import mlx.core as mx
+import numpy as np
 import torch
 
-MX_ARRAY_TYPE = type(mx.array(0))
+from autograd.backend import xp
 
 
-def _to_mx_array(value):
-    if isinstance(value, MX_ARRAY_TYPE):
+def _to_numpy(value):
+    if isinstance(value, np.ndarray):
         return value
     if isinstance(value, torch.Tensor):
-        return mx.array(value.detach().cpu().tolist())
+        return value.detach().cpu().numpy()
     if isinstance(value, (numbers.Number, bool)):
-        return mx.array(value)
-    if isinstance(value, (list, tuple)):
+        return np.asarray(value)
+    if hasattr(value, "numpy"):
         try:
-            return mx.array(value)
+            return value.numpy()
         except (TypeError, ValueError):
             return value
-    if hasattr(value, "tolist"):
+    if isinstance(value, (list, tuple)):
         try:
-            return mx.array(value.tolist())
+            return np.asarray(value)
+        except (TypeError, ValueError):
+            return value
+    if hasattr(value, "shape") or hasattr(value, "tolist"):
+        try:
+            return xp.to_numpy(value)
         except (TypeError, ValueError):
             return value
     return value
 
 
 def allclose(a, b, *args, **kwargs):
-    return mx.allclose(_to_mx_array(a), _to_mx_array(b), *args, **kwargs)
+    return np.allclose(_to_numpy(a), _to_numpy(b), *args, **kwargs)
 
 
 def array_equal(a, b, *args, **kwargs):
     try:
-        return mx.array_equal(_to_mx_array(a), _to_mx_array(b), *args, **kwargs)
+        return np.array_equal(_to_numpy(a), _to_numpy(b), *args, **kwargs)
     except (TypeError, ValueError):
         return a == b
 
 
 def isclose(a, b, *args, **kwargs):
-    return mx.isclose(_to_mx_array(a), _to_mx_array(b), *args, **kwargs)
+    return np.isclose(_to_numpy(a), _to_numpy(b), *args, **kwargs)

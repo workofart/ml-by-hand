@@ -1,9 +1,8 @@
 import logging
 from typing import Any, Optional
 
-import mlx.core as mx
-
 from autograd import functional, nn, optim
+from autograd.backend import xp
 from autograd.tensor import Tensor
 from autograd.text import utils as text_utils
 from autograd.text.tokenizer import BytePairEncoder
@@ -414,7 +413,7 @@ class DecoderSublayer(nn.Module):
 
 
 class PositionalEncoding(nn.Module):
-    """
+    r"""
     Implements positional encoding as described in Section 3.5 of the paper.
 
     This allows the model to learn to attend to relative positions even
@@ -439,11 +438,13 @@ class PositionalEncoding(nn.Module):
             dropout_prob (float): Dropout probability.
         """
         super().__init__()
-        pe = mx.zeros((max_seq_len, hidden_size), dtype=mx.float32)
-        position = mx.arange(0, max_seq_len)[:, None]
-        inverse_freq = 1.0 / 10000 ** (mx.arange(0, hidden_size, 2) / hidden_size)
-        pe[:, 0::2] = mx.sin(position * inverse_freq)
-        pe[:, 1::2] = mx.cos(position * inverse_freq)
+        pe = xp.zeros((max_seq_len, hidden_size), dtype=xp.float32)
+        position = xp.arange(0, max_seq_len, dtype=xp.float32)[:, None]
+        inverse_freq = 1.0 / 10000 ** (
+            xp.arange(0, hidden_size, 2, dtype=xp.float32) / hidden_size
+        )
+        pe[:, 0::2] = xp.sin(position * inverse_freq)
+        pe[:, 1::2] = xp.cos(position * inverse_freq)
         # Shape (max_seq_len, hidden_size)
         self._parameters["pe"] = Tensor(pe, requires_grad=False)
         self.dropout = nn.Dropout(p=dropout_prob)
@@ -643,7 +644,7 @@ if __name__ == "__main__":
     )
 
     train_data_loader = LLMDataLoader(
-        data=mx.array(train_data),
+        data=xp.array(train_data, dtype=xp.int32),
         bpe=bpe,
         batch_size=CONFIG.batch_size,
         seq_len=trainer.model.max_seq_len,
@@ -653,7 +654,7 @@ if __name__ == "__main__":
         create_padding_masks=CONFIG.create_padding_masks,
     )
     test_data_loader = LLMDataLoader(
-        data=mx.array(test_data),
+        data=xp.array(test_data, dtype=xp.int32),
         bpe=bpe,
         batch_size=CONFIG.batch_size // 2,
         seq_len=trainer.model.max_seq_len,

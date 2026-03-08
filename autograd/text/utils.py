@@ -10,12 +10,10 @@ from typing import (
     Optional,
     Tuple,
     Union,
-    cast,
 )
 
-import mlx.core as mx
-
 from autograd import nn
+from autograd.backend import sample_categorical, xp
 from autograd.text.tokenizer import BytePairEncoder
 
 logger = logging.getLogger(__name__)
@@ -98,7 +96,7 @@ def text_to_one_hot_and_sparse(
 
     # Create an integer matrix of shape (batch_size, max_sequence_length)
     # filled with pad_idx initially, then we overwrite with actual indices later
-    matrix = mx.full((batch_size, max_sequence_length), pad_idx, dtype=mx.int32)
+    matrix = xp.full((batch_size, max_sequence_length), pad_idx, dtype=xp.int32)
 
     for i, text in enumerate(texts):
         # Split text into words and convert to indices
@@ -114,7 +112,7 @@ def text_to_one_hot_and_sparse(
 
     # Convert to one-hot encoding
     # Shape: (batch_size, sequence_length, vocab_size)
-    one_hot = mx.eye(vocab_size, dtype=mx.float32)[matrix]
+    one_hot = xp.eye(vocab_size, dtype=xp.float32)[matrix]
     return one_hot, matrix
 
 
@@ -151,18 +149,18 @@ def create_causal_mask(
         # If mask_diagonal=False => strictly below diagonal => i>j
         k_ = 0 if mask_diagonal else -1
         # np.tril(..., k=0) includes diagonal; np.tril(..., k=-1) excludes diagonal
-        mask_2d = mx.tril(mx.ones((seq_len, seq_len), dtype=mx.float32), k=k_)
+        mask_2d = xp.tril(xp.ones((seq_len, seq_len), dtype=xp.float32), k=k_)
     else:
         # Mask the upper triangle => i<j => can't attend to "future"
         # If mask_diagonal=True => includes diagonal => i<=j => so we do k=0 in np.triu
         # If mask_diagonal=False => strictly above diagonal => i<j => so we do k=1
         k_ = 0 if mask_diagonal else 1
-        mask_2d = mx.triu(mx.ones((seq_len, seq_len), dtype=mx.float32), k=k_)
+        mask_2d = xp.triu(xp.ones((seq_len, seq_len), dtype=xp.float32), k=k_)
 
     # "mask" means 1.0 in forbidden positions.
     # Add batch dimension: (batch_size, 1, seq_len, seq_len)
-    mask_4d = mx.expand_dims(mx.expand_dims(mask_2d, axis=0), axis=0)
-    mask_4d = mx.repeat(mask_4d, batch_size, axis=0)
+    mask_4d = xp.expand_dims(xp.expand_dims(mask_2d, axis=0), axis=0)
+    mask_4d = xp.repeat(mask_4d, batch_size, axis=0)
     return mask_4d
 
 
@@ -188,12 +186,12 @@ def create_padding_mask(
         >>> print(mask.shape)
         (2, 1, 1, 3)
     """
-    token_indices = mx.asarray(token_indices)
-    pad_positions = (token_indices == pad_idx).astype(mx.float32)
+    token_indices = xp.array(token_indices)
+    pad_positions = (token_indices == pad_idx).astype(xp.float32)
 
     if dims is None:
         # Default shape for standard attention: (batch_size, 1, 1, seq_len)
-        return mx.expand_dims(mx.expand_dims(pad_positions, axis=1), axis=1)
+        return xp.expand_dims(xp.expand_dims(pad_positions, axis=1), axis=1)
     else:
         # We will simply reshape pad_positions to the desired dims
         # assuming the number of elements matches.
@@ -264,7 +262,7 @@ def token_batch_to_indices(
         for token in batch:
             seq.append(vocab.get(token, vocab[b"<UNK>"]))
         X.append(seq)
-    return mx.array(X, dtype=mx.int32)
+    return xp.array(X, dtype=xp.int32)
 
 
 def inference(
@@ -319,20 +317,20 @@ def inference(
     """
 
     def sample_next_token(logits: Any, temp: float, k: Optional[int]) -> int:
-        logits = mx.asarray(logits, dtype=mx.float32)
+        logits = xp.array(logits, dtype=xp.float32)
         # If temp <= 0 (teacher forcing), use argmax.
         if temp <= 0:
-            return int(mx.argmax(logits))
+            return int(xp.argmax(logits))
         # Otherwise, apply temperature scaling and top-k filtering.
         scaled_logits = logits / temp
         if k is not None and k < len(scaled_logits):
-            threshold = mx.sort(scaled_logits)[-k]
-            scaled_logits = mx.where(
+            threshold = xp.sort(scaled_logits)[-k]
+            scaled_logits = xp.where(
                 scaled_logits >= threshold,
                 scaled_logits,
-                mx.full(scaled_logits.shape, -float("inf"), dtype=scaled_logits.dtype),
+                xp.full(scaled_logits.shape, -float("inf"), dtype=scaled_logits.dtype),
             )
-        return int(mx.random.categorical(scaled_logits))
+        return int(sample_categorical(scaled_logits))
 
     # Determine mode and set up initial values.
     teacher_forcing = groundtruth_data is not None
@@ -342,10 +340,9 @@ def inference(
         num_steps = max(0, min(max_length, len(groundtruth_data)) - 1)
         output_ids = [int(groundtruth_data[0])]
 
+        groundtruth_tokens = [int(token) for token in groundtruth_data.tolist()]
         groundtruth_text = "\n".join(
-            bpe.decode(cast(List[int], groundtruth_data.tolist())).split(
-                "<|endoftext|>"
-            )
+            bpe.decode(groundtruth_tokens).split("<|endoftext|>")
         )
         logger.info(f"Teacher forcing mode on!!\nGroundtruth:\n{groundtruth_text}")
     else:
@@ -357,7 +354,7 @@ def inference(
     # Main loop: decide input tokens based on the mode.
     for i in range(min(num_steps, 100)):
         current_input = groundtruth_data[: i + 1] if teacher_forcing else output_ids
-        batch_data = mx.expand_dims(mx.asarray(current_input, dtype=mx.int32), axis=0)
+        batch_data = xp.expand_dims(xp.array(current_input, dtype=xp.int32), axis=0)
         prediction = prediction_func(model=model, batch_data=batch_data, mode="sample")
         if isinstance(prediction, tuple):
             prediction = prediction[0]
@@ -394,7 +391,7 @@ def load_wiki_simple() -> str:
     )
     assert isinstance(data, str)
     logger.info(f"{len(data)} characters in the entire dataset. Sample: \n{data[:100]}")
-    return cast(str, data)
+    return data
 
 
 def load_shakespeare_mini() -> str:
@@ -406,4 +403,4 @@ def load_shakespeare_mini() -> str:
     )
     assert isinstance(data, str)
     logger.info(f"{len(data)} characters in the entire dataset. Sample: \n{data[:100]}")
-    return cast(str, data)
+    return data

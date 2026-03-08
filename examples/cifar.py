@@ -1,6 +1,6 @@
 import logging
 
-from openml.datasets import get_dataset
+from openml.datasets import get_dataset  # pyright: ignore[reportMissingImports]
 
 from autograd import functional, nn, optim
 from autograd.tools.config_schema import GenericTrainingConfig

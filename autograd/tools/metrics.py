@@ -1,6 +1,6 @@
 """Metrics for evaluating model predictions."""
 
-import mlx.core as mx
+from autograd.backend import xp
 
 
 def accuracy(y_pred, y_true):
@@ -20,15 +20,15 @@ def accuracy(y_pred, y_true):
 
     Example:
         >>> import mlx.core as mx
-        >>> y_pred = mx.array([1, 0, 1, 1])
-        >>> y_true = mx.array([1, 1, 1, 0])
+        >>> y_pred = xp.array([1, 0, 1, 1])
+        >>> y_true = xp.array([1, 1, 1, 0])
         >>> accuracy(y_pred, y_true)
         0.5
     """
-    y_true = mx.asarray(y_true)
-    y_pred = mx.asarray(y_pred)
+    y_true = xp.array(y_true)
+    y_pred = xp.array(y_pred)
     assert len(y_true) == len(y_pred)
-    return float(mx.sum(mx.asarray(y_pred == y_true))) / len(y_true)
+    return float(xp.to_scalar(xp.sum(xp.array(y_pred == y_true)))) / len(y_true)
 
 
 def precision(y_pred, y_true):
@@ -48,18 +48,22 @@ def precision(y_pred, y_true):
 
     Example:
         >>> import mlx.core as mx
-        >>> y_pred = mx.array([1, 0, 1, 1])
-        >>> y_true = mx.array([1, 1, 1, 0])
+        >>> y_pred = xp.array([1, 0, 1, 1])
+        >>> y_true = xp.array([1, 1, 1, 0])
         >>> precision(y_pred, y_true)
         0.6666666666666666
     """
     assert len(y_true) == len(y_pred)
-    y_true = mx.asarray(y_true)
-    y_pred = mx.asarray(y_pred)
+    y_true = xp.array(y_true)
+    y_pred = xp.array(y_pred)
     true_positives = int(
-        mx.sum(mx.logical_and(mx.asarray(y_true == 1), mx.asarray(y_pred == 1)))
+        float(
+            xp.to_scalar(
+                xp.sum(xp.logical_and(xp.array(y_true == 1), xp.array(y_pred == 1)))
+            )
+        )
     )
-    predicted_positives = int(mx.sum(mx.asarray(y_pred == 1)))
+    predicted_positives = int(float(xp.to_scalar(xp.sum(xp.array(y_pred == 1)))))
     return true_positives / predicted_positives if predicted_positives != 0 else 0.0
 
 
@@ -80,12 +84,12 @@ def mean_squared_error(y_pred, y_true):
 
     Example:
         >>> import mlx.core as mx
-        >>> y_pred = mx.array([2.5, 0.0, 2, 8])
-        >>> y_true = mx.array([3.0, -0.5, 2, 7])
+        >>> y_pred = xp.array([2.5, 0.0, 2, 8])
+        >>> y_true = xp.array([3.0, -0.5, 2, 7])
         >>> mean_squared_error(y_pred, y_true)
         0.375
     """
-    y_true = mx.asarray(y_true)
-    y_pred = mx.asarray(y_pred)
+    y_true = xp.array(y_true)
+    y_pred = xp.array(y_pred)
     assert len(y_true) == len(y_pred)
-    return float(mx.mean((y_pred - y_true) ** 2))
+    return float(xp.to_scalar(xp.mean((y_pred - y_true) ** 2)))

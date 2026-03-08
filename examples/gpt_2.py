@@ -1,15 +1,22 @@
+# ruff: noqa: E402
+
 import logging
+import sys
+from pathlib import Path
 from typing import Any, Optional
 
-import mlx.core as mx
-
 from autograd import functional, nn, optim
+from autograd.backend import xp
 from autograd.tensor import Tensor
 from autograd.text import utils as text_utils
 from autograd.text.tokenizer import BytePairEncoder
 from autograd.tools.config_schema import CustomBpeConfig, TransformerTrainingConfig
 from autograd.tools.data import LLMDataLoader
 from autograd.tools.trainer import LLMTrainer
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 # The feedforward layer is the same as the original transformers
 from examples.transformers import (
@@ -80,8 +87,8 @@ class GPT2(nn.Module):
         batch_size, seq_len = tokens.shape
 
         # Create positions [0,1,2,...,seq_len-1], repeated for each batch
-        positions = mx.arange(seq_len)  # shape (seq_len, )
-        positions = mx.tile(positions, (batch_size, 1))  # shape (batch_size, seq_len)
+        positions = xp.arange(seq_len, dtype=xp.int32)  # shape (seq_len, )
+        positions = xp.tile(positions, (batch_size, 1))  # shape (batch_size, seq_len)
 
         token_emb = self.token_embedding(tokens)  # shape: (batch, seq_len, hidden_dim)
         pos_emb = self.position_embedding(
@@ -315,7 +322,7 @@ if __name__ == "__main__":
     )
 
     train_data_loader = LLMDataLoader(
-        data=mx.array(train_data),
+        data=xp.array(train_data, dtype=xp.int32),
         bpe=bpe,
         batch_size=CONFIG.batch_size,
         seq_len=trainer.model.max_seq_len,
@@ -325,7 +332,7 @@ if __name__ == "__main__":
         create_padding_masks=CONFIG.create_padding_masks,
     )
     test_data_loader = LLMDataLoader(
-        data=mx.array(test_data),
+        data=xp.array(test_data, dtype=xp.int32),
         bpe=bpe,
         batch_size=CONFIG.batch_size // 2,
         seq_len=trainer.model.max_seq_len,

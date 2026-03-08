@@ -3,17 +3,23 @@ from collections import Counter
 from unittest import TestCase
 
 from autograd.text.tokenizer import BytePairEncoder
+from test.helpers import array_equal
 
 
 class TestTokenizer(TestCase):
     def setUp(self):
-        self.bpe = BytePairEncoder(num_merges=50, vocab_file_path="test_vocab.pkl")
+        self.bpe = BytePairEncoder(
+            num_merges=50,
+            vocab_file_path="test_vocab.pkl",
+            encoded_data_path="test_encoded_data.npz",
+        )
         with open("test/autograd/text/test_text.txt", "r", encoding="utf-8") as f:
             self.original_text = f.read()
 
     def tearDown(self) -> None:
-        if os.path.exists(self.bpe.vocab_file_path):
-            os.remove(self.bpe.vocab_file_path)
+        for path in [self.bpe.vocab_file_path, self.bpe.encoded_data_path]:
+            if os.path.exists(path):
+                os.remove(path)
 
     def test_construct_unicode_to_int_vocab(self):
         vocab = self.bpe._construct_unicode_to_int_vocab()
@@ -112,3 +118,18 @@ class TestTokenizer(TestCase):
     def test_decode_unknown_token(self):
         decoded = self.bpe.decode([999999])  # a token ID that doesn't exist
         self.assertIn("<UNK>", decoded)
+
+    def test_prepare_data_reuses_cached_encoded_data(self):
+        first = self.bpe.prepare_data(
+            self.original_text,
+            overwrite_vocabulary_file=True,
+            overwrite_encoded_data=True,
+        )
+        second = self.bpe.prepare_data(
+            self.original_text,
+            overwrite_vocabulary_file=False,
+            overwrite_encoded_data=False,
+        )
+
+        self.assertTrue(os.path.exists(self.bpe.encoded_data_path))
+        self.assertTrue(array_equal(first, second))

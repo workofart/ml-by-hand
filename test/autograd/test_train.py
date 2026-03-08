@@ -2,10 +2,10 @@ import logging
 import os
 from unittest import TestCase
 
-import mlx.core as mx
 from sklearn.datasets import load_breast_cancer, load_diabetes
 
 from autograd import functional, nn, optim
+from autograd.backend import xp
 from autograd.tools.config_schema import GenericTrainingConfig
 from autograd.tools.data import SimpleDataLoader
 from autograd.tools.metrics import accuracy, mean_squared_error
@@ -13,7 +13,7 @@ from autograd.tools.trainer import SimpleTrainer
 
 logger = logging.getLogger(__name__)
 
-mx.random.seed(42)
+xp.random.seed(42)
 
 
 class Classifier(nn.Module):
@@ -95,7 +95,7 @@ class TestTrain(TestCase):
         y_pred = trainer.model(X).data
 
         # compare y_pred and y on the classification accuracy
-        acc = accuracy(mx.asarray(y_pred > 0.5).astype(mx.int32).squeeze(), y)
+        acc = accuracy(xp.asarray(y_pred > 0.5).astype(xp.int32).squeeze(), y)
         logger.info(f"Accuracy: {acc}")
         assert acc > 0.9
 

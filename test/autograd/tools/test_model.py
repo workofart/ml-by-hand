@@ -3,8 +3,7 @@ import os
 from copy import deepcopy
 from unittest import TestCase
 
-import mlx.core as mx
-
+from autograd.backend import xp
 from autograd.init import xavier_uniform
 from autograd.nn import Module
 from autograd.tensor import Tensor
@@ -14,10 +13,10 @@ from autograd.tools.model import load_checkpoint, save_checkpoint
 class MockModule(Module):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self._parameters["weight"] = xavier_uniform(Tensor(mx.zeros((4, 5))))
-        self._parameters["bias"] = xavier_uniform(Tensor(mx.zeros((1, 1))))
+        self._parameters["weight"] = xavier_uniform(Tensor(xp.zeros((4, 5))))
+        self._parameters["bias"] = xavier_uniform(Tensor(xp.zeros((1, 1))))
 
-        self.stateful_states = mx.array([1, 1, 1])
+        self.stateful_states = xp.array([1, 1, 1])
         self.arg0 = args[0]
         self.kwarg0 = kwargs["kwarg0"]
 
@@ -62,7 +61,7 @@ class TestModel(TestCase):
         )
 
         # 2. Perform a forward/backward pass to change the parameters
-        x = Tensor(mx.ones((5, 4)) + 1.234)
+        x = Tensor(xp.ones((5, 4)) + 1.234)
         out = self.model.forward(x)
         out.backward()
 
@@ -74,13 +73,13 @@ class TestModel(TestCase):
         # Check that parameters have indeed changed
         for name, p in self.model.parameters.items():
             self.assertFalse(
-                mx.allclose(original_params[name].data, p.data),
+                xp.allclose(original_params[name].data, p.data),
                 f"Parameter {name} did not change after update.",
             )
 
         # But states have not changed by this update
         self.assertTrue(
-            mx.allclose(self.model.stateful_states, mx.array([1, 1, 1])),
+            xp.allclose(self.model.stateful_states, xp.array([1, 1, 1])),
             "States should not change with parameter updates.",
         )
 
@@ -91,12 +90,12 @@ class TestModel(TestCase):
         # Check that parameters are back to original
         for name, p in self.model.parameters.items():
             self.assertTrue(
-                mx.allclose(original_params[name].data, p.data),
+                xp.allclose(original_params[name].data, p.data),
                 f"Parameter {name} did not restore to original.",
             )
         # Check states are also back to original
         self.assertTrue(
-            mx.allclose(self.model.stateful_states, mx.array([1, 1, 1])),
+            xp.allclose(self.model.stateful_states, xp.array([1, 1, 1])),
             "Stateful array did not restore to original.",
         )
 
@@ -110,7 +109,7 @@ class TestModel(TestCase):
         )
 
         # Manually change the new model's states from the default
-        new_model.stateful_states = mx.array([999, 999, 999])
+        new_model.stateful_states = xp.array([999, 999, 999])
 
         # 2. Load only weights (parameters) from the checkpoint, ignoring states
         weights_only_data = load_checkpoint(
@@ -121,13 +120,13 @@ class TestModel(TestCase):
         # 3. Parameters should match original
         for name, p in new_model.parameters.items():
             self.assertTrue(
-                mx.allclose(original_params[name].data, p.data),
+                xp.allclose(original_params[name].data, p.data),
                 f"Parameter {name} did not match original in new model with weights-only load.",
             )
 
         # But states should remain the custom value we set (999,999,999)
         self.assertTrue(
-            mx.allclose(new_model.stateful_states, mx.array([999, 999, 999])),
+            xp.allclose(new_model.stateful_states, xp.array([999, 999, 999])),
             "States should NOT have been overwritten in weights-only scenario.",
         )
 
@@ -172,6 +171,6 @@ class TestModel(TestCase):
         loaded_sd = load_checkpoint(json_path=self.json_path, npz_path=self.npz_path)
         self.model.load_state_dict(loaded_sd)
         self.assertTrue(
-            mx.allclose(self.model.stateful_states, mx.array([1, 1, 1])),
+            xp.allclose(self.model.stateful_states, xp.array([1, 1, 1])),
             "Legacy array metadata should still deserialize correctly.",
         )

@@ -1,9 +1,9 @@
+import math
 import os
 import unittest
 from unittest.mock import MagicMock, patch
 
-import mlx.core as mx
-
+from autograd.backend import xp
 from autograd.nn import Module
 from autograd.optim import Optimizer
 from autograd.tensor import Tensor
@@ -57,7 +57,7 @@ class MockModelClass(Module):
         # Return a consistent shape for classification (e.g. batch_size x num_classes)
         # Or adapt to your needs.
         batch_size = x.shape[0]
-        return Tensor(mx.zeros((batch_size, 3), dtype=mx.float32))
+        return Tensor(xp.zeros((batch_size, 3), dtype=xp.float32))
 
     def train(self):
         pass
@@ -132,15 +132,15 @@ class TestSimpleTrainer(BaseTrainerTest):
         )
 
         # Make the model return a fake_pred
-        self.fake_pred = mx.zeros((2, 3), dtype=mx.float32)
+        self.fake_pred = xp.zeros((2, 3), dtype=xp.float32)
 
         # Build training data for 2 batches, validation data for 1 batch
         self.train_data = [
-            (mx.ones((2, 5), dtype=mx.float32), mx.zeros((2,), dtype=mx.float32)),
-            (mx.ones((2, 5), dtype=mx.float32), mx.zeros((2,), dtype=mx.float32)),
+            (xp.ones((2, 5), dtype=xp.float32), xp.zeros((2,), dtype=xp.float32)),
+            (xp.ones((2, 5), dtype=xp.float32), xp.zeros((2,), dtype=xp.float32)),
         ]
         self.val_data = [
-            (mx.ones((2, 5), dtype=mx.float32), mx.zeros((2,), dtype=mx.float32)),
+            (xp.ones((2, 5), dtype=xp.float32), xp.zeros((2,), dtype=xp.float32)),
         ]
 
         # Now use our real in-memory loader
@@ -168,6 +168,35 @@ class TestSimpleTrainer(BaseTrainerTest):
         loss_val = self.trainer.train_step(batch)
         self.assertAlmostEqual(loss_val, 1.23, places=5)
 
+    def test_save_metrics_persists_none_as_nan(self):
+        self.trainer.metrics["epoch"] = [0]
+        self.trainer.metrics["train_loss"] = [1.23]
+        self.trainer.metrics["val_loss"] = [None]
+
+        self.trainer._save_metrics()
+
+        metrics_path = (
+            f"{SimpleTrainer.METRICS_DIR}/{MockModelClass.__name__}_default.npz"
+        )
+        archive = xp.load(metrics_path)
+        val_loss = xp.to_numpy(archive["val_loss"])
+
+        self.assertTrue(math.isnan(float(val_loss[0])))
+
+    def test_fit_with_single_epoch_and_sample_predictions_does_not_crash(self):
+        self.config.total_epochs = 1
+        trainer = SimpleTrainer(
+            model_cls=MockModelClass,
+            optimizer_cls=MockOptimizerClass,
+            loss_fn=self.loss_fn,
+            config=self.config,
+            output_type="logits",
+            sample_predictions=True,
+        )
+
+        trainer.fit(self.train_loader, self.val_loader)
+        self.assertEqual(trainer.optimizer.step_call_count, len(self.train_data))
+
 
 class TestLLMTrainer(BaseTrainerTest):
     def setUp(self):
@@ -175,14 +204,14 @@ class TestLLMTrainer(BaseTrainerTest):
         seq_len = 10
 
         # For LLM, define a shape like (batch_size, seq_len, vocab_size).
-        self.fake_pred = mx.zeros((2, seq_len, 10), dtype=mx.float32)
+        self.fake_pred = xp.zeros((2, seq_len, 10), dtype=xp.float32)
 
         # LLM data (just 2 batches for training, 1 batch for validation)
         self.train_data = [
             (
-                mx.zeros((2, seq_len), dtype=mx.int32),
-                mx.ones((2, seq_len), dtype=mx.int32),
-                mx.full((2, seq_len), 2, dtype=mx.int32),
+                xp.zeros((2, seq_len), dtype=xp.int32),
+                xp.ones((2, seq_len), dtype=xp.int32),
+                xp.full((2, seq_len), 2, dtype=xp.int32),
                 None,
                 None,
                 None,
@@ -191,9 +220,9 @@ class TestLLMTrainer(BaseTrainerTest):
         ]
         self.val_data = [
             (
-                mx.zeros((2, seq_len), dtype=mx.int32),
-                mx.ones((2, seq_len), dtype=mx.int32),
-                mx.full((2, seq_len), 2, dtype=mx.int32),
+                xp.zeros((2, seq_len), dtype=xp.int32),
+                xp.ones((2, seq_len), dtype=xp.int32),
+                xp.full((2, seq_len), 2, dtype=xp.int32),
                 None,
                 None,
                 None,
@@ -209,7 +238,7 @@ class TestLLMTrainer(BaseTrainerTest):
         # Suppose it returns (logits, y) => shape: (2,10,10) for logits, plus (2,10) for labels
         self.forward_fn.return_value = (
             Tensor(self.fake_pred),
-            mx.zeros((2, seq_len), dtype=mx.int32),
+            xp.zeros((2, seq_len), dtype=xp.int32),
         )
 
         self.config = TransformerTrainingConfig(

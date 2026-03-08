@@ -3,10 +3,10 @@ import os
 import time
 from unittest import TestCase
 
-import mlx.core as mx
 import psutil
 
 from autograd import functional, nn, optim
+from autograd.backend import xp
 from autograd.tensor import Tensor
 
 logger = logging.getLogger(__name__)
@@ -136,12 +136,12 @@ class CIPipelinePerformanceTest(TestCase):
 
     def _compute_stats(self, metrics_list):
         """Compute mean, std, min, max statistics for a given list of values."""
-        metrics_array = mx.asarray(metrics_list)
+        metrics_array = xp.asarray(metrics_list)
         return {
-            "mean": mx.mean(metrics_array),
-            "std": mx.std(metrics_array),
-            "min": mx.min(metrics_array),
-            "max": mx.max(metrics_array),
+            "mean": xp.mean(metrics_array),
+            "std": xp.std(metrics_array),
+            "min": xp.min(metrics_array),
+            "max": xp.max(metrics_array),
         }
 
     def _log_performance_metrics(self, metrics, model_name):
@@ -150,8 +150,8 @@ class CIPipelinePerformanceTest(TestCase):
         """
         logger.info(f"\nPerformance Metrics for {model_name}:")
 
-        forward_stats = self._compute_stats(mx.array(metrics["forward_times"]))
-        backward_stats = self._compute_stats(mx.array(metrics["backward_times"]))
+        forward_stats = self._compute_stats(xp.array(metrics["forward_times"]))
+        backward_stats = self._compute_stats(xp.array(metrics["backward_times"]))
 
         logger.info("Timing (seconds):")
         logger.info("Forward Pass:")
@@ -174,8 +174,8 @@ class CIPipelinePerformanceTest(TestCase):
         batch_size = 1024
 
         # Generate random input and labels
-        X = mx.random.normal(shape=(batch_size, input_size)).astype(mx.float32)
-        y = mx.random.randint(0, output_size, shape=(batch_size,), dtype=mx.int64)
+        X = xp.random.normal(shape=(batch_size, input_size)).astype(xp.float32)
+        y = xp.random.randint(0, output_size, (batch_size,), dtype=xp.int64)
 
         # Initialize model and optimizer
         mlp_model = ComplexMLP(input_size, hidden_size, num_layers, output_size)
@@ -204,10 +204,10 @@ class CIPipelinePerformanceTest(TestCase):
         batch_size = 256
 
         # Generate random input and labels
-        X = mx.random.normal(
+        X = xp.random.normal(
             shape=(batch_size, input_channels, image_size, image_size)
-        ).astype(mx.float32)
-        y = mx.random.randint(0, num_classes, shape=(batch_size,), dtype=mx.int64)
+        ).astype(xp.float32)
+        y = xp.random.randint(0, num_classes, (batch_size,), dtype=xp.int64)
 
         # Initialize model and optimizer
         cnn_model = DeepCNN(input_channels, image_size, num_classes)
@@ -232,7 +232,7 @@ class CIPipelinePerformanceTest(TestCase):
         Test that focuses on raw computational time for forward and backward passes
         for both a complex MLP and a deep CNN model.
         """
-        mx.random.seed(42)
+        xp.random.seed(42)
         total_epochs = 10
         logger.info(f"Running {total_epochs} epochs for performance measurement...")
 

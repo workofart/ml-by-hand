@@ -10,6 +10,7 @@ readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.8"
 dependencies = [
+    "numpy",
     "mlx; platform_system == 'Darwin'",
     "openml",  # for dataset
     "pyarrow",

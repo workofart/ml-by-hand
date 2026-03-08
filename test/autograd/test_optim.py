@@ -2,9 +2,9 @@ import math
 from copy import deepcopy
 from unittest import TestCase
 
-import mlx.core as mx
 import torch  # for test validation
 
+from autograd.backend import xp
 from autograd.nn import Tensor
 from autograd.optim import SGD, Adam, CosineScheduler, Optimizer
 from test.helpers import allclose
@@ -73,8 +73,8 @@ class TestOptimizer(TestCase):
         # {
         #   "hyperparams": {"lr": 0.001, "beta1": 0.8, "beta2": 0.9, "epsilon": 1e-5, ...},
         #   "states": {
-        #       "m": { param_id -> mx.array(...) },
-        #       "v": { param_id -> mx.array(...) },
+        #       "m": { param_id -> xp.array(...) },
+        #       "v": { param_id -> xp.array(...) },
         #       "timestep": 1
         #   }
         # }
@@ -122,9 +122,35 @@ class TestOptimizer(TestCase):
         self.optimizer.step()
         self.assertEqual(self.optimizer.timestep, initial_ts + 1)
 
+    def test_scheduler_accepts_class_object(self):
+        optimizer = Optimizer(
+            self.params,
+            lr=0.01,
+            lr_scheduler_kwargs={
+                "lr_scheduler_cls": CosineScheduler,
+                "warmup_steps": 2,
+                "lr_decay_iters": 10,
+            },
+        )
+
+        self.assertIsInstance(optimizer.lr_scheduler, CosineScheduler)
+
+    def test_scheduler_accepts_string_class_name(self):
+        optimizer = Optimizer(
+            self.params,
+            lr=0.01,
+            lr_scheduler_kwargs={
+                "lr_scheduler_cls": "CosineScheduler",
+                "warmup_steps": 2,
+                "lr_decay_iters": 10,
+            },
+        )
+
+        self.assertIsInstance(optimizer.lr_scheduler, CosineScheduler)
+
     def test_clip_grad_norm_l2_below_threshold(self):
-        g1 = mx.array([0.1, 0.1, 0.1], dtype=mx.float32)
-        g2 = mx.array([0.2, 0.2, 0.2], dtype=mx.float32)
+        g1 = xp.array([0.1, 0.1, 0.1], dtype=xp.float32)
+        g2 = xp.array([0.2, 0.2, 0.2], dtype=xp.float32)
 
         # Assign these gradients to your parameters
         self.params["param1"].grad = Tensor(g1)
@@ -153,8 +179,8 @@ class TestOptimizer(TestCase):
         assert allclose(custom_final_g2, torch_final_g2, rtol=1e-6, atol=1e-7)
 
     def test_clip_grad_norm_l2_above_threshold(self):
-        g1 = mx.array([3.0, 4.0, 5.0], dtype=mx.float32)
-        g2 = mx.array([6.0, 7.0, 8.0], dtype=mx.float32)
+        g1 = xp.array([3.0, 4.0, 5.0], dtype=xp.float32)
+        g2 = xp.array([6.0, 7.0, 8.0], dtype=xp.float32)
 
         self.params["param1"].grad = Tensor(g1)
         self.params["param2"].grad = Tensor(g2)
@@ -178,8 +204,8 @@ class TestOptimizer(TestCase):
         assert allclose(custom_final_g2, torch_final_g2, rtol=1e-6, atol=1e-7)
 
     def test_clip_grad_norm_l1(self):
-        g1 = mx.array([10.0, 10.0, 10.0], dtype=mx.float32)
-        g2 = mx.array([5.0, 5.0, 5.0], dtype=mx.float32)
+        g1 = xp.array([10.0, 10.0, 10.0], dtype=xp.float32)
+        g2 = xp.array([5.0, 5.0, 5.0], dtype=xp.float32)
 
         self.params["param1"].grad = Tensor(g1)
         self.params["param2"].grad = Tensor(g2)
@@ -203,9 +229,9 @@ class TestOptimizer(TestCase):
         assert allclose(custom_final_g2, torch_final_g2, rtol=1e-6, atol=1e-7)
 
     def test_clip_grad_norm_random(self):
-        mx.random.seed(42)
-        g1 = (mx.random.normal(shape=(3,)) * 10).astype(mx.float32)
-        g2 = (mx.random.normal(shape=(3,)) * 10).astype(mx.float32)
+        xp.random.seed(42)
+        g1 = (xp.random.normal(shape=(3,)) * 10).astype(xp.float32)
+        g2 = (xp.random.normal(shape=(3,)) * 10).astype(xp.float32)
 
         self.params["param1"].grad = Tensor(g1)
         self.params["param2"].grad = Tensor(g2)
@@ -406,8 +432,8 @@ class TestAdam(TestCase):
         num_steps = 5
         for _ in range(num_steps):
             # Set some gradient
-            grad1 = float(mx.random.normal(shape=()).item())  # or a fixed value
-            grad2 = float(mx.random.normal(shape=()).item())  # or a fixed value
+            grad1 = float(xp.random.normal(shape=()).item())  # or a fixed value
+            grad2 = float(xp.random.normal(shape=()).item())  # or a fixed value
 
             # Assign to custom
             self.param1.grad = grad1
