@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 class _ScaledDotProductAttentionMLXReference(Function):
     @staticmethod
     def prepare_mask(
-        mask: Optional[ArrayLike],
+        mask: Optional[Union[Tensor, ArrayLike]],
         *,
         query_shape: Tuple[int, ...],
         key_shape: Tuple[int, ...],
@@ -50,11 +50,22 @@ class _ScaledDotProductAttentionMLXReference(Function):
         logic lives here to keep the backend-specific behavior self-contained.
         The outer attention module uses the result only to decide whether it can
         safely take the MLX reference lane or must remain on the dense contract.
+
+        Mask inputs intentionally accept either:
+        - repo `Tensor` masks that already follow the dense additive-mask
+          contract (`1.0 == forbidden`, `0.0 == allowed`)
+        - raw backend arrays for the explicit-bool MLX contract (`True == keep`,
+          `False == masked`)
+
+        TODO: revisit this mixed `Tensor`/raw-array mask contract only if the
+        repo adopts dtype-preserving `Tensor` semantics. Today, `Tensor`
+        construction coerces data to `float32`, which would erase explicit-bool
+        mask intent.
         """
         if mask is None:
             return "none", None
 
-        raw_mask = xp.array(mask)
+        raw_mask = mask.data if isinstance(mask, Tensor) else xp.array(mask)
         target_shape = (
             int(query_shape[0]),
             int(query_shape[1]),
@@ -146,67 +157,113 @@ class _ScaledDotProductAttentionMLXReference(Function):
         raise NotImplementedError("mlx_fast_reference is forward-only in milestone 0")
 
 
-# Cache the compiled Metal kernel so milestone 1 pays the JIT/build cost once
-# per process instead of once per forward call. This matches the plan's intent
-# to prove repo-owned custom-op plumbing without letting repeated kernel builds
-# dominate the prototype's behavior.
+# Cache the compiled Metal kernel so milestone 2 pays the JIT/build cost once
+# per process instead of once per forward call. Layout normalization remains
+# delegated to MLX's default `ensure_row_contiguous=True` behavior for now,
+# since the current Python MLX surface does not expose reliable contiguity
+# metadata for gating.
 @lru_cache(maxsize=1)
 def _mlx_custom_attention_kernel() -> Any:
+    r"""
+    Milestone 2 implements the first real custom fast path:
+    square causal self-attention in float32 with dropout disabled.
+
+    For each output element, the kernel computes:
+    $$
+    s_{b,h,q,k}
+    =
+    \frac{1}{\sqrt{D}}
+    \sum_{i=0}^{D-1}
+    Q_{b,h,q,i} K_{b,h,k,i}
+    \quad \text{for } k \le q
+    $$
+    $$
+    p_{b,h,q,k}
+    =
+    \frac{\exp(s_{b,h,q,k} - m_{b,h,q})}
+    {\sum_{t=0}^{q} \exp(s_{b,h,q,t} - m_{b,h,q})}
+    \quad \text{where } m_{b,h,q} = \max_{t \le q} s_{b,h,q,t}
+    $$
+    $$
+    O_{b,h,q,d}
+    =
+    \sum_{k=0}^{q} p_{b,h,q,k} V_{b,h,k,d}
+    $$
+
+    The implementation is intentionally simple rather than aggressively
+    optimized: one thread computes one output element $O_{b,h,q,d}$ and
+    recomputes the causal score row twice so it can perform a numerically
+    stable softmax reduction without materializing the dense score matrix. This
+    keeps the semantics close to the repo's dense contract while leaving room
+    for milestone 3 to decide what rowwise state to save for backward.
+    """
     try:
         import mlx.core.fast as mx_fast  # pyright: ignore[reportMissingImports]
     except ModuleNotFoundError as exc:  # pragma: no cover - platform dependent
         raise RuntimeError("mlx_custom requires the MLX backend") from exc
-
-    """
-    Milestone 1 intentionally does not implement real attention math yet.
-
-    The toy forward contract is:
-    $$
-      \mathrm{out}_{b,h,s,d}
-      =
-      \mathrm{query}_{b,h,s,d}
-      +
-      \mathrm{value}_{b,h,s,d}
-      +
-      \frac{1}{S} \sum_{t=0}^{S-1} \mathrm{key}_{b,h,t,d}
-    $$
-
-    This is a simplified, non-optimized prototype whose only job is to prove
-    that a repo-owned Function can call an MLX Metal kernel with 4D
-    attention-shaped inputs, multiple inputs, and a real reduction over the
-    sequence dimension. It is not intended to approximate real attention.
-    """
     return mx_fast.metal_kernel(
         name="scaled_dot_product_attention_mlx_custom",
         input_names=["query", "key", "value"],
         output_names=["out"],
         source=r"""
-            uint elem = thread_position_in_grid.x;
+            // "data" is the smallest granular entry in the 4D array
+            uint data = thread_position_in_grid.x;
             int head_dim = query_shape[3];
             int seq_len = query_shape[2];
             int num_heads = query_shape[1];
 
-            int d = elem % head_dim;
-            int s = (elem / head_dim) % seq_len;
-            int h = (elem / (head_dim * seq_len)) % num_heads;
-            int b = elem / (head_dim * seq_len * num_heads);
+            // Map the flat output index back to (b, h, q, d).
+            int data_idx = data % head_dim;
+            int query_idx = (data / head_dim) % seq_len;
+            int head_idx = (data / (head_dim * seq_len)) % num_heads;
+            int batch_idx = data / (head_dim * seq_len * num_heads);
 
-            int base = ((b * num_heads + h) * seq_len + s) * head_dim + d;
-            int key_base = ((b * num_heads + h) * seq_len) * head_dim + d;
+            int query_row_offset = ((batch_idx * num_heads + head_idx) * seq_len + query_idx) * head_dim;
+            int head_sequence_offset = ((batch_idx * num_heads + head_idx) * seq_len) * head_dim;
 
-            float key_mean = 0.0f;
-            for (int t = 0; t < seq_len; ++t) {
-                key_mean += key[key_base + t * head_dim];
+            // Equivalent to 1 / sqrt(D)
+            float scale = metal::rsqrt(float(head_dim));
+
+            // Pass 1: compute the maximum causal score for a stable softmax.
+            // sum over data_offset in [0, 1, ..., head_dim]
+            // keep the max score over all visible key_idx
+            float max_score = -INFINITY;
+            for (int key_idx = 0; key_idx <= query_idx; ++key_idx) {
+                int key_row_offset = head_sequence_offset + key_idx * head_dim;
+                float scaled_dot_product = 0.0f;
+                for (int data_offset = 0; data_offset < head_dim; ++data_offset) {
+                    scaled_dot_product += query[query_row_offset + data_offset] * key[key_row_offset + data_offset];
+                }
+                scaled_dot_product *= scale;
+                max_score = metal::max(max_score, scaled_dot_product);
             }
-            key_mean /= float(seq_len);
 
-            out[elem] = query[base] + value[base] + key_mean;
+            // Pass 2: accumulate the softmax denominator and the weighted value sum.
+            float softmax_denominator = 0.0f;
+            float weighted_value_sum = 0.0f;
+            for (int key_idx = 0; key_idx <= query_idx; ++key_idx) {
+                int key_row_offset = head_sequence_offset + key_idx * head_dim;
+                float scaled_dot_product = 0.0f;
+                for (int data_offset = 0; data_offset < head_dim; ++data_offset) {
+                    scaled_dot_product += query[query_row_offset + data_offset] * key[key_row_offset + data_offset];
+                }
+                float attention_weight = metal::exp(scaled_dot_product * scale - max_score);
+                softmax_denominator += attention_weight;
+                weighted_value_sum += attention_weight * value[key_row_offset + data_idx];
+            }
+
+            out[data] = weighted_value_sum / softmax_denominator;
         """,
     )
 
 
 class _ScaledDotProductAttentionMLXCustom(Function):
-    def forward(self, query: Array, key: Array, value: Array) -> Array:
+    @staticmethod
+    def _validate(
+        query: Array,
+        key: Array,
+        value: Array,
+    ) -> None:
         from autograd.backend import NAME
 
         if NAME != "mlx":
@@ -224,9 +281,10 @@ class _ScaledDotProductAttentionMLXCustom(Function):
         if any(tensor.dtype != xp.float32 for tensor in tensors):
             raise ValueError("mlx_custom requires float32 query, key, and value")
 
+    def forward(self, query: Array, key: Array, value: Array) -> Array:
+        self._validate(query, key, value)
+
         kernel = _mlx_custom_attention_kernel()
-        # Milestone 1 uses the simplified toy kernel above only to validate the
-        # custom-op plumbing. Real attention math arrives in milestone 2.
         return kernel(
             inputs=[query, key, value],
             grid=(int(query.size), 1, 1),
@@ -236,7 +294,7 @@ class _ScaledDotProductAttentionMLXCustom(Function):
         )[0]
 
     def backward(self, grad: Tensor) -> Array:
-        raise NotImplementedError("mlx_custom is forward-only in milestone 1")
+        raise NotImplementedError("mlx_custom is forward-only in milestone 2")
 
 
 class Module:
@@ -1664,7 +1722,11 @@ class ScaledDotProductAttention(Module):
         self.dropout = Dropout(p=dropout_prob)
 
     def forward(
-        self, query: Tensor, key: Tensor, value: Tensor, mask: Optional[Tensor] = None
+        self,
+        query: Tensor,
+        key: Tensor,
+        value: Tensor,
+        mask: Optional[Union[Tensor, ArrayLike]] = None,
     ) -> Tensor:
         """
         Compute the scaled dot-product attention.
@@ -1673,7 +1735,11 @@ class ScaledDotProductAttention(Module):
             query (Tensor): Query tensor.
             key (Tensor): Key tensor.
             value (Tensor): Value tensor.
-            mask (Optional[Tensor], optional): Mask tensor. Defaults to None.
+            mask (Optional[Union[Tensor, ArrayLike]], optional): Attention mask.
+                The dense repo contract uses additive float masks where `1.0`
+                means forbidden and `0.0` means allowed. The MLX reference path
+                also accepts raw backend bool masks where `True` means keep and
+                `False` means masked. Defaults to None.
 
         Returns:
             Tensor: The attended output.
@@ -1693,10 +1759,9 @@ class ScaledDotProductAttention(Module):
             if self.dropout.p != 0:
                 raise RuntimeError("mlx_fast_reference requires dropout_prob == 0")
 
-            raw_mask = mask.data if isinstance(mask, Tensor) else mask
             mask_kind, prepared_mask = (
                 _ScaledDotProductAttentionMLXReference.prepare_mask(
-                    raw_mask,
+                    mask,
                     query_shape=query.shape,
                     key_shape=key.shape,
                 )
@@ -1712,11 +1777,25 @@ class ScaledDotProductAttention(Module):
             # Dense remains the fallback for unsupported, ambiguous, or degenerate
             # mask cases in milestone 0.
         elif self._implementation == "mlx_custom":
-            if self.dropout.p != 0:
-                raise RuntimeError("mlx_custom requires dropout_prob == 0")
-            if mask is not None:
-                raise RuntimeError("mlx_custom does not support mask in milestone 1")
-            return _ScaledDotProductAttentionMLXCustom.apply(query, key, value)
+            mask_kind, _ = _ScaledDotProductAttentionMLXReference.prepare_mask(
+                mask,
+                query_shape=query.shape,
+                key_shape=key.shape,
+            )
+
+            if self.dropout.p == 0 and mask_kind == "causal":
+                try:
+                    _ScaledDotProductAttentionMLXCustom._validate(
+                        query.data,
+                        key.data,
+                        value.data,
+                    )
+                except (RuntimeError, ValueError):
+                    pass
+                else:
+                    return _ScaledDotProductAttentionMLXCustom.apply(query, key, value)
+            # Dense remains the contract fallback for everything outside the
+            # narrow milestone-2 causal self-attention slice.
         else:
             raise ValueError(
                 f"Unknown attention implementation: {self._implementation}"
@@ -1730,6 +1809,8 @@ class ScaledDotProductAttention(Module):
 
         # mask (optional)
         if mask is not None:
+            if not isinstance(mask, Tensor):
+                mask = Tensor(mask, requires_grad=False)
             # broadcast across heads
             att_score = att_score + (mask * -1e9)
         att_score = self.dropout(softmax(att_score))
