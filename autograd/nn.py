@@ -293,8 +293,152 @@ class _ScaledDotProductAttentionMLXCustom(Function):
             output_dtypes=[query.dtype],
         )[0]
 
-    def backward(self, grad: Tensor) -> Array:
-        raise NotImplementedError("mlx_custom is forward-only in milestone 2")
+    def backward(self, grad: Tensor) -> Tuple[Array, Array, Array]:
+        r"""
+        The reason we have to define this backward function explicitly is because the kernel's forward function is defined not with our Tensor ops, but with a lower-level kernel ops.
+        That's why we don't get the backward implementation for free like other NN classes.
+
+        Backpropagate through the narrow v1 fused causal attention path.
+
+        The forward contract is:
+
+        $$
+        \text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{key\_dim}}\right) V
+        $$
+
+        For milestone 3 we recompute the causal masked probabilities inside
+        backward instead of saving dense logits/probabilities from the fused
+        forward kernel. We will use these intermediate names:
+        $$
+        \text{attention\_scores} = \frac{QK^T}{\sqrt{key\_dim}}
+        $$
+        $$
+        \text{attention\_weights} = \operatorname{softmax}(\text{attention\_scores}_{\text{causal}})
+        $$
+        $$
+        \text{attention\_output} = \text{attention\_weights} \; V
+        $$
+
+        Let `loss` be the final scalar training objective, and let the upstream
+        gradient be:
+        $$
+        \text{upstream\_grad} = \frac{\partial \text{loss}}{\partial \text{attention\_output}}
+        $$
+
+        1. Derivative of `loss` with respect to `V`:
+        $$
+        \frac{\partial \text{loss}}{\partial V}
+        =
+        \frac{\partial \text{loss}}{\partial \text{attention\_output}}
+        \frac{\partial \text{attention\_output}}{\partial V}
+        =
+        \text{attention\_weights}^T \, \text{upstream\_grad}
+        $$
+
+        2. Derivative of `loss` with respect to `attention_weights`:
+        $$
+        \frac{\partial \text{loss}}{\partial \text{attention\_weights}}
+        =
+        \frac{\partial \text{loss}}{\partial \text{attention\_output}}
+        \frac{\partial \text{attention\_output}}{\partial \text{attention\_weights}}
+        =
+        \text{upstream\_grad} \, V^T
+        $$
+
+        3. Derivative of `loss` with respect to `attention_scores`:
+        Softmax is applied independently to each query row, so we apply the
+        softmax derivative row by row along the key dimension.
+        $$
+        \frac{\partial \text{loss}}{\partial \text{attention\_scores}}
+        =
+        \frac{\partial \text{loss}}{\partial \text{attention\_weights}}
+        \frac{\partial \text{attention\_weights}}{\partial \text{attention\_scores}}
+        =
+        \text{attention\_weights} \odot
+        \left(
+        \frac{\partial \text{loss}}{\partial \text{attention\_weights}}
+        -
+        \sum_k
+        \left(
+        \frac{\partial \text{loss}}{\partial \text{attention\_weights}_k}
+        \text{attention\_weights}_k
+        \right)
+        \right)
+        $$
+
+        4. Derivative of `loss` with respect to `Q` and `K`, using
+        $$
+        \text{attention\_scores} = \frac{QK^T}{\sqrt{key\_dim}}
+        $$
+        $$
+        \frac{\partial \text{loss}}{\partial Q}
+        =
+        \frac{\partial \text{loss}}{\partial \text{attention\_scores}}
+        \frac{\partial \text{attention\_scores}}{\partial Q}
+        =
+        \frac{\partial \text{loss}}{\partial \text{attention\_scores}}
+        K \cdot \frac{1}{\sqrt{key\_dim}}
+        $$
+        $$
+        \frac{\partial \text{loss}}{\partial K}
+        =
+        \frac{\partial \text{loss}}{\partial \text{attention\_scores}}
+        \frac{\partial \text{attention\_scores}}{\partial K}
+        =
+        \left(
+        \frac{\partial \text{loss}}{\partial \text{attention\_scores}}
+        \right)^T
+        Q \cdot \frac{1}{\sqrt{key\_dim}}
+        $$
+        """
+        query, key, value = (tensor.data for tensor in self.tensors)
+        scale = float(query.shape[-1]) ** -0.5
+        seq_len = int(query.shape[-2])
+
+        # attention_scores = QK^T / sqrt(key_dim)
+        attention_scores = (query @ key.transpose(0, 1, 3, 2)) * scale
+
+        # Apply the repo's additive causal mask contract before softmax:
+        # forbidden positions receive a large negative value (+ mask * -1e9).
+        causal_mask = xp.triu(xp.ones((seq_len, seq_len), dtype=xp.float32), k=1)
+        masked_scores = (
+            attention_scores + causal_mask.reshape(1, 1, seq_len, seq_len) * -1e9
+        )
+
+        # attention_weights = softmax(attention_scores_causal)
+        # Not calling functional.softmax here because we don't want to build the computation graph here because this backward is completely detached from the graph as a custom kernel's backward pass
+        exp_scores = xp.exp(
+            masked_scores - xp.max(masked_scores, axis=-1, keepdims=True)
+        )
+        probs = exp_scores / xp.sum(exp_scores, axis=-1, keepdims=True)
+
+        upstream_grad = grad.data
+
+        # attention_output = attention_weights V
+        # By the chain rule, the derivative of loss with respect to V is:
+        # d(loss)/dV = attention_weights^T d(loss)/d(attention_output)
+        grad_value = probs.transpose(0, 1, 3, 2) @ upstream_grad
+
+        # By the chain rule, the derivative of loss with respect to
+        # attention_weights is:
+        # d(loss)/d(attention_weights) =
+        # d(loss)/d(attention_output) V^T
+        grad_probs = upstream_grad @ value.transpose(0, 1, 3, 2)
+
+        # By the chain rule, the derivative of loss with respect to
+        # attention_scores comes from the derivative of the softmax output with
+        # respect to its input scores.
+        # softmax acts on each query row independently, so this reduction is
+        # computed row by row along the key dimension.
+        grad_scores = probs * (
+            grad_probs - xp.sum(grad_probs * probs, axis=-1, keepdims=True)
+        )
+
+        # attention_scores = QK^T / sqrt(key_dim)
+        # By the chain rule, propagate d(loss)/d(attention_scores) into Q and K.
+        grad_query = (grad_scores @ key) * scale
+        grad_key = (grad_scores.transpose(0, 1, 3, 2) @ query) * scale
+        return grad_query, grad_key, grad_value
 
 
 class Module:

@@ -77,6 +77,44 @@ class TestScaledDotProductAttention(TestCase):
         )
         return attention(query, key, value, mask=mask)
 
+    def _backward_grads(
+        self,
+        implementation: str,
+        *,
+        query: Tensor,
+        key: Tensor,
+        value: Tensor,
+        mask: Optional[Tensor] = None,
+        upstream: Optional[Tensor] = None,
+    ):
+        attention = ScaledDotProductAttention(
+            dropout_prob=0.0,
+            _implementation=implementation,
+        )
+        output = attention(query, key, value, mask=mask)
+        output.backward(upstream)
+        assert query.grad is not None
+        assert key.grad is not None
+        assert value.grad is not None
+        return query.grad.data, key.grad.data, value.grad.data
+
+    def _attention_objective(
+        self,
+        implementation: str,
+        *,
+        query,
+        key,
+        value,
+        mask: Optional[Tensor],
+        upstream: Tensor,
+    ) -> float:
+        attention = ScaledDotProductAttention(
+            dropout_prob=0.0,
+            _implementation=implementation,
+        )
+        output = attention(Tensor(query), Tensor(key), Tensor(value), mask=mask)
+        return xp.to_scalar(xp.sum(output.data * upstream.data))
+
     @skipUnless(IS_MLX, "mlx_fast_reference parity requires the MLX backend")
     def test_mlx_reference_matches_dense_without_mask(self):
         dense = self._run_attention("dense")
@@ -316,18 +354,291 @@ class TestScaledDotProductAttention(TestCase):
         assert allclose(mlx_custom.data, torch_output, atol=1e-5, rtol=1e-5)
 
     @skipUnless(IS_MLX, "mlx_custom requires the MLX backend")
-    def test_mlx_custom_backward_raises_exact_error(self):
+    def test_mlx_custom_backward_matches_dense_for_standard_causal_mask(self):
         mask = Tensor(
             create_causal_mask(seq_len=self.seq_len, batch_size=self.batch_size),
             requires_grad=False,
         )
-        output = self._run_attention("mlx_custom", mask=mask)
+        upstream = Tensor(
+            xp.random.normal(
+                shape=(
+                    self.batch_size,
+                    self.num_heads,
+                    self.seq_len,
+                    self.head_dim,
+                )
+            ),
+            requires_grad=False,
+        )
 
-        with self.assertRaisesRegex(
-            NotImplementedError,
-            "mlx_custom is forward-only",
+        dense_query = Tensor(xp.array(self.query.data))
+        dense_key = Tensor(xp.array(self.key.data))
+        dense_value = Tensor(xp.array(self.value.data))
+        mlx_query = Tensor(xp.array(self.query.data))
+        mlx_key = Tensor(xp.array(self.key.data))
+        mlx_value = Tensor(xp.array(self.value.data))
+
+        dense_grads = self._backward_grads(
+            "dense",
+            query=dense_query,
+            key=dense_key,
+            value=dense_value,
+            mask=mask,
+            upstream=upstream,
+        )
+        mlx_grads = self._backward_grads(
+            "mlx_custom",
+            query=mlx_query,
+            key=mlx_key,
+            value=mlx_value,
+            mask=mask,
+            upstream=upstream,
+        )
+
+        for dense_grad, mlx_grad in zip(dense_grads, mlx_grads):
+            assert allclose(dense_grad, mlx_grad, atol=1e-5, rtol=1e-5)
+
+    @skipUnless(IS_MLX, "mlx_custom requires the MLX backend")
+    def test_mlx_custom_backward_matches_dense_across_supported_shapes(self):
+        test_shapes = (
+            (1, 1, 4, 1),
+            (2, 2, 5, 3),
+            (2, 3, 4, 5),
+        )
+
+        for shape in test_shapes:
+            with self.subTest(shape=shape):
+                batch_size, _, seq_len, _ = shape
+                query_data = xp.random.normal(shape=shape)
+                key_data = xp.random.normal(shape=shape)
+                value_data = xp.random.normal(shape=shape)
+                upstream = Tensor(xp.random.normal(shape=shape), requires_grad=False)
+                mask = self._causal_mask(batch_size=batch_size, seq_len=seq_len)
+
+                dense_grads = self._backward_grads(
+                    "dense",
+                    query=Tensor(xp.array(query_data)),
+                    key=Tensor(xp.array(key_data)),
+                    value=Tensor(xp.array(value_data)),
+                    mask=mask,
+                    upstream=upstream,
+                )
+                mlx_grads = self._backward_grads(
+                    "mlx_custom",
+                    query=Tensor(xp.array(query_data)),
+                    key=Tensor(xp.array(key_data)),
+                    value=Tensor(xp.array(value_data)),
+                    mask=mask,
+                    upstream=upstream,
+                )
+
+                for dense_grad, mlx_grad in zip(dense_grads, mlx_grads):
+                    assert allclose(dense_grad, mlx_grad, atol=1e-5, rtol=1e-5)
+
+    def test_mlx_custom_fallback_backward_matches_dense_for_unsupported_masks(self):
+        reverse_causal = Tensor(
+            create_causal_mask(
+                seq_len=self.seq_len,
+                batch_size=self.batch_size,
+                lookback=True,
+            ),
+            requires_grad=False,
+        )
+        explicit_additive = Tensor(
+            xp.zeros(
+                (self.batch_size, 1, self.seq_len, self.seq_len),
+                dtype=xp.float32,
+            ),
+            requires_grad=False,
+        )
+        explicit_additive.data[:, :, 0, -1] = 1.0
+        explicit_additive.data[:, :, 1, 0] = 1.0
+
+        upstream = Tensor(
+            xp.random.normal(
+                shape=(
+                    self.batch_size,
+                    self.num_heads,
+                    self.seq_len,
+                    self.head_dim,
+                )
+            ),
+            requires_grad=False,
+        )
+
+        for mask in (reverse_causal, explicit_additive):
+            with self.subTest(mask_shape=mask.shape, mask=xp.to_numpy(mask.data)):
+                dense_grads = self._backward_grads(
+                    "dense",
+                    query=Tensor(xp.array(self.query.data)),
+                    key=Tensor(xp.array(self.key.data)),
+                    value=Tensor(xp.array(self.value.data)),
+                    mask=mask,
+                    upstream=upstream,
+                )
+
+                with patch(
+                    "autograd.nn._ScaledDotProductAttentionMLXCustom.apply",
+                    side_effect=AssertionError("mlx custom path should not be used"),
+                ):
+                    fallback_grads = self._backward_grads(
+                        "mlx_custom",
+                        query=Tensor(xp.array(self.query.data)),
+                        key=Tensor(xp.array(self.key.data)),
+                        value=Tensor(xp.array(self.value.data)),
+                        mask=mask,
+                        upstream=upstream,
+                    )
+
+                for dense_grad, fallback_grad in zip(dense_grads, fallback_grads):
+                    assert allclose(dense_grad, fallback_grad, atol=1e-5, rtol=1e-5)
+
+    @skipUnless(IS_MLX, "mlx_custom requires the MLX backend")
+    def test_mlx_custom_backward_matches_finite_difference_on_tiny_case(self):
+        shape = (1, 1, 3, 2)
+        batch_size, _, seq_len, _ = shape
+        epsilon = 1e-3
+        mask = self._causal_mask(batch_size=batch_size, seq_len=seq_len)
+
+        query_data = xp.random.normal(shape=shape)
+        key_data = xp.random.normal(shape=shape)
+        value_data = xp.random.normal(shape=shape)
+        upstream = Tensor(xp.random.normal(shape=shape), requires_grad=False)
+
+        grad_query, grad_key, grad_value = self._backward_grads(
+            "mlx_custom",
+            query=Tensor(xp.array(query_data)),
+            key=Tensor(xp.array(key_data)),
+            value=Tensor(xp.array(value_data)),
+            mask=mask,
+            upstream=upstream,
+        )
+
+        for name, tensor_data, grad_data, index in (
+            ("query", query_data, grad_query, (0, 0, 1, 0)),
+            ("key", key_data, grad_key, (0, 0, 1, 1)),
+            ("value", value_data, grad_value, (0, 0, 2, 0)),
         ):
-            output.sum().backward()
+            with self.subTest(input=name):
+                positive = xp.array(tensor_data)
+                negative = xp.array(tensor_data)
+                positive[index] += epsilon
+                negative[index] -= epsilon
+
+                if name == "query":
+                    positive_loss = self._attention_objective(
+                        "mlx_custom",
+                        query=positive,
+                        key=key_data,
+                        value=value_data,
+                        mask=mask,
+                        upstream=upstream,
+                    )
+                    negative_loss = self._attention_objective(
+                        "mlx_custom",
+                        query=negative,
+                        key=key_data,
+                        value=value_data,
+                        mask=mask,
+                        upstream=upstream,
+                    )
+                elif name == "key":
+                    positive_loss = self._attention_objective(
+                        "mlx_custom",
+                        query=query_data,
+                        key=positive,
+                        value=value_data,
+                        mask=mask,
+                        upstream=upstream,
+                    )
+                    negative_loss = self._attention_objective(
+                        "mlx_custom",
+                        query=query_data,
+                        key=negative,
+                        value=value_data,
+                        mask=mask,
+                        upstream=upstream,
+                    )
+                else:
+                    positive_loss = self._attention_objective(
+                        "mlx_custom",
+                        query=query_data,
+                        key=key_data,
+                        value=positive,
+                        mask=mask,
+                        upstream=upstream,
+                    )
+                    negative_loss = self._attention_objective(
+                        "mlx_custom",
+                        query=query_data,
+                        key=key_data,
+                        value=negative,
+                        mask=mask,
+                        upstream=upstream,
+                    )
+
+                numerical_grad = (positive_loss - negative_loss) / (2 * epsilon)
+                assert allclose(
+                    grad_data[index],
+                    numerical_grad,
+                    atol=5e-3,
+                    rtol=5e-3,
+                )
+
+    @skipUnless(IS_MLX, "mlx_custom requires the MLX backend")
+    def test_mlx_custom_backward_keeps_causal_gradients_local(self):
+        shape = (2, 2, 5, 3)
+        batch_size, _, seq_len, _ = shape
+        cutoff = 2
+        mask = self._causal_mask(batch_size=batch_size, seq_len=seq_len)
+
+        query_data = xp.random.normal(shape=shape)
+        key_data = xp.random.normal(shape=shape)
+        value_data = xp.random.normal(shape=shape)
+        upstream_data = xp.zeros(shape, dtype=xp.float32)
+        upstream_data[:, :, : cutoff + 1, :] = xp.random.normal(
+            shape=upstream_data[:, :, : cutoff + 1, :].shape
+        )
+        upstream = Tensor(upstream_data, requires_grad=False)
+
+        baseline_grads = self._backward_grads(
+            "mlx_custom",
+            query=Tensor(xp.array(query_data)),
+            key=Tensor(xp.array(key_data)),
+            value=Tensor(xp.array(value_data)),
+            mask=mask,
+            upstream=upstream,
+        )
+
+        modified_query = xp.array(query_data)
+        modified_key = xp.array(key_data)
+        modified_value = xp.array(value_data)
+        modified_query[:, :, cutoff + 1 :, :] = xp.random.normal(
+            shape=modified_query[:, :, cutoff + 1 :, :].shape
+        )
+        modified_key[:, :, cutoff + 1 :, :] = xp.random.normal(
+            shape=modified_key[:, :, cutoff + 1 :, :].shape
+        )
+        modified_value[:, :, cutoff + 1 :, :] = xp.random.normal(
+            shape=modified_value[:, :, cutoff + 1 :, :].shape
+        )
+
+        updated_grads = self._backward_grads(
+            "mlx_custom",
+            query=Tensor(modified_query),
+            key=Tensor(modified_key),
+            value=Tensor(modified_value),
+            mask=mask,
+            upstream=upstream,
+        )
+
+        for baseline_grad, updated_grad in zip(baseline_grads, updated_grads):
+            assert allclose(
+                baseline_grad[:, :, : cutoff + 1, :],
+                updated_grad[:, :, : cutoff + 1, :],
+                atol=1e-5,
+                rtol=1e-5,
+            )
 
     @skipUnless(IS_MLX, "mlx_custom requires the MLX backend")
     def test_mlx_custom_reduces_to_prefix_average_when_queries_and_keys_are_zero(self):
