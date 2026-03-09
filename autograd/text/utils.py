@@ -1,19 +1,26 @@
+from __future__ import annotations
+
 import logging
 import os
 import re
 from collections import defaultdict
 from typing import (
+    TYPE_CHECKING,
     Callable,
     Dict,
     List,
+    Literal,
     Optional,
     Tuple,
     Union,
 )
 
-from autograd import nn
-from autograd.backend import Array, xp
+from autograd.backend import Array, ArrayLike, xp
+from autograd.tensor import Tensor
 from autograd.text.tokenizer import BytePairEncoder
+
+if TYPE_CHECKING:
+    from autograd import nn
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +168,85 @@ def create_causal_mask(
     mask_4d = xp.expand_dims(xp.expand_dims(mask_2d, axis=0), axis=0)
     mask_4d = xp.repeat(mask_4d, batch_size, axis=0)
     return mask_4d
+
+
+def prepare_mlx_reference_attention_mask(
+    mask: Optional[Union[Tensor, ArrayLike]],
+    *,
+    query_shape: Tuple[int, ...],
+    key_shape: Tuple[int, ...],
+) -> Tuple[
+    Literal["none", "causal", "explicit_bool", "explicit_additive", "dense_fallback"],
+    Optional[Array],
+]:
+    """
+    Translate repo mask semantics into the narrower MLX reference contract.
+
+    The MLX reference path is the only consumer of this translation, so the
+    logic lives here to keep the backend-specific behavior self-contained.
+
+    Mask inputs intentionally accept either:
+    - repo `Tensor` masks that already follow the dense additive-mask
+      contract (`1.0 == forbidden`, `0.0 == allowed`)
+    - raw backend arrays for the explicit-bool MLX contract (`True == keep`,
+      `False == masked`)
+
+    TODO: revisit this mixed `Tensor`/raw-array mask contract only if the repo
+    adopts dtype-preserving `Tensor` semantics. Today, `Tensor` construction
+    coerces data to `float32`, which would erase explicit-bool mask intent.
+    """
+    if mask is None:
+        return "none", None
+
+    raw_mask = mask.data if isinstance(mask, Tensor) else xp.array(mask)
+    target_shape = (
+        int(query_shape[0]),
+        int(query_shape[1]),
+        int(query_shape[-2]),
+        int(key_shape[-2]),
+    )
+    if raw_mask.ndim > 4:
+        return "dense_fallback", None
+
+    try:
+        broadcast_mask = xp.broadcast_to(raw_mask, target_shape)
+    except ValueError:
+        return "dense_fallback", None
+
+    if broadcast_mask.dtype == xp.bool_:
+        # MLX bool masks use "True means keep". Fully-masked rows stay on the
+        # dense path because that remains the contract oracle.
+        if xp.to_scalar(xp.any(xp.all(~broadcast_mask, axis=-1))):
+            return "dense_fallback", None
+        return "explicit_bool", raw_mask
+
+    float_mask = xp.array(broadcast_mask, dtype=xp.float32)
+    seq_q = target_shape[-2]
+    seq_k = target_shape[-1]
+    standard_causal = xp.broadcast_to(
+        xp.triu(xp.ones((seq_q, seq_k), dtype=xp.float32), k=1),
+        target_shape,
+    )
+    if xp.to_scalar(xp.all(float_mask == standard_causal)):
+        return "causal", None
+
+    unsupported_structural_masks = (
+        xp.triu(xp.ones((seq_q, seq_k), dtype=xp.float32), k=0),
+        xp.tril(xp.ones((seq_q, seq_k), dtype=xp.float32), k=-1),
+        xp.tril(xp.ones((seq_q, seq_k), dtype=xp.float32), k=0),
+    )
+    if any(
+        xp.to_scalar(
+            xp.all(float_mask == xp.broadcast_to(structural_mask, target_shape))
+        )
+        for structural_mask in unsupported_structural_masks
+    ):
+        return "dense_fallback", None
+
+    if xp.to_scalar(xp.any(xp.all(float_mask > 0, axis=-1))):
+        return "dense_fallback", None
+
+    return "explicit_additive", xp.array(raw_mask, dtype=xp.float32) * -1e9
 
 
 def create_padding_mask(

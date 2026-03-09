@@ -5,6 +5,7 @@ from unittest.mock import patch
 import torch
 
 from autograd.backend import IS_MLX, xp
+from autograd.functional import ScaledDotProductAttentionMLXCustom
 from autograd.nn import ScaledDotProductAttention
 from autograd.tensor import Tensor
 from autograd.text.utils import create_causal_mask
@@ -175,7 +176,7 @@ class TestScaledDotProductAttention(TestCase):
         )
 
         with patch(
-            "autograd.nn._ScaledDotProductAttentionMLXReference.apply",
+            "autograd.functional.ScaledDotProductAttentionMLXReference.apply",
             side_effect=AssertionError("mlx reference path should not be used"),
         ):
             result = self._run_attention("mlx_fast_reference", mask=mask)
@@ -194,7 +195,7 @@ class TestScaledDotProductAttention(TestCase):
         )
 
         with patch(
-            "autograd.nn._ScaledDotProductAttentionMLXReference.apply",
+            "autograd.functional.ScaledDotProductAttentionMLXReference.apply",
             side_effect=AssertionError("mlx reference path should not be used"),
         ):
             result = self._run_attention("mlx_fast_reference", mask=mask)
@@ -211,7 +212,7 @@ class TestScaledDotProductAttention(TestCase):
         mask = Tensor(additive_mask, requires_grad=False)
 
         with patch(
-            "autograd.nn._ScaledDotProductAttentionMLXReference.apply",
+            "autograd.functional.ScaledDotProductAttentionMLXReference.apply",
             side_effect=AssertionError("mlx reference path should not be used"),
         ):
             result = self._run_attention("mlx_fast_reference", mask=mask)
@@ -246,24 +247,9 @@ class TestScaledDotProductAttention(TestCase):
             ):
                 self._run_attention("mlx_fast_reference")
 
-    def test_mlx_custom_falls_back_to_dense_when_dropout_is_nonzero(self):
-        attention = ScaledDotProductAttention(
-            dropout_prob=0.1,
-            _implementation="mlx_custom",
-        )
-        dense_attention = ScaledDotProductAttention(
-            dropout_prob=0.1,
-            _implementation="dense",
-        )
-
-        result = attention(self.query, self.key, self.value)
-        dense = dense_attention(self.query, self.key, self.value)
-
-        assert allclose(dense.data, result.data, atol=1e-5, rtol=1e-5)
-
     def test_mlx_custom_falls_back_to_dense_without_mask(self):
         with patch(
-            "autograd.nn._ScaledDotProductAttentionMLXCustom.apply",
+            "autograd.functional.ScaledDotProductAttentionMLXCustom.apply",
             side_effect=AssertionError("mlx custom path should not be used"),
         ):
             result = self._run_attention("mlx_custom")
@@ -282,7 +268,7 @@ class TestScaledDotProductAttention(TestCase):
         )
 
         with patch(
-            "autograd.nn._ScaledDotProductAttentionMLXCustom.apply",
+            "autograd.functional.ScaledDotProductAttentionMLXCustom.apply",
             side_effect=AssertionError("mlx custom path should not be used"),
         ):
             result = self._run_attention("mlx_custom", mask=mask)
@@ -300,7 +286,60 @@ class TestScaledDotProductAttention(TestCase):
         mask = Tensor(additive_mask, requires_grad=False)
 
         with patch(
-            "autograd.nn._ScaledDotProductAttentionMLXCustom.apply",
+            "autograd.functional.ScaledDotProductAttentionMLXCustom.apply",
+            side_effect=AssertionError("mlx custom path should not be used"),
+        ):
+            result = self._run_attention("mlx_custom", mask=mask)
+
+        dense = self._run_attention("dense", mask=mask)
+        assert allclose(dense.data, result.data, atol=1e-5, rtol=1e-5)
+
+    def test_mlx_custom_falls_back_to_dense_for_explicit_bool_mask(self):
+        bool_mask = xp.ones(
+            (self.batch_size, 1, self.seq_len, self.seq_len),
+            dtype=xp.bool_,
+        )
+        bool_mask[:, :, 0, -1] = False
+        bool_mask[:, :, -1, 0] = False
+
+        with patch(
+            "autograd.functional.ScaledDotProductAttentionMLXCustom.apply",
+            side_effect=AssertionError("mlx custom path should not be used"),
+        ):
+            result = self._run_attention("mlx_custom", mask=bool_mask)
+
+        dense = self._run_attention("dense", mask=bool_mask)
+        assert allclose(dense.data, result.data, atol=1e-5, rtol=1e-5)
+
+    def test_mlx_custom_falls_back_to_dense_for_masked_diagonal(self):
+        mask = Tensor(
+            create_causal_mask(
+                seq_len=self.seq_len,
+                batch_size=self.batch_size,
+                mask_diagonal=True,
+            ),
+            requires_grad=False,
+        )
+
+        with patch(
+            "autograd.functional.ScaledDotProductAttentionMLXCustom.apply",
+            side_effect=AssertionError("mlx custom path should not be used"),
+        ):
+            result = self._run_attention("mlx_custom", mask=mask)
+
+        dense = self._run_attention("dense", mask=mask)
+        assert allclose(dense.data, result.data, atol=1e-5, rtol=1e-5)
+
+    def test_mlx_custom_falls_back_to_dense_for_fully_masked_rows(self):
+        additive_mask = xp.zeros(
+            (self.batch_size, 1, self.seq_len, self.seq_len),
+            dtype=xp.float32,
+        )
+        additive_mask[:, :, 0, :] = 1.0
+        mask = Tensor(additive_mask, requires_grad=False)
+
+        with patch(
+            "autograd.functional.ScaledDotProductAttentionMLXCustom.apply",
             side_effect=AssertionError("mlx custom path should not be used"),
         ):
             result = self._run_attention("mlx_custom", mask=mask)
@@ -354,6 +393,60 @@ class TestScaledDotProductAttention(TestCase):
         assert allclose(mlx_custom.data, torch_output, atol=1e-5, rtol=1e-5)
 
     @skipUnless(IS_MLX, "mlx_custom requires the MLX backend")
+    def test_mlx_custom_uses_custom_path_in_eval_mode_with_configured_dropout(self):
+        mask = self._causal_mask(batch_size=self.batch_size, seq_len=self.seq_len)
+        dense_attention = ScaledDotProductAttention(
+            dropout_prob=0.25,
+            _implementation="dense",
+        )
+        custom_attention = ScaledDotProductAttention(
+            dropout_prob=0.25,
+            _implementation="mlx_custom",
+        )
+        dense_attention.eval()
+        custom_attention.eval()
+
+        dense = dense_attention(self.query, self.key, self.value, mask=mask)
+        with patch(
+            "autograd.functional.ScaledDotProductAttentionMLXCustom.apply",
+            wraps=ScaledDotProductAttentionMLXCustom.apply,
+        ) as custom_apply:
+            result = custom_attention(self.query, self.key, self.value, mask=mask)
+
+        self.assertEqual(custom_apply.call_count, 1)
+        assert allclose(dense.data, result.data, atol=1e-5, rtol=1e-5)
+
+    @skipUnless(IS_MLX, "mlx_custom requires the MLX backend")
+    def test_mlx_custom_train_mode_dropout_matches_dense_for_standard_causal_mask(self):
+        mask = self._causal_mask(batch_size=self.batch_size, seq_len=self.seq_len)
+        dropout_prob = 0.25
+        seed = 123
+
+        dense_attention = ScaledDotProductAttention(
+            dropout_prob=dropout_prob,
+            _implementation="dense",
+        )
+        custom_attention = ScaledDotProductAttention(
+            dropout_prob=dropout_prob,
+            _implementation="mlx_custom",
+        )
+        dense_attention.train()
+        custom_attention.train()
+
+        xp.random.seed(seed)
+        dense = dense_attention(self.query, self.key, self.value, mask=mask)
+
+        xp.random.seed(seed)
+        with patch(
+            "autograd.functional.ScaledDotProductAttentionMLXCustom.apply",
+            wraps=ScaledDotProductAttentionMLXCustom.apply,
+        ) as custom_apply:
+            result = custom_attention(self.query, self.key, self.value, mask=mask)
+
+        self.assertEqual(custom_apply.call_count, 1)
+        assert allclose(dense.data, result.data, atol=1e-5, rtol=1e-5)
+
+    @skipUnless(IS_MLX, "mlx_custom requires the MLX backend")
     def test_mlx_custom_backward_matches_dense_for_standard_causal_mask(self):
         mask = Tensor(
             create_causal_mask(seq_len=self.seq_len, batch_size=self.batch_size),
@@ -397,6 +490,186 @@ class TestScaledDotProductAttention(TestCase):
 
         for dense_grad, mlx_grad in zip(dense_grads, mlx_grads):
             assert allclose(dense_grad, mlx_grad, atol=1e-5, rtol=1e-5)
+
+    @skipUnless(IS_MLX, "mlx_custom requires the MLX backend")
+    def test_mlx_custom_train_mode_dropout_backward_matches_dense(self):
+        mask = self._causal_mask(batch_size=self.batch_size, seq_len=self.seq_len)
+        dropout_prob = 0.25
+        seed = 321
+        upstream = Tensor(
+            xp.random.normal(
+                shape=(
+                    self.batch_size,
+                    self.num_heads,
+                    self.seq_len,
+                    self.head_dim,
+                )
+            ),
+            requires_grad=False,
+        )
+
+        dense_query = Tensor(xp.array(self.query.data))
+        dense_key = Tensor(xp.array(self.key.data))
+        dense_value = Tensor(xp.array(self.value.data))
+        custom_query = Tensor(xp.array(self.query.data))
+        custom_key = Tensor(xp.array(self.key.data))
+        custom_value = Tensor(xp.array(self.value.data))
+
+        dense_attention = ScaledDotProductAttention(
+            dropout_prob=dropout_prob,
+            _implementation="dense",
+        )
+        custom_attention = ScaledDotProductAttention(
+            dropout_prob=dropout_prob,
+            _implementation="mlx_custom",
+        )
+        dense_attention.train()
+        custom_attention.train()
+
+        xp.random.seed(seed)
+        dense_output = dense_attention(
+            dense_query,
+            dense_key,
+            dense_value,
+            mask=mask,
+        )
+        dense_output.backward(upstream)
+
+        xp.random.seed(seed)
+        with patch(
+            "autograd.functional.ScaledDotProductAttentionMLXCustom.apply",
+            wraps=ScaledDotProductAttentionMLXCustom.apply,
+        ) as custom_apply:
+            custom_output = custom_attention(
+                custom_query,
+                custom_key,
+                custom_value,
+                mask=mask,
+            )
+
+        self.assertEqual(custom_apply.call_count, 1)
+        custom_output.backward(upstream)
+
+        assert dense_query.grad is not None
+        assert dense_key.grad is not None
+        assert dense_value.grad is not None
+        assert custom_query.grad is not None
+        assert custom_key.grad is not None
+        assert custom_value.grad is not None
+
+        assert allclose(dense_output.data, custom_output.data, atol=1e-5, rtol=1e-5)
+        assert allclose(
+            dense_query.grad.data, custom_query.grad.data, atol=1e-5, rtol=1e-5
+        )
+        assert allclose(dense_key.grad.data, custom_key.grad.data, atol=1e-5, rtol=1e-5)
+        assert allclose(
+            dense_value.grad.data, custom_value.grad.data, atol=1e-5, rtol=1e-5
+        )
+
+    @skipUnless(IS_MLX, "mlx_custom requires the MLX backend")
+    def test_mlx_custom_train_mode_dropout_p1_matches_dense_and_returns_zero(self):
+        mask = self._causal_mask(batch_size=self.batch_size, seq_len=self.seq_len)
+        dense_attention = ScaledDotProductAttention(
+            dropout_prob=1.0,
+            _implementation="dense",
+        )
+        custom_attention = ScaledDotProductAttention(
+            dropout_prob=1.0,
+            _implementation="mlx_custom",
+        )
+        dense_attention.train()
+        custom_attention.train()
+
+        dense = dense_attention(self.query, self.key, self.value, mask=mask)
+        with patch(
+            "autograd.functional.ScaledDotProductAttentionMLXCustom.apply",
+            wraps=ScaledDotProductAttentionMLXCustom.apply,
+        ) as custom_apply:
+            result = custom_attention(self.query, self.key, self.value, mask=mask)
+
+        self.assertEqual(custom_apply.call_count, 1)
+        assert allclose(dense.data, result.data, atol=1e-6, rtol=1e-6)
+        assert allclose(result.data, xp.zeros_like(result.data), atol=1e-6, rtol=1e-6)
+
+    @skipUnless(IS_MLX, "mlx_custom requires the MLX backend")
+    def test_mlx_custom_train_mode_dropout_p1_backward_returns_zero_grads(self):
+        mask = self._causal_mask(batch_size=self.batch_size, seq_len=self.seq_len)
+        upstream = Tensor(
+            xp.random.normal(
+                shape=(
+                    self.batch_size,
+                    self.num_heads,
+                    self.seq_len,
+                    self.head_dim,
+                )
+            ),
+            requires_grad=False,
+        )
+
+        dense_query = Tensor(xp.array(self.query.data))
+        dense_key = Tensor(xp.array(self.key.data))
+        dense_value = Tensor(xp.array(self.value.data))
+        custom_query = Tensor(xp.array(self.query.data))
+        custom_key = Tensor(xp.array(self.key.data))
+        custom_value = Tensor(xp.array(self.value.data))
+
+        dense_attention = ScaledDotProductAttention(
+            dropout_prob=1.0,
+            _implementation="dense",
+        )
+        custom_attention = ScaledDotProductAttention(
+            dropout_prob=1.0,
+            _implementation="mlx_custom",
+        )
+        dense_attention.train()
+        custom_attention.train()
+
+        dense_output = dense_attention(
+            dense_query,
+            dense_key,
+            dense_value,
+            mask=mask,
+        )
+        dense_output.backward(upstream)
+
+        with patch(
+            "autograd.functional.ScaledDotProductAttentionMLXCustom.apply",
+            wraps=ScaledDotProductAttentionMLXCustom.apply,
+        ) as custom_apply:
+            custom_output = custom_attention(
+                custom_query,
+                custom_key,
+                custom_value,
+                mask=mask,
+            )
+
+        self.assertEqual(custom_apply.call_count, 1)
+        custom_output.backward(upstream)
+
+        assert dense_query.grad is not None
+        assert dense_key.grad is not None
+        assert dense_value.grad is not None
+        assert custom_query.grad is not None
+        assert custom_key.grad is not None
+        assert custom_value.grad is not None
+
+        zero_output = xp.zeros_like(custom_output.data)
+        zero_query_grad = xp.zeros_like(custom_query.grad.data)
+        zero_key_grad = xp.zeros_like(custom_key.grad.data)
+        zero_value_grad = xp.zeros_like(custom_value.grad.data)
+
+        assert allclose(dense_output.data, custom_output.data, atol=1e-6, rtol=1e-6)
+        assert allclose(custom_output.data, zero_output, atol=1e-6, rtol=1e-6)
+        assert allclose(
+            dense_query.grad.data, custom_query.grad.data, atol=1e-6, rtol=1e-6
+        )
+        assert allclose(dense_key.grad.data, custom_key.grad.data, atol=1e-6, rtol=1e-6)
+        assert allclose(
+            dense_value.grad.data, custom_value.grad.data, atol=1e-6, rtol=1e-6
+        )
+        assert allclose(custom_query.grad.data, zero_query_grad, atol=1e-6, rtol=1e-6)
+        assert allclose(custom_key.grad.data, zero_key_grad, atol=1e-6, rtol=1e-6)
+        assert allclose(custom_value.grad.data, zero_value_grad, atol=1e-6, rtol=1e-6)
 
     @skipUnless(IS_MLX, "mlx_custom requires the MLX backend")
     def test_mlx_custom_backward_matches_dense_across_supported_shapes(self):
@@ -453,6 +726,22 @@ class TestScaledDotProductAttention(TestCase):
         )
         explicit_additive.data[:, :, 0, -1] = 1.0
         explicit_additive.data[:, :, 1, 0] = 1.0
+        masked_diagonal = Tensor(
+            create_causal_mask(
+                seq_len=self.seq_len,
+                batch_size=self.batch_size,
+                mask_diagonal=True,
+            ),
+            requires_grad=False,
+        )
+        fully_masked_rows = Tensor(
+            xp.zeros(
+                (self.batch_size, 1, self.seq_len, self.seq_len),
+                dtype=xp.float32,
+            ),
+            requires_grad=False,
+        )
+        fully_masked_rows.data[:, :, 0, :] = 1.0
 
         upstream = Tensor(
             xp.random.normal(
@@ -466,7 +755,12 @@ class TestScaledDotProductAttention(TestCase):
             requires_grad=False,
         )
 
-        for mask in (reverse_causal, explicit_additive):
+        for mask in (
+            reverse_causal,
+            explicit_additive,
+            masked_diagonal,
+            fully_masked_rows,
+        ):
             with self.subTest(mask_shape=mask.shape, mask=xp.to_numpy(mask.data)):
                 dense_grads = self._backward_grads(
                     "dense",
@@ -478,7 +772,7 @@ class TestScaledDotProductAttention(TestCase):
                 )
 
                 with patch(
-                    "autograd.nn._ScaledDotProductAttentionMLXCustom.apply",
+                    "autograd.functional.ScaledDotProductAttentionMLXCustom.apply",
                     side_effect=AssertionError("mlx custom path should not be used"),
                 ):
                     fallback_grads = self._backward_grads(
@@ -492,6 +786,56 @@ class TestScaledDotProductAttention(TestCase):
 
                 for dense_grad, fallback_grad in zip(dense_grads, fallback_grads):
                     assert allclose(dense_grad, fallback_grad, atol=1e-5, rtol=1e-5)
+
+    def test_mlx_custom_fallback_backward_matches_dense_for_explicit_bool_mask(self):
+        bool_mask = xp.ones(
+            (self.batch_size, 1, self.seq_len, self.seq_len),
+            dtype=xp.bool_,
+        )
+        bool_mask[:, :, 0, -1] = False
+        bool_mask[:, :, -1, 0] = False
+        upstream = Tensor(
+            xp.random.normal(
+                shape=(
+                    self.batch_size,
+                    self.num_heads,
+                    self.seq_len,
+                    self.head_dim,
+                )
+            ),
+            requires_grad=False,
+        )
+
+        dense_grads = self._backward_grads(
+            "dense",
+            query=Tensor(xp.array(self.query.data)),
+            key=Tensor(xp.array(self.key.data)),
+            value=Tensor(xp.array(self.value.data)),
+            mask=bool_mask,
+            upstream=upstream,
+        )
+
+        attention = ScaledDotProductAttention(
+            dropout_prob=0.0,
+            _implementation="mlx_custom",
+        )
+        with patch(
+            "autograd.functional.ScaledDotProductAttentionMLXCustom.apply",
+            side_effect=AssertionError("mlx custom path should not be used"),
+        ):
+            query = Tensor(xp.array(self.query.data))
+            key = Tensor(xp.array(self.key.data))
+            value = Tensor(xp.array(self.value.data))
+            output = attention(query, key, value, mask=bool_mask)
+            output.backward(upstream)
+
+        assert query.grad is not None
+        assert key.grad is not None
+        assert value.grad is not None
+        fallback_grads = (query.grad.data, key.grad.data, value.grad.data)
+
+        for dense_grad, fallback_grad in zip(dense_grads, fallback_grads):
+            assert allclose(dense_grad, fallback_grad, atol=1e-5, rtol=1e-5)
 
     @skipUnless(IS_MLX, "mlx_custom requires the MLX backend")
     def test_mlx_custom_backward_matches_finite_difference_on_tiny_case(self):

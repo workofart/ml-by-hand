@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from functools import lru_cache
 from typing import (
     Any,
     Callable,
@@ -14,431 +13,21 @@ from typing import (
     cast,
 )
 
-from autograd.backend import ARRAY_TYPE, Array, ArrayLike, xp
+from autograd.backend import ARRAY_TYPE, ArrayLike, xp
 
-from .functional import relu, sigmoid, softmax, tanh
+from .functional import (
+    relu,
+    scaled_dot_product_attention_mlx_custom,
+    scaled_dot_product_attention_mlx_reference,
+    sigmoid,
+    softmax,
+    tanh,
+)
 from .init import xavier_uniform
-from .tensor import Function, Tensor
+from .tensor import Tensor
+from .text.utils import prepare_mlx_reference_attention_mask
 
 logger = logging.getLogger(__name__)
-
-
-#
-# Milestone context:
-# - M0 needs a repo-owned reference path that can call MLX's official SDPA
-#   without changing the public attention API or the default dense contract.
-# - Later milestones replace this oracle-style forward-only path with the
-#   custom kernel path and then add backward parity.
-#
-class _ScaledDotProductAttentionMLXReference(Function):
-    @staticmethod
-    def prepare_mask(
-        mask: Optional[Union[Tensor, ArrayLike]],
-        *,
-        query_shape: Tuple[int, ...],
-        key_shape: Tuple[int, ...],
-    ) -> Tuple[
-        Literal[
-            "none", "causal", "explicit_bool", "explicit_additive", "dense_fallback"
-        ],
-        Optional[Array],
-    ]:
-        """
-        Translate repo mask semantics into the narrower MLX reference contract.
-
-        The MLX reference path is the only consumer of this translation, so the
-        logic lives here to keep the backend-specific behavior self-contained.
-        The outer attention module uses the result only to decide whether it can
-        safely take the MLX reference lane or must remain on the dense contract.
-
-        Mask inputs intentionally accept either:
-        - repo `Tensor` masks that already follow the dense additive-mask
-          contract (`1.0 == forbidden`, `0.0 == allowed`)
-        - raw backend arrays for the explicit-bool MLX contract (`True == keep`,
-          `False == masked`)
-
-        TODO: revisit this mixed `Tensor`/raw-array mask contract only if the
-        repo adopts dtype-preserving `Tensor` semantics. Today, `Tensor`
-        construction coerces data to `float32`, which would erase explicit-bool
-        mask intent.
-        """
-        if mask is None:
-            return "none", None
-
-        raw_mask = mask.data if isinstance(mask, Tensor) else xp.array(mask)
-        target_shape = (
-            int(query_shape[0]),
-            int(query_shape[1]),
-            int(query_shape[-2]),
-            int(key_shape[-2]),
-        )
-        if raw_mask.ndim > 4:
-            return "dense_fallback", None
-
-        try:
-            broadcast_mask = xp.broadcast_to(raw_mask, target_shape)
-        except ValueError:
-            return "dense_fallback", None
-
-        if broadcast_mask.dtype == xp.bool_:
-            # MLX bool masks use "True means keep". Fully-masked rows stay on the
-            # dense path because that remains the milestone-0 contract oracle.
-            if xp.to_scalar(xp.any(xp.all(~broadcast_mask, axis=-1))):
-                return "dense_fallback", None
-            return "explicit_bool", raw_mask
-
-        float_mask = xp.array(broadcast_mask, dtype=xp.float32)
-        seq_q = target_shape[-2]
-        seq_k = target_shape[-1]
-        standard_causal = xp.broadcast_to(
-            xp.triu(xp.ones((seq_q, seq_k), dtype=xp.float32), k=1),
-            target_shape,
-        )
-        if xp.to_scalar(xp.all(float_mask == standard_causal)):
-            return "causal", None
-
-        unsupported_structural_masks = (
-            xp.triu(xp.ones((seq_q, seq_k), dtype=xp.float32), k=0),
-            xp.tril(xp.ones((seq_q, seq_k), dtype=xp.float32), k=-1),
-            xp.tril(xp.ones((seq_q, seq_k), dtype=xp.float32), k=0),
-        )
-        if any(
-            xp.to_scalar(
-                xp.all(float_mask == xp.broadcast_to(structural_mask, target_shape))
-            )
-            for structural_mask in unsupported_structural_masks
-        ):
-            return "dense_fallback", None
-
-        if xp.to_scalar(xp.any(xp.all(float_mask > 0, axis=-1))):
-            return "dense_fallback", None
-
-        return "explicit_additive", xp.array(raw_mask, dtype=xp.float32) * -1e9
-
-    def forward(
-        self,
-        query: Array,
-        key: Array,
-        value: Array,
-        *,
-        mask_kind: Literal["none", "causal", "explicit_bool", "explicit_additive"],
-        mask: Optional[Array] = None,
-    ) -> Array:
-        try:
-            import mlx.core.fast as mx_fast  # pyright: ignore[reportMissingImports]
-
-            from autograd.backend import NAME
-        except ModuleNotFoundError as exc:  # pragma: no cover - platform dependent
-            raise RuntimeError("mlx_fast_reference requires the MLX backend") from exc
-
-        if NAME != "mlx":
-            raise RuntimeError("mlx_fast_reference requires the MLX backend")
-
-        if mask_kind == "none":
-            mask = None
-        elif mask_kind == "causal":
-            mask = "causal"
-        elif mask_kind not in ("explicit_bool", "explicit_additive"):
-            raise ValueError(f"Unsupported MLX reference mask kind: {mask_kind}")
-
-        output = mx_fast.scaled_dot_product_attention(
-            query,
-            key,
-            value,
-            # Attention logits are scaled by 1 / sqrt(head_dim) so their magnitude
-            # stays controlled as the per-head dimension grows.
-            scale=float(key.shape[-1]) ** -0.5,
-            mask=mask,
-        )
-        return output
-
-    def backward(self, grad: Tensor) -> Array:
-        # TODO: replace this explicit failure once milestone 3 adds backward parity.
-        raise NotImplementedError("mlx_fast_reference is forward-only in milestone 0")
-
-
-# Cache the compiled Metal kernel so milestone 2 pays the JIT/build cost once
-# per process instead of once per forward call. Layout normalization remains
-# delegated to MLX's default `ensure_row_contiguous=True` behavior for now,
-# since the current Python MLX surface does not expose reliable contiguity
-# metadata for gating.
-@lru_cache(maxsize=1)
-def _mlx_custom_attention_kernel() -> Any:
-    r"""
-    Milestone 2 implements the first real custom fast path:
-    square causal self-attention in float32 with dropout disabled.
-
-    For each output element, the kernel computes:
-    $$
-    s_{b,h,q,k}
-    =
-    \frac{1}{\sqrt{D}}
-    \sum_{i=0}^{D-1}
-    Q_{b,h,q,i} K_{b,h,k,i}
-    \quad \text{for } k \le q
-    $$
-    $$
-    p_{b,h,q,k}
-    =
-    \frac{\exp(s_{b,h,q,k} - m_{b,h,q})}
-    {\sum_{t=0}^{q} \exp(s_{b,h,q,t} - m_{b,h,q})}
-    \quad \text{where } m_{b,h,q} = \max_{t \le q} s_{b,h,q,t}
-    $$
-    $$
-    O_{b,h,q,d}
-    =
-    \sum_{k=0}^{q} p_{b,h,q,k} V_{b,h,k,d}
-    $$
-
-    The implementation is intentionally simple rather than aggressively
-    optimized: one thread computes one output element $O_{b,h,q,d}$ and
-    recomputes the causal score row twice so it can perform a numerically
-    stable softmax reduction without materializing the dense score matrix. This
-    keeps the semantics close to the repo's dense contract while leaving room
-    for milestone 3 to decide what rowwise state to save for backward.
-    """
-    try:
-        import mlx.core.fast as mx_fast  # pyright: ignore[reportMissingImports]
-    except ModuleNotFoundError as exc:  # pragma: no cover - platform dependent
-        raise RuntimeError("mlx_custom requires the MLX backend") from exc
-    return mx_fast.metal_kernel(
-        name="scaled_dot_product_attention_mlx_custom",
-        input_names=["query", "key", "value"],
-        output_names=["out"],
-        source=r"""
-            // "data" is the smallest granular entry in the 4D array
-            uint data = thread_position_in_grid.x;
-            int head_dim = query_shape[3];
-            int seq_len = query_shape[2];
-            int num_heads = query_shape[1];
-
-            // Map the flat output index back to (b, h, q, d).
-            int data_idx = data % head_dim;
-            int query_idx = (data / head_dim) % seq_len;
-            int head_idx = (data / (head_dim * seq_len)) % num_heads;
-            int batch_idx = data / (head_dim * seq_len * num_heads);
-
-            int query_row_offset = ((batch_idx * num_heads + head_idx) * seq_len + query_idx) * head_dim;
-            int head_sequence_offset = ((batch_idx * num_heads + head_idx) * seq_len) * head_dim;
-
-            // Equivalent to 1 / sqrt(D)
-            float scale = metal::rsqrt(float(head_dim));
-
-            // Pass 1: compute the maximum causal score for a stable softmax.
-            // sum over data_offset in [0, 1, ..., head_dim]
-            // keep the max score over all visible key_idx
-            float max_score = -INFINITY;
-            for (int key_idx = 0; key_idx <= query_idx; ++key_idx) {
-                int key_row_offset = head_sequence_offset + key_idx * head_dim;
-                float scaled_dot_product = 0.0f;
-                for (int data_offset = 0; data_offset < head_dim; ++data_offset) {
-                    scaled_dot_product += query[query_row_offset + data_offset] * key[key_row_offset + data_offset];
-                }
-                scaled_dot_product *= scale;
-                max_score = metal::max(max_score, scaled_dot_product);
-            }
-
-            // Pass 2: accumulate the softmax denominator and the weighted value sum.
-            float softmax_denominator = 0.0f;
-            float weighted_value_sum = 0.0f;
-            for (int key_idx = 0; key_idx <= query_idx; ++key_idx) {
-                int key_row_offset = head_sequence_offset + key_idx * head_dim;
-                float scaled_dot_product = 0.0f;
-                for (int data_offset = 0; data_offset < head_dim; ++data_offset) {
-                    scaled_dot_product += query[query_row_offset + data_offset] * key[key_row_offset + data_offset];
-                }
-                float attention_weight = metal::exp(scaled_dot_product * scale - max_score);
-                softmax_denominator += attention_weight;
-                weighted_value_sum += attention_weight * value[key_row_offset + data_idx];
-            }
-
-            out[data] = weighted_value_sum / softmax_denominator;
-        """,
-    )
-
-
-class _ScaledDotProductAttentionMLXCustom(Function):
-    @staticmethod
-    def _validate(
-        query: Array,
-        key: Array,
-        value: Array,
-    ) -> None:
-        from autograd.backend import NAME
-
-        if NAME != "mlx":
-            raise RuntimeError("mlx_custom requires the MLX backend")
-
-        tensors = (query, key, value)
-        if any(len(tensor.shape) != 4 for tensor in tensors):
-            raise ValueError(
-                "mlx_custom expects query, key, and value to be 4D tensors"
-            )
-        if query.shape != key.shape or query.shape != value.shape:
-            raise ValueError(
-                "mlx_custom requires query, key, and value to share the same shape"
-            )
-        if any(tensor.dtype != xp.float32 for tensor in tensors):
-            raise ValueError("mlx_custom requires float32 query, key, and value")
-
-    def forward(self, query: Array, key: Array, value: Array) -> Array:
-        self._validate(query, key, value)
-
-        kernel = _mlx_custom_attention_kernel()
-        return kernel(
-            inputs=[query, key, value],
-            grid=(int(query.size), 1, 1),
-            threadgroup=(256, 1, 1),
-            output_shapes=[query.shape],
-            output_dtypes=[query.dtype],
-        )[0]
-
-    def backward(self, grad: Tensor) -> Tuple[Array, Array, Array]:
-        r"""
-        The reason we have to define this backward function explicitly is because the kernel's forward function is defined not with our Tensor ops, but with a lower-level kernel ops.
-        That's why we don't get the backward implementation for free like other NN classes.
-
-        Backpropagate through the narrow v1 fused causal attention path.
-
-        The forward contract is:
-
-        $$
-        \text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{key\_dim}}\right) V
-        $$
-
-        For milestone 3 we recompute the causal masked probabilities inside
-        backward instead of saving dense logits/probabilities from the fused
-        forward kernel. We will use these intermediate names:
-        $$
-        \text{attention\_scores} = \frac{QK^T}{\sqrt{key\_dim}}
-        $$
-        $$
-        \text{attention\_weights} = \operatorname{softmax}(\text{attention\_scores}_{\text{causal}})
-        $$
-        $$
-        \text{attention\_output} = \text{attention\_weights} \; V
-        $$
-
-        Let `loss` be the final scalar training objective, and let the upstream
-        gradient be:
-        $$
-        \text{upstream\_grad} = \frac{\partial \text{loss}}{\partial \text{attention\_output}}
-        $$
-
-        1. Derivative of `loss` with respect to `V`:
-        $$
-        \frac{\partial \text{loss}}{\partial V}
-        =
-        \frac{\partial \text{loss}}{\partial \text{attention\_output}}
-        \frac{\partial \text{attention\_output}}{\partial V}
-        =
-        \text{attention\_weights}^T \, \text{upstream\_grad}
-        $$
-
-        2. Derivative of `loss` with respect to `attention_weights`:
-        $$
-        \frac{\partial \text{loss}}{\partial \text{attention\_weights}}
-        =
-        \frac{\partial \text{loss}}{\partial \text{attention\_output}}
-        \frac{\partial \text{attention\_output}}{\partial \text{attention\_weights}}
-        =
-        \text{upstream\_grad} \, V^T
-        $$
-
-        3. Derivative of `loss` with respect to `attention_scores`:
-        Softmax is applied independently to each query row, so we apply the
-        softmax derivative row by row along the key dimension.
-        $$
-        \frac{\partial \text{loss}}{\partial \text{attention\_scores}}
-        =
-        \frac{\partial \text{loss}}{\partial \text{attention\_weights}}
-        \frac{\partial \text{attention\_weights}}{\partial \text{attention\_scores}}
-        =
-        \text{attention\_weights} \odot
-        \left(
-        \frac{\partial \text{loss}}{\partial \text{attention\_weights}}
-        -
-        \sum_k
-        \left(
-        \frac{\partial \text{loss}}{\partial \text{attention\_weights}_k}
-        \text{attention\_weights}_k
-        \right)
-        \right)
-        $$
-
-        4. Derivative of `loss` with respect to `Q` and `K`, using
-        $$
-        \text{attention\_scores} = \frac{QK^T}{\sqrt{key\_dim}}
-        $$
-        $$
-        \frac{\partial \text{loss}}{\partial Q}
-        =
-        \frac{\partial \text{loss}}{\partial \text{attention\_scores}}
-        \frac{\partial \text{attention\_scores}}{\partial Q}
-        =
-        \frac{\partial \text{loss}}{\partial \text{attention\_scores}}
-        K \cdot \frac{1}{\sqrt{key\_dim}}
-        $$
-        $$
-        \frac{\partial \text{loss}}{\partial K}
-        =
-        \frac{\partial \text{loss}}{\partial \text{attention\_scores}}
-        \frac{\partial \text{attention\_scores}}{\partial K}
-        =
-        \left(
-        \frac{\partial \text{loss}}{\partial \text{attention\_scores}}
-        \right)^T
-        Q \cdot \frac{1}{\sqrt{key\_dim}}
-        $$
-        """
-        query, key, value = (tensor.data for tensor in self.tensors)
-        scale = float(query.shape[-1]) ** -0.5
-        seq_len = int(query.shape[-2])
-
-        # attention_scores = QK^T / sqrt(key_dim)
-        attention_scores = (query @ key.transpose(0, 1, 3, 2)) * scale
-
-        # Apply the repo's additive causal mask contract before softmax:
-        # forbidden positions receive a large negative value (+ mask * -1e9).
-        causal_mask = xp.triu(xp.ones((seq_len, seq_len), dtype=xp.float32), k=1)
-        masked_scores = (
-            attention_scores + causal_mask.reshape(1, 1, seq_len, seq_len) * -1e9
-        )
-
-        # attention_weights = softmax(attention_scores_causal)
-        # Not calling functional.softmax here because we don't want to build the computation graph here because this backward is completely detached from the graph as a custom kernel's backward pass
-        exp_scores = xp.exp(
-            masked_scores - xp.max(masked_scores, axis=-1, keepdims=True)
-        )
-        probs = exp_scores / xp.sum(exp_scores, axis=-1, keepdims=True)
-
-        upstream_grad = grad.data
-
-        # attention_output = attention_weights V
-        # By the chain rule, the derivative of loss with respect to V is:
-        # d(loss)/dV = attention_weights^T d(loss)/d(attention_output)
-        grad_value = probs.transpose(0, 1, 3, 2) @ upstream_grad
-
-        # By the chain rule, the derivative of loss with respect to
-        # attention_weights is:
-        # d(loss)/d(attention_weights) =
-        # d(loss)/d(attention_output) V^T
-        grad_probs = upstream_grad @ value.transpose(0, 1, 3, 2)
-
-        # By the chain rule, the derivative of loss with respect to
-        # attention_scores comes from the derivative of the softmax output with
-        # respect to its input scores.
-        # softmax acts on each query row independently, so this reduction is
-        # computed row by row along the key dimension.
-        grad_scores = probs * (
-            grad_probs - xp.sum(grad_probs * probs, axis=-1, keepdims=True)
-        )
-
-        # attention_scores = QK^T / sqrt(key_dim)
-        # By the chain rule, propagate d(loss)/d(attention_scores) into Q and K.
-        grad_query = (grad_scores @ key) * scale
-        grad_key = (grad_scores.transpose(0, 1, 3, 2) @ query) * scale
-        return grad_query, grad_key, grad_value
 
 
 class Module:
@@ -1903,43 +1492,41 @@ class ScaledDotProductAttention(Module):
             if self.dropout.p != 0:
                 raise RuntimeError("mlx_fast_reference requires dropout_prob == 0")
 
-            mask_kind, prepared_mask = (
-                _ScaledDotProductAttentionMLXReference.prepare_mask(
-                    mask,
-                    query_shape=query.shape,
-                    key_shape=key.shape,
-                )
+            mask_kind, prepared_mask = prepare_mlx_reference_attention_mask(
+                mask,
+                query_shape=query.shape,
+                key_shape=key.shape,
             )
             if mask_kind != "dense_fallback":
-                return _ScaledDotProductAttentionMLXReference.apply(
+                return scaled_dot_product_attention_mlx_reference(
                     query,
                     key,
                     value,
                     mask_kind=mask_kind,
                     mask=prepared_mask,
                 )
-            # Dense remains the fallback for unsupported, ambiguous, or degenerate
-            # mask cases in milestone 0.
+            # Dense remains the fallback for unsupported, ambiguous, or
+            # degenerate mask cases.
         elif self._implementation == "mlx_custom":
-            mask_kind, _ = _ScaledDotProductAttentionMLXReference.prepare_mask(
+            mask_kind, _ = prepare_mlx_reference_attention_mask(
                 mask,
                 query_shape=query.shape,
                 key_shape=key.shape,
             )
 
-            if self.dropout.p == 0 and mask_kind == "causal":
+            if mask_kind == "causal":
                 try:
-                    _ScaledDotProductAttentionMLXCustom._validate(
-                        query.data,
-                        key.data,
-                        value.data,
+                    return scaled_dot_product_attention_mlx_custom(
+                        query,
+                        key,
+                        value,
+                        is_training=self._is_training,
+                        dropout_prob=self.dropout.p,
                     )
                 except (RuntimeError, ValueError):
                     pass
-                else:
-                    return _ScaledDotProductAttentionMLXCustom.apply(query, key, value)
             # Dense remains the contract fallback for everything outside the
-            # narrow milestone-2 causal self-attention slice.
+            # supported causal self-attention slice.
         else:
             raise ValueError(
                 f"Unknown attention implementation: {self._implementation}"
