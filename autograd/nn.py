@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
+from functools import lru_cache
 from typing import (
     Any,
     Callable,
@@ -143,6 +144,99 @@ class _ScaledDotProductAttentionMLXReference(Function):
     def backward(self, grad: Tensor) -> Array:
         # TODO: replace this explicit failure once milestone 3 adds backward parity.
         raise NotImplementedError("mlx_fast_reference is forward-only in milestone 0")
+
+
+# Cache the compiled Metal kernel so milestone 1 pays the JIT/build cost once
+# per process instead of once per forward call. This matches the plan's intent
+# to prove repo-owned custom-op plumbing without letting repeated kernel builds
+# dominate the prototype's behavior.
+@lru_cache(maxsize=1)
+def _mlx_custom_attention_kernel() -> Any:
+    try:
+        import mlx.core.fast as mx_fast  # pyright: ignore[reportMissingImports]
+    except ModuleNotFoundError as exc:  # pragma: no cover - platform dependent
+        raise RuntimeError("mlx_custom requires the MLX backend") from exc
+
+    """
+    Milestone 1 intentionally does not implement real attention math yet.
+
+    The toy forward contract is:
+    $$
+      \mathrm{out}_{b,h,s,d}
+      =
+      \mathrm{query}_{b,h,s,d}
+      +
+      \mathrm{value}_{b,h,s,d}
+      +
+      \frac{1}{S} \sum_{t=0}^{S-1} \mathrm{key}_{b,h,t,d}
+    $$
+
+    This is a simplified, non-optimized prototype whose only job is to prove
+    that a repo-owned Function can call an MLX Metal kernel with 4D
+    attention-shaped inputs, multiple inputs, and a real reduction over the
+    sequence dimension. It is not intended to approximate real attention.
+    """
+    return mx_fast.metal_kernel(
+        name="scaled_dot_product_attention_mlx_custom",
+        input_names=["query", "key", "value"],
+        output_names=["out"],
+        source=r"""
+            uint elem = thread_position_in_grid.x;
+            int head_dim = query_shape[3];
+            int seq_len = query_shape[2];
+            int num_heads = query_shape[1];
+
+            int d = elem % head_dim;
+            int s = (elem / head_dim) % seq_len;
+            int h = (elem / (head_dim * seq_len)) % num_heads;
+            int b = elem / (head_dim * seq_len * num_heads);
+
+            int base = ((b * num_heads + h) * seq_len + s) * head_dim + d;
+            int key_base = ((b * num_heads + h) * seq_len) * head_dim + d;
+
+            float key_mean = 0.0f;
+            for (int t = 0; t < seq_len; ++t) {
+                key_mean += key[key_base + t * head_dim];
+            }
+            key_mean /= float(seq_len);
+
+            out[elem] = query[base] + value[base] + key_mean;
+        """,
+    )
+
+
+class _ScaledDotProductAttentionMLXCustom(Function):
+    def forward(self, query: Array, key: Array, value: Array) -> Array:
+        from autograd.backend import NAME
+
+        if NAME != "mlx":
+            raise RuntimeError("mlx_custom requires the MLX backend")
+
+        tensors = (query, key, value)
+        if any(len(tensor.shape) != 4 for tensor in tensors):
+            raise ValueError(
+                "mlx_custom expects query, key, and value to be 4D tensors"
+            )
+        if query.shape != key.shape or query.shape != value.shape:
+            raise ValueError(
+                "mlx_custom requires query, key, and value to share the same shape"
+            )
+        if any(tensor.dtype != xp.float32 for tensor in tensors):
+            raise ValueError("mlx_custom requires float32 query, key, and value")
+
+        kernel = _mlx_custom_attention_kernel()
+        # Milestone 1 uses the simplified toy kernel above only to validate the
+        # custom-op plumbing. Real attention math arrives in milestone 2.
+        return kernel(
+            inputs=[query, key, value],
+            grid=(int(query.size), 1, 1),
+            threadgroup=(256, 1, 1),
+            output_shapes=[query.shape],
+            output_dtypes=[query.dtype],
+        )[0]
+
+    def backward(self, grad: Tensor) -> Array:
+        raise NotImplementedError("mlx_custom is forward-only in milestone 1")
 
 
 class Module:
@@ -1557,7 +1651,7 @@ class ScaledDotProductAttention(Module):
     def __init__(
         self,
         dropout_prob: float = 0.1,
-        _implementation: Literal["dense", "mlx_fast_reference"] = "dense",
+        _implementation: Literal["dense", "mlx_fast_reference", "mlx_custom"] = "dense",
     ) -> None:
         """
         Initialize the ScaledDotProductAttention layer.
@@ -1617,6 +1711,12 @@ class ScaledDotProductAttention(Module):
                 )
             # Dense remains the fallback for unsupported, ambiguous, or degenerate
             # mask cases in milestone 0.
+        elif self._implementation == "mlx_custom":
+            if self.dropout.p != 0:
+                raise RuntimeError("mlx_custom requires dropout_prob == 0")
+            if mask is not None:
+                raise RuntimeError("mlx_custom does not support mask in milestone 1")
+            return _ScaledDotProductAttentionMLXCustom.apply(query, key, value)
         else:
             raise ValueError(
                 f"Unknown attention implementation: {self._implementation}"

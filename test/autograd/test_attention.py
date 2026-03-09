@@ -1,7 +1,7 @@
-from unittest import TestCase
+from unittest import TestCase, skipUnless
 from unittest.mock import patch
 
-from autograd.backend import xp
+from autograd.backend import IS_MLX, xp
 from autograd.nn import ScaledDotProductAttention
 from autograd.tensor import Tensor
 from autograd.text.utils import create_causal_mask
@@ -54,12 +54,14 @@ class TestScaledDotProductAttention(TestCase):
         )
         return attention(self.query, self.key, self.value, mask=mask)
 
+    @skipUnless(IS_MLX, "mlx_fast_reference parity requires the MLX backend")
     def test_mlx_reference_matches_dense_without_mask(self):
         dense = self._run_attention("dense")
         mlx_reference = self._run_attention("mlx_fast_reference")
 
         assert allclose(dense.data, mlx_reference.data, atol=1e-5, rtol=1e-5)
 
+    @skipUnless(IS_MLX, "mlx_fast_reference parity requires the MLX backend")
     def test_mlx_reference_matches_dense_for_standard_causal_mask(self):
         mask = Tensor(
             create_causal_mask(seq_len=self.seq_len, batch_size=self.batch_size),
@@ -71,6 +73,7 @@ class TestScaledDotProductAttention(TestCase):
 
         assert allclose(dense.data, mlx_reference.data, atol=1e-5, rtol=1e-5)
 
+    @skipUnless(IS_MLX, "mlx_fast_reference parity requires the MLX backend")
     def test_mlx_reference_matches_dense_for_explicit_additive_mask(self):
         additive_mask = xp.zeros(
             (self.batch_size, 1, self.seq_len, self.seq_len),
@@ -85,6 +88,7 @@ class TestScaledDotProductAttention(TestCase):
 
         assert allclose(dense.data, mlx_reference.data, atol=1e-5, rtol=1e-5)
 
+    @skipUnless(IS_MLX, "mlx_fast_reference parity requires the MLX backend")
     def test_mlx_reference_matches_dense_for_explicit_bool_mask(self):
         bool_mask = xp.ones(
             (self.batch_size, 1, self.seq_len, self.seq_len),
@@ -154,6 +158,7 @@ class TestScaledDotProductAttention(TestCase):
         dense = self._run_attention("dense", mask=mask)
         assert allclose(dense.data, result.data, atol=1e-5, rtol=1e-5)
 
+    @skipUnless(IS_MLX, "mlx_fast_reference parity requires the MLX backend")
     def test_mlx_reference_backward_raises_exact_error(self):
         output = self._run_attention("mlx_fast_reference")
 
@@ -179,3 +184,128 @@ class TestScaledDotProductAttention(TestCase):
                 "mlx_fast_reference requires the MLX backend",
             ):
                 self._run_attention("mlx_fast_reference")
+
+    def test_mlx_custom_requires_dropout_prob_zero(self):
+        attention = ScaledDotProductAttention(
+            dropout_prob=0.1,
+            _implementation="mlx_custom",
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "mlx_custom requires dropout_prob == 0",
+        ):
+            attention(self.query, self.key, self.value)
+
+    def test_mlx_custom_rejects_mask_in_milestone_1(self):
+        attention = ScaledDotProductAttention(
+            dropout_prob=0.0,
+            _implementation="mlx_custom",
+        )
+        mask = Tensor(
+            create_causal_mask(seq_len=self.seq_len, batch_size=self.batch_size),
+            requires_grad=False,
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "mlx_custom does not support mask in milestone 1",
+        ):
+            attention(self.query, self.key, self.value, mask=mask)
+
+    @skipUnless(IS_MLX, "mlx_custom prototype requires the MLX backend")
+    def test_mlx_custom_matches_toy_oracle(self):
+        test_shapes = (
+            (1, 1, 1, 1),
+            (1, 2, 3, 4),
+            (2, 3, 4, 5),
+        )
+        for shape in test_shapes:
+            with self.subTest(shape=shape):
+                query = Tensor(xp.random.normal(shape=shape))
+                key = Tensor(xp.random.normal(shape=shape))
+                value = Tensor(xp.random.normal(shape=shape))
+                attention = ScaledDotProductAttention(
+                    dropout_prob=0.0,
+                    _implementation="mlx_custom",
+                )
+
+                output = attention(query, key, value)
+                expected = (
+                    query.data
+                    + value.data
+                    + xp.mean(
+                        key.data,
+                        axis=2,
+                        keepdims=True,
+                    )
+                )
+
+                assert output.shape == shape
+                assert allclose(output.data, expected, atol=1e-6, rtol=1e-6)
+
+    @skipUnless(IS_MLX, "mlx_custom prototype requires the MLX backend")
+    def test_mlx_custom_matches_hand_computed_toy_example(self):
+        attention = ScaledDotProductAttention(
+            dropout_prob=0.0,
+            _implementation="mlx_custom",
+        )
+        query = Tensor(xp.array([[[[1.0], [2.0], [3.0]]]], dtype=xp.float32))
+        key = Tensor(xp.array([[[[4.0], [7.0], [10.0]]]], dtype=xp.float32))
+        value = Tensor(xp.array([[[[0.5], [1.5], [2.5]]]], dtype=xp.float32))
+
+        output = attention(query, key, value)
+        expected = xp.array([[[[8.5], [10.5], [12.5]]]], dtype=xp.float32)
+
+        assert allclose(output.data, expected, atol=1e-6, rtol=1e-6)
+
+    @skipUnless(IS_MLX, "mlx_custom prototype requires the MLX backend")
+    def test_mlx_custom_backward_raises_exact_error(self):
+        output = self._run_attention("mlx_custom")
+
+        with self.assertRaisesRegex(
+            NotImplementedError,
+            "mlx_custom is forward-only in milestone 1",
+        ):
+            output.sum().backward()
+
+    @skipUnless(IS_MLX, "mlx_custom prototype requires the MLX backend")
+    def test_mlx_custom_requires_rank_4_inputs(self):
+        attention = ScaledDotProductAttention(
+            dropout_prob=0.0,
+            _implementation="mlx_custom",
+        )
+        query = Tensor(
+            xp.random.normal(
+                shape=(self.batch_size, self.seq_len, self.num_heads * self.head_dim)
+            )
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "mlx_custom expects query, key, and value to be 4D tensors",
+        ):
+            attention(query, query, query)
+
+    @skipUnless(IS_MLX, "mlx_custom prototype requires the MLX backend")
+    def test_mlx_custom_requires_matching_shapes(self):
+        attention = ScaledDotProductAttention(
+            dropout_prob=0.0,
+            _implementation="mlx_custom",
+        )
+        key = Tensor(
+            xp.random.normal(
+                shape=(
+                    self.batch_size,
+                    self.num_heads,
+                    self.seq_len + 1,
+                    self.head_dim,
+                )
+            )
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "mlx_custom requires query, key, and value to share the same shape",
+        ):
+            attention(self.query, key, self.value)
