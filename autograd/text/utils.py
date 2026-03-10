@@ -170,7 +170,7 @@ def create_causal_mask(
     return mask_4d
 
 
-def prepare_mlx_reference_attention_mask(
+def prepare_mlx_attention_mask(
     mask: Optional[Union[Tensor, ArrayLike]],
     *,
     query_shape: Tuple[int, ...],
@@ -180,16 +180,16 @@ def prepare_mlx_reference_attention_mask(
     Optional[Array],
 ]:
     """
-    Translate repo mask semantics into the narrower MLX reference contract.
+    Translate repo mask semantics into the narrower MLX attention contracts.
 
-    The MLX reference path is the only consumer of this translation, so the
-    logic lives here to keep the backend-specific behavior self-contained.
+    The MLX custom attention path uses this classification to decide whether it
+    can take the optimized causal self-attention fast path or must fall back to
+    the dense contract implementation.
 
     Mask inputs intentionally accept either:
     - repo `Tensor` masks that already follow the dense additive-mask
       contract (`1.0 == forbidden`, `0.0 == allowed`)
-    - raw backend arrays for the explicit-bool MLX contract (`True == keep`,
-      `False == masked`)
+    - raw backend arrays for bool-mask cases (`True == keep`, `False == masked`)
 
     TODO: revisit this mixed `Tensor`/raw-array mask contract only if the repo
     adopts dtype-preserving `Tensor` semantics. Today, `Tensor` construction

@@ -116,136 +116,12 @@ class TestScaledDotProductAttention(TestCase):
         output = attention(Tensor(query), Tensor(key), Tensor(value), mask=mask)
         return xp.to_scalar(xp.sum(output.data * upstream.data))
 
-    @skipUnless(IS_MLX, "mlx_fast_reference parity requires the MLX backend")
-    def test_mlx_reference_matches_dense_without_mask(self):
-        dense = self._run_attention("dense")
-        mlx_reference = self._run_attention("mlx_fast_reference")
-
-        assert allclose(dense.data, mlx_reference.data, atol=1e-5, rtol=1e-5)
-
-    @skipUnless(IS_MLX, "mlx_fast_reference parity requires the MLX backend")
-    def test_mlx_reference_matches_dense_for_standard_causal_mask(self):
-        mask = Tensor(
-            create_causal_mask(seq_len=self.seq_len, batch_size=self.batch_size),
-            requires_grad=False,
-        )
-
-        dense = self._run_attention("dense", mask=mask)
-        mlx_reference = self._run_attention("mlx_fast_reference", mask=mask)
-
-        assert allclose(dense.data, mlx_reference.data, atol=1e-5, rtol=1e-5)
-
-    @skipUnless(IS_MLX, "mlx_fast_reference parity requires the MLX backend")
-    def test_mlx_reference_matches_dense_for_explicit_additive_mask(self):
-        additive_mask = xp.zeros(
-            (self.batch_size, 1, self.seq_len, self.seq_len),
-            dtype=xp.float32,
-        )
-        additive_mask[:, :, 0, -1] = 1.0
-        additive_mask[:, :, 1, 0] = 1.0
-        mask = Tensor(additive_mask, requires_grad=False)
-
-        dense = self._run_attention("dense", mask=mask)
-        mlx_reference = self._run_attention("mlx_fast_reference", mask=mask)
-
-        assert allclose(dense.data, mlx_reference.data, atol=1e-5, rtol=1e-5)
-
-    @skipUnless(IS_MLX, "mlx_fast_reference parity requires the MLX backend")
-    def test_mlx_reference_matches_dense_for_explicit_bool_mask(self):
-        bool_mask = xp.ones(
-            (self.batch_size, 1, self.seq_len, self.seq_len),
-            dtype=xp.bool_,
-        )
-        bool_mask[:, :, 0, -1] = False
-        bool_mask[:, :, -1, 0] = False
-
-        dense_mask = Tensor((~bool_mask).astype(xp.float32), requires_grad=False)
-        dense = self._run_attention("dense", mask=dense_mask)
-        mlx_reference = self._run_attention("mlx_fast_reference", mask=bool_mask)
-
-        assert allclose(dense.data, mlx_reference.data, atol=1e-5, rtol=1e-5)
-
-    def test_mlx_reference_falls_back_to_dense_for_reverse_causal_mask(self):
-        mask = Tensor(
-            create_causal_mask(
-                seq_len=self.seq_len,
-                batch_size=self.batch_size,
-                lookback=True,
-            ),
-            requires_grad=False,
-        )
-
-        with patch(
-            "autograd.functional.ScaledDotProductAttentionMLXReference.apply",
-            side_effect=AssertionError("mlx reference path should not be used"),
-        ):
-            result = self._run_attention("mlx_fast_reference", mask=mask)
-
-        dense = self._run_attention("dense", mask=mask)
-        assert allclose(dense.data, result.data, atol=1e-5, rtol=1e-5)
-
-    def test_mlx_reference_falls_back_to_dense_for_masked_diagonal(self):
-        mask = Tensor(
-            create_causal_mask(
-                seq_len=self.seq_len,
-                batch_size=self.batch_size,
-                mask_diagonal=True,
-            ),
-            requires_grad=False,
-        )
-
-        with patch(
-            "autograd.functional.ScaledDotProductAttentionMLXReference.apply",
-            side_effect=AssertionError("mlx reference path should not be used"),
-        ):
-            result = self._run_attention("mlx_fast_reference", mask=mask)
-
-        dense = self._run_attention("dense", mask=mask)
-        assert allclose(dense.data, result.data, atol=1e-5, rtol=1e-5)
-
-    def test_mlx_reference_falls_back_to_dense_for_fully_masked_rows(self):
-        additive_mask = xp.zeros(
-            (self.batch_size, 1, self.seq_len, self.seq_len),
-            dtype=xp.float32,
-        )
-        additive_mask[:, :, 0, :] = 1.0
-        mask = Tensor(additive_mask, requires_grad=False)
-
-        with patch(
-            "autograd.functional.ScaledDotProductAttentionMLXReference.apply",
-            side_effect=AssertionError("mlx reference path should not be used"),
-        ):
-            result = self._run_attention("mlx_fast_reference", mask=mask)
-
-        dense = self._run_attention("dense", mask=mask)
-        assert allclose(dense.data, result.data, atol=1e-5, rtol=1e-5)
-
-    @skipUnless(IS_MLX, "mlx_fast_reference parity requires the MLX backend")
-    def test_mlx_reference_backward_raises_exact_error(self):
-        output = self._run_attention("mlx_fast_reference")
-
+    def test_removed_mlx_reference_backend_is_rejected(self):
         with self.assertRaisesRegex(
-            NotImplementedError,
-            "mlx_fast_reference is forward-only",
+            ValueError,
+            "Unknown attention implementation: mlx_fast_reference",
         ):
-            output.sum().backward()
-
-    def test_mlx_reference_requires_mlx_backend(self):
-        import builtins
-
-        original_import = builtins.__import__
-
-        def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
-            if name in {"mlx.core", "mlx.core.fast"}:
-                raise ModuleNotFoundError(name)
-            return original_import(name, globals, locals, fromlist, level)
-
-        with patch("builtins.__import__", side_effect=fake_import):
-            with self.assertRaisesRegex(
-                RuntimeError,
-                "mlx_fast_reference requires the MLX backend",
-            ):
-                self._run_attention("mlx_fast_reference")
+            self._run_attention("mlx_fast_reference")
 
     def test_mlx_custom_falls_back_to_dense_without_mask(self):
         with patch(
@@ -358,18 +234,6 @@ class TestScaledDotProductAttention(TestCase):
         mlx_custom = self._run_attention("mlx_custom", mask=mask)
 
         assert allclose(dense.data, mlx_custom.data, atol=1e-5, rtol=1e-5)
-
-    @skipUnless(IS_MLX, "mlx_custom requires the MLX backend")
-    def test_mlx_custom_matches_mlx_reference_for_standard_causal_mask(self):
-        mask = Tensor(
-            create_causal_mask(seq_len=self.seq_len, batch_size=self.batch_size),
-            requires_grad=False,
-        )
-
-        mlx_reference = self._run_attention("mlx_fast_reference", mask=mask)
-        mlx_custom = self._run_attention("mlx_custom", mask=mask)
-
-        assert allclose(mlx_reference.data, mlx_custom.data, atol=1e-5, rtol=1e-5)
 
     @skipUnless(IS_MLX, "mlx_custom requires the MLX backend")
     def test_mlx_custom_matches_pytorch_math_sdpa_for_standard_causal_mask(self):

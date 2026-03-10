@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import math
 from functools import lru_cache
-from typing import Any, Literal, Optional, Tuple, Union, cast
+from typing import Any, Optional, Tuple, Union, cast
 
 from autograd.backend import (
     Array,
@@ -110,28 +110,6 @@ def gelu(x: Tensor) -> Tensor:
         >>> y = gelu(x) # Expected output: approximate GELU values for the inputs
     """
     return Gelu.apply(x)
-
-
-def scaled_dot_product_attention_mlx_reference(
-    query: Tensor,
-    key: Tensor,
-    value: Tensor,
-    *,
-    mask_kind: Literal["none", "causal", "explicit_bool", "explicit_additive"],
-    mask: Optional[Array] = None,
-) -> Tensor:
-    """
-    MLX reference SDPA implementation.
-    TODO: remove this reference path once the custom MLX kernel no longer
-    needs an oracle for parity validation/debugging.
-    """
-    return ScaledDotProductAttentionMLXReference.apply(
-        query,
-        key,
-        value,
-        mask_kind=mask_kind,
-        mask=mask,
-    )
 
 
 def scaled_dot_product_attention_mlx_custom(
@@ -440,50 +418,6 @@ class Tanh(Function):
             xp.ndarray: The gradient of the loss with respect to the input.
         """
         return grad.data * (1 - self.out**2)
-
-
-class ScaledDotProductAttentionMLXReference(Function):
-    def forward(
-        self,
-        query: Array,
-        key: Array,
-        value: Array,
-        *,
-        mask_kind: Literal["none", "causal", "explicit_bool", "explicit_additive"],
-        mask: Optional[Array] = None,
-    ) -> Array:
-        # TODO: remove this reference path once the custom MLX kernel no longer
-        # needs an in-repo oracle for parity validation/debugging.
-        try:
-            import mlx.core.fast as mx_fast  # pyright: ignore[reportMissingImports]
-
-            from autograd.backend import NAME
-        except ModuleNotFoundError as exc:  # pragma: no cover - platform dependent
-            raise RuntimeError("mlx_fast_reference requires the MLX backend") from exc
-
-        if NAME != "mlx":
-            raise RuntimeError("mlx_fast_reference requires the MLX backend")
-
-        if mask_kind == "none":
-            mask = None
-        elif mask_kind == "causal":
-            mask = "causal"
-        elif mask_kind not in ("explicit_bool", "explicit_additive"):
-            raise ValueError(f"Unsupported MLX reference mask kind: {mask_kind}")
-
-        output = mx_fast.scaled_dot_product_attention(
-            query,
-            key,
-            value,
-            # Attention logits are scaled by 1 / sqrt(head_dim) so their magnitude
-            # stays controlled as the per-head dimension grows.
-            scale=float(key.shape[-1]) ** -0.5,
-            mask=mask,
-        )
-        return output
-
-    def backward(self, grad: Tensor) -> Array:
-        raise NotImplementedError("mlx_fast_reference is forward-only")
 
 
 class ScaledDotProductAttentionMLXCustom(Function):

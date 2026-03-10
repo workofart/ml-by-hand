@@ -18,14 +18,13 @@ from autograd.backend import ARRAY_TYPE, ArrayLike, xp
 from .functional import (
     relu,
     scaled_dot_product_attention_mlx_custom,
-    scaled_dot_product_attention_mlx_reference,
     sigmoid,
     softmax,
     tanh,
 )
 from .init import xavier_uniform
 from .tensor import Tensor
-from .text.utils import prepare_mlx_reference_attention_mask
+from .text.utils import prepare_mlx_attention_mask
 
 logger = logging.getLogger(__name__)
 
@@ -1442,7 +1441,7 @@ class ScaledDotProductAttention(Module):
     def __init__(
         self,
         dropout_prob: float = 0.1,
-        _implementation: Literal["dense", "mlx_fast_reference", "mlx_custom"] = "dense",
+        _implementation: Literal["dense", "mlx_custom"] = "dense",
     ) -> None:
         """
         Initialize the ScaledDotProductAttention layer.
@@ -1470,9 +1469,10 @@ class ScaledDotProductAttention(Module):
             value (Tensor): Value tensor.
             mask (Optional[Union[Tensor, ArrayLike]], optional): Attention mask.
                 The dense repo contract uses additive float masks where `1.0`
-                means forbidden and `0.0` means allowed. The MLX reference path
-                also accepts raw backend bool masks where `True` means keep and
-                `False` means masked. Defaults to None.
+                means forbidden and `0.0` means allowed. Raw backend bool masks
+                are also accepted and routed through the implementation-specific
+                gating logic before falling back to dense when unsupported.
+                Defaults to None.
 
         Returns:
             Tensor: The attended output.
@@ -1488,27 +1488,8 @@ class ScaledDotProductAttention(Module):
         """
         if self._implementation == "dense":
             pass
-        elif self._implementation == "mlx_fast_reference":
-            if self.dropout.p != 0:
-                raise RuntimeError("mlx_fast_reference requires dropout_prob == 0")
-
-            mask_kind, prepared_mask = prepare_mlx_reference_attention_mask(
-                mask,
-                query_shape=query.shape,
-                key_shape=key.shape,
-            )
-            if mask_kind != "dense_fallback":
-                return scaled_dot_product_attention_mlx_reference(
-                    query,
-                    key,
-                    value,
-                    mask_kind=mask_kind,
-                    mask=prepared_mask,
-                )
-            # Dense remains the fallback for unsupported, ambiguous, or
-            # degenerate mask cases.
         elif self._implementation == "mlx_custom":
-            mask_kind, _ = prepare_mlx_reference_attention_mask(
+            mask_kind, _ = prepare_mlx_attention_mask(
                 mask,
                 query_shape=query.shape,
                 key_shape=key.shape,
