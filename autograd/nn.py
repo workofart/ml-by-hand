@@ -2,13 +2,29 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, Optional, Tuple, Union, cast
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Literal,
+    Optional,
+    Tuple,
+    Union,
+    cast,
+)
 
 from autograd.backend import ARRAY_TYPE, ArrayLike, xp
 
-from .functional import relu, sigmoid, softmax, tanh
+from .functional import (
+    relu,
+    scaled_dot_product_attention_mlx_custom,
+    sigmoid,
+    softmax,
+    tanh,
+)
 from .init import xavier_uniform
 from .tensor import Tensor
+from .text.utils import prepare_mlx_attention_mask
 
 logger = logging.getLogger(__name__)
 
@@ -1422,7 +1438,11 @@ class ScaledDotProductAttention(Module):
         >>> y = attn(query, key, value) # Expected shape: (2, 2, 4, 8)
     """
 
-    def __init__(self, dropout_prob: float = 0.1) -> None:
+    def __init__(
+        self,
+        dropout_prob: float = 0.1,
+        _implementation: Literal["dense", "mlx_custom"] = "dense",
+    ) -> None:
         """
         Initialize the ScaledDotProductAttention layer.
 
@@ -1430,10 +1450,15 @@ class ScaledDotProductAttention(Module):
             dropout_prob (float, optional): Dropout probability applied after softmax. Defaults to 0.1.
         """
         super().__init__()
+        self._implementation = _implementation
         self.dropout = Dropout(p=dropout_prob)
 
     def forward(
-        self, query: Tensor, key: Tensor, value: Tensor, mask: Optional[Tensor] = None
+        self,
+        query: Tensor,
+        key: Tensor,
+        value: Tensor,
+        mask: Optional[Union[Tensor, ArrayLike]] = None,
     ) -> Tensor:
         """
         Compute the scaled dot-product attention.
@@ -1442,7 +1467,12 @@ class ScaledDotProductAttention(Module):
             query (Tensor): Query tensor.
             key (Tensor): Key tensor.
             value (Tensor): Value tensor.
-            mask (Optional[Tensor], optional): Mask tensor. Defaults to None.
+            mask (Optional[Union[Tensor, ArrayLike]], optional): Attention mask.
+                The dense repo contract uses additive float masks where `1.0`
+                means forbidden and `0.0` means allowed. Raw backend bool masks
+                are also accepted and routed through the implementation-specific
+                gating logic before falling back to dense when unsupported.
+                Defaults to None.
 
         Returns:
             Tensor: The attended output.
@@ -1456,6 +1486,33 @@ class ScaledDotProductAttention(Module):
             >>> value = Tensor(xp.random.randn(2, 2, 4, 8))
             >>> output = attn(query, key, value) # Expected: (2, 2, 4, 8)
         """
+        if self._implementation == "dense":
+            pass
+        elif self._implementation == "mlx_custom":
+            mask_kind, _ = prepare_mlx_attention_mask(
+                mask,
+                query_shape=query.shape,
+                key_shape=key.shape,
+            )
+
+            if mask_kind == "causal":
+                try:
+                    return scaled_dot_product_attention_mlx_custom(
+                        query,
+                        key,
+                        value,
+                        is_training=self._is_training,
+                        dropout_prob=self.dropout.p,
+                    )
+                except (RuntimeError, ValueError):
+                    pass
+            # Dense remains the contract fallback for everything outside the
+            # supported causal self-attention slice.
+        else:
+            raise ValueError(
+                f"Unknown attention implementation: {self._implementation}"
+            )
+
         attention_size = Tensor(key.shape[-1])
 
         # scaled dot product
@@ -1464,6 +1521,8 @@ class ScaledDotProductAttention(Module):
 
         # mask (optional)
         if mask is not None:
+            if not isinstance(mask, Tensor):
+                mask = Tensor(mask, requires_grad=False)
             # broadcast across heads
             att_score = att_score + (mask * -1e9)
         att_score = self.dropout(softmax(att_score))
