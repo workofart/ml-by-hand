@@ -2,7 +2,7 @@ import logging
 import os
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from typing import Any, Callable, Dict, Optional, Tuple, cast
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple, cast
 
 from tqdm import tqdm
 
@@ -13,7 +13,6 @@ from autograd.backend import (
     xp,
 )
 from autograd.tensor import Tensor
-from autograd.text import utils as text_utils
 from autograd.tools.config_schema import (
     GenericTrainingConfig,
     TransformerTrainingConfig,
@@ -75,7 +74,8 @@ class AbstractTrainer(ABC):
 
         Args:
             train_data_loader: An iterable or generator that yields training batches.
-            val_data_loader: (Optional) An iterable or generator that yields validation batches.
+            val_data_loader: (Optional) An iterable or generator that yields labeled
+                validation batches.
         """
         logger.info(
             f"Training {self.model.__class__.__name__} with "
@@ -96,7 +96,7 @@ class AbstractTrainer(ABC):
             if val_data_loader is not None:
                 if hasattr(val_data_loader, "on_epoch_start"):
                     val_data_loader.on_epoch_start()
-                val_loss = self.evaluate(train_data_loader, val_data_loader, epoch)
+                val_loss = self.evaluate(val_data_loader)
             else:
                 val_loss = None
 
@@ -135,6 +135,8 @@ class AbstractTrainer(ABC):
                 self.metrics["grad_l2_norm"].append(grad_l2_norm(self.model.parameters))
                 self.optimizer.zero_grad()
             batch_count += 1
+        # TODO: Decide whether to flush leftover accumulated gradients at epoch end when
+        # batch_count is not divisible by update_weights_every_n_steps.
         return total_loss / max(batch_count, 1)
 
     def _save_checkpoint(self, epoch: int, val_loss: Optional[float]):
@@ -224,13 +226,11 @@ class AbstractTrainer(ABC):
         logger.info(log_msg)
 
     @abstractmethod
-    def evaluate(self, train_data_loader, val_data_loader, epoch) -> float:
+    def evaluate(self, val_data_loader) -> float:
         """Evaluates the model on the validation set.
 
         Args:
-            train_data_loader: Training data loader (if needed for evaluation context).
             val_data_loader: Validation data loader providing validation batches.
-            epoch (int): Current epoch number, provided for logging or conditional evaluation.
 
         Returns:
             float: The average validation loss over the validation set.
@@ -419,13 +419,11 @@ class SimpleTrainer(AbstractTrainer):
         loss.backward()
         return float(loss.item())
 
-    def evaluate(self, train_data_loader, val_data_loader, epoch) -> float:
+    def evaluate(self, val_data_loader) -> float:
         """Evaluates the model on the validation data loader.
 
         Args:
-            train_data_loader: Unused in this implementation, but kept for interface consistency.
             val_data_loader: An iterable or generator providing validation batches.
-            epoch (int): The current epoch number.
 
         Returns:
             float: The average validation loss over the entire validation dataset.
@@ -458,15 +456,7 @@ class SimpleTrainer(AbstractTrainer):
             )
             self.metrics["val_accuracy"].append(acc_val)
 
-            if (
-                self.sample_predictions
-                and epoch
-                % max(
-                    1,
-                    self.config.total_epochs // min(10, self.config.total_epochs),
-                )
-                == 0
-            ):
+            if self.sample_predictions:
                 sample_count = min(5, len(y_pred_proc))
                 if sample_count > 0:
                     sample_lines = [
@@ -584,6 +574,19 @@ class LLMTrainer(AbstractTrainer):
         loss_fn: Callable,
         forward_fn: nn.AbstractLLMForwardFn,
         config: TransformerTrainingConfig,
+        eval_callbacks: Optional[
+            Sequence[
+                Callable[
+                    [
+                        nn.Module,
+                        nn.AbstractLLMForwardFn,
+                        Any,
+                        TransformerTrainingConfig,
+                    ],
+                    None,
+                ]
+            ]
+        ] = None,
         **kwargs,
     ):
         """Initializes the LLMTrainer.
@@ -596,6 +599,8 @@ class LLMTrainer(AbstractTrainer):
                 to handle how the model is invoked for language modeling tasks.
             config (TransformerTrainingConfig): A specialized config containing transformer
                 and training hyperparameters.
+            eval_callbacks: Optional callbacks run after evaluation using
+                `(model, forward_fn, val_data_loader, config)`.
             **kwargs: Additional arguments passed to the parent trainer.
         """
         super().__init__(model_cls, optimizer_cls, loss_fn, config=config, **kwargs)
@@ -603,6 +608,7 @@ class LLMTrainer(AbstractTrainer):
             TransformerTrainingConfig, self.config
         )
         self.forward_fn = forward_fn
+        self.eval_callbacks = list(eval_callbacks or [])
 
     def train_step(self, batch_data, data_loader) -> float:
         """Performs a forward pass for language modeling, computes the loss, and backpropagates.
@@ -629,63 +635,33 @@ class LLMTrainer(AbstractTrainer):
         loss.backward()
         return float(loss.item())
 
-    def evaluate(self, train_data_loader, val_data_loader, epoch) -> float:
+    def evaluate(self, val_data_loader) -> float:
         """Evaluates the model on the validation data loader for language modeling.
 
         Args:
-            train_data_loader: Training data loader (if needed for context).
             val_data_loader: Validation data loader providing batches with
                 (X, dec_inp, y, src_mask, tgt_mask, causal_mask).
-            epoch (int): Current epoch number.
 
         Returns:
             float: The average validation loss over the language modeling validation set.
         """
         self.model.eval()
-        total_loss = 0.0
-        batch_count = 0
-        for batch_data in tqdm(val_data_loader, desc="Evaluation", leave=False):
-            pred_probs, y = self.forward_fn(self.model, batch_data, mode="train")
-            loss = self.loss_fn(pred_probs, y, pad_idx=val_data_loader.pad_idx)
-            total_loss += float(loss.item())
-            batch_count += 1
-        avg_val_loss = total_loss / max(batch_count, 1)
-
-        if epoch % 2 == 0:  # Optionally perform inference every 2 epochs
-            self._perform_inference(train_data_loader)
-
-        self.model.train()
-        return avg_val_loss
-
-    def _perform_inference(self, train_data_loader):
-        """Optionally performs teacher-forcing or sampling-based inference.
-        Make sure LLMDataLoader has `data` if you rely on `train_data_loader.data`.
-
-        Args:
-            train_data_loader: Data loader that can provide the BPE tokenizer and some
-                sample data to generate from.
-        """
-        if self.config.teacher_enforcing and hasattr(train_data_loader, "data"):
-            text_utils.inference(
-                model=self.model,
-                prediction_func=self.forward_fn,
-                bpe=train_data_loader.bpe,
-                groundtruth_data=train_data_loader.data[
-                    : train_data_loader.seq_len // 3
-                ],
-                max_length=train_data_loader.seq_len // 3,
-            )
-
-        # Normal sampling inference
-        text_utils.inference(
-            model=self.model,
-            prediction_func=self.forward_fn,
-            bpe=train_data_loader.bpe,
-            start_tokens=self.config.eval_start_string,
-            max_length=min(128, int(train_data_loader.seq_len * 0.4)),
-            temperature=1.0,
-            top_k=self.config.eval_top_k,
-        )
+        try:
+            total_loss = 0.0
+            batch_count = 0
+            for batch_data in tqdm(val_data_loader, desc="Evaluation", leave=False):
+                pred_probs, y = self.forward_fn(self.model, batch_data, mode="train")
+                # TODO: Decide whether validation should use the same label_smoothing setting
+                # as training, or intentionally report unsmoothed cross-entropy.
+                loss = self.loss_fn(pred_probs, y, pad_idx=val_data_loader.pad_idx)
+                total_loss += float(loss.item())
+                batch_count += 1
+            avg_val_loss = total_loss / max(batch_count, 1)
+            for callback in self.eval_callbacks:
+                callback(self.model, self.forward_fn, val_data_loader, self.config)
+            return avg_val_loss
+        finally:
+            self.model.train()
 
 
 def grad_l2_norm(parameters: Dict[str, Tensor]) -> float:

@@ -6,6 +6,7 @@ from autograd.backend import xp
 from autograd.tensor import Tensor
 from autograd.text import utils as text_utils
 from autograd.text.tokenizer import BytePairEncoder
+from autograd.tools.callback import sampling_callback, teacher_forcing_callback
 from autograd.tools.config_schema import CustomBpeConfig, TransformerTrainingConfig
 from autograd.tools.data import LLMDataLoader
 from autograd.tools.trainer import LLMTrainer
@@ -641,6 +642,7 @@ if __name__ == "__main__":
         loss_fn=functional.cross_entropy,
         config=CONFIG,
         forward_fn=TransformerForwardFn(),
+        eval_callbacks=[teacher_forcing_callback, sampling_callback],
     )
 
     train_data_loader = LLMDataLoader(
