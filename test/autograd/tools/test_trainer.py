@@ -1,7 +1,7 @@
 import math
 import os
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from autograd.backend import xp
 from autograd.nn import Module
@@ -274,8 +274,34 @@ class TestLLMTrainer(BaseTrainerTest):
         loss_val = self.trainer.train_step(batch, self.train_loader)
         self.assertAlmostEqual(loss_val, 1.23, places=5)
 
-    @patch("autograd.text.utils.inference")
-    def test_perform_inference_called(self, mock_inference):
-        # epoch=0 => calls _perform_inference => at least one inference function is called
-        self.trainer.fit(self.train_loader, self.val_loader)
-        self.assertTrue(mock_inference.called)
+    def test_evaluate_does_not_require_loader_metadata(self):
+        class MinimalLoader:
+            pad_idx = 0
+
+            def __init__(self, data):
+                self.data = data
+
+            def __iter__(self):
+                return iter(self.data)
+
+        avg_val_loss = self.trainer.evaluate(MinimalLoader(self.val_data))
+
+        self.assertAlmostEqual(avg_val_loss, 1.23, places=5)
+
+    def test_evaluate_runs_eval_callbacks_and_returns_val_loss(self):
+        callback = MagicMock()
+        trainer = LLMTrainer(
+            model_cls=MockModelClass,
+            optimizer_cls=MockOptimizerClass,
+            loss_fn=self.loss_fn,
+            forward_fn=self.forward_fn,
+            config=self.config,
+            eval_callbacks=[callback],
+        )
+
+        avg_val_loss = trainer.evaluate(self.val_loader)
+
+        self.assertAlmostEqual(avg_val_loss, 1.23, places=5)
+        callback.assert_called_once_with(
+            trainer.model, trainer.forward_fn, self.val_loader, trainer.config
+        )
