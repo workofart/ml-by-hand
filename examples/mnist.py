@@ -5,7 +5,13 @@ from openml.datasets import get_dataset  # pyright: ignore[reportMissingImports]
 from autograd import functional, nn, optim
 from autograd.backend import xp
 from autograd.tools.config_schema import GenericTrainingConfig
-from autograd.tools.data import SimpleDataLoader, train_test_split
+from autograd.tools.data import (
+    DataLoader,
+    PairedCollator,
+    PairedIterableDataset,
+    TransformDataset,
+    train_test_split,
+)
 from autograd.tools.metrics import accuracy, precision
 from autograd.tools.trainer import SimpleTrainer
 
@@ -249,20 +255,20 @@ def train_mnist_with_hinge_loss(
 
     one_vs_rest_models = []
 
-    def preprocess_for_digit(x, y, digit):
+    def target_transform_for_digit(digit):
         # Convert y into {+1, -1}
-        y_bin = 2 * (y == digit).astype(xp.int32) - 1
-        return x, y_bin
+        return lambda y: 2 * (xp.array(y) == digit).astype(xp.int32) - 1
 
     for digit in range(10):
         logger.info(f"Training digit={digit}")
-        train_loader = SimpleDataLoader(X_train, y_train, batch_size, shuffle=True)
-        test_loader = SimpleDataLoader(X_test, y_test, batch_size, shuffle=False)
-
-        # Use a lambda with a default parameter to capture the current digit.
-        train_loader.preprocess(lambda x, y, d=digit: preprocess_for_digit(x, y, d))
-        test_loader.preprocess(lambda x, y, d=digit: preprocess_for_digit(x, y, d))
-
+        train_loader = DataLoader(
+            TransformDataset(
+                PairedIterableDataset(X_train, y_train, shuffle=True),
+                target_transform=target_transform_for_digit(digit),
+            ),
+            batch_size=batch_size,
+            collate_fn=PairedCollator(),
+        )
         # Build a training configuration for the trainer.
         config = GenericTrainingConfig(
             total_epochs=epochs,
@@ -324,21 +330,20 @@ def train_mnist_one_vs_rest_model(
 
     one_vs_rest_models = []
 
-    def preprocess_for_digit(x, y, digit):
+    def target_transform_for_digit(digit):
         # Convert y into {0, 1}
-        y_bin = (y == digit).astype(xp.int32)
-        return x, y_bin
+        return lambda y: (xp.array(y) == digit).astype(xp.int32)
 
     for digit in range(10):
         logger.info(f"Training digit={digit}")
-        # Create fresh data loaders for each digit
-        train_loader = SimpleDataLoader(X_train, y_train, batch_size, shuffle=True)
-        test_loader = SimpleDataLoader(X_test, y_test, batch_size, shuffle=False)
-
-        # Freeze the current digit in the lambda via a default parameter.
-        train_loader.preprocess(lambda x, y, d=digit: preprocess_for_digit(x, y, d))
-        test_loader.preprocess(lambda x, y, d=digit: preprocess_for_digit(x, y, d))
-
+        train_loader = DataLoader(
+            TransformDataset(
+                PairedIterableDataset(X_train, y_train, shuffle=True),
+                target_transform=target_transform_for_digit(digit),
+            ),
+            batch_size=batch_size,
+            collate_fn=PairedCollator(),
+        )
         # Build the training configuration.
         config = GenericTrainingConfig(
             total_epochs=epochs,
@@ -388,8 +393,8 @@ def train_mnist_multiclass_model(
       - Optionally evaluates on test_data_loader if provided.
 
     Args:
-        train_data_loader (SimpleDataLoader): Data loader for training.
-        test_data_loader (SimpleDataLoader): Data loader for evaluation/testing.
+        train_data_loader (DataLoader): Data loader for training.
+        test_data_loader (DataLoader): Data loader for evaluation/testing.
         optimizer_cls: An optimizer class from autograd.optim, e.g., optim.Adam or optim.SGD.
         model_cls: A model class (nn.Module) defining the network architecture.
         loss_fn: A loss function from autograd.functional, e.g., cross_entropy.
@@ -419,7 +424,7 @@ if __name__ == "__main__":
       1) Fetch the 'mnist_784' dataset (ID=554) from OpenML.
       2) Subsample the data to 3000 examples (both X and y).
       3) Split into training (90%) and test (10%) sets.
-      4) Create SimpleDataLoader objects for each split.
+      4) Create DataLoader objects for each split.
       5) Train various model architectures, including:
          - A ResNet-like model using residual blocks.
          - A Multi-layer Perceptron (MLP) with optional batch normalization.
@@ -447,8 +452,16 @@ if __name__ == "__main__":
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.1)
 
     # Create data loaders with a consistent batch size.
-    train_data_loader = SimpleDataLoader(X_train, y_train, batch_size=512, shuffle=True)
-    val_data_loader = SimpleDataLoader(X_test, y_test, batch_size=512, shuffle=False)
+    train_data_loader = DataLoader(
+        PairedIterableDataset(X_train, y_train, shuffle=True),
+        batch_size=512,
+        collate_fn=PairedCollator(),
+    )
+    val_data_loader = DataLoader(
+        PairedIterableDataset(X_test, y_test, shuffle=False),
+        batch_size=512,
+        collate_fn=PairedCollator(),
+    )
 
     # Train several multi-class models.
     train_mnist_multiclass_model(

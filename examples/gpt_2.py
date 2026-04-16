@@ -10,9 +10,16 @@ from autograd.backend import xp
 from autograd.tensor import Tensor
 from autograd.text import utils as text_utils
 from autograd.text.tokenizer import BytePairEncoder
-from autograd.tools.callback import sampling_callback, teacher_forcing_callback
+from autograd.tools.callback import (
+    run_sampling_inference,
+    run_teacher_forcing_inference,
+)
 from autograd.tools.config_schema import CustomBpeConfig, TransformerTrainingConfig
-from autograd.tools.data import LLMDataLoader
+from autograd.tools.data import (
+    DataLoader,
+    LanguageModelingCollator,
+    TokenSequenceDataset,
+)
 from autograd.tools.trainer import LLMTrainer
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -320,41 +327,65 @@ if __name__ == "__main__":
         loss_fn=functional.cross_entropy,
         config=CONFIG,
         forward_fn=GPT2ForwardFn(),
-        eval_callbacks=[teacher_forcing_callback, sampling_callback],
     )
 
-    train_data_loader = LLMDataLoader(
-        data=xp.array(train_data, dtype=xp.int32),
-        bpe=bpe,
+    pad_idx = bpe.encode("<PAD>", allowed_special={"<PAD>"})[0]
+    sos_idx = bpe.encode("<SOS>", allowed_special={"<SOS>"})[0]
+
+    train_data_loader = DataLoader(
+        dataset=TokenSequenceDataset(
+            data=xp.array(train_data, dtype=xp.int32),
+            seq_len=trainer.model.max_seq_len,
+            shuffle=True,
+            random_window=True,
+        ),
         batch_size=CONFIG.batch_size,
-        seq_len=trainer.model.max_seq_len,
-        steps_per_epoch=CONFIG.steps_per_epoch,
-        shuffle=True,
-        include_decoder_input=CONFIG.include_decoder_input,
-        create_padding_masks=CONFIG.create_padding_masks,
+        collate_fn=LanguageModelingCollator(
+            max_tokens=trainer.model.max_seq_len + 1,
+            pad_idx=pad_idx,
+            sos_idx=sos_idx,
+            include_decoder_input=CONFIG.include_decoder_input,
+            create_padding_masks=CONFIG.create_padding_masks,
+        ),
     )
-    test_data_loader = LLMDataLoader(
-        data=xp.array(test_data, dtype=xp.int32),
-        bpe=bpe,
+    test_data_loader = DataLoader(
+        dataset=TokenSequenceDataset(
+            data=xp.array(test_data, dtype=xp.int32),
+            seq_len=trainer.model.max_seq_len,
+            shuffle=False,
+            random_window=True,
+        ),
         batch_size=CONFIG.batch_size // 2,
-        seq_len=trainer.model.max_seq_len,
-        steps_per_epoch=CONFIG.eval_iters,
-        shuffle=False,
-        include_decoder_input=CONFIG.include_decoder_input,
-        create_padding_masks=CONFIG.create_padding_masks,
+        collate_fn=LanguageModelingCollator(
+            max_tokens=trainer.model.max_seq_len + 1,
+            pad_idx=pad_idx,
+            sos_idx=sos_idx,
+            include_decoder_input=CONFIG.include_decoder_input,
+            create_padding_masks=CONFIG.create_padding_masks,
+        ),
     )
 
     trainer.fit(train_data_loader, test_data_loader)
 
+    if CONFIG.teacher_enforcing:
+        run_teacher_forcing_inference(
+            model=trainer.model,
+            forward_fn=GPT2ForwardFn(),
+            bpe=bpe,
+            groundtruth_data=xp.array(
+                test_data[: trainer.model.max_seq_len // 3], dtype=xp.int32
+            ),
+            max_length=trainer.model.max_seq_len // 3,
+        )
+
     # Inference test
     for k in range(5):
-        text_utils.inference(
+        run_sampling_inference(
             model=trainer.model,
-            prediction_func=GPT2ForwardFn(),
+            forward_fn=GPT2ForwardFn(),
             bpe=bpe,
-            start_tokens="\n",  # Example start token
+            start_tokens="\n",
             max_length=int(trainer.model.max_seq_len),
-            temperature=1.0,
             top_k=200,
         )
         print("\n------------------------\n")

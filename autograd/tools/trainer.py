@@ -127,6 +127,8 @@ class AbstractTrainer(ABC):
         batch_count = 0
         self.optimizer.zero_grad()
         for batch in tqdm(data_loader, desc="Training Batches", leave=False):
+            if batch_count >= self.config.steps_per_epoch:
+                break
             loss = self.train_step(batch, data_loader)
             total_loss += loss
             # Simulate larger batches by updating weights every N steps
@@ -433,6 +435,8 @@ class SimpleTrainer(AbstractTrainer):
         batch_count = 0
         all_preds, all_targets = [], []
         for batch_data in val_data_loader:
+            if batch_count >= self.config.eval_iters:
+                break
             batch_X, batch_y = batch_data
             y_pred = self.model(batch_X)
             loss = self.loss_fn(y_pred, batch_y)
@@ -650,6 +654,8 @@ class LLMTrainer(AbstractTrainer):
             total_loss = 0.0
             batch_count = 0
             for batch_data in tqdm(val_data_loader, desc="Evaluation", leave=False):
+                if batch_count >= self.config.eval_iters:
+                    break
                 pred_probs, y = self.forward_fn(self.model, batch_data, mode="train")
                 # TODO: Decide whether validation should use the same label_smoothing setting
                 # as training, or intentionally report unsmoothed cross-entropy.

@@ -1,40 +1,46 @@
-from typing import Any
+from typing import Optional
 
 from autograd import nn
+from autograd.backend import Array
 from autograd.text import utils as text_utils
-from autograd.tools.config_schema import TransformerTrainingConfig
+from autograd.text.tokenizer import BytePairEncoder
 
 
-def teacher_forcing_callback(
+# TODO: Convert these qualitative inference helpers into real trainer lifecycle
+# callbacks once the callback boundary is redesigned. For now they are invoked
+# manually from examples and do not participate in trainer evaluation.
+def run_teacher_forcing_inference(
     model: nn.Module,
     forward_fn: nn.AbstractLLMForwardFn,
-    val_data_loader: Any,
-    config: TransformerTrainingConfig,
-) -> None:
-    """Runs teacher-forcing qualitative evaluation when enabled in the config."""
-    if config.teacher_enforcing and hasattr(val_data_loader, "data"):
-        text_utils.inference(
-            model=model,
-            prediction_func=forward_fn,
-            bpe=val_data_loader.bpe,
-            groundtruth_data=val_data_loader.data[: val_data_loader.seq_len // 3],
-            max_length=val_data_loader.seq_len // 3,
-        )
-
-
-def sampling_callback(
-    model: nn.Module,
-    forward_fn: nn.AbstractLLMForwardFn,
-    val_data_loader: Any,
-    config: TransformerTrainingConfig,
-) -> None:
-    """Runs free-sampling qualitative evaluation."""
-    text_utils.inference(
+    bpe: BytePairEncoder,
+    groundtruth_data: Array,
+    max_length: int,
+) -> str:
+    """Runs teacher-forcing qualitative inference with explicit context."""
+    return text_utils.inference(
         model=model,
         prediction_func=forward_fn,
-        bpe=val_data_loader.bpe,
-        start_tokens=config.eval_start_string,
-        max_length=min(128, int(val_data_loader.seq_len * 0.4)),
+        bpe=bpe,
+        groundtruth_data=groundtruth_data,
+        max_length=max_length,
+    )
+
+
+def run_sampling_inference(
+    model: nn.Module,
+    forward_fn: nn.AbstractLLMForwardFn,
+    bpe: BytePairEncoder,
+    start_tokens: Optional[str],
+    max_length: int,
+    top_k: Optional[int] = None,
+) -> str:
+    """Runs free-sampling qualitative inference with explicit context."""
+    return text_utils.inference(
+        model=model,
+        prediction_func=forward_fn,
+        bpe=bpe,
+        start_tokens=start_tokens,
+        max_length=max_length,
         temperature=1.0,
-        top_k=config.eval_top_k,
+        top_k=top_k,
     )

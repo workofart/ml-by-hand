@@ -573,9 +573,15 @@ if __name__ == "__main__":
     X_val = to_one_hot(X_val, input_size)
 
     print("------------- Neural Turing Machine ---------------")
-    train_data_loader = data.SimpleDataLoader(X, y, batch_size=batch_size, shuffle=True)
-    val_data_loader = data.SimpleDataLoader(
-        X_val, y_val, batch_size=batch_size, shuffle=True
+    train_data_loader = data.DataLoader(
+        data.PairedIterableDataset(X, y, shuffle=True),
+        batch_size=batch_size,
+        collate_fn=data.PairedCollator(),
+    )
+    val_data_loader = data.DataLoader(
+        data.PairedIterableDataset(X_val, y_val, shuffle=True),
+        batch_size=batch_size,
+        collate_fn=data.PairedCollator(),
     )
 
     # Create training configuration for the Neural Turing Machine.

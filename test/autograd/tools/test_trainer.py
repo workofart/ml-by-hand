@@ -1,15 +1,27 @@
 import math
 import os
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from autograd.backend import xp
-from autograd.nn import Module
+from autograd.functional import cross_entropy
+from autograd.nn import AbstractLLMForwardFn, Module
 from autograd.optim import Optimizer
 from autograd.tensor import Tensor
+from autograd.tools.callback import (
+    run_sampling_inference,
+    run_teacher_forcing_inference,
+)
 from autograd.tools.config_schema import (
     GenericTrainingConfig,
     TransformerTrainingConfig,
+)
+from autograd.tools.data import (
+    DataLoader,
+    LanguageModelingCollator,
+    TokenSequenceDataset,
+    openai_chat_to_prompt_completion,
+    tokenize_prompt_completion,
 )
 from autograd.tools.trainer import LLMTrainer, SimpleTrainer
 
@@ -98,6 +110,42 @@ class MockOptimizerClass(Optimizer):
 
     def state_dict(self):
         return {}
+
+
+class MockBPE:
+    def encode(self, token, allowed_special=set()):
+        if token in allowed_special:
+            if token == "<PAD>":
+                return [0]
+            if token == "<SOS>":
+                return [1]
+        return [ord(char) for char in token]
+
+
+class PromptMaskAwareForwardFn(AbstractLLMForwardFn):
+    def __init__(self, vocab_size=512):
+        self.vocab_size = vocab_size
+
+    def _build_logits(self, y):
+        logits = xp.full(
+            (y.shape[0], y.shape[1], self.vocab_size),
+            -6.0,
+            dtype=xp.float32,
+        )
+        for batch_idx in range(y.shape[0]):
+            for token_idx in range(y.shape[1]):
+                target = int(y[batch_idx, token_idx])
+                predicted_class = target if target != 0 else 3
+                logits[batch_idx, token_idx, predicted_class] = 6.0
+        return Tensor(logits, requires_grad=True)
+
+    def train(self, model, batch_data):
+        _, _, y, _, _, _ = batch_data
+        return self._build_logits(y), y
+
+    def sample(self, model, batch_data):
+        _, _, y, _, _, _ = batch_data
+        return self._build_logits(y), None
 
 
 class BaseTrainerTest(unittest.TestCase):
@@ -196,6 +244,23 @@ class TestSimpleTrainer(BaseTrainerTest):
 
         trainer.fit(self.train_loader, self.val_loader)
         self.assertEqual(trainer.optimizer.step_call_count, len(self.train_data))
+
+    def test_fit_respects_steps_per_epoch_from_config(self):
+        self.config.total_epochs = 1
+        self.config.steps_per_epoch = 1
+
+        self.trainer.fit(self.train_loader, self.val_loader)
+
+        self.assertEqual(self.trainer.optimizer.step_call_count, 1)
+
+    def test_evaluate_respects_eval_iters_from_config(self):
+        self.config.eval_iters = 1
+        val_loader = MockDataLoader(self.val_data * 2)
+
+        avg_val_loss = self.trainer.evaluate(val_loader)
+
+        self.assertAlmostEqual(avg_val_loss, 1.23, places=5)
+        self.assertEqual(self.loss_fn.call_count, 1)
 
 
 class TestLLMTrainer(BaseTrainerTest):
@@ -305,3 +370,133 @@ class TestLLMTrainer(BaseTrainerTest):
         callback.assert_called_once_with(
             trainer.model, trainer.forward_fn, self.val_loader, trainer.config
         )
+
+    @patch("autograd.tools.callback.text_utils.inference")
+    def test_manual_qualitative_inference_helpers_do_not_depend_on_loader(
+        self, mock_inference
+    ):
+        bpe = MockBPE()
+        groundtruth = xp.arange(10, dtype=xp.int32)
+
+        teacher_forcing_text = run_teacher_forcing_inference(
+            model=self.trainer.model,
+            forward_fn=PromptMaskAwareForwardFn(),
+            bpe=bpe,
+            groundtruth_data=groundtruth,
+            max_length=3,
+        )
+        sampled_text = run_sampling_inference(
+            model=self.trainer.model,
+            forward_fn=PromptMaskAwareForwardFn(),
+            bpe=bpe,
+            start_tokens="ABC",
+            max_length=4,
+            top_k=5,
+        )
+
+        self.assertIs(mock_inference.return_value, teacher_forcing_text)
+        self.assertIs(mock_inference.return_value, sampled_text)
+        self.assertEqual(mock_inference.call_count, 2)
+
+    def test_llm_evaluate_respects_eval_iters_from_config(self):
+        self.config.eval_iters = 1
+        val_loader = MockDataLoader(self.val_data * 2, pad_idx=0, seq_len=10)
+
+        avg_val_loss = self.trainer.evaluate(val_loader)
+
+        self.assertAlmostEqual(avg_val_loss, 1.23, places=5)
+        self.assertEqual(self.loss_fn.call_count, 1)
+
+    def test_train_step_supports_sft_batches_from_generic_data_loader(self):
+        bpe = MockBPE()
+        pad_idx = bpe.encode("<PAD>", allowed_special={"<PAD>"})[0]
+        sos_idx = bpe.encode("<SOS>", allowed_special={"<SOS>"})[0]
+        tokenized_example = tokenize_prompt_completion(
+            openai_chat_to_prompt_completion(
+                {
+                    "messages": [
+                        {"role": "user", "content": "ABC"},
+                        {"role": "assistant", "content": "CB"},
+                    ]
+                }
+            ),
+            bpe,
+        )
+        loader = DataLoader(
+            dataset=TokenSequenceDataset(
+                token_sequences=[tokenized_example["tokens"]],
+                loss_masks=[tokenized_example["loss_mask"]],
+                shuffle=False,
+            ),
+            batch_size=1,
+            collate_fn=LanguageModelingCollator(
+                max_tokens=6,
+                pad_idx=pad_idx,
+                sos_idx=sos_idx,
+                include_decoder_input=False,
+                create_padding_masks=False,
+            ),
+        )
+        trainer = LLMTrainer(
+            model_cls=MockModelClass,
+            optimizer_cls=MockOptimizerClass,
+            loss_fn=cross_entropy,
+            forward_fn=PromptMaskAwareForwardFn(),
+            config=TransformerTrainingConfig(
+                total_epochs=1,
+                checkpoint_freq=1,
+                model_kwargs={"hidden_size": 128},
+                optimizer_kwargs={"lr": 0.01},
+                resume_epoch=None,
+                label_smoothing=0.0,
+                teacher_enforcing=False,
+                include_decoder_input=False,
+                create_padding_masks=False,
+            ),
+        )
+
+        batch = next(iter(loader))
+        logits, y = trainer.forward_fn(trainer.model, batch, mode="train")
+        expected_loss = cross_entropy(logits, y, pad_idx=loader.pad_idx)
+
+        train_loss = trainer.train_step(batch, loader)
+        val_loss = trainer.evaluate(loader)
+
+        self.assertAlmostEqual(train_loss, float(expected_loss.item()), places=6)
+        self.assertAlmostEqual(val_loss, float(expected_loss.item()), places=6)
+
+    def test_fit_supports_unsized_streaming_data_loaders(self):
+        bpe = MockBPE()
+        pad_idx = bpe.encode("<PAD>", allowed_special={"<PAD>"})[0]
+        sos_idx = bpe.encode("<SOS>", allowed_special={"<SOS>"})[0]
+        self.config.total_epochs = 1
+        self.config.steps_per_epoch = 1
+        self.config.eval_iters = 1
+
+        stream_loader = DataLoader(
+            dataset=TokenSequenceDataset(
+                data=xp.arange(100, dtype=xp.int32),
+                seq_len=4,
+                shuffle=False,
+                random_window=True,
+            ),
+            batch_size=2,
+            collate_fn=LanguageModelingCollator(
+                max_tokens=5,
+                pad_idx=pad_idx,
+                sos_idx=sos_idx,
+                include_decoder_input=False,
+                create_padding_masks=False,
+            ),
+        )
+        trainer = LLMTrainer(
+            model_cls=MockModelClass,
+            optimizer_cls=MockOptimizerClass,
+            loss_fn=cross_entropy,
+            forward_fn=PromptMaskAwareForwardFn(),
+            config=self.config,
+        )
+
+        trainer.fit(stream_loader, stream_loader)
+
+        self.assertEqual(trainer.optimizer.step_call_count, 1)

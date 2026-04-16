@@ -1,7 +1,20 @@
+"""
+Data pipeline boundary:
+
+1. Per-sample transforms/tokenization
+- dataset / transforms
+
+2. Batch assembly and batch-time shaping
+- collate_fn
+
+3. Training-specific logic
+- trainer / training loop / model forward
+"""
+
 import csv
 import os
 from abc import ABC, abstractmethod
-from typing import Any, Iterator, Optional, Tuple, Union
+from typing import Any, Callable, Iterator, Optional, Sequence, Tuple, Union
 from urllib.request import urlopen
 
 from pyarrow import parquet as pq  # pyright: ignore[reportMissingImports]
@@ -100,285 +113,550 @@ def load_data(
             return f.read()
 
 
-class AbstractDataLoader(ABC):
+class IterableDataset(ABC):
     """
-    An abstract base class for DataLoaders.
-    A base interface for DataLoaders that yield batches of data for training,
-    with an optional per-epoch hook.
-    """
+    Abstract interface for iterable datasets that yield single examples.
 
-    def __init__(self, batch_size: int, shuffle: bool = True) -> None:
-        """
-        Args:
-            batch_size (int): Number of samples per batch.
-            shuffle (bool): Whether to shuffle the data every epoch (implementation can vary).
-        """
-        self.batch_size = batch_size
-        self.shuffle = shuffle
+    Each iteration should yield one example dictionary. The exact keys depend on
+    the task, but examples should contain enough information for a downstream
+    `collate_fn` to build the final trainer batch.
+
+    Examples:
+        >>> class DummyIterableDataset(IterableDataset):
+        ...     def __iter__(self):
+        ...         yield {"tokens": xp.array([1, 2, 3], dtype=xp.int32)}
+        ...     def __len__(self):
+        ...         return 1
+        >>> dataset = DummyIterableDataset()
+        >>> next(iter(dataset))["tokens"].shape
+        (3,)
+    """
 
     def on_epoch_start(self) -> None:
-        """
-        Optional hook to perform actions at the start of an epoch.
-        The default implementation does nothing.
-        Subclasses (e.g. for shuffling) can override this method.
-        """
+        pass
+
+    @abstractmethod
+    def __iter__(self) -> Iterator[dict[str, Any]]:
         pass
 
     def __len__(self) -> int:
-        """
-        Returns the number of batches per epoch if defined,
-        otherwise raises an error.
-        """
-        raise NotImplementedError(
-            "This DataLoader does not support __len__ by default."
-        )
-
-    @abstractmethod
-    def __iter__(self) -> Iterator[Any]:
-        """
-        Should yield one batch at a time.
-        The batch format can vary depending on the type of data.
-        Please implement this method in the subclasses.
-        """
-        pass
+        raise TypeError(f"object of type '{self.__class__.__name__}' has no len()")
 
 
-class SimpleDataLoader(AbstractDataLoader):
+class PairedIterableDataset(IterableDataset):
     """
-    A basic DataLoader for supervised tasks (e.g., classification or regression).
-    It handles:
-      - In-memory storage of X and y.
-      - Optional shuffling at the start of each epoch.
-      - Batching data into (batch_X, batch_y) pairs.
+    Iterates over in-memory paired `(X, y)` data one example at a time.
 
     Examples:
-        >>> from autograd.backend import xp
-        >>> from your_module import SimpleDataLoader  # Replace 'your_module' with your actual module name.
-        >>> # Create dummy data: 100 samples, each with 10 features.
-        >>> X = xp.random.uniform(0.0, 1.0, (100, 10))
-        >>> y = xp.random.randint(0, 2, (100, 1))
-        >>> # Instantiate the data loader with a batch size of 32.
-        >>> loader = SimpleDataLoader(X, y, batch_size=32, shuffle=True)
-        >>> # Iterate over batches.
-        >>> for batch_X, batch_y in loader:
-        ...     print(batch_X.shape, batch_y.shape)
-        (32, 10) (32, 1)
+        >>> X = xp.arange(6).reshape(3, 2)
+        >>> y = xp.array([0, 1, 2])
+        >>> dataset = PairedIterableDataset(X, y, shuffle=False)
+        >>> example = next(iter(dataset))
+        >>> example["inputs"].shape, int(example["targets"])
+        ((2,), 0)
     """
 
     def __init__(
-        self,
-        X: Array,
-        y: Array,
-        batch_size: int = 32,
-        shuffle: bool = True,
+        self, X: Sequence[Any], y: Sequence[Any], shuffle: bool = True
     ) -> None:
-        super().__init__(batch_size=batch_size, shuffle=shuffle)
+        if len(X) != len(y):
+            raise ValueError("X and y must contain the same number of examples")
         self.X = X
         self.y = y
+        self.shuffle = shuffle
         self.num_samples = len(X)
         self.indices = xp.arange(self.num_samples)
 
     def on_epoch_start(self) -> None:
-        # Shuffle the index array if needed.
         if self.shuffle:
             self.indices = xp.random.permutation(self.num_samples)
 
-    def __iter__(self) -> Iterator[Tuple[Array, Array]]:
-        for start in range(0, self.num_samples, self.batch_size):
-            batch_indices = self.indices[start : start + self.batch_size]
-            yield self.X[batch_indices], self.y[batch_indices]
+    def __iter__(self) -> Iterator[dict[str, Array]]:
+        for sample_idx in self.indices:
+            idx = int(sample_idx)
+            yield {"inputs": self.X[idx], "targets": self.y[idx]}
 
     def __len__(self) -> int:
-        # Compute the number of batches per epoch.
-        return (self.num_samples + self.batch_size - 1) // self.batch_size
-
-    def preprocess(self, preprocess_func) -> None:
-        """
-        Optionally preprocess the data using the provided function.
-
-        Args:
-            preprocess_func: A function that takes (X, y) and returns preprocessed (X, y).
-
-        Examples:
-            >>> def dummy_preprocess(X, y):
-            ...     return X * 2, y  # Example: double the features.
-            >>> loader.preprocess(dummy_preprocess)
-        """
-        self.X, self.y = preprocess_func(self.X, self.y)
+        return self.num_samples
 
 
-class LLMDataLoader(AbstractDataLoader):
+class TransformDataset(IterableDataset):
     """
-    A specialized DataLoader for language modeling or next-token tasks,
-    where it samples random chunks of contiguous sequences of data.
-    It handles:
-      - A single tokenized array (e.g. integer IDs of text).
-      - Random chunk sampling: each batch picks 'batch_size' random slices
-        of length (seq_len+1).
-      - Optional creation of a decoder_input by prepending a special <SOS> token.
-      - Optional creation of a causal mask or other masks.
-      - If a finite 'steps_per_epoch' is provided, each epoch produces that number of batches.
-        Otherwise, batches can be yielded infinitely.
+    Wraps another dataset and applies per-example transforms during iteration.
 
     Examples:
-        >>> from autograd.backend import xp
-        >>> from your_module import LLMDataLoader  # Replace 'your_module' with your actual module name.
-        >>> # Define a dummy Byte Pair Encoder (BPE) with minimal encode/decode functionality.
-        >>> class DummyBPE:
-        ...     def encode(self, text, allowed_special=None):
-        ...         # Simple encoding: return ASCII codes of characters.
-        ...         return [ord(c) for c in text]
-        ...     def decode(self, tokens):
-        ...         return ''.join(chr(t) for t in tokens)
-        >>> bpe = DummyBPE()
-        >>>
-        >>> # Create dummy token data: an array of token IDs (integers).
-        >>> token_data = xp.random.randint(0, 100, (1000,))  # 1000 tokens.
-        >>>
-        >>> # Instantiate the LLMDataLoader.
-        >>> loader = LLMDataLoader(
-        ...     data=token_data,
-        ...     bpe=bpe,
-        ...     batch_size=4,
-        ...     seq_len=10,
-        ...     steps_per_epoch=5,  # Produce 5 batches per epoch.
-        ...     include_decoder_input=True,
-        ...     create_padding_masks=True,
-        ...     sos_token="<SOS>",
-        ...     pad_token="<PAD>"
+        >>> dataset = PairedIterableDataset(
+        ...     xp.arange(6).reshape(3, 2),
+        ...     xp.array([0, 1, 2]),
+        ...     shuffle=False,
         ... )
-        >>>
-        >>> # Iterate over one epoch of batches.
-        >>> for batch in loader:
-        ...     X_chunk, dec_inp, Y_chunk, smask, tmask, causal_mask = batch
-        ...     print(X_chunk.shape, Y_chunk.shape)
-        (4, 10) (4, 10)
+        >>> wrapped = TransformDataset(
+        ...     dataset,
+        ...     target_transform=lambda y: xp.array(int(y == 1), dtype=xp.int32),
+        ... )
+        >>> int(next(iter(wrapped))["targets"])
+        0
     """
 
     def __init__(
         self,
-        data: Array,  # array of token IDs
-        bpe,
-        batch_size: int,
-        seq_len: int,
-        shuffle: bool = True,
-        steps_per_epoch: Optional[int] = 1000,
-        include_decoder_input: bool = True,
-        create_padding_masks: bool = True,
-        sos_token: Union[str, bytes] = "<SOS>",
-        pad_token: Union[str, bytes] = "<PAD>",
+        dataset: IterableDataset,
+        transform: Optional[Callable[[Array], Array]] = None,
+        target_transform: Optional[Callable[[Array], Array]] = None,
     ) -> None:
-        """
-        Args:
-            data (Array): Tokenized integer IDs of the entire dataset.
-            bpe: BytePairEncoder or other tokenizer with .encode() / .decode().
-            batch_size (int): Number of sequences per batch.
-            seq_len (int): Length of each sequence (X) fed to the model.
-                           (seq_len+1 tokens are sliced so that position i can predict i+1).
-            shuffle (bool): Whether to randomize each epoch's sampling.
-            steps_per_epoch (Optional[int]): If given, produces exactly this many batches per epoch.
-                                             Otherwise, batches can be yielded infinitely.
-            include_decoder_input (bool): If True, creates a separate decoder input array.
-            create_padding_masks (bool): If True, creates padding masks for variable-length sequences.
-            sos_token (Union[str, bytes]): The start-of-sequence token for the decoder input.
-            pad_token (Union[str, bytes]): The token for padding.
-        """
-        super().__init__(batch_size=batch_size, shuffle=shuffle)
-
-        self.data = xp.array(data)
-        self.bpe = bpe
-        self.seq_len = seq_len
-        self.steps_per_epoch = steps_per_epoch
-        self.include_decoder_input = include_decoder_input
-        self.create_padding_masks = create_padding_masks
-
-        # For ignoring or masking out pad tokens:
-        self.pad_idx = bpe.encode(pad_token, allowed_special={pad_token})[0]
-        if self.include_decoder_input:
-            self.sos_idx = bpe.encode(sos_token, allowed_special={sos_token})[0]
-        else:
-            self.sos_idx = None
-
-        self.data_size = len(self.data)
+        self.dataset = dataset
+        self.transform = transform
+        self.target_transform = target_transform
 
     def on_epoch_start(self) -> None:
-        """
-        Called at the start of each epoch.
-        For random chunking, reseeds the RNG to ensure different random offsets each epoch if shuffle is True.
-        """
-        if self.shuffle:
-            xp.random.seed(int.from_bytes(os.urandom(4), "big"))
+        self.dataset.on_epoch_start()
 
-    def __iter__(
+    def __iter__(self) -> Iterator[dict[str, Array]]:
+        for example in self.dataset:
+            transformed_example = dict(example)
+            if self.transform is not None:
+                transformed_example["inputs"] = self.transform(
+                    xp.array(example["inputs"])
+                )
+            if self.target_transform is not None:
+                transformed_example["targets"] = self.target_transform(
+                    xp.array(example["targets"])
+                )
+            yield transformed_example
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+
+class TokenSequenceDataset(IterableDataset):
+    """
+    Iterates over LM token sequences with per-token loss masks.
+
+    This class supports two modes:
+    - finite examples stored in memory
+    - infinite random windows sampled from one flat token stream
+
+    Examples:
+        >>> dataset = TokenSequenceDataset(
+        ...     token_sequences=[xp.array([10, 11, 20], dtype=xp.int32)],
+        ...     loss_masks=[xp.array([0, 0, 1], dtype=xp.int32)],
+        ...     shuffle=False,
+        ... )
+        >>> example = next(iter(dataset))
+        >>> example["tokens"].tolist(), example["loss_mask"].tolist()
+        ([10, 11, 20], [0, 0, 1])
+        >>> random_window_dataset = TokenSequenceDataset(
+        ...     data=xp.arange(32, dtype=xp.int32),
+        ...     seq_len=4,
+        ...     shuffle=False,
+        ...     random_window=True,
+        ... )
+        >>> next(iter(random_window_dataset))["tokens"].shape
+        (5,)
+    """
+
+    def __init__(
         self,
-    ) -> Iterator[
-        Tuple[
-            Array,  # X_chunk: (batch_size, seq_len)
-            Optional[Array],  # dec_inp: (batch_size, seq_len) or None
-            Array,  # Y_chunk: (batch_size, seq_len)
-            Optional[Array],  # source mask (e.g., padding mask)
-            Optional[Array],  # target mask (e.g., causal + padding)
-            Optional[Array],  # causal mask
-        ]
-    ]:
-        step = 0
-        # Allow infinite iteration if steps_per_epoch is None.
-        while self.steps_per_epoch is None or step < self.steps_per_epoch:
-            step += 1
+        token_sequences: Optional[Sequence[Array]] = None,
+        loss_masks: Optional[Sequence[Array]] = None,
+        *,
+        data: Optional[Array] = None,
+        seq_len: Optional[int] = None,
+        shuffle: bool = True,
+        random_window: bool = False,
+    ) -> None:
+        self.shuffle = shuffle
+        self.random_window = random_window
 
+        if self.random_window:
+            if data is None or seq_len is None:
+                raise ValueError("random_window datasets require both data and seq_len")
+            if token_sequences is not None or loss_masks is not None:
+                raise ValueError(
+                    "random_window datasets do not accept token_sequences or loss_masks"
+                )
+            self.data = xp.array(data, dtype=xp.int32)
+            self.seq_len = seq_len
+            self.data_size = len(self.data)
+            return
+
+        if token_sequences is None:
+            raise ValueError("token_sequences are required when random_window=False")
+        if loss_masks is None:
+            loss_masks = [
+                xp.ones((len(tokens),), dtype=xp.int32) for tokens in token_sequences
+            ]
+        if len(token_sequences) != len(loss_masks):
+            raise ValueError(
+                "token_sequences and loss_masks must contain the same number of examples"
+            )
+        self.examples = []
+        for tokens, loss_mask in zip(token_sequences, loss_masks):
+            tokens_array = xp.array(tokens, dtype=xp.int32)
+            loss_mask_array = xp.array(loss_mask, dtype=xp.int32)
+            if len(tokens_array) != len(loss_mask_array):
+                raise ValueError(
+                    "token sequence and loss mask must have the same length"
+                )
+            self.examples.append({"tokens": tokens_array, "loss_mask": loss_mask_array})
+        self.num_examples = len(self.examples)
+        self.indices = xp.arange(self.num_examples)
+
+    def on_epoch_start(self) -> None:
+        if self.random_window:
+            if self.shuffle:
+                xp.random.seed(int.from_bytes(os.urandom(4), "big"))
+            return
+        if self.shuffle:
+            self.indices = xp.random.permutation(self.num_examples)
+
+    def __iter__(self) -> Iterator[dict[str, Array]]:
+        if self.random_window:
             max_offset = self.data_size - (self.seq_len + 1)
             if max_offset < 1:
                 raise ValueError(
                     f"Dataset too small ({self.data_size} tokens) for seq_len={self.seq_len + 1}"
                 )
+            while True:
+                offset = int(xp.random.randint(0, max_offset, (), dtype=xp.int32))
+                tokens = self.data[offset : offset + self.seq_len + 1]
+                yield {
+                    "tokens": tokens,
+                    "loss_mask": xp.ones(tokens.shape, dtype=xp.int32),
+                }
+            return
 
-            # Randomly choose starting offsets for each sequence in the batch.
-            offsets = xp.random.randint(
-                0, max_offset, (self.batch_size,), dtype=xp.int32
-            )
-            # Extract chunks of (seq_len+1) tokens.
-            batch_chunks = [
-                self.data[int(offset) : int(offset) + self.seq_len + 1]
-                for offset in offsets
-            ]
-            # Stack to shape: (batch_size, seq_len+1)
-            batch = xp.stack(batch_chunks, axis=0)
-
-            # Prepare input (X) and target (Y) by shifting the sequence.
-            X_chunk = batch[:, :-1]  # (batch_size, seq_len)
-            Y_chunk = batch[:, 1:]  # (batch_size, seq_len)
-
-            # Optionally create a decoder input by prepending the SOS token.
-            if self.include_decoder_input:
-                assert self.sos_idx is not None
-                sos_column = xp.full(
-                    (self.batch_size, 1), self.sos_idx, dtype=Y_chunk.dtype
-                )
-                dec_inp = xp.concatenate([sos_column, Y_chunk[:, :-1]], axis=1)
-            else:
-                dec_inp = None
-
-            # Create a causal mask (e.g., for next-token prediction).
-            causal_mask = text_utils.create_causal_mask(
-                seq_len=self.seq_len, batch_size=self.batch_size
-            )
-
-            smask, tmask = None, None
-            if self.create_padding_masks:
-                smask = text_utils.create_padding_mask(X_chunk, self.pad_idx)
-                pmask = text_utils.create_padding_mask(Y_chunk, self.pad_idx)
-                tmask = pmask + causal_mask if causal_mask is not None else pmask
-
-            yield (
-                X_chunk,  # (batch_size, seq_len)
-                dec_inp,  # (batch_size, seq_len) or None
-                Y_chunk,  # (batch_size, seq_len)
-                smask,  # source mask or None
-                tmask,  # target mask or None
-                causal_mask,  # causal mask or None
-            )
+        for sample_idx in self.indices:
+            example = self.examples[int(sample_idx)]
+            yield {
+                "tokens": example["tokens"],
+                "loss_mask": example["loss_mask"],
+            }
 
     def __len__(self) -> int:
-        if self.steps_per_epoch is None:
-            raise NotImplementedError("Infinite DataLoader does not support __len__.")
-        return self.steps_per_epoch
+        if self.random_window:
+            raise TypeError(f"object of type '{self.__class__.__name__}' has no len()")
+        return self.num_examples
+
+
+def openai_chat_to_prompt_completion(chat_example: dict[str, Any]) -> dict[str, str]:
+    """
+    Converts one OpenAI chat-format SFT record into prompt/completion text.
+
+    Examples:
+        >>> example = openai_chat_to_prompt_completion(
+        ...     {
+        ...         "messages": [
+        ...             {"role": "user", "content": "ABC"},
+        ...             {"role": "assistant", "content": "DE"},
+        ...         ]
+        ...     },
+        ... )
+        >>> example["prompt_text"], example["completion_text"]
+        ('ABC', 'DE')
+    """
+    messages = chat_example.get("messages")
+    if not messages:
+        raise ValueError("chat example must contain at least one message")
+    if messages[-1].get("role") != "assistant":
+        raise ValueError("chat example must end with an assistant message")
+
+    prompt_parts = []
+    for message in messages[:-1]:
+        content = message.get("content")
+        if not isinstance(content, str):
+            raise ValueError("message content must be a string")
+        prompt_parts.append(content)
+
+    response_content = messages[-1].get("content")
+    if not isinstance(response_content, str):
+        raise ValueError("message content must be a string")
+
+    return {
+        "prompt_text": "".join(prompt_parts),
+        "completion_text": response_content,
+    }
+
+
+def tokenize_prompt_completion(
+    prompt_completion_example: dict[str, str], bpe
+) -> dict[str, Array]:
+    """
+    Tokenizes one prompt/completion example into LM tokens and a loss mask.
+
+    Examples:
+        >>> class DummyBPE:
+        ...     def encode(self, text, allowed_special=None):
+        ...         return [ord(char) for char in text]
+        >>> example = tokenize_prompt_completion(
+        ...     {"prompt_text": "ABC", "completion_text": "DE"},
+        ...     DummyBPE(),
+        ... )
+        >>> example["tokens"].tolist(), example["loss_mask"].tolist()
+        ([65, 66, 67, 68, 69], [0, 0, 0, 1, 1])
+    """
+    prompt_tokens = xp.array(
+        bpe.encode(prompt_completion_example["prompt_text"]),
+        dtype=xp.int32,
+    )
+    completion_tokens = xp.array(
+        bpe.encode(prompt_completion_example["completion_text"]),
+        dtype=xp.int32,
+    )
+    if len(completion_tokens) == 0:
+        raise ValueError("assistant completion must contain at least one token")
+    return {
+        "tokens": xp.concatenate([prompt_tokens, completion_tokens], axis=0),
+        "loss_mask": xp.concatenate(
+            [
+                xp.zeros(prompt_tokens.shape, dtype=xp.int32),
+                xp.ones(completion_tokens.shape, dtype=xp.int32),
+            ],
+            axis=0,
+        ),
+    }
+
+
+def pack_tokens(tokens: Array, max_tokens: int, pad_idx: int) -> Array:
+    """
+    Left-truncates and right-pads one token sequence to `max_tokens`.
+
+    Examples:
+        >>> packed = pack_tokens(
+        ...     tokens=xp.array([10, 11, 12, 20, 21]),
+        ...     max_tokens=6,
+        ...     pad_idx=0,
+        ... )
+        >>> packed.shape
+        (6,)
+    """
+    if len(tokens) > max_tokens:
+        tokens = tokens[-max_tokens:]
+    if len(tokens) < max_tokens:
+        pad_width = max_tokens - len(tokens)
+        tokens = xp.concatenate(
+            [tokens, xp.full((pad_width,), pad_idx, dtype=xp.int32)],
+            axis=0,
+        )
+    return tokens
+
+
+class Collator(ABC):
+    """
+    Abstract interface for collators that turn example lists into batches.
+    """
+
+    @abstractmethod
+    def __call__(self, examples: Sequence[dict[str, Array]]) -> Any:
+        pass
+
+
+class PairedCollator(Collator):
+    """
+    Batches paired examples from `PairedIterableDataset`.
+
+    Examples:
+        >>> collator = PairedCollator()
+        >>> batch_X, batch_y = collator(
+        ...     [
+        ...         {"inputs": xp.array([1, 2]), "targets": xp.array(0)},
+        ...         {"inputs": xp.array([3, 4]), "targets": xp.array(1)},
+        ...     ]
+        ... )
+        >>> batch_X.shape, batch_y.shape
+        ((2, 2), (2,))
+    """
+
+    def __call__(self, examples: Sequence[dict[str, Array]]) -> Tuple[Array, Array]:
+        batch_X = xp.stack(
+            [xp.array(example["inputs"]) for example in examples], axis=0
+        )
+        batch_y = xp.stack(
+            [xp.array(example["targets"]) for example in examples],
+            axis=0,
+        )
+        return batch_X, batch_y
+
+
+class OneHotCollator(Collator):
+    """
+    Batches token-id examples and materializes one-hot inputs.
+
+    This keeps token IDs in memory and expands them to one-hot features at
+    batch time.
+
+    Examples:
+        >>> collator = OneHotCollator(num_classes=4)
+        >>> batch_X, batch_y = collator(
+        ...     [
+        ...         {"inputs": xp.array([0, 2]), "targets": xp.array(1)},
+        ...         {"inputs": xp.array([1, 3]), "targets": xp.array(0)},
+        ...     ]
+        ... )
+        >>> batch_X.shape, batch_y.shape
+        ((2, 2, 4), (2,))
+    """
+
+    def __init__(self, num_classes: int, dtype: Array = xp.float32) -> None:
+        self.num_classes = num_classes
+        self.dtype = dtype
+
+    def __call__(self, examples: Sequence[dict[str, Array]]) -> Tuple[Array, Array]:
+        # TODO: replace batch-time one-hot with direct token-id model inputs.
+        eye = xp.eye(self.num_classes, dtype=self.dtype)
+        batch_tokens = xp.stack(
+            [xp.array(example["inputs"], dtype=xp.int32) for example in examples],
+            axis=0,
+        )
+        batch_y = xp.stack(
+            [xp.array(example["targets"]) for example in examples],
+            axis=0,
+        )
+        return eye[batch_tokens], batch_y
+
+
+class LanguageModelingCollator(Collator):
+    """
+    Builds the full LM trainer batch tuple from token sequences and loss masks.
+
+    Examples:
+        >>> collator = LanguageModelingCollator(
+        ...     max_tokens=4,
+        ...     pad_idx=0,
+        ...     sos_idx=1,
+        ...     include_decoder_input=True,
+        ...     create_padding_masks=False,
+        ... )
+        >>> batch = collator(
+        ...     [
+        ...         {
+        ...             "tokens": xp.array([1, 2, 3, 4], dtype=xp.int32),
+        ...             "loss_mask": xp.array([1, 1, 1, 1], dtype=xp.int32),
+        ...         }
+        ...     ],
+        ... )
+        >>> len(batch), batch[0].shape, batch[2].shape
+        (6, (1, 3), (1, 3))
+    """
+
+    def __init__(
+        self,
+        max_tokens: int,
+        pad_idx: int,
+        sos_idx: Optional[int] = None,
+        include_decoder_input: bool = True,
+        create_padding_masks: bool = True,
+        packer: Optional[Callable[[Array, int, int], Array]] = None,
+    ) -> None:
+        self.max_tokens = max_tokens
+        self.pad_idx = pad_idx
+        self.sos_idx = sos_idx
+        self.include_decoder_input = include_decoder_input
+        self.create_padding_masks = create_padding_masks
+        self.packer = packer or pack_tokens
+
+    def __call__(
+        self, examples: Sequence[dict[str, Array]]
+    ) -> Tuple[
+        Array, Optional[Array], Array, Optional[Array], Optional[Array], Optional[Array]
+    ]:
+        batch_inputs = []
+        batch_targets = []
+
+        for example in examples:
+            tokens = xp.array(example["tokens"], dtype=xp.int32)
+            loss_mask = xp.array(
+                example.get(
+                    "loss_mask",
+                    xp.ones(tokens.shape, dtype=xp.int32),
+                ),
+                dtype=xp.int32,
+            )
+            if len(tokens) != len(loss_mask):
+                raise ValueError("tokens and loss_mask must have the same length")
+
+            packed_tokens = self.packer(tokens, self.max_tokens, self.pad_idx)
+            packed_loss_mask = self.packer(loss_mask, self.max_tokens, 0)
+            input_tokens = packed_tokens[:-1]
+            target_tokens = xp.array(packed_tokens[1:])
+            target_loss_mask = packed_loss_mask[1:]
+            target_tokens[target_loss_mask == 0] = self.pad_idx
+
+            batch_inputs.append(input_tokens)
+            batch_targets.append(target_tokens)
+
+        X_chunk = xp.stack(batch_inputs, axis=0)
+        Y_chunk = xp.stack(batch_targets, axis=0)
+        batch_size = X_chunk.shape[0]
+        seq_len = X_chunk.shape[1]
+
+        if self.include_decoder_input:
+            assert self.sos_idx is not None
+            sos_column = xp.full((batch_size, 1), self.sos_idx, dtype=Y_chunk.dtype)
+            dec_inp = xp.concatenate([sos_column, Y_chunk[:, :-1]], axis=1)
+        else:
+            dec_inp = None
+
+        causal_mask = text_utils.create_causal_mask(
+            seq_len=seq_len, batch_size=batch_size
+        )
+
+        smask, tmask = None, None
+        if self.create_padding_masks:
+            smask = text_utils.create_padding_mask(X_chunk, self.pad_idx)
+            pmask = text_utils.create_padding_mask(Y_chunk, self.pad_idx)
+            tmask = pmask + causal_mask if causal_mask is not None else pmask
+
+        return (
+            X_chunk,
+            dec_inp,
+            Y_chunk,
+            smask,
+            tmask,
+            causal_mask,
+        )
+
+
+class DataLoader:
+    """
+    Thin generic data loader that batches examples from a dataset and applies a collator.
+
+    Examples:
+        >>> X = xp.arange(6).reshape(3, 2)
+        >>> y = xp.array([0, 1, 2])
+        >>> dataset = PairedIterableDataset(X, y, shuffle=False)
+        >>> loader = DataLoader(dataset, batch_size=2, collate_fn=PairedCollator())
+        >>> batch_X, batch_y = next(iter(loader))
+        >>> batch_X.shape, batch_y.shape
+        ((2, 2), (2,))
+    """
+
+    def __init__(
+        self,
+        dataset: IterableDataset,
+        batch_size: int,
+        collate_fn: Optional[Collator] = None,
+    ) -> None:
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.collate_fn = collate_fn
+        self.pad_idx = getattr(collate_fn, "pad_idx", None)
+
+    def on_epoch_start(self) -> None:
+        self.dataset.on_epoch_start()
+
+    def __iter__(self) -> Iterator[Any]:
+        batch_examples = []
+        for example in self.dataset:
+            batch_examples.append(example)
+            if len(batch_examples) < self.batch_size:
+                continue
+
+            yield self.collate_fn(batch_examples) if self.collate_fn else batch_examples
+            batch_examples = []
+
+        if batch_examples:
+            yield self.collate_fn(batch_examples) if self.collate_fn else batch_examples
+
+    def __len__(self) -> int:
+        return (len(self.dataset) + self.batch_size - 1) // self.batch_size
