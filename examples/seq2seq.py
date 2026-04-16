@@ -1,7 +1,12 @@
 from autograd import functional, nn, optim, tensor
 from autograd.text.utils import create_vocabulary, text_to_one_hot_and_sparse
 from autograd.tools.config_schema import GenericTrainingConfig
-from autograd.tools.data import SimpleDataLoader, load_data
+from autograd.tools.data import (
+    DataLoader,
+    PairedCollator,
+    PairedIterableDataset,
+    load_data,
+)
 from autograd.tools.trainer import SimpleTrainer
 
 """
@@ -137,7 +142,7 @@ def main():
       2. Parses the data into source and target sequences using parse_data_into_xy.
       3. Creates a vocabulary from the combined source and target texts.
       4. Converts the text sequences into one-hot encoded features and integer index matrices.
-      5. Creates SimpleDataLoader objects for training and testing.
+      5. Creates DataLoader objects for training and testing.
       6. Configures the training parameters via a GenericTrainingConfig.
       7. Creates a SimpleTrainer with the Seq2Seq model and trains the model.
 
@@ -171,17 +176,15 @@ def main():
         train_y, vocab, max_sequence_length=60
     )
 
-    train_data_loader = SimpleDataLoader(
-        features,
-        labels_vocab_idx,
+    train_data_loader = DataLoader(
+        PairedIterableDataset(features, labels_vocab_idx, shuffle=True),
         batch_size=32,
-        shuffle=True,
+        collate_fn=PairedCollator(),
     )
-    test_data_loader = SimpleDataLoader(
-        test_features,
-        test_labels_vocab_idx,
+    test_data_loader = DataLoader(
+        PairedIterableDataset(test_features, test_labels_vocab_idx, shuffle=False),
         batch_size=32,
-        shuffle=False,
+        collate_fn=PairedCollator(),
     )
 
     # Build a training configuration for the Seq2Seq model.

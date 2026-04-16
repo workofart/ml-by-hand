@@ -6,7 +6,9 @@ from autograd.backend import xp
 from autograd.text.utils import create_vocabulary
 from autograd.tools.config_schema import GenericTrainingConfig
 from autograd.tools.data import (
-    SimpleDataLoader,
+    DataLoader,
+    OneHotCollator,
+    PairedIterableDataset,
     load_data,
     train_test_split,
 )
@@ -29,25 +31,6 @@ def reviews_to_token_ids(reviews, vocabulary, max_sequence_length, pad_str="<PAD
         matrix.append(token_ids)
 
     return xp.array(matrix, dtype=xp.int32)
-
-
-class OneHotMovieSentimentDataLoader(SimpleDataLoader):
-    """Keep token IDs in memory and materialize one-hot features per batch."""
-
-    def __init__(self, X, y, vocab_size, batch_size=32, shuffle=True) -> None:
-        super().__init__(X, y, batch_size=batch_size, shuffle=shuffle)
-        self.vocab_size = vocab_size
-
-    def __iter__(self):
-        # TODO: replace batch-time one-hot with direct token-id model inputs.
-        eye = xp.eye(self.vocab_size, dtype=xp.float32)
-        for batch_indices in self._batch_indices():
-            batch_tokens = self.X[batch_indices]
-            yield eye[batch_tokens], self.y[batch_indices]
-
-    def _batch_indices(self):
-        for start in range(0, self.num_samples, self.batch_size):
-            yield self.indices[start : start + self.batch_size]
 
 
 def process_data(data):
@@ -168,8 +151,8 @@ class LSTM(nn.Module):
 
 def main(
     model_cls: type,
-    train_data_loader: SimpleDataLoader,
-    test_data_loader: SimpleDataLoader,
+    train_data_loader: DataLoader,
+    test_data_loader: DataLoader,
     config: GenericTrainingConfig,
 ):
     """
@@ -181,8 +164,8 @@ def main(
 
     Args:
         model_cls (type): The neural network model class to instantiate.
-        train_data_loader (SimpleDataLoader): Data loader for the training data.
-        test_data_loader (SimpleDataLoader): Data loader for the validation/testing data.
+        train_data_loader (DataLoader): Data loader for the training data.
+        test_data_loader (DataLoader): Data loader for the validation/testing data.
         config (GenericTrainingConfig): Configuration for training (epochs, learning rate, etc.).
     """
     logger.info(
@@ -209,7 +192,7 @@ if __name__ == "__main__":
       3) Processes the data by creating a vocabulary from the review texts, converting the texts to token IDs
          (with fixed sequence length), and mapping sentiment labels to binary values.
       4) Splits the processed data into training and testing sets.
-      5) Creates dataloaders that materialize one-hot features lazily per batch.
+      5) Creates datasets plus collators that materialize one-hot features lazily per batch.
       6) Constructs training configurations for both RNN and LSTM models using GenericTrainingConfig.
       7) Trains the RNN model followed by the LSTM model using the main training function.
       8) Logs training progress, checkpoints, and evaluation metrics.
@@ -228,19 +211,15 @@ if __name__ == "__main__":
     data = load_data("training_data/IMDB Dataset.csv", "training_data/IMDB Dataset.csv")
     assert not isinstance(data, str)
     X_train, X_test, y_train, y_test, vocab = process_data(data)
-    train_data_loader = OneHotMovieSentimentDataLoader(
-        X_train,
-        y_train,
-        vocab_size=len(vocab),
+    train_data_loader = DataLoader(
+        PairedIterableDataset(X_train, y_train, shuffle=True),
         batch_size=32,
-        shuffle=True,
+        collate_fn=OneHotCollator(num_classes=len(vocab)),
     )
-    test_data_loader = OneHotMovieSentimentDataLoader(
-        X_test,
-        y_test,
-        vocab_size=len(vocab),
+    test_data_loader = DataLoader(
+        PairedIterableDataset(X_test, y_test, shuffle=False),
         batch_size=32,
-        shuffle=False,
+        collate_fn=OneHotCollator(num_classes=len(vocab)),
     )
 
     # Train the RNN model.

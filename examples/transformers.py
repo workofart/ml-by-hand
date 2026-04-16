@@ -8,7 +8,11 @@ from autograd.text import utils as text_utils
 from autograd.text.tokenizer import BytePairEncoder
 from autograd.tools.callback import sampling_callback, teacher_forcing_callback
 from autograd.tools.config_schema import CustomBpeConfig, TransformerTrainingConfig
-from autograd.tools.data import LLMDataLoader
+from autograd.tools.data import (
+    DataLoader,
+    LanguageModelingCollator,
+    TokenSequenceDataset,
+)
 from autograd.tools.trainer import LLMTrainer
 
 
@@ -559,7 +563,7 @@ if __name__ == "__main__":
       5) Split the encoded data into training and testing portions.
       6) Update the model configuration with the vocabulary size from the BPE.
       7) Instantiate an LLMTrainer with the Transformer model, optimizer, loss function, and forward function.
-      8) Create LLMDataLoader objects for training and evaluation.
+      8) Create DataLoader objects for training and evaluation.
       9) Train the Transformer model.
       10) Run inference on the trained model to generate output text.
 
@@ -645,25 +649,40 @@ if __name__ == "__main__":
         eval_callbacks=[teacher_forcing_callback, sampling_callback],
     )
 
-    train_data_loader = LLMDataLoader(
-        data=xp.array(train_data, dtype=xp.int32),
-        bpe=bpe,
+    pad_idx = bpe.encode("<PAD>", allowed_special={"<PAD>"})[0]
+    sos_idx = bpe.encode("<SOS>", allowed_special={"<SOS>"})[0]
+
+    train_data_loader = DataLoader(
+        dataset=TokenSequenceDataset(
+            data=xp.array(train_data, dtype=xp.int32),
+            seq_len=trainer.model.max_seq_len,
+            shuffle=True,
+            random_window=True,
+        ),
         batch_size=CONFIG.batch_size,
-        seq_len=trainer.model.max_seq_len,
-        steps_per_epoch=CONFIG.steps_per_epoch,
-        shuffle=True,
-        include_decoder_input=CONFIG.include_decoder_input,
-        create_padding_masks=CONFIG.create_padding_masks,
+        collate_fn=LanguageModelingCollator(
+            max_tokens=trainer.model.max_seq_len + 1,
+            pad_idx=pad_idx,
+            sos_idx=sos_idx,
+            include_decoder_input=CONFIG.include_decoder_input,
+            create_padding_masks=CONFIG.create_padding_masks,
+        ),
     )
-    test_data_loader = LLMDataLoader(
-        data=xp.array(test_data, dtype=xp.int32),
-        bpe=bpe,
+    test_data_loader = DataLoader(
+        dataset=TokenSequenceDataset(
+            data=xp.array(test_data, dtype=xp.int32),
+            seq_len=trainer.model.max_seq_len,
+            shuffle=False,
+            random_window=True,
+        ),
         batch_size=CONFIG.batch_size // 2,
-        seq_len=trainer.model.max_seq_len,
-        steps_per_epoch=CONFIG.eval_iters,
-        shuffle=False,
-        include_decoder_input=CONFIG.include_decoder_input,
-        create_padding_masks=CONFIG.create_padding_masks,
+        collate_fn=LanguageModelingCollator(
+            max_tokens=trainer.model.max_seq_len + 1,
+            pad_idx=pad_idx,
+            sos_idx=sos_idx,
+            include_decoder_input=CONFIG.include_decoder_input,
+            create_padding_masks=CONFIG.create_padding_masks,
+        ),
     )
 
     trainer.fit(train_data_loader, test_data_loader)

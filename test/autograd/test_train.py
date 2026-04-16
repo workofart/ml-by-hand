@@ -7,7 +7,11 @@ from sklearn.datasets import load_breast_cancer, load_diabetes
 from autograd import functional, nn, optim
 from autograd.backend import xp
 from autograd.tools.config_schema import GenericTrainingConfig
-from autograd.tools.data import SimpleDataLoader
+from autograd.tools.data import (
+    DataLoader,
+    PairedCollator,
+    PairedIterableDataset,
+)
 from autograd.tools.metrics import accuracy, mean_squared_error
 from autograd.tools.trainer import SimpleTrainer
 
@@ -81,7 +85,11 @@ class TestTrain(TestCase):
                 "lr": 1e-3,
             },
         )
-        train_data_loader = SimpleDataLoader(X, y, batch_size=32, shuffle=True)
+        train_data_loader = DataLoader(
+            PairedIterableDataset(X, y, shuffle=True),
+            batch_size=32,
+            collate_fn=PairedCollator(),
+        )
         trainer = SimpleTrainer(
             model_cls=Classifier,
             optimizer_cls=optim.SGD,
@@ -127,7 +135,11 @@ class TestTrain(TestCase):
         X = (X - X.mean(axis=0)) / (X.std(axis=0) + eps)
         y = (y - y.mean()) / (y.std() + eps)
 
-        train_data_loader = SimpleDataLoader(X, y, batch_size=32, shuffle=True)
+        train_data_loader = DataLoader(
+            PairedIterableDataset(X, y, shuffle=True),
+            batch_size=32,
+            collate_fn=PairedCollator(),
+        )
 
         trainer = SimpleTrainer(
             model_cls=RegressionModel,

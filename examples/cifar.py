@@ -4,7 +4,12 @@ from openml.datasets import get_dataset  # pyright: ignore[reportMissingImports]
 
 from autograd import functional, nn, optim
 from autograd.tools.config_schema import GenericTrainingConfig
-from autograd.tools.data import SimpleDataLoader, train_test_split
+from autograd.tools.data import (
+    DataLoader,
+    PairedCollator,
+    PairedIterableDataset,
+    train_test_split,
+)
 from autograd.tools.trainer import SimpleTrainer
 
 logger = logging.getLogger(__name__)
@@ -194,8 +199,8 @@ def train_cifar_multiclass_model(
     and testing data loaders.
 
     Args:
-        train_data_loader (SimpleDataLoader): Data loader for training data.
-        test_data_loader (SimpleDataLoader): Data loader for testing data.
+        train_data_loader (DataLoader): Data loader for training data.
+        test_data_loader (DataLoader): Data loader for testing data.
         optimizer_cls: Optimizer class to use (e.g., optim.Adam, optim.SGD).
         model_cls: Neural network model class to instantiate.
         loss_fn: Loss function to optimize.
@@ -223,7 +228,7 @@ if __name__ == "__main__":
       1) Fetch the CIFAR-10 dataset using OpenML, normalize the pixel values to [0, 1],
          and subsample 5000 examples for faster training.
       2) Split the data into training and testing sets using train_test_split.
-      3) Create SimpleDataLoader objects for both training and testing sets.
+      3) Create DataLoader objects for both training and testing sets.
       4) Train three types of models on CIFAR-10:
            - A ResNet-based model using residual blocks.
            - A convolutional classifier.
@@ -257,8 +262,16 @@ if __name__ == "__main__":
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.1)
 
-    train_data_loader = SimpleDataLoader(X_train, y_train, batch_size=256, shuffle=True)
-    test_data_loader = SimpleDataLoader(X_test, y_test, batch_size=256, shuffle=False)
+    train_data_loader = DataLoader(
+        PairedIterableDataset(X_train, y_train, shuffle=True),
+        batch_size=256,
+        collate_fn=PairedCollator(),
+    )
+    test_data_loader = DataLoader(
+        PairedIterableDataset(X_test, y_test, shuffle=False),
+        batch_size=256,
+        collate_fn=PairedCollator(),
+    )
 
     # Train ResNet CIFAR-10 model
     logger.info("Training ResNet CIFAR-10 model")
@@ -328,8 +341,16 @@ if __name__ == "__main__":
     logger.info(f"{X.shape=}, {y.shape=}")
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.1)
-    train_data_loader = SimpleDataLoader(X_train, y_train, batch_size=256, shuffle=True)
-    test_data_loader = SimpleDataLoader(X_test, y_test, batch_size=256, shuffle=False)
+    train_data_loader = DataLoader(
+        PairedIterableDataset(X_train, y_train, shuffle=True),
+        batch_size=256,
+        collate_fn=PairedCollator(),
+    )
+    test_data_loader = DataLoader(
+        PairedIterableDataset(X_test, y_test, shuffle=False),
+        batch_size=256,
+        collate_fn=PairedCollator(),
+    )
 
     # Train ResNet CIFAR-100 model
     logger.info("Training ResNet CIFAR-100 model")
