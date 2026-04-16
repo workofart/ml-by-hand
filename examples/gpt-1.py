@@ -10,7 +10,10 @@ from autograd.backend import xp
 from autograd.tensor import Tensor
 from autograd.text import utils as text_utils
 from autograd.text.tokenizer import BytePairEncoder
-from autograd.tools.callback import sampling_callback, teacher_forcing_callback
+from autograd.tools.callback import (
+    run_sampling_inference,
+    run_teacher_forcing_inference,
+)
 from autograd.tools.config_schema import CustomBpeConfig, TransformerTrainingConfig
 from autograd.tools.data import (
     DataLoader,
@@ -216,7 +219,6 @@ if __name__ == "__main__":
         loss_fn=functional.cross_entropy,
         config=CONFIG,
         forward_fn=GPT1ForwardFn(),
-        eval_callbacks=[teacher_forcing_callback, sampling_callback],
     )
 
     pad_idx = bpe.encode("<PAD>", allowed_special={"<PAD>"})[0]
@@ -257,13 +259,22 @@ if __name__ == "__main__":
 
     trainer.fit(train_data_loader, test_data_loader)
 
-    text_utils.inference(
+    if CONFIG.teacher_enforcing:
+        run_teacher_forcing_inference(
+            model=trainer.model,
+            forward_fn=GPT1ForwardFn(),
+            bpe=bpe,
+            groundtruth_data=xp.array(
+                test_data[: trainer.model.max_seq_len // 3], dtype=xp.int32
+            ),
+            max_length=trainer.model.max_seq_len // 3,
+        )
+
+    run_sampling_inference(
         model=trainer.model,
-        prediction_func=GPT1ForwardFn(),
+        forward_fn=GPT1ForwardFn(),
         bpe=bpe,
-        start_tokens="All",  # Dummy token to start the generation
-        max_length=int(
-            trainer.model.max_seq_len * 0.9
-        ),  # this should be shorter than context
-        temperature=1.0,
+        start_tokens="All",
+        max_length=int(trainer.model.max_seq_len * 0.9),
+        top_k=CONFIG.eval_top_k,
     )

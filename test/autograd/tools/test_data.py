@@ -366,7 +366,7 @@ class TestDataLoaders(unittest.TestCase):
     @patch.object(text_utils, "create_padding_mask", side_effect=mock_padding_mask)
     def test_pretraining_data_loader_length(self, mock_padding, mock_causal):
         loader_infinite = self.make_pretraining_loader()
-        with self.assertRaises(NotImplementedError):
+        with self.assertRaises(TypeError):
             _ = len(loader_infinite)
 
     def test_random_window_token_sequence_dataset_yields_single_example(self):

@@ -1,13 +1,17 @@
 import math
 import os
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from autograd.backend import xp
 from autograd.functional import cross_entropy
 from autograd.nn import AbstractLLMForwardFn, Module
 from autograd.optim import Optimizer
 from autograd.tensor import Tensor
+from autograd.tools.callback import (
+    run_sampling_inference,
+    run_teacher_forcing_inference,
+)
 from autograd.tools.config_schema import (
     GenericTrainingConfig,
     TransformerTrainingConfig,
@@ -367,6 +371,33 @@ class TestLLMTrainer(BaseTrainerTest):
             trainer.model, trainer.forward_fn, self.val_loader, trainer.config
         )
 
+    @patch("autograd.tools.callback.text_utils.inference")
+    def test_manual_qualitative_inference_helpers_do_not_depend_on_loader(
+        self, mock_inference
+    ):
+        bpe = MockBPE()
+        groundtruth = xp.arange(10, dtype=xp.int32)
+
+        teacher_forcing_text = run_teacher_forcing_inference(
+            model=self.trainer.model,
+            forward_fn=PromptMaskAwareForwardFn(),
+            bpe=bpe,
+            groundtruth_data=groundtruth,
+            max_length=3,
+        )
+        sampled_text = run_sampling_inference(
+            model=self.trainer.model,
+            forward_fn=PromptMaskAwareForwardFn(),
+            bpe=bpe,
+            start_tokens="ABC",
+            max_length=4,
+            top_k=5,
+        )
+
+        self.assertIs(mock_inference.return_value, teacher_forcing_text)
+        self.assertIs(mock_inference.return_value, sampled_text)
+        self.assertEqual(mock_inference.call_count, 2)
+
     def test_llm_evaluate_respects_eval_iters_from_config(self):
         self.config.eval_iters = 1
         val_loader = MockDataLoader(self.val_data * 2, pad_idx=0, seq_len=10)
@@ -433,3 +464,39 @@ class TestLLMTrainer(BaseTrainerTest):
 
         self.assertAlmostEqual(train_loss, float(expected_loss.item()), places=6)
         self.assertAlmostEqual(val_loss, float(expected_loss.item()), places=6)
+
+    def test_fit_supports_unsized_streaming_data_loaders(self):
+        bpe = MockBPE()
+        pad_idx = bpe.encode("<PAD>", allowed_special={"<PAD>"})[0]
+        sos_idx = bpe.encode("<SOS>", allowed_special={"<SOS>"})[0]
+        self.config.total_epochs = 1
+        self.config.steps_per_epoch = 1
+        self.config.eval_iters = 1
+
+        stream_loader = DataLoader(
+            dataset=TokenSequenceDataset(
+                data=xp.arange(100, dtype=xp.int32),
+                seq_len=4,
+                shuffle=False,
+                random_window=True,
+            ),
+            batch_size=2,
+            collate_fn=LanguageModelingCollator(
+                max_tokens=5,
+                pad_idx=pad_idx,
+                sos_idx=sos_idx,
+                include_decoder_input=False,
+                create_padding_masks=False,
+            ),
+        )
+        trainer = LLMTrainer(
+            model_cls=MockModelClass,
+            optimizer_cls=MockOptimizerClass,
+            loss_fn=cross_entropy,
+            forward_fn=PromptMaskAwareForwardFn(),
+            config=self.config,
+        )
+
+        trainer.fit(stream_loader, stream_loader)
+
+        self.assertEqual(trainer.optimizer.step_call_count, 1)

@@ -140,7 +140,7 @@ class IterableDataset(ABC):
         pass
 
     def __len__(self) -> int:
-        raise NotImplementedError
+        raise TypeError(f"object of type '{self.__class__.__name__}' has no len()")
 
 
 class PairedIterableDataset(IterableDataset):
@@ -335,7 +335,7 @@ class TokenSequenceDataset(IterableDataset):
 
     def __len__(self) -> int:
         if self.random_window:
-            raise NotImplementedError
+            raise TypeError(f"object of type '{self.__class__.__name__}' has no len()")
         return self.num_examples
 
 
