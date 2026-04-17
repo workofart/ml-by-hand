@@ -29,8 +29,10 @@ class GenericTrainingConfig:
     resume_epoch: Optional[int] = None
     training_run_name: str = "default"
     dataset_name: Optional[str] = ""
-    # This is to simulate larger batches by updating the weights once every N batches.
-    update_weights_every_n_steps: int = 1
+    # Effective batch size after gradient accumulation.
+    global_batch_size: int = 1
+    # Per-forward/backward batch size that must fit in memory.
+    micro_batch_size: int = 1
 
     def __post_init__(self) -> None:
         if self.max_epochs is None and self.max_steps is None:
@@ -43,11 +45,23 @@ class GenericTrainingConfig:
             raise ValueError(f"max_eval_steps must be >= 1, got {self.max_eval_steps}")
         if self.checkpoint_freq <= 0:
             raise ValueError(f"checkpoint_freq must be > 0, got {self.checkpoint_freq}")
-        if self.update_weights_every_n_steps < 1:
+        if self.global_batch_size < 1:
             raise ValueError(
-                "update_weights_every_n_steps must be >= 1, "
-                f"got {self.update_weights_every_n_steps}"
+                f"global_batch_size must be >= 1, got {self.global_batch_size}"
             )
+        if self.micro_batch_size < 1:
+            raise ValueError(
+                f"micro_batch_size must be >= 1, got {self.micro_batch_size}"
+            )
+        if self.global_batch_size % self.micro_batch_size != 0:
+            raise ValueError(
+                "global_batch_size must be divisible by micro_batch_size, "
+                f"got {self.global_batch_size} and {self.micro_batch_size}"
+            )
+
+    @property
+    def gradient_accumulation_steps(self) -> int:
+        return self.global_batch_size // self.micro_batch_size
 
 
 @dataclass

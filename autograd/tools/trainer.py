@@ -144,15 +144,14 @@ class AbstractTrainer(ABC):
                 break
             loss = self.train_step(batch, data_loader)
             total_loss += loss
-            # Simulate larger batches by updating weights every N steps
-            if (batch_count + 1) % self.config.update_weights_every_n_steps == 0:
+            if (batch_count + 1) % self.config.gradient_accumulation_steps == 0:
                 self.optimizer.step()  # increments .timestep, applies LR scheduler if present
                 self.metrics["grad_l2_norm"].append(grad_l2_norm(self.model.parameters))
                 self.optimizer.zero_grad()
             batch_count += 1
             self.global_step += 1
         # TODO: Decide whether to flush leftover accumulated gradients at epoch end when
-        # batch_count is not divisible by update_weights_every_n_steps.
+        # batch_count is not divisible by gradient_accumulation_steps.
         return total_loss / max(batch_count, 1)
 
     def _save_checkpoint(self, epoch: int, val_loss: Optional[float]):
@@ -367,7 +366,8 @@ class SimpleTrainer(AbstractTrainer):
         >>> # Create a dummy training configuration.
         >>> config = GenericTrainingConfig(
         ...     max_epochs=10,
-        ...     update_weights_every_n_steps=1,
+        ...     global_batch_size=1,
+        ...     micro_batch_size=1,
         ...     training_run_name='dummy_run',
         ...     model_kwargs={},
         ...     optimizer_kwargs={},
@@ -554,7 +554,8 @@ class LLMTrainer(AbstractTrainer):
         >>> # Create a dummy training configuration.
         >>> config = TransformerTrainingConfig(
         ...     max_epochs=10,
-        ...     update_weights_every_n_steps=1,
+        ...     global_batch_size=1,
+        ...     micro_batch_size=1,
         ...     training_run_name='llm_dummy_run',
         ...     model_kwargs={},
         ...     optimizer_kwargs={},

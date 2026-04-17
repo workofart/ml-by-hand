@@ -272,6 +272,27 @@ class TestSimpleTrainer(BaseTrainerTest):
 
         self.assertEqual(trainer.optimizer.step_call_count, 3)
 
+    def test_fit_accumulates_using_global_and_micro_batch_sizes(self):
+        config = GenericTrainingConfig(
+            max_epochs=2,
+            checkpoint_freq=1,
+            model_kwargs={"hidden_size": 256},
+            optimizer_kwargs={"lr": 0.01},
+            global_batch_size=4,
+            micro_batch_size=2,
+        )
+        trainer = SimpleTrainer(
+            model_cls=MockModelClass,
+            optimizer_cls=MockOptimizerClass,
+            loss_fn=self.loss_fn,
+            config=config,
+            output_type="logits",
+        )
+
+        trainer.fit(self.train_loader, self.val_loader)
+
+        self.assertEqual(trainer.optimizer.step_call_count, 2)
+
     def test_config_requires_at_least_one_training_limit(self):
         with self.assertRaisesRegex(
             ValueError, "At least one of max_epochs or max_steps must be set"
@@ -282,6 +303,22 @@ class TestSimpleTrainer(BaseTrainerTest):
                 checkpoint_freq=1,
                 model_kwargs={"hidden_size": 256},
                 optimizer_kwargs={"lr": 0.01},
+            )
+
+    def test_config_requires_global_batch_size_to_be_divisible_by_micro_batch_size(
+        self,
+    ):
+        with self.assertRaisesRegex(
+            ValueError,
+            "global_batch_size must be divisible by micro_batch_size",
+        ):
+            GenericTrainingConfig(
+                max_epochs=1,
+                checkpoint_freq=1,
+                model_kwargs={"hidden_size": 256},
+                optimizer_kwargs={"lr": 0.01},
+                global_batch_size=3,
+                micro_batch_size=2,
             )
 
     def test_evaluate_uses_full_loader_when_max_eval_steps_is_none(self):

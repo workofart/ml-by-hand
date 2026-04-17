@@ -572,14 +572,16 @@ if __name__ == "__main__":
 
     No value is returned; training progress and generated outputs are logged.
     """
-    train_batch_size = 16
-    eval_batch_size = train_batch_size // 2
+    train_global_batch_size = 16
+    train_micro_batch_size = train_global_batch_size
     CONFIG = TransformerTrainingConfig(
         training_run_name="shakespeare_mini",
         dataset_name="shakespeare_mini",
         max_steps=500,
         max_eval_steps=16,
         checkpoint_freq=2,
+        global_batch_size=train_global_batch_size,
+        micro_batch_size=train_micro_batch_size,
         model_kwargs={
             "num_attention_heads": 4,
             "hidden_size": 128,
@@ -661,7 +663,7 @@ if __name__ == "__main__":
             shuffle=True,
             random_window=True,
         ),
-        batch_size=train_batch_size,
+        batch_size=train_micro_batch_size,
         collate_fn=LanguageModelingCollator(
             max_tokens=trainer.model.max_seq_len + 1,
             pad_idx=pad_idx,
@@ -677,7 +679,7 @@ if __name__ == "__main__":
             shuffle=False,
             random_window=True,
         ),
-        batch_size=eval_batch_size,
+        batch_size=train_micro_batch_size // 2,
         collate_fn=LanguageModelingCollator(
             max_tokens=trainer.model.max_seq_len + 1,
             pad_idx=pad_idx,

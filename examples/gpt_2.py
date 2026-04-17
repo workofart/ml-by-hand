@@ -198,12 +198,15 @@ class GPT2ForwardFn(nn.AbstractLLMForwardFn):
 
 
 if __name__ == "__main__":
+    train_global_batch_size = 16
     SHAPESPEARE_CONFIG = TransformerTrainingConfig(
         training_run_name="shakespeare_mini",
         dataset_name="shakespeare_mini",
         max_steps=1000,
         max_eval_steps=50,
         checkpoint_freq=4,
+        global_batch_size=train_global_batch_size,
+        micro_batch_size=train_global_batch_size,
         model_kwargs={
             "num_attention_heads": 6,  # GPT-2 small uses 12
             "hidden_size": 768,  # GPT-2 small uses 768, must be divisible by num_attention_heads
@@ -247,16 +250,17 @@ if __name__ == "__main__":
     WIKI_CONFIG = TransformerTrainingConfig(
         training_run_name="wiki",
         dataset_name="wiki_simple_english",
-        max_steps=48000,
-        max_eval_steps=100,
-        update_weights_every_n_steps=8,  # simulate larger batch sizes
-        checkpoint_freq=4,
+        max_steps=10000,
+        max_eval_steps=200,
+        checkpoint_freq=200,
+        global_batch_size=32,
+        micro_batch_size=1,
         model_kwargs={
-            "num_attention_heads": 12,  # GPT-2 small uses 12
+            "num_attention_heads": 6,  # GPT-2 small uses 12
             "hidden_size": 768,  # GPT-2 small uses 768, must be divisible by num_attention_heads
             "dropout_prob": 0.2,
-            "max_seq_len": 740,  # GPT-2 uses 1024
-            "num_decoder_layers": 12,  # GPT-2 uses 12
+            "max_seq_len": 384,  # GPT-2 uses 1024
+            "num_decoder_layers": 6,  # GPT-2 uses 12
         },
         optimizer_kwargs={
             "lr": 1e-3,
@@ -265,8 +269,8 @@ if __name__ == "__main__":
             "weight_decay": 0.1,
             "lr_scheduler_kwargs": {
                 "lr_scheduler_cls": optim.CosineScheduler,
-                "warmup_steps": 100,
-                "lr_decay_iters": 40000,
+                "warmup_steps": 1500,  # 15% of max_steps
+                "lr_decay_iters": 8000,  # 80% of max_steps
             },
         },
         resume_epoch=None,  # Set this to None if you don't want to load from checkpoint
@@ -291,8 +295,8 @@ if __name__ == "__main__":
 
     # Load some data
     # Note: Please supply the correct data for your model
-    data = text_utils.load_shakespeare_mini()
-    # data = text_utils.load_wiki_simple()
+    # data = text_utils.load_shakespeare_mini()
+    data = text_utils.load_wiki_simple()
 
     if CONFIG.custom_bpe:
         # Create a Byte Pair Encoder and prepare data
@@ -335,7 +339,7 @@ if __name__ == "__main__":
             shuffle=True,
             random_window=True,
         ),
-        batch_size=16,  # GPT-2 uses 512
+        batch_size=CONFIG.micro_batch_size,
         collate_fn=LanguageModelingCollator(
             max_tokens=trainer.model.max_seq_len + 1,
             pad_idx=pad_idx,
@@ -351,7 +355,7 @@ if __name__ == "__main__":
             shuffle=False,
             random_window=True,
         ),
-        batch_size=16 // 2,
+        batch_size=CONFIG.micro_batch_size // 2,
         collate_fn=LanguageModelingCollator(
             max_tokens=trainer.model.max_seq_len + 1,
             pad_idx=pad_idx,
