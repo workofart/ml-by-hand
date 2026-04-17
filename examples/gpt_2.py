@@ -201,10 +201,8 @@ if __name__ == "__main__":
     SHAPESPEARE_CONFIG = TransformerTrainingConfig(
         training_run_name="shakespeare_mini",
         dataset_name="shakespeare_mini",
-        batch_size=16,  # GPT-2 uses 512
-        total_epochs=10,
-        eval_iters=50,
-        steps_per_epoch=100,
+        max_steps=1000,
+        max_eval_steps=50,
         checkpoint_freq=4,
         model_kwargs={
             "num_attention_heads": 6,  # GPT-2 small uses 12
@@ -221,7 +219,7 @@ if __name__ == "__main__":
             "lr_scheduler_kwargs": {
                 "lr_scheduler_cls": "CosineScheduler",
                 "warmup_steps": 100,
-                "lr_decay_iters": 1000,  # steps_per_epoch * total_epochs
+                "lr_decay_iters": 1000,  # matches max_steps
             },
         },
         resume_epoch=None,  # Set this to None if you don't want to load from checkpoint
@@ -249,10 +247,8 @@ if __name__ == "__main__":
     WIKI_CONFIG = TransformerTrainingConfig(
         training_run_name="wiki",
         dataset_name="wiki_simple_english",
-        batch_size=16,  # GPT-2 uses 512
-        total_epochs=30,
-        eval_iters=100,
-        steps_per_epoch=1600,
+        max_steps=48000,
+        max_eval_steps=100,
         update_weights_every_n_steps=8,  # simulate larger batch sizes
         checkpoint_freq=4,
         model_kwargs={
@@ -289,7 +285,7 @@ if __name__ == "__main__":
         ),
     )
 
-    CONFIG = SHAPESPEARE_CONFIG
+    CONFIG = WIKI_CONFIG
 
     logger = logging.getLogger(__name__)
 
@@ -339,7 +335,7 @@ if __name__ == "__main__":
             shuffle=True,
             random_window=True,
         ),
-        batch_size=CONFIG.batch_size,
+        batch_size=16,  # GPT-2 uses 512
         collate_fn=LanguageModelingCollator(
             max_tokens=trainer.model.max_seq_len + 1,
             pad_idx=pad_idx,
@@ -355,7 +351,7 @@ if __name__ == "__main__":
             shuffle=False,
             random_window=True,
         ),
-        batch_size=CONFIG.batch_size // 2,
+        batch_size=16 // 2,
         collate_fn=LanguageModelingCollator(
             max_tokens=trainer.model.max_seq_len + 1,
             pad_idx=pad_idx,

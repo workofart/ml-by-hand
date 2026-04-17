@@ -225,7 +225,7 @@ if __name__ == "__main__":
     # Train the RNN model.
     config_rnn = GenericTrainingConfig(
         training_run_name="movie_sentiment_rnn",
-        total_epochs=15,
+        max_epochs=15,
         checkpoint_freq=15,
         model_kwargs={
             "input_size": len(vocab),
@@ -239,7 +239,7 @@ if __name__ == "__main__":
     # Train the LSTM model.
     config_lstm = GenericTrainingConfig(
         training_run_name="movie_sentiment_rnn",
-        total_epochs=15,
+        max_epochs=15,
         checkpoint_freq=15,
         model_kwargs={
             "input_size": len(vocab),

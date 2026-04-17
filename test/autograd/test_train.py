@@ -70,12 +70,9 @@ class TestTrain(TestCase):
         CONFIG = GenericTrainingConfig(
             training_run_name="default",
             dataset_name="breast_cancer",
-            eval_iters=10,
-            steps_per_epoch=10,
             checkpoint_freq=10,
             resume_epoch=None,
-            total_epochs=1000,
-            batch_size=32,
+            max_epochs=1000,
             model_kwargs={
                 "input_size": X.shape[-1],
                 "hidden_size": 64,
@@ -115,12 +112,9 @@ class TestTrain(TestCase):
         CONFIG = GenericTrainingConfig(
             training_run_name="default",
             dataset_name="diabetes",
-            eval_iters=10,
-            steps_per_epoch=10,
             checkpoint_freq=10,
             resume_epoch=None,
-            total_epochs=200,
-            batch_size=32,
+            max_epochs=200,
             model_kwargs={
                 "input_size": X.shape[-1],
                 "hidden_size": 32,

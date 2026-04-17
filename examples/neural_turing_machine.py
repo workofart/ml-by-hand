@@ -587,7 +587,7 @@ if __name__ == "__main__":
     # Create training configuration for the Neural Turing Machine.
     config_ntm = GenericTrainingConfig(
         training_run_name="neural_turing_machine_copy_task",
-        total_epochs=epochs,
+        max_epochs=epochs,
         checkpoint_freq=epochs,
         model_kwargs={
             "input_size": input_size,
@@ -612,7 +612,7 @@ if __name__ == "__main__":
     # Create training configuration for the LSTM.
     config_lstm = GenericTrainingConfig(
         training_run_name="lstm_copy_task",
-        total_epochs=epochs,
+        max_epochs=epochs,
         checkpoint_freq=epochs,
         model_kwargs={
             "input_size": input_size,

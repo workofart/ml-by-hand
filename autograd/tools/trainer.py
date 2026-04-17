@@ -67,6 +67,7 @@ class AbstractTrainer(ABC):
             checkpoint_path=kwargs.get("checkpoint_path"),
         )
         self.start_epoch = self.config.resume_epoch or 0
+        self.global_step = int(self.checkpoint.get("step_count", 0))
         self.metrics = defaultdict(list)
 
     def fit(self, train_data_loader, val_data_loader=None):
@@ -81,12 +82,10 @@ class AbstractTrainer(ABC):
             f"Training {self.model.__class__.__name__} with "
             f"{(self.model.num_parameters() / 1e6):.2f}M parameters."
         )
-        for epoch in tqdm(
-            range(self.start_epoch, self.config.total_epochs),
-            desc="Training",
-            leave=False,
-            initial=self.start_epoch,
-        ):
+        epoch = self.start_epoch
+        while True:
+            if self._max_epochs_reached(epoch) or self._max_steps_reached():
+                break
             if hasattr(train_data_loader, "on_epoch_start"):
                 train_data_loader.on_epoch_start()
 
@@ -102,15 +101,29 @@ class AbstractTrainer(ABC):
 
             self._on_epoch_end(epoch, train_loss, val_loss)
 
-            if (
-                epoch
-                % max(
-                    1,
-                    self.config.total_epochs // min(20, self.config.total_epochs),
-                )
-                == 0
-            ):
+            if epoch % self._metrics_save_interval() == 0:
                 self._save_metrics()
+            epoch += 1
+
+    def _max_epochs_reached(self, epoch: int) -> bool:
+        return self.config.max_epochs is not None and epoch >= self.config.max_epochs
+
+    def _metrics_save_interval(self) -> int:
+        if self.config.max_epochs is None:
+            return 1
+        return max(1, self.config.max_epochs // min(20, self.config.max_epochs))
+
+    def _max_steps_reached(self) -> bool:
+        return (
+            self.config.max_steps is not None
+            and self.global_step >= self.config.max_steps
+        )
+
+    def _max_eval_steps_reached(self, batch_count: int) -> bool:
+        return (
+            self.config.max_eval_steps is not None
+            and batch_count >= self.config.max_eval_steps
+        )
 
     def _train_one_epoch(self, data_loader) -> float:
         """Trains the model for one epoch on the provided data loader.
@@ -127,7 +140,7 @@ class AbstractTrainer(ABC):
         batch_count = 0
         self.optimizer.zero_grad()
         for batch in tqdm(data_loader, desc="Training Batches", leave=False):
-            if batch_count >= self.config.steps_per_epoch:
+            if self._max_steps_reached():
                 break
             loss = self.train_step(batch, data_loader)
             total_loss += loss
@@ -137,6 +150,7 @@ class AbstractTrainer(ABC):
                 self.metrics["grad_l2_norm"].append(grad_l2_norm(self.model.parameters))
                 self.optimizer.zero_grad()
             batch_count += 1
+            self.global_step += 1
         # TODO: Decide whether to flush leftover accumulated gradients at epoch end when
         # batch_count is not divisible by update_weights_every_n_steps.
         return total_loss / max(batch_count, 1)
@@ -152,6 +166,7 @@ class AbstractTrainer(ABC):
             if self.metrics["val_loss"] and val_loss < min(self.metrics["val_loss"]):
                 checkpoint = {
                     "epoch": epoch + 1,
+                    "step_count": self.global_step,
                     "model_state_dict": self.model.state_dict(),
                     "optimizer_state_dict": self.optimizer.state_dict(),
                     "model_init_kwargs": self.config.model_kwargs,
@@ -257,7 +272,7 @@ class AbstractTrainer(ABC):
             checkpoint and cannot be modified because they are inherently tied to the model and
             optimizer state (e.g. hidden_size cannot be changed because the model artifact was
             created using the previous checkpoint's hidden_size)
-            The other configs (e.g. eval_iters) can be changed, and can just be read from the
+            The other configs (e.g. max_eval_steps) can be changed, and can just be read from the
             self.config attribute instead of checkpoint["hyperparams"].
 
         Args:
@@ -351,7 +366,7 @@ class SimpleTrainer(AbstractTrainer):
         >>>
         >>> # Create a dummy training configuration.
         >>> config = GenericTrainingConfig(
-        ...     total_epochs=10,
+        ...     max_epochs=10,
         ...     update_weights_every_n_steps=1,
         ...     training_run_name='dummy_run',
         ...     model_kwargs={},
@@ -435,7 +450,7 @@ class SimpleTrainer(AbstractTrainer):
         batch_count = 0
         all_preds, all_targets = [], []
         for batch_data in val_data_loader:
-            if batch_count >= self.config.eval_iters:
+            if self._max_eval_steps_reached(batch_count):
                 break
             batch_X, batch_y = batch_data
             y_pred = self.model(batch_X)
@@ -538,7 +553,7 @@ class LLMTrainer(AbstractTrainer):
         >>>
         >>> # Create a dummy training configuration.
         >>> config = TransformerTrainingConfig(
-        ...     total_epochs=10,
+        ...     max_epochs=10,
         ...     update_weights_every_n_steps=1,
         ...     training_run_name='llm_dummy_run',
         ...     model_kwargs={},
@@ -654,7 +669,7 @@ class LLMTrainer(AbstractTrainer):
             total_loss = 0.0
             batch_count = 0
             for batch_data in tqdm(val_data_loader, desc="Evaluation", leave=False):
-                if batch_count >= self.config.eval_iters:
+                if self._max_eval_steps_reached(batch_count):
                     break
                 pred_probs, y = self.forward_fn(self.model, batch_data, mode="train")
                 # TODO: Decide whether validation should use the same label_smoothing setting
