@@ -189,7 +189,7 @@ def main():
 
     # Build a training configuration for the Seq2Seq model.
     config = GenericTrainingConfig(
-        total_epochs=40,
+        max_epochs=40,
         checkpoint_freq=20,
         model_kwargs={
             "input_size": len(vocab),

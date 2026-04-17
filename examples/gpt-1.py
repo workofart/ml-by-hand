@@ -142,14 +142,16 @@ if __name__ == "__main__":
     # Note: The current hyperparameters are not optimal, they are just used
     # for overfitting the model quickly to test the model architecture and training
     # loop are free of bugs.
+    train_global_batch_size = 64
+    train_micro_batch_size = train_global_batch_size
     CONFIG = TransformerTrainingConfig(
         training_run_name="shakespeare_mini",
         dataset_name="shakespeare_mini",
-        batch_size=64,
-        total_epochs=25,
-        eval_iters=16,
-        steps_per_epoch=20,
+        max_steps=500,
+        max_eval_steps=16,
         checkpoint_freq=2,
+        global_batch_size=train_global_batch_size,
+        micro_batch_size=train_micro_batch_size,
         model_kwargs={
             "num_attention_heads": 6,
             "hidden_size": 144,
@@ -231,7 +233,7 @@ if __name__ == "__main__":
             shuffle=True,
             random_window=True,
         ),
-        batch_size=CONFIG.batch_size,
+        batch_size=train_micro_batch_size,
         collate_fn=LanguageModelingCollator(
             max_tokens=trainer.model.max_seq_len + 1,
             pad_idx=pad_idx,
@@ -247,7 +249,7 @@ if __name__ == "__main__":
             shuffle=False,
             random_window=True,
         ),
-        batch_size=CONFIG.batch_size // 2,
+        batch_size=train_micro_batch_size // 2,
         collate_fn=LanguageModelingCollator(
             max_tokens=trainer.model.max_seq_len + 1,
             pad_idx=pad_idx,

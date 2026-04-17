@@ -276,7 +276,7 @@ if __name__ == "__main__":
     # Train ResNet CIFAR-10 model
     logger.info("Training ResNet CIFAR-10 model")
     config = GenericTrainingConfig(
-        total_epochs=30,
+        max_epochs=30,
         checkpoint_freq=100,
         model_kwargs={"num_classes": 10},
         optimizer_kwargs={"lr": 3e-3, "max_grad_norm": 1.0},
@@ -294,7 +294,7 @@ if __name__ == "__main__":
     # Train Convolutional CIFAR-10 model
     logger.info("Training Convolutional CIFAR-10 model")
     config = GenericTrainingConfig(
-        total_epochs=100,
+        max_epochs=100,
         checkpoint_freq=100,
         model_kwargs={"num_classes": 10},
         optimizer_kwargs={"lr": 1e-3, "max_grad_norm": 1.0},
@@ -312,7 +312,7 @@ if __name__ == "__main__":
     # Train Dense CIFAR-10 model
     logger.info("Training Dense CIFAR-10 model")
     config = GenericTrainingConfig(
-        total_epochs=100,
+        max_epochs=100,
         checkpoint_freq=100,
         model_kwargs={"num_classes": 10},
         optimizer_kwargs={"lr": 1e-3, "max_grad_norm": 1.0},
@@ -355,7 +355,7 @@ if __name__ == "__main__":
     # Train ResNet CIFAR-100 model
     logger.info("Training ResNet CIFAR-100 model")
     config = GenericTrainingConfig(
-        total_epochs=100,
+        max_epochs=100,
         checkpoint_freq=100,
         model_kwargs={"num_classes": 100},
         optimizer_kwargs={"lr": 1e-3, "max_grad_norm": 1.0},
@@ -373,7 +373,7 @@ if __name__ == "__main__":
     # Train Convolutional CIFAR-100 model
     logger.info("Training Convolutional CIFAR-100 model")
     config = GenericTrainingConfig(
-        total_epochs=100,
+        max_epochs=100,
         checkpoint_freq=100,
         model_kwargs={"num_classes": 100},
         optimizer_kwargs={"lr": 1e-3, "max_grad_norm": 1.0},
@@ -391,7 +391,7 @@ if __name__ == "__main__":
     # Train Dense CIFAR-100 model
     logger.info("Training Dense CIFAR-100 model")
     config = GenericTrainingConfig(
-        total_epochs=100,
+        max_epochs=100,
         checkpoint_freq=100,
         model_kwargs={"num_classes": 100},
         optimizer_kwargs={"lr": 1e-3, "max_grad_norm": 1.0},

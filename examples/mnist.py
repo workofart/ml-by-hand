@@ -271,8 +271,7 @@ def train_mnist_with_hinge_loss(
         )
         # Build a training configuration for the trainer.
         config = GenericTrainingConfig(
-            total_epochs=epochs,
-            steps_per_epoch=10,
+            max_steps=10 * epochs,
             checkpoint_freq=10,
             model_kwargs={"output_logits": True},
             optimizer_kwargs={"lr": 1e-3},
@@ -346,7 +345,7 @@ def train_mnist_one_vs_rest_model(
         )
         # Build the training configuration.
         config = GenericTrainingConfig(
-            total_epochs=epochs,
+            max_epochs=epochs,
             checkpoint_freq=10,
             model_kwargs={"output_logits": False},
             optimizer_kwargs={"lr": 1e-3},
@@ -471,7 +470,7 @@ if __name__ == "__main__":
         model_cls=MnistResNet,
         loss_fn=functional.cross_entropy,
         config=GenericTrainingConfig(
-            total_epochs=10,
+            max_epochs=10,
             checkpoint_freq=10,
             model_kwargs={},
             optimizer_kwargs={
@@ -489,7 +488,7 @@ if __name__ == "__main__":
         model_cls=MnistMultiClassClassifier,
         loss_fn=functional.cross_entropy,
         config=GenericTrainingConfig(
-            total_epochs=10,
+            max_epochs=10,
             checkpoint_freq=10,
             model_kwargs={
                 "batch_norm": False,
@@ -508,8 +507,7 @@ if __name__ == "__main__":
         model_cls=MnistMultiClassClassifier,
         loss_fn=functional.cross_entropy,
         config=GenericTrainingConfig(
-            total_epochs=10,
-            steps_per_epoch=10,
+            max_steps=100,
             checkpoint_freq=10,
             model_kwargs={
                 "batch_norm": True,
@@ -528,7 +526,7 @@ if __name__ == "__main__":
         model_cls=MnistMultiClassClassifier,
         loss_fn=functional.cross_entropy,
         config=GenericTrainingConfig(
-            total_epochs=10,
+            max_epochs=10,
             checkpoint_freq=10,
             model_kwargs={
                 "batch_norm": True,

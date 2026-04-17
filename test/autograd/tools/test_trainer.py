@@ -172,7 +172,7 @@ class TestSimpleTrainer(BaseTrainerTest):
 
         # Build a GenericTrainingConfig
         self.config = GenericTrainingConfig(
-            total_epochs=2,
+            max_epochs=2,
             checkpoint_freq=1,
             model_kwargs={"hidden_size": 256},
             optimizer_kwargs={"lr": 0.01},
@@ -232,7 +232,7 @@ class TestSimpleTrainer(BaseTrainerTest):
         self.assertTrue(math.isnan(float(val_loss[0])))
 
     def test_fit_with_single_epoch_and_sample_predictions_does_not_crash(self):
-        self.config.total_epochs = 1
+        self.config.max_epochs = 1
         trainer = SimpleTrainer(
             model_cls=MockModelClass,
             optimizer_cls=MockOptimizerClass,
@@ -245,16 +245,92 @@ class TestSimpleTrainer(BaseTrainerTest):
         trainer.fit(self.train_loader, self.val_loader)
         self.assertEqual(trainer.optimizer.step_call_count, len(self.train_data))
 
-    def test_fit_respects_steps_per_epoch_from_config(self):
-        self.config.total_epochs = 1
-        self.config.steps_per_epoch = 1
+    def test_fit_respects_max_steps_from_config(self):
+        self.config.max_epochs = 3
+        self.config.max_steps = 1
 
         self.trainer.fit(self.train_loader, self.val_loader)
 
         self.assertEqual(self.trainer.optimizer.step_call_count, 1)
 
-    def test_evaluate_respects_eval_iters_from_config(self):
-        self.config.eval_iters = 1
+    def test_fit_supports_max_steps_without_max_epochs(self):
+        step_only_config = GenericTrainingConfig(
+            max_steps=3,
+            checkpoint_freq=1,
+            model_kwargs={"hidden_size": 256},
+            optimizer_kwargs={"lr": 0.01},
+        )
+        trainer = SimpleTrainer(
+            model_cls=MockModelClass,
+            optimizer_cls=MockOptimizerClass,
+            loss_fn=self.loss_fn,
+            config=step_only_config,
+            output_type="logits",
+        )
+
+        trainer.fit(self.train_loader, self.val_loader)
+
+        self.assertEqual(trainer.optimizer.step_call_count, 3)
+
+    def test_fit_accumulates_using_global_and_micro_batch_sizes(self):
+        config = GenericTrainingConfig(
+            max_epochs=2,
+            checkpoint_freq=1,
+            model_kwargs={"hidden_size": 256},
+            optimizer_kwargs={"lr": 0.01},
+            global_batch_size=4,
+            micro_batch_size=2,
+        )
+        trainer = SimpleTrainer(
+            model_cls=MockModelClass,
+            optimizer_cls=MockOptimizerClass,
+            loss_fn=self.loss_fn,
+            config=config,
+            output_type="logits",
+        )
+
+        trainer.fit(self.train_loader, self.val_loader)
+
+        self.assertEqual(trainer.optimizer.step_call_count, 2)
+
+    def test_config_requires_at_least_one_training_limit(self):
+        with self.assertRaisesRegex(
+            ValueError, "At least one of max_epochs or max_steps must be set"
+        ):
+            GenericTrainingConfig(
+                max_epochs=None,
+                max_steps=None,
+                checkpoint_freq=1,
+                model_kwargs={"hidden_size": 256},
+                optimizer_kwargs={"lr": 0.01},
+            )
+
+    def test_config_requires_global_batch_size_to_be_divisible_by_micro_batch_size(
+        self,
+    ):
+        with self.assertRaisesRegex(
+            ValueError,
+            "global_batch_size must be divisible by micro_batch_size",
+        ):
+            GenericTrainingConfig(
+                max_epochs=1,
+                checkpoint_freq=1,
+                model_kwargs={"hidden_size": 256},
+                optimizer_kwargs={"lr": 0.01},
+                global_batch_size=3,
+                micro_batch_size=2,
+            )
+
+    def test_evaluate_uses_full_loader_when_max_eval_steps_is_none(self):
+        val_loader = MockDataLoader(self.val_data * 2)
+
+        avg_val_loss = self.trainer.evaluate(val_loader)
+
+        self.assertAlmostEqual(avg_val_loss, 1.23, places=5)
+        self.assertEqual(self.loss_fn.call_count, 2)
+
+    def test_evaluate_respects_max_eval_steps_from_config(self):
+        self.config.max_eval_steps = 1
         val_loader = MockDataLoader(self.val_data * 2)
 
         avg_val_loss = self.trainer.evaluate(val_loader)
@@ -307,7 +383,7 @@ class TestLLMTrainer(BaseTrainerTest):
         )
 
         self.config = TransformerTrainingConfig(
-            total_epochs=2,
+            max_epochs=2,
             checkpoint_freq=1,
             model_kwargs={"hidden_size": 128},
             optimizer_kwargs={"lr": 0.01},
@@ -398,8 +474,8 @@ class TestLLMTrainer(BaseTrainerTest):
         self.assertIs(mock_inference.return_value, sampled_text)
         self.assertEqual(mock_inference.call_count, 2)
 
-    def test_llm_evaluate_respects_eval_iters_from_config(self):
-        self.config.eval_iters = 1
+    def test_llm_evaluate_respects_max_eval_steps_from_config(self):
+        self.config.max_eval_steps = 1
         val_loader = MockDataLoader(self.val_data * 2, pad_idx=0, seq_len=10)
 
         avg_val_loss = self.trainer.evaluate(val_loader)
@@ -443,7 +519,7 @@ class TestLLMTrainer(BaseTrainerTest):
             loss_fn=cross_entropy,
             forward_fn=PromptMaskAwareForwardFn(),
             config=TransformerTrainingConfig(
-                total_epochs=1,
+                max_epochs=1,
                 checkpoint_freq=1,
                 model_kwargs={"hidden_size": 128},
                 optimizer_kwargs={"lr": 0.01},
@@ -469,9 +545,9 @@ class TestLLMTrainer(BaseTrainerTest):
         bpe = MockBPE()
         pad_idx = bpe.encode("<PAD>", allowed_special={"<PAD>"})[0]
         sos_idx = bpe.encode("<SOS>", allowed_special={"<SOS>"})[0]
-        self.config.total_epochs = 1
-        self.config.steps_per_epoch = 1
-        self.config.eval_iters = 1
+        self.config.max_epochs = 10
+        self.config.max_steps = 1
+        self.config.max_eval_steps = 1
 
         stream_loader = DataLoader(
             dataset=TokenSequenceDataset(

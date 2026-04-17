@@ -14,7 +14,6 @@ class GenericTrainingConfig:
     This follows the same interface as the AbstractTrainer class in `autograd.tools.trainer.py`
     """
 
-    total_epochs: int
     checkpoint_freq: float
     # When we load from checkpoint, the below kwargs are restored from the checkpoint
     # and cannot be modified because they are inherently tied to the model and optimizer
@@ -23,15 +22,46 @@ class GenericTrainingConfig:
     # The above configs can be changed, and don't need to be loaded from the checkpoint
     model_kwargs: dict
     optimizer_kwargs: dict
-    steps_per_epoch: int = 16
-    eval_iters: int = 16
-    batch_size: int = 32
+    max_epochs: Optional[int] = None
+    max_steps: Optional[int] = None
+    max_eval_steps: Optional[int] = None
     # Whether to load from a checkpoint
     resume_epoch: Optional[int] = None
     training_run_name: str = "default"
     dataset_name: Optional[str] = ""
-    # This is to simulate larger batches by updating the weights once every N batches.
-    update_weights_every_n_steps: int = 1
+    # Effective batch size after gradient accumulation.
+    global_batch_size: int = 1
+    # Per-forward/backward batch size that must fit in memory.
+    micro_batch_size: int = 1
+
+    def __post_init__(self) -> None:
+        if self.max_epochs is None and self.max_steps is None:
+            raise ValueError("At least one of max_epochs or max_steps must be set")
+        if self.max_epochs is not None and self.max_epochs < 1:
+            raise ValueError(f"max_epochs must be >= 1, got {self.max_epochs}")
+        if self.max_steps is not None and self.max_steps < 1:
+            raise ValueError(f"max_steps must be >= 1, got {self.max_steps}")
+        if self.max_eval_steps is not None and self.max_eval_steps < 1:
+            raise ValueError(f"max_eval_steps must be >= 1, got {self.max_eval_steps}")
+        if self.checkpoint_freq <= 0:
+            raise ValueError(f"checkpoint_freq must be > 0, got {self.checkpoint_freq}")
+        if self.global_batch_size < 1:
+            raise ValueError(
+                f"global_batch_size must be >= 1, got {self.global_batch_size}"
+            )
+        if self.micro_batch_size < 1:
+            raise ValueError(
+                f"micro_batch_size must be >= 1, got {self.micro_batch_size}"
+            )
+        if self.global_batch_size % self.micro_batch_size != 0:
+            raise ValueError(
+                "global_batch_size must be divisible by micro_batch_size, "
+                f"got {self.global_batch_size} and {self.micro_batch_size}"
+            )
+
+    @property
+    def gradient_accumulation_steps(self) -> int:
+        return self.global_batch_size // self.micro_batch_size
 
 
 @dataclass

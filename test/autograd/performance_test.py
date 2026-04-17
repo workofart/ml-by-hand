@@ -1,15 +1,213 @@
-import logging
+import gc
 import os
 import time
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Optional
 from unittest import TestCase
 
 import psutil
 
 from autograd import functional, nn, optim
-from autograd.backend import xp
+from autograd.backend import IS_CUPY, NAME, xp
+from autograd.backend import eval as backend_eval
 from autograd.tensor import Tensor
+from autograd.tools.data import (
+    DataLoader,
+    LanguageModelingCollator,
+    PairedCollator,
+    PairedIterableDataset,
+    TokenSequenceDataset,
+)
+from examples.gpt_2 import GPT2
 
-logger = logging.getLogger(__name__)
+
+@dataclass(frozen=True)
+class MemorySnapshot:
+    rss_bytes: int
+    device_active_bytes: Optional[int] = None
+    device_cache_bytes: Optional[int] = None
+    device_peak_bytes: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class CallProfile:
+    elapsed_s: float
+    rss_delta_bytes: int
+    device_active_delta_bytes: Optional[int]
+    device_cache_delta_bytes: Optional[int]
+    device_peak_delta_bytes: Optional[int]
+
+
+def _flatten_sync_targets(value):
+    if value is None:
+        return []
+    if isinstance(value, Tensor):
+        return [value.data]
+    if hasattr(value, "shape") and hasattr(value, "dtype"):
+        return [value]
+    if isinstance(value, Mapping):
+        leaves = []
+        for item in value.values():
+            leaves.extend(_flatten_sync_targets(item))
+        return leaves
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        leaves = []
+        for item in value:
+            leaves.extend(_flatten_sync_targets(item))
+        return leaves
+    return []
+
+
+def synchronize_trees(*values):
+    arrays = []
+    for value in values:
+        arrays.extend(_flatten_sync_targets(value))
+    if arrays:
+        backend_eval(*arrays)
+    if IS_CUPY:
+        cuda = getattr(xp, "cuda", None)
+        device_cls = getattr(cuda, "Device", None)
+        if callable(device_cls):
+            device_cls().synchronize()
+            return
+        null_stream = getattr(getattr(cuda, "Stream", None), "null", None)
+        stream_sync = getattr(null_stream, "synchronize", None)
+        if callable(stream_sync):
+            stream_sync()
+            return
+    if hasattr(xp, "synchronize"):
+        xp.synchronize()
+
+
+def _device_memory_stat(name):
+    if IS_CUPY:
+        pool = getattr(xp, "get_default_memory_pool", lambda: None)()
+        if pool is None:
+            return None
+        if name == "get_active_memory":
+            used_bytes = getattr(pool, "used_bytes", None)
+            return int(used_bytes()) if callable(used_bytes) else None
+        if name == "get_cache_memory":
+            used_bytes = getattr(pool, "used_bytes", None)
+            total_bytes = getattr(pool, "total_bytes", None)
+            if callable(used_bytes) and callable(total_bytes):
+                return int(total_bytes()) - int(used_bytes())
+            return None
+        return None
+
+    fn = getattr(xp, name, None)
+    if callable(fn):
+        value = fn()
+        return int(value) if value is not None else None
+    metal = getattr(xp, "metal", None)
+    fn = getattr(metal, name, None)
+    if callable(fn):
+        value = fn()
+        return int(value) if value is not None else None
+    return None
+
+
+def reset_device_peak_memory():
+    if IS_CUPY:
+        return
+    fn = getattr(xp, "reset_peak_memory", None)
+    if callable(fn):
+        fn()
+        return
+    metal = getattr(xp, "metal", None)
+    fn = getattr(metal, "reset_peak_memory", None)
+    if callable(fn):
+        fn()
+
+
+def clear_device_cache():
+    fn = getattr(xp, "clear_cache", None)
+    if callable(fn):
+        fn()
+        return
+    metal = getattr(xp, "metal", None)
+    fn = getattr(metal, "clear_cache", None)
+    if callable(fn):
+        fn()
+
+
+def capture_memory_snapshot(process=None):
+    if process is None:
+        process = psutil.Process(os.getpid())
+    rss_bytes = int(process.memory_info().rss)
+    return MemorySnapshot(
+        rss_bytes=rss_bytes,
+        device_active_bytes=_device_memory_stat("get_active_memory"),
+        device_cache_bytes=_device_memory_stat("get_cache_memory"),
+        device_peak_bytes=_device_memory_stat("get_peak_memory"),
+    )
+
+
+def _delta(end, start):
+    if end is None or start is None:
+        return None
+    return end - start
+
+
+def measure_call(
+    fn: Callable[[], object],
+    *,
+    sync_trees: Optional[Callable[[object], object]] = None,
+    process=None,
+    reset_peak_memory: bool = False,
+):
+    synchronize_trees()
+    start_snapshot = capture_memory_snapshot(process=process)
+    if reset_peak_memory:
+        reset_device_peak_memory()
+
+    start_time = time.perf_counter()
+    result = fn()
+    if sync_trees is None:
+        synchronize_trees(result)
+    else:
+        synchronize_trees(sync_trees(result))
+    elapsed_s = time.perf_counter() - start_time
+    end_snapshot = capture_memory_snapshot(process=process)
+
+    device_peak_delta_bytes = (
+        end_snapshot.device_peak_bytes
+        if reset_peak_memory
+        else _delta(end_snapshot.device_peak_bytes, start_snapshot.device_peak_bytes)
+    )
+    profile = CallProfile(
+        elapsed_s=elapsed_s,
+        rss_delta_bytes=end_snapshot.rss_bytes - start_snapshot.rss_bytes,
+        device_active_delta_bytes=_delta(
+            end_snapshot.device_active_bytes,
+            start_snapshot.device_active_bytes,
+        ),
+        device_cache_delta_bytes=_delta(
+            end_snapshot.device_cache_bytes,
+            start_snapshot.device_cache_bytes,
+        ),
+        device_peak_delta_bytes=device_peak_delta_bytes,
+    )
+    return result, profile
+
+
+def _format_memory_value(num_bytes: int) -> str:
+    abs_bytes = abs(num_bytes)
+    if abs_bytes < 1024:
+        return f"{num_bytes:.2f} B"
+    if abs_bytes < 1024**2:
+        return f"{num_bytes / float(1024):.2f} KiB"
+    if abs_bytes < 1000 * 1024**2:
+        return f"{num_bytes / float(1024**2):.2f} MiB"
+    return f"{num_bytes / float(1024**3):.2f} GiB"
+
+
+def _format_duration_value(duration_s: float) -> str:
+    abs_seconds = abs(duration_s)
+    if abs_seconds < 1.0:
+        return f"{duration_s * 1000.0:.3f} ms"
+    return f"{duration_s:.3f} s"
 
 
 class ComplexMLP(nn.Module):
@@ -29,8 +227,7 @@ class ComplexMLP(nn.Module):
             x = linear(x)
             x = bn(x)
             x = functional.relu(x)
-        x = self.final(x)
-        return functional.softmax(x)
+        return self.final(x)
 
 
 class DeepCNN(nn.Module):
@@ -87,155 +284,356 @@ class DeepCNN(nn.Module):
         # Fully connected layers
         x = x.reshape(batch_size, -1)
         x = functional.relu(self.fc1(x))
-        x = self.fc2(x)
-        return functional.softmax(x)
+        return self.fc2(x)
 
 
 class CIPipelinePerformanceTest(TestCase):
-    def setUp(self):
-        self.process = psutil.Process(os.getpid())
+    def _cleanup_benchmark_case(self):
+        synchronize_trees()
+        gc.collect()
+        clear_device_cache()
+        reset_device_peak_memory()
 
-    def tearDown(self):
-        pass
-
-    def _measure_model_performance(
-        self, model, x, y_true, optimizer, total_epochs, loss_fn
+    def _record_benchmark_case(
+        self,
+        results,
+        summary_rows,
+        *,
+        case_name,
+        model,
+        batch,
+        throughput_unit,
+        total_epochs,
+        optimizer_lr=0.01,
+        loss_fn=functional.cross_entropy,
     ):
-        """
-        Measure the forward and backward pass times for the given model and optimizer
-        over a specified number of epochs. Returns a dictionary with recorded timings.
-        """
-        performance_metrics = {
+        try:
+            model_inputs, targets, throughput_count = batch
+            results["cases"][case_name] = self._run_benchmark_case(
+                model=model,
+                model_inputs=model_inputs,
+                targets=targets,
+                total_epochs=total_epochs,
+                throughput_count=throughput_count,
+                throughput_unit=throughput_unit,
+                optimizer_lr=optimizer_lr,
+                loss_fn=loss_fn,
+            )
+            summary_rows.append(
+                self._summary_row(case_name, results["cases"][case_name])
+            )
+        finally:
+            self._cleanup_benchmark_case()
+
+    def _build_classification_batch(
+        self,
+        *,
+        input_shape: tuple[int, ...],
+        num_classes: int,
+    ):
+        """Materialize one paired classification batch via the repo data pipeline."""
+        inputs = xp.random.normal(shape=input_shape).astype(xp.float32)
+        targets = xp.random.randint(
+            0,
+            num_classes,
+            (input_shape[0],),
+            dtype=xp.int64,
+        )
+        loader = DataLoader(
+            dataset=PairedIterableDataset(inputs, targets, shuffle=False),
+            batch_size=input_shape[0],
+            collate_fn=PairedCollator(),
+        )
+        batch_inputs, batch_targets = next(iter(loader))
+        return (
+            (Tensor(batch_inputs),),
+            batch_targets,
+            int(batch_inputs.shape[0]),
+        )
+
+    def _build_causal_lm_batch(
+        self,
+        *,
+        batch_size: int,
+        seq_len: int,
+        vocab_size: int,
+    ):
+        """Materialize one causal LM batch via the repo token dataset/collator path."""
+        token_sequences = [
+            xp.random.randint(2, vocab_size, (seq_len + 1,), dtype=xp.int32)
+            for _ in range(batch_size)
+        ]
+        loader = DataLoader(
+            dataset=TokenSequenceDataset(
+                token_sequences=token_sequences,
+                shuffle=False,
+            ),
+            batch_size=batch_size,
+            collate_fn=LanguageModelingCollator(
+                max_tokens=seq_len + 1,
+                pad_idx=0,
+                sos_idx=1,
+                include_decoder_input=False,
+                create_padding_masks=False,
+            ),
+        )
+        inputs, _, targets, _, _, causal_mask = next(iter(loader))
+        return (
+            (
+                # GPT2 expects token IDs plus an additive causal mask.
+                Tensor(inputs, requires_grad=False),
+                Tensor(causal_mask, requires_grad=False),
+            ),
+            targets,
+            int(inputs.shape[0] * inputs.shape[1]),
+        )
+
+    def _run_benchmark_case(
+        self,
+        *,
+        model,
+        model_inputs,
+        targets,
+        total_epochs,
+        throughput_count,
+        throughput_unit,
+        optimizer_lr=0.01,
+        loss_fn=functional.cross_entropy,
+    ):
+        optimizer = optim.SGD(model.parameters, lr=optimizer_lr)
+        metrics = {
             "forward_times": [],
             "backward_times": [],
+            "update_times": [],
+            "step_times": [],
+            "throughput_per_second": [],
+            "rss_deltas": [],
+            "device_active_deltas": [],
+            "device_cache_deltas": [],
+            "device_peak_deltas": [],
         }
 
-        # Warm-up iteration (not timed)
-        _ = model(x)
+        def _loss_and_backward(y_pred):
+            loss = loss_fn(y_pred, targets)
+            loss.backward()
+            grads = [p.grad for p in model.parameters.values() if p.grad is not None]
+            return {"loss": loss, "grads": grads}
+
+        def _optimizer_step():
+            optimizer.step()
+            optimizer.zero_grad()
+            return tuple(model.parameters.values())
+
+        # Warm-up iterations (not timed)
+        for _ in range(2):
+            y_pred, _ = measure_call(lambda: model(*model_inputs))
+            _, _ = measure_call(
+                lambda: _loss_and_backward(y_pred),
+                sync_trees=lambda result: (result["loss"], result["grads"]),
+            )
+            _, _ = measure_call(_optimizer_step)
 
         # Actual performance measurements
         for _ in range(total_epochs):
-            # Forward pass timing
-            start_time = time.perf_counter()
-            y_pred = model(x)
-            forward_elapsed = time.perf_counter() - start_time
-            performance_metrics["forward_times"].append(forward_elapsed)
+            synchronize_trees()
+            reset_device_peak_memory()
+            step_start = capture_memory_snapshot()
+            y_pred, forward_profile = measure_call(lambda: model(*model_inputs))
+            _, backward_profile = measure_call(
+                lambda: _loss_and_backward(y_pred),
+                sync_trees=lambda result: (result["loss"], result["grads"]),
+            )
+            _, update_profile = measure_call(_optimizer_step)
+            synchronize_trees()
+            step_end = capture_memory_snapshot()
 
-            # Backward pass timing
-            start_time = time.perf_counter()
-            loss = loss_fn(y_pred, y_true)
-            loss.backward()
-            backward_elapsed = time.perf_counter() - start_time
-            performance_metrics["backward_times"].append(backward_elapsed)
+            step_elapsed = (
+                forward_profile.elapsed_s
+                + backward_profile.elapsed_s
+                + update_profile.elapsed_s
+            )
+            metrics["forward_times"].append(forward_profile.elapsed_s)
+            metrics["backward_times"].append(backward_profile.elapsed_s)
+            metrics["update_times"].append(update_profile.elapsed_s)
+            metrics["step_times"].append(step_elapsed)
+            metrics["throughput_per_second"].append(throughput_count / step_elapsed)
+            metrics["rss_deltas"].append(step_end.rss_bytes - step_start.rss_bytes)
+            metrics["device_active_deltas"].append(
+                _delta(step_end.device_active_bytes, step_start.device_active_bytes)
+            )
+            metrics["device_cache_deltas"].append(
+                _delta(step_end.device_cache_bytes, step_start.device_cache_bytes)
+            )
+            metrics["device_peak_deltas"].append(step_end.device_peak_bytes)
 
-            # Update parameters
-            optimizer.step()
-            optimizer.zero_grad()
-
-        return performance_metrics
+        return self._summarize_metrics(metrics, throughput_unit)
 
     def _compute_stats(self, metrics_list):
         """Compute mean, std, min, max statistics for a given list of values."""
-        metrics_array = xp.asarray(metrics_list)
+        metrics_array = xp.asarray(metrics_list, dtype=xp.float32)
         return {
-            "mean": xp.mean(metrics_array),
-            "std": xp.std(metrics_array),
-            "min": xp.min(metrics_array),
-            "max": xp.max(metrics_array),
+            "mean": float(xp.mean(metrics_array)),
+            "std": float(xp.std(metrics_array)),
+            "min": float(xp.min(metrics_array)),
+            "max": float(xp.max(metrics_array)),
         }
 
-    def _log_performance_metrics(self, metrics, model_name):
-        """
-        Log forward and backward pass performance metrics (mean, std, min, max).
-        """
-        logger.info(f"\nPerformance Metrics for {model_name}:")
+    def _duration_stats(self, values):
+        stats = self._compute_stats(values)
+        return {key: _format_duration_value(value) for key, value in stats.items()}
 
-        forward_stats = self._compute_stats(xp.array(metrics["forward_times"]))
-        backward_stats = self._compute_stats(xp.array(metrics["backward_times"]))
+    def _byte_stats(self, values):
+        stats = self._compute_stats(values)
+        return {
+            key: _format_memory_value(int(round(value))) for key, value in stats.items()
+        }
 
-        logger.info("Timing (seconds):")
-        logger.info("Forward Pass:")
-        logger.info(
-            f"  Mean: {float(forward_stats['mean']):.6f} ± {float(forward_stats['std']):.6f} "
-            f"(Min: {float(forward_stats['min']):.6f}, Max: {float(forward_stats['max']):.6f})"
-        )
-        logger.info("Backward Pass:")
-        logger.info(
-            f"  Mean: {float(backward_stats['mean']):.6f} ± {float(backward_stats['std']):.6f} "
-            f"(Min: {float(backward_stats['min']):.6f}, Max: {float(backward_stats['max']):.6f})"
-        )
+    def _summarize_metrics(self, metrics, throughput_unit):
+        timing_summary = {
+            "forward": self._duration_stats(metrics["forward_times"]),
+            "backward": self._duration_stats(metrics["backward_times"]),
+            "optimizer_update": self._duration_stats(metrics["update_times"]),
+            "training_step": self._duration_stats(metrics["step_times"]),
+        }
+        throughput_summary = self._compute_stats(metrics["throughput_per_second"])
+        throughput_summary = {
+            "unit": f"{throughput_unit}/s",
+            "mean": round(throughput_summary["mean"], 2),
+            "std": round(throughput_summary["std"], 2),
+            "min": round(throughput_summary["min"], 2),
+            "max": round(throughput_summary["max"], 2),
+        }
+        memory_summary = {
+            "host_rss_delta": self._byte_stats(metrics["rss_deltas"]),
+        }
+        for metric_suffix, values in (
+            ("device_active_delta", metrics["device_active_deltas"]),
+            ("device_cache_delta", metrics["device_cache_deltas"]),
+            ("device_peak_delta", metrics["device_peak_deltas"]),
+        ):
+            values = [value for value in values if value is not None]
+            if values:
+                memory_summary[f"{NAME}_{metric_suffix}"] = self._byte_stats(values)
+        return {
+            "timing": timing_summary,
+            "throughput": throughput_summary,
+            "memory": memory_summary,
+        }
 
-    def _test_complex_mlp(self, total_epochs):
-        """Test performance metrics on a complex MLP model."""
-        input_size = 1024
-        hidden_size = 512
-        num_layers = 4
-        output_size = 10
-        batch_size = 1024
+    def _summary_row(self, case_name, case_metrics):
+        row = {
+            "case": case_name,
+            "step_mean": case_metrics["timing"]["training_step"]["mean"],
+            "step_std": case_metrics["timing"]["training_step"]["std"],
+            "throughput": (
+                f"{case_metrics['throughput']['mean']} "
+                f"{case_metrics['throughput']['unit']}"
+            ),
+            "host_rss_delta_mean": case_metrics["memory"]["host_rss_delta"]["mean"],
+        }
+        peak_key = f"{NAME}_device_peak_delta"
+        if peak_key in case_metrics["memory"]:
+            row[f"{NAME}_device_peak_delta_mean"] = case_metrics["memory"][peak_key][
+                "mean"
+            ]
+        return row
 
-        # Generate random input and labels
-        X = xp.random.normal(shape=(batch_size, input_size)).astype(xp.float32)
-        y = xp.random.randint(0, output_size, (batch_size,), dtype=xp.int64)
+    def _format_summary_table(self, rows):
+        columns = [
+            ("case", "Case"),
+            ("step_mean", "Step Mean"),
+            ("step_std", "Step Std"),
+            ("throughput", "Throughput"),
+            ("host_rss_delta_mean", "Host RSS Delta"),
+        ]
+        peak_key = f"{NAME}_device_peak_delta_mean"
+        if any(peak_key in row for row in rows):
+            columns.append((peak_key, f"{NAME} Peak Delta"))
 
-        # Initialize model and optimizer
-        mlp_model = ComplexMLP(input_size, hidden_size, num_layers, output_size)
-        mlp_optimizer = optim.SGD(mlp_model.parameters, lr=0.01)
+        widths = {}
+        for key, header in columns:
+            widths[key] = len(header)
+            for row in rows:
+                widths[key] = max(widths[key], len(str(row.get(key, ""))))
 
-        # Convert data to tensors
-        x_tensor = Tensor(X)
-        y_tensor = Tensor(y)
+        def _format_row(row):
+            cells = []
+            for key, _ in columns:
+                cells.append(f"{str(row.get(key, '')):<{widths[key]}}")
+            return "| " + " | ".join(cells) + " |"
 
-        # Measure and log performance
-        mlp_metrics = self._measure_model_performance(
-            mlp_model,
-            x_tensor,
-            y_tensor,
-            mlp_optimizer,
-            total_epochs,
-            functional.binary_cross_entropy,
-        )
-        self._log_performance_metrics(mlp_metrics, "Complex MLP Model")
-
-    def _test_deep_cnn(self, total_epochs):
-        """Test performance metrics on a deeper CNN model."""
-        input_channels = 3
-        image_size = 24
-        num_classes = 20
-        batch_size = 256
-
-        # Generate random input and labels
-        X = xp.random.normal(
-            shape=(batch_size, input_channels, image_size, image_size)
-        ).astype(xp.float32)
-        y = xp.random.randint(0, num_classes, (batch_size,), dtype=xp.int64)
-
-        # Initialize model and optimizer
-        cnn_model = DeepCNN(input_channels, image_size, num_classes)
-        cnn_optimizer = optim.SGD(cnn_model.parameters, lr=0.01)
-
-        x_tensor = Tensor(X)
-        y_tensor = y  # Not wrapped in Tensor to highlight loss usage consistency
-
-        # Measure and log performance
-        cnn_metrics = self._measure_model_performance(
-            cnn_model,
-            x_tensor,
-            y_tensor,
-            cnn_optimizer,
-            total_epochs,
-            functional.binary_cross_entropy,
-        )
-        self._log_performance_metrics(cnn_metrics, "Deep CNN Model")
+        header = _format_row({key: label for key, label in columns})
+        separator = "|-" + "-|-".join("-" * widths[key] for key, _ in columns) + "-|"
+        body = [_format_row(row) for row in rows]
+        return "\n".join([header, separator, *body])
 
     def test_resource_usage_metrics(self):
         """
-        Test that focuses on raw computational time for forward and backward passes
-        for both a complex MLP and a deep CNN model.
+        Measure step throughput and memory for representative MLP, CNN, and GPT-2
+        training steps on the resolved backend.
         """
         xp.random.seed(42)
         total_epochs = 10
-        logger.info(f"Running {total_epochs} epochs for performance measurement...")
-
-        # Run performance tests on different models
-        self._test_complex_mlp(total_epochs)
-        self._test_deep_cnn(total_epochs)
+        results = {
+            "backend": NAME,
+            "measurement_epochs": total_epochs,
+            "cases": {},
+        }
+        summary_rows = []
+        self._record_benchmark_case(
+            results,
+            summary_rows,
+            case_name="Complex MLP Model",
+            model=ComplexMLP(
+                input_size=1024,
+                hidden_size=512,
+                num_layers=4,
+                output_size=10,
+            ),
+            batch=self._build_classification_batch(
+                input_shape=(1024, 1024),
+                num_classes=10,
+            ),
+            total_epochs=total_epochs,
+            throughput_unit="examples",
+        )
+        self._record_benchmark_case(
+            results,
+            summary_rows,
+            case_name="Deep CNN Model",
+            model=DeepCNN(
+                input_channels=3,
+                image_size=24,
+                num_classes=20,
+            ),
+            batch=self._build_classification_batch(
+                input_shape=(256, 3, 24, 24),
+                num_classes=20,
+            ),
+            total_epochs=total_epochs,
+            throughput_unit="examples",
+        )
+        self._record_benchmark_case(
+            results,
+            summary_rows,
+            case_name="Mini GPT-2 Model",
+            model=GPT2(
+                vocab_size=1024 * 10,
+                hidden_size=128 * 6,
+                num_attention_heads=6,
+                max_seq_len=768,
+                dropout_prob=0.1,
+                num_decoder_layers=6,
+            ),
+            batch=self._build_causal_lm_batch(
+                batch_size=8,
+                seq_len=768,
+                vocab_size=1024 * 10,
+            ),
+            total_epochs=total_epochs,
+            throughput_unit="tokens",
+            optimizer_lr=1e-3,
+            loss_fn=functional.cross_entropy,
+        )
+        print("\n")
+        print(self._format_summary_table(summary_rows))
