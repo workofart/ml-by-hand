@@ -541,7 +541,7 @@ class LanguageModelingCollator(Collator):
         ...     ],
         ... )
         >>> len(batch), batch[0].shape, batch[2].shape
-        (6, (1, 3), (1, 3))
+        (5, (1, 3), (1, 3))
     """
 
     def __init__(
@@ -562,9 +562,7 @@ class LanguageModelingCollator(Collator):
 
     def __call__(
         self, examples: Sequence[dict[str, Array]]
-    ) -> Tuple[
-        Array, Optional[Array], Array, Optional[Array], Optional[Array], Optional[Array]
-    ]:
+    ) -> Tuple[Array, Optional[Array], Array, Optional[Array], Optional[Array]]:
         batch_inputs = []
         batch_targets = []
 
@@ -593,7 +591,6 @@ class LanguageModelingCollator(Collator):
         X_chunk = xp.stack(batch_inputs, axis=0)
         Y_chunk = xp.stack(batch_targets, axis=0)
         batch_size = X_chunk.shape[0]
-        seq_len = X_chunk.shape[1]
 
         if self.include_decoder_input:
             assert self.sos_idx is not None
@@ -602,15 +599,10 @@ class LanguageModelingCollator(Collator):
         else:
             dec_inp = None
 
-        causal_mask = text_utils.create_causal_mask(
-            seq_len=seq_len, batch_size=batch_size
-        )
-
         smask, tmask = None, None
         if self.create_padding_masks:
             smask = text_utils.create_padding_mask(X_chunk, self.pad_idx)
-            pmask = text_utils.create_padding_mask(Y_chunk, self.pad_idx)
-            tmask = pmask + causal_mask if causal_mask is not None else pmask
+            tmask = text_utils.create_padding_mask(Y_chunk, self.pad_idx)
 
         return (
             X_chunk,
@@ -618,7 +610,6 @@ class LanguageModelingCollator(Collator):
             Y_chunk,
             smask,
             tmask,
-            causal_mask,
         )
 
     def batch_token_count(self, batch: Any) -> Optional[int]:

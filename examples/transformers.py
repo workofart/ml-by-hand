@@ -76,7 +76,7 @@ class Transformer(nn.Module):
             source (Tensor): Source sequence indices of shape (batch_size, seq_len).
             target (Tensor): Target sequence indices of shape (batch_size, seq_len).
             source_mask (Optional[Tensor]): Mask for the source sequence (e.g., to ignore padding).
-            target_mask (Optional[Tensor]): Mask for the target sequence (e.g., causal mask).
+            target_mask (Optional[Tensor]): Padding mask for the target sequence.
 
         Returns:
             Tensor: Logits over the vocabulary for each position in the target sequence.
@@ -209,7 +209,7 @@ class Decoder(nn.Module):
             embedding_layer (nn.Module): Shared embedding layer.
             encoder_output (Tensor): Output from the encoder.
             source_mask (Optional[Tensor]): Mask for the encoder input.
-            target_mask (Optional[Tensor]): Mask for the target input (e.g., causal mask).
+            target_mask (Optional[Tensor]): Padding mask for the target input.
 
         Returns:
             Tensor: Logits over the vocabulary for each time step.
@@ -396,13 +396,16 @@ class DecoderSublayer(nn.Module):
             x (Tensor): Decoder input tensor.
             encoder_output (Tensor): Encoder output tensor.
             source_mask (Optional[Tensor]): Mask for the encoder input.
-            target_mask (Optional[Tensor]): Mask for the decoder input (e.g., to enforce causality).
+            target_mask (Optional[Tensor]): Padding mask for the decoder input.
 
         Returns:
             Tensor: The output tensor of the decoder sublayer.
         """
         x = self.add_and_norm1(
-            x, lambda x_: self.masked_multi_head_attention(x_, x_, x_, mask=target_mask)
+            x,
+            lambda x_: self.masked_multi_head_attention(
+                x_, x_, x_, mask=target_mask, is_causal=True
+            ),
         )
 
         # 3.2.3 in Paper. Encoder-Decoder Attention
@@ -530,12 +533,12 @@ class TransformerForwardFn(nn.AbstractLLMForwardFn):
 
         Args:
             model (Transformer): The Transformer model.
-            batch_data (Any): A tuple containing (X, decoder_input, y, src_mask, tgt_mask, causal_mask).
+            batch_data (Any): A tuple containing (X, decoder_input, y, src_mask, tgt_mask).
 
         Returns:
             Tuple[Tensor, Any]: The output logits and the target labels.
         """
-        X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_data
+        X, dec_inp, y, src_mask, tgt_mask = batch_data
         logits = model(X, dec_inp, src_mask, tgt_mask)
         return logits, y
 

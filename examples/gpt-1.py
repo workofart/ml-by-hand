@@ -3,7 +3,7 @@
 import logging
 import sys
 from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import Any, Tuple
 
 from autograd import functional, nn, optim
 from autograd.backend import xp
@@ -70,7 +70,7 @@ class GPT1(nn.Module):
             ]
         )
 
-    def forward(self, tokens, mask: Optional[Tensor]):
+    def forward(self, tokens):
         """
         Following the same notation in the original paper
         Section 3.1 Unsupervised pre-training
@@ -88,7 +88,7 @@ class GPT1(nn.Module):
         h_0 = self.dropout(token_embedding + position_embedding)
 
         for sublayer in self.sublayers:
-            h_0 = sublayer(h_0, mask)
+            h_0 = sublayer(h_0)
 
         output = self.layer_norm(h_0)
         output = output @ self.token_embedding.parameters["weight"].T
@@ -116,9 +116,9 @@ class DecoderSublayer(nn.Module):
             dropout_prob=dropout_prob,
         )
 
-    def forward(self, x: Tensor, mask: Optional[Tensor]) -> Tensor:
+    def forward(self, x: Tensor) -> Tensor:
         x = self.add_and_norm1(
-            x, lambda x_: self.multi_head_attention(x_, x_, x_, mask=mask)
+            x, lambda x_: self.multi_head_attention(x_, x_, x_, is_causal=True)
         )
         x = self.add_and_norm2(x, self.feedforward)
         return x
@@ -126,12 +126,12 @@ class DecoderSublayer(nn.Module):
 
 class GPT1ForwardFn(nn.AbstractLLMForwardFn):
     def train(self, model: GPT1, batch_data: Any, **kwargs) -> Tuple[Any, Any]:
-        X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_data
-        logits = model(X, causal_mask)
+        X, dec_inp, y, src_mask, tgt_mask = batch_data
+        logits = model(X)
         return logits, y
 
     def sample(self, model: GPT1, batch_data: Any, **kwargs) -> Tuple[Any, Any]:
-        logits = model(batch_data, None)
+        logits = model(batch_data)
         return logits, None
 
 

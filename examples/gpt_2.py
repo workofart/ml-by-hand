@@ -3,7 +3,7 @@
 import logging
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from autograd import functional, nn, optim
 from autograd.backend import xp
@@ -86,11 +86,10 @@ class GPT2(nn.Module):
             lambda m: self._scale_weights(m, num_decoder_layers * 2)
         )  # there are 2 residual layers in each decoder sublayer
 
-    def forward(self, tokens: Tensor, mask: Optional[Tensor]) -> Tensor:
+    def forward(self, tokens: Tensor) -> Tensor:
         """
         Forward pass for GPT-2.
         tokens: shape (batch_size, seq_len)
-        mask: optional shape (batch_size, 1, seq_len, seq_len) for causal masking
         """
         batch_size, seq_len = tokens.shape
 
@@ -108,7 +107,7 @@ class GPT2(nn.Module):
 
         # Pass through each Decoder sublayer
         for sublayer in self.sublayers:
-            h_0 = sublayer(h_0, mask)
+            h_0 = sublayer(h_0)
 
         # Final normalization
         output = self.layer_norm(h_0)
@@ -168,13 +167,11 @@ class DecoderSublayer(nn.Module):
             dropout_prob=dropout_prob,
         )
 
-    def forward(self, x: Tensor, mask: Optional[Tensor]) -> Tensor:
+    def forward(self, x: Tensor) -> Tensor:
         # Pre-norm before attention
         a = self.layer_norm1(x)
 
-        x = x + self.multi_head_attention(
-            a, a, a, mask=mask
-        )  # (batch, seq_len, hidden_size)
+        x = x + self.multi_head_attention(a, a, a, is_causal=True)
 
         # Pre-norm before feed-forward
         b = self.layer_norm2(x)
@@ -188,12 +185,12 @@ class GPT2ForwardFn(nn.AbstractLLMForwardFn):
     """
 
     def train(self, model: GPT2, batch_data: Any, **kwargs):
-        X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_data
-        logits = model(X, causal_mask)
+        X, dec_inp, y, src_mask, tgt_mask = batch_data
+        logits = model(X)
         return logits, y
 
     def sample(self, model: GPT2, batch_data: Any, **kwargs):
-        logits = model(batch_data, None)
+        logits = model(batch_data)
         return logits, None
 
 

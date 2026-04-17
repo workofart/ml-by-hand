@@ -8,7 +8,6 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from autograd.backend import xp
-from autograd.text import utils as text_utils
 from autograd.tools.data import (
     DataLoader,
     LanguageModelingCollator,
@@ -22,13 +21,6 @@ from autograd.tools.data import (
     pack_tokens,
     tokenize_prompt_completion,
 )
-
-
-def mock_causal_mask(seq_len, batch_size):
-    # Create a lower-triangular mask of ones with shape (seq_len, seq_len)
-    mask = xp.tril(xp.ones((seq_len, seq_len)))
-    # Broadcast to (batch_size, 1, seq_len, seq_len)
-    return xp.broadcast_to(mask, (batch_size, 1, seq_len, seq_len))
 
 
 def mock_padding_mask(X_chunk, pad_idx):
@@ -379,9 +371,11 @@ class TestDataLoaders(unittest.TestCase):
         )
 
     # Use decorators to patch the text_utils functions for LM collator tests.
-    @patch.object(text_utils, "create_causal_mask", side_effect=mock_causal_mask)
-    @patch.object(text_utils, "create_padding_mask", side_effect=mock_padding_mask)
-    def test_pretraining_data_loader_length(self, mock_padding, mock_causal):
+    @patch(
+        "autograd.tools.data.text_utils.create_padding_mask",
+        side_effect=mock_padding_mask,
+    )
+    def test_pretraining_data_loader_length(self, mock_padding):
         loader_infinite = self.make_pretraining_loader()
         with self.assertRaises(TypeError):
             _ = len(loader_infinite)
@@ -463,9 +457,11 @@ class TestDataLoaders(unittest.TestCase):
             )
         )
 
-    @patch.object(text_utils, "create_causal_mask", side_effect=mock_causal_mask)
-    @patch.object(text_utils, "create_padding_mask", side_effect=mock_padding_mask)
-    def test_pretraining_data_loader_small_data(self, mock_padding, mock_causal):
+    @patch(
+        "autograd.tools.data.text_utils.create_padding_mask",
+        side_effect=mock_padding_mask,
+    )
+    def test_pretraining_data_loader_small_data(self, mock_padding):
         data_small = xp.arange(5)
         loader = self.make_pretraining_loader(
             data=data_small,
@@ -475,13 +471,15 @@ class TestDataLoaders(unittest.TestCase):
         with self.assertRaises(ValueError):
             next(it)
 
-    @patch.object(text_utils, "create_causal_mask", side_effect=mock_causal_mask)
-    @patch.object(text_utils, "create_padding_mask", side_effect=mock_padding_mask)
-    def test_pretraining_data_loader_output(self, mock_padding, mock_causal):
+    @patch(
+        "autograd.tools.data.text_utils.create_padding_mask",
+        side_effect=mock_padding_mask,
+    )
+    def test_pretraining_data_loader_output(self, mock_padding):
         loader = self.make_pretraining_loader()
         batch = next(iter(loader))
-        self.assertEqual(len(batch), 6)
-        X_chunk, dec_inp, Y_chunk, smask, tmask, causal_mask = batch
+        self.assertEqual(len(batch), 5)
+        X_chunk, dec_inp, Y_chunk, smask, tmask = batch
         self.assertEqual(X_chunk.shape, (self.batch_size_llm, self.seq_len))
         self.assertEqual(Y_chunk.shape, (self.batch_size_llm, self.seq_len))
         if loader.collate_fn.include_decoder_input:
@@ -493,20 +491,16 @@ class TestDataLoaders(unittest.TestCase):
             self.assertIsNone(dec_inp)
         if loader.collate_fn.create_padding_masks:
             self.assertEqual(smask.shape, (self.batch_size_llm, 1, 1, self.seq_len))
-            self.assertEqual(
-                tmask.shape, (self.batch_size_llm, 1, self.seq_len, self.seq_len)
-            )
-            self.assertEqual(
-                causal_mask.shape, (self.batch_size_llm, 1, self.seq_len, self.seq_len)
-            )
+            self.assertEqual(tmask.shape, (self.batch_size_llm, 1, 1, self.seq_len))
         else:
             self.assertIsNone(smask)
             self.assertIsNone(tmask)
-            self.assertIsNone(causal_mask)
 
-    @patch.object(text_utils, "create_causal_mask", side_effect=mock_causal_mask)
-    @patch.object(text_utils, "create_padding_mask", side_effect=mock_padding_mask)
-    def test_pretraining_data_loader_no_decoder_input(self, mock_padding, mock_causal):
+    @patch(
+        "autograd.tools.data.text_utils.create_padding_mask",
+        side_effect=mock_padding_mask,
+    )
+    def test_pretraining_data_loader_no_decoder_input(self, mock_padding):
         loader = self.make_pretraining_loader(
             include_decoder_input=False,
         )
@@ -532,14 +526,13 @@ class TestDataLoaders(unittest.TestCase):
             shuffle=False,
         )
 
-        X_chunk, dec_inp, Y_chunk, smask, tmask, causal_mask = next(iter(loader))
+        X_chunk, dec_inp, Y_chunk, smask, tmask = next(iter(loader))
 
         self.assertIsNone(dec_inp)
         self.assertIsNone(smask)
         self.assertIsNone(tmask)
         self.assertEqual(X_chunk.shape, (1, 5))
         self.assertEqual(Y_chunk.shape, (1, 5))
-        self.assertEqual(causal_mask.shape, (1, 1, 5, 5))
         self.assertTrue(
             xp.array_equal(
                 Y_chunk[0],
@@ -562,14 +555,13 @@ class TestDataLoaders(unittest.TestCase):
             shuffle=False,
         )
 
-        X_chunk, dec_inp, Y_chunk, smask, tmask, causal_mask = next(iter(loader))
+        X_chunk, dec_inp, Y_chunk, smask, tmask = next(iter(loader))
 
         self.assertIsNone(dec_inp)
         self.assertIsNone(smask)
         self.assertIsNone(tmask)
         self.assertEqual(X_chunk.shape, (1, 5))
         self.assertEqual(Y_chunk.shape, (1, 5))
-        self.assertEqual(causal_mask.shape, (1, 1, 5, 5))
         self.assertTrue(
             xp.array_equal(
                 X_chunk[0],
@@ -598,7 +590,7 @@ class TestDataLoaders(unittest.TestCase):
             shuffle=False,
         )
 
-        X_chunk, _, Y_chunk, _, _, _ = next(iter(loader))
+        X_chunk, _, Y_chunk, _, _ = next(iter(loader))
 
         self.assertTrue(
             xp.array_equal(X_chunk[0], xp.array([67, 68, 69, 70], dtype=xp.int32))

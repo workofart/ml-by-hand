@@ -588,7 +588,7 @@ class SimpleTrainer(AbstractTrainer):
 class LLMTrainer(AbstractTrainer):
     """Trainer specialized for language modeling or next-token prediction tasks.
 
-    Expects DataLoader batches of the form (X, dec_inp, y, src_mask, tgt_mask, causal_mask).
+    Expects DataLoader batches of the form (X, dec_inp, y, src_mask, tgt_mask).
 
     Examples:
         The following example demonstrates how to instantiate and run a training loop
@@ -615,7 +615,7 @@ class LLMTrainer(AbstractTrainer):
         >>> class DummyForwardFn:
         ...     def __call__(self, model, batch_data, mode="train"):
         ...         # Unpack batch_data; dummy implementation.
-        ...         X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_data
+        ...         X, dec_inp, y, src_mask, tgt_mask = batch_data
         ...         logits = model(X)
         ...         return logits, y
         >>>
@@ -641,14 +641,13 @@ class LLMTrainer(AbstractTrainer):
         >>> trainer = LLMTrainer(model_cls, optimizer_cls, loss_fn, forward_fn, config)
         >>>
         >>> # Create dummy data loaders for language modeling.
-        >>> # Each batch is expected to be a tuple: (X, dec_inp, y, src_mask, tgt_mask, causal_mask).
+        >>> # Each batch is expected to be a tuple: (X, dec_inp, y, src_mask, tgt_mask).
         >>> dummy_batch = (
         ...     np.random.randint(0, 1000, (32, 10)),  # X
         ...     np.random.randint(0, 1000, (32, 10)),  # dec_inp
         ...     np.random.randint(0, 1000, (32, 10)),  # y
         ...     None,  # src_mask (dummy)
         ...     None,  # tgt_mask (dummy)
-        ...     None   # causal_mask (dummy)
         ... )
         >>> train_loader = [dummy_batch for _ in range(100)]
         >>> val_loader = [dummy_batch for _ in range(20)]
@@ -704,7 +703,7 @@ class LLMTrainer(AbstractTrainer):
         """Performs a forward pass for language modeling, computes the loss, and backpropagates.
 
         This method expects batch_data in the form:
-            (X, dec_inp, y, src_mask, tgt_mask, causal_mask).
+            (X, dec_inp, y, src_mask, tgt_mask).
 
         Note that .zero_grad() and .step() calls are in the _train_one_epoch() function
 
@@ -730,7 +729,7 @@ class LLMTrainer(AbstractTrainer):
 
         Args:
             val_data_loader: Validation data loader providing batches with
-                (X, dec_inp, y, src_mask, tgt_mask, causal_mask).
+                (X, dec_inp, y, src_mask, tgt_mask).
 
         Returns:
             float: The average validation loss over the language modeling validation set.

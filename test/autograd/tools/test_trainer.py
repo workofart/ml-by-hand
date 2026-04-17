@@ -163,11 +163,11 @@ class PromptMaskAwareForwardFn(AbstractLLMForwardFn):
         return Tensor(logits, requires_grad=True)
 
     def train(self, model, batch_data):
-        _, _, y, _, _, _ = batch_data
+        _, _, y, _, _ = batch_data
         return self._build_logits(y), y
 
     def sample(self, model, batch_data):
-        _, _, y, _, _, _ = batch_data
+        _, _, y, _, _ = batch_data
         return self._build_logits(y), None
 
 
