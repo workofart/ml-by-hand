@@ -23,7 +23,7 @@ from autograd.tools.data import (
     openai_chat_to_prompt_completion,
     tokenize_prompt_completion,
 )
-from autograd.tools.trainer import LLMTrainer, SimpleTrainer
+from autograd.tools.trainer import LLMTrainer, SimpleTrainer, grad_l2_norm
 
 
 class MockDataLoader(DataLoader):
@@ -240,8 +240,8 @@ class TestSimpleTrainer(BaseTrainerTest):
         self.assertAlmostEqual(float(loss_val.item()), 1.23, places=5)
 
     def test_save_metrics_persists_none_as_nan(self):
-        self.trainer.metrics["epoch"] = [0]
-        self.trainer.metrics["train_loss"] = [1.23]
+        self.trainer.metrics["epoch"] = [xp.array(0.0, dtype=xp.float32)]
+        self.trainer.metrics["train_loss"] = [xp.array(1.23, dtype=xp.float32)]
         self.trainer.metrics["val_loss"] = [None]
 
         self.trainer._save_metrics()
@@ -401,6 +401,63 @@ class TestSimpleTrainer(BaseTrainerTest):
         self.assertFalse(trainer.loss_fn.last_loss.requires_grad)
         self.assertIsNone(trainer.loss_fn.last_loss.creator)
         self.assertGreaterEqual(avg_val_loss, 0.0)
+
+    def test_grad_l2_norm_returns_backend_scalar(self):
+        param = Tensor(xp.array([1.0, 2.0], dtype=xp.float32), requires_grad=True)
+        param.grad = Tensor(xp.array([3.0, 4.0], dtype=xp.float32), requires_grad=False)
+
+        grad_norm = grad_l2_norm({"weight": param})
+
+        self.assertTrue(xp.isclose(grad_norm, xp.array(5.0, dtype=xp.float32)))
+
+    def test_on_epoch_end_logs_backend_scalar_metrics(self):
+        self.trainer.metrics["grad_l2_norm"].append(xp.array(2.5, dtype=xp.float32))
+
+        self.trainer._on_epoch_end(epoch=0, train_loss=1.23, val_loss=None)
+
+        self.assertTrue(
+            xp.isclose(
+                self.trainer.metrics["epoch"][0],
+                xp.array(0.0, dtype=xp.float32),
+            )
+        )
+
+    def test_save_metrics_persists_backend_scalar_metrics(self):
+        self.trainer.metrics["epoch"] = [xp.array(0.0, dtype=xp.float32)]
+        self.trainer.metrics["train_loss"] = [xp.array(1.23, dtype=xp.float32)]
+        self.trainer.metrics["val_loss"] = [None]
+        self.trainer.metrics["grad_l2_norm"] = [xp.array(2.5, dtype=xp.float32)]
+
+        self.trainer._save_metrics()
+
+        metrics_path = (
+            f"{SimpleTrainer.METRICS_DIR}/{MockModelClass.__name__}_default.npz"
+        )
+        archive = xp.load(metrics_path)
+        grad_norm = xp.to_numpy(archive["grad_l2_norm"])
+
+        self.assertEqual(float(grad_norm[0]), 2.5)
+
+    @patch("autograd.tools.trainer.save_checkpoint")
+    def test_save_checkpoint_uses_stored_val_loss_history(self, mock_save_checkpoint):
+        self.trainer.metrics["val_loss"] = [xp.array(0.5, dtype=xp.float32)]
+
+        self.trainer._save_checkpoint(epoch=0)
+
+        mock_save_checkpoint.assert_called_once()
+
+    @patch("autograd.tools.trainer.save_checkpoint")
+    def test_save_checkpoint_skips_when_val_loss_does_not_improve(
+        self, mock_save_checkpoint
+    ):
+        self.trainer.metrics["val_loss"] = [
+            xp.array(0.5, dtype=xp.float32),
+            xp.array(0.7, dtype=xp.float32),
+        ]
+
+        self.trainer._save_checkpoint(epoch=1)
+
+        mock_save_checkpoint.assert_not_called()
 
 
 class TestLLMTrainer(BaseTrainerTest):

@@ -81,6 +81,16 @@ class BytePairEncoder:
         """
         return len(self._unicode_to_int_vocab)
 
+    def _should_parallelize(
+        self, *, work_items: int, min_items_per_worker: int
+    ) -> bool:
+        # On small workloads, Pool startup/pickling dominates the actual work,
+        # especially on macOS where multiprocessing uses `spawn`. Only fan out
+        # when each worker has enough items to amortize that fixed overhead.
+        return (
+            self.n_workers > 1 and work_items >= self.n_workers * min_items_per_worker
+        )
+
     def _load_dictionary(self) -> None:
         """Loads the dictionary (vocab + merges) from disk if it exists.
 
@@ -186,14 +196,18 @@ class BytePairEncoder:
             encoded_data = encoded_archive["arr_0"]
         else:
             # 3) Parallel encoding
-            chunk_size = max(1, len(raw_text) // self.n_workers)
-            text_chunks = [
-                raw_text[i : i + chunk_size]
-                for i in range(0, len(raw_text), chunk_size)
-            ]
-
-            with Pool(self.n_workers) as pool:
-                partial_encoded = pool.map(self.encode, text_chunks)
+            if self._should_parallelize(
+                work_items=len(raw_text), min_items_per_worker=8192
+            ):
+                chunk_size = max(1, len(raw_text) // self.n_workers)
+                text_chunks = [
+                    raw_text[i : i + chunk_size]
+                    for i in range(0, len(raw_text), chunk_size)
+                ]
+                with Pool(self.n_workers) as pool:
+                    partial_encoded = pool.map(self.encode, text_chunks)
+            else:
+                partial_encoded = [self.encode(raw_text)]
 
             encoded_data = xp.array([], dtype=xp.int32)
             for part in partial_encoded:
@@ -439,15 +453,17 @@ class BytePairEncoder:
             >>> counts = bpe._get_initial_pair_counts(word_freq) # Displays the frequency counts for each bigram
         """
         items = list(word_freq.items())
-        chunk_size = max(1, len(items) // self.n_workers)
-
-        with Pool(self.n_workers) as pool:
-            chunked_items = [
-                items[i : i + chunk_size] for i in range(0, len(items), chunk_size)
-            ]
-            partial_results = pool.map(
-                BytePairEncoder._local_pair_counts, chunked_items
-            )
+        if self._should_parallelize(work_items=len(items), min_items_per_worker=256):
+            chunk_size = max(1, len(items) // self.n_workers)
+            with Pool(self.n_workers) as pool:
+                chunked_items = [
+                    items[i : i + chunk_size] for i in range(0, len(items), chunk_size)
+                ]
+                partial_results = pool.map(
+                    BytePairEncoder._local_pair_counts, chunked_items
+                )
+        else:
+            partial_results = [BytePairEncoder._local_pair_counts(items)]
 
         total_counts = Counter()
         for c in partial_results:
@@ -498,16 +514,23 @@ class BytePairEncoder:
             del corpus_word_freq[w_tuple]
 
         # Parallel merge
-        chunk_size = max(1, len(items_to_update) // self.n_workers)
-        with Pool(self.n_workers) as pool:
-            chunked_items = [
-                items_to_update[i : i + chunk_size]
-                for i in range(0, len(items_to_update), chunk_size)
+        if self._should_parallelize(
+            work_items=len(items_to_update), min_items_per_worker=256
+        ):
+            chunk_size = max(1, len(items_to_update) // self.n_workers)
+            with Pool(self.n_workers) as pool:
+                chunked_items = [
+                    items_to_update[i : i + chunk_size]
+                    for i in range(0, len(items_to_update), chunk_size)
+                ]
+                partial_results = pool.map(
+                    BytePairEncoder._local_merge_chunk,
+                    [(chunk, pair, new_id) for chunk in chunked_items],
+                )
+        else:
+            partial_results = [
+                BytePairEncoder._local_merge_chunk((items_to_update, pair, new_id))
             ]
-            partial_results = pool.map(
-                BytePairEncoder._local_merge_chunk,
-                [(chunk, pair, new_id) for chunk in chunked_items],
-            )
 
         # Aggregate results
         for local_new_word_freq, local_pair_counts in partial_results:

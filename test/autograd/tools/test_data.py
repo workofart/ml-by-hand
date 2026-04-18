@@ -148,8 +148,7 @@ class TestDataLoaders(unittest.TestCase):
             batch_size=self.batch_size_simple,
             collate_fn=PairedCollator(),
         )
-        expected_indices = xp.arange(len(self.X))
-        self.assertTrue(xp.array_equal(dataset.indices, expected_indices))
+        self.assertEqual(list(dataset.indices), list(range(len(self.X))))
         batches = list(loader)
         expected_batches = (
             len(self.X) + self.batch_size_simple - 1
@@ -161,9 +160,8 @@ class TestDataLoaders(unittest.TestCase):
     def test_paired_iterable_dataset_shuffle(self):
         dataset = PairedIterableDataset(self.X, self.y, shuffle=True)
         dataset.on_epoch_start()
-        self.assertTrue(
-            xp.array_equal(xp.sort(dataset.indices), xp.arange(len(self.X)))
-        )
+        self.assertIsInstance(dataset.indices, list)
+        self.assertEqual(sorted(dataset.indices), list(range(len(self.X))))
 
     def test_data_loader_length(self):
         loader = DataLoader(

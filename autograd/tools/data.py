@@ -166,16 +166,17 @@ class PairedIterableDataset(IterableDataset):
         self.y = y
         self.shuffle = shuffle
         self.num_samples = len(X)
-        self.indices = xp.arange(self.num_samples)
+        self.indices = range(self.num_samples)
 
     def on_epoch_start(self) -> None:
         if self.shuffle:
-            self.indices = xp.random.permutation(self.num_samples)
+            # Materialize the shuffle order on host once per epoch so iterating
+            # samples does not pay a device->host scalar sync on every example.
+            self.indices = xp.to_numpy(xp.random.permutation(self.num_samples)).tolist()
 
     def __iter__(self) -> Iterator[dict[str, Array]]:
         for sample_idx in self.indices:
-            idx = int(sample_idx)
-            yield {"inputs": self.X[idx], "targets": self.y[idx]}
+            yield {"inputs": self.X[sample_idx], "targets": self.y[sample_idx]}
 
     def __len__(self) -> int:
         return self.num_samples
