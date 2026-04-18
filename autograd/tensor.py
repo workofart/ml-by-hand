@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from abc import abstractmethod
 from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import (
     Any,
     List,
@@ -17,22 +18,27 @@ from autograd.backend import ARRAY_TYPE, Array, ArrayLike, xp
 
 logger = logging.getLogger(__name__)
 
-_grad_enabled = True
+# We have to ensure that this flag doesn't leak across concurrent execution.
+# A ContextVar keeps the API simple while giving each thread / async task its
+# own view of the flag, which matches how users expect nested `with no_grad():`
+_grad_enabled: ContextVar[bool] = ContextVar("grad_enabled", default=True)
 
 
 def is_grad_enabled() -> bool:
-    return _grad_enabled
+    return _grad_enabled.get()
 
 
 @contextmanager
 def no_grad():
-    global _grad_enabled
-    previous = _grad_enabled
-    _grad_enabled = False
+    # Entering the context changes the flag for this execution context only,
+    # and exiting restores the previous value. The ContextVar captures that
+    # previous state so nesting and exception paths both unwind correctly
+    # without manually tracking a stack.
+    token = _grad_enabled.set(False)
     try:
         yield
     finally:
-        _grad_enabled = previous
+        _grad_enabled.reset(token)
 
 
 class Function:
@@ -421,6 +427,10 @@ class Tensor:
         if isinstance(other, int) and other >= 0:
             if other == 0:
                 return Tensor(xp.ones_like(self.data), requires_grad=False)
+            if other == 1:
+                return (
+                    self if is_grad_enabled() and self.requires_grad else self.detach()
+                )
 
             result = self
             for _ in range(other - 1):
@@ -446,7 +456,7 @@ class Tensor:
             Tensor: This tensor, after in-place addition.
         """
         if not isinstance(other, Tensor):
-            other = Tensor(other)
+            other = Tensor(other, requires_grad=False)
 
         # Use expand for broadcasting
         broadcast_shape = xp.broadcast_shapes(self.shape, other.shape)

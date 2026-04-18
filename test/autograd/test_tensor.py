@@ -1,3 +1,5 @@
+import asyncio
+import threading
 from unittest import TestCase
 
 import torch  # for comparison
@@ -135,6 +137,65 @@ class TestTensorOps(TestTensor):
                 assert not is_grad_enabled()
             assert not is_grad_enabled()
         assert is_grad_enabled()
+
+    def test_no_grad_context_is_thread_local(self):
+        x = Tensor([1.0], requires_grad=True)
+        ready = threading.Event()
+        release = threading.Event()
+        results = {}
+
+        def thread_with_no_grad():
+            with no_grad():
+                ready.set()
+                release.wait()
+
+        def thread_with_grad():
+            ready.wait()
+            y = x * 2
+            results["requires_grad"] = y.requires_grad
+            results["creator_is_none"] = y.creator is None
+            release.set()
+
+        worker_a = threading.Thread(target=thread_with_no_grad)
+        worker_b = threading.Thread(target=thread_with_grad)
+        worker_a.start()
+        worker_b.start()
+        worker_a.join()
+        worker_b.join()
+
+        assert results == {"requires_grad": True, "creator_is_none": False}
+
+    def test_no_grad_context_is_task_local(self):
+        x = Tensor([1.0], requires_grad=True)
+        results = {}
+        ready = asyncio.Event()
+        release = asyncio.Event()
+
+        async def task_with_no_grad():
+            with no_grad():
+                ready.set()
+                await release.wait()
+
+        async def task_with_grad():
+            await ready.wait()
+            y = x * 2
+            results["requires_grad"] = y.requires_grad
+            results["creator_is_none"] = y.creator is None
+            release.set()
+
+        async def main():
+            await asyncio.gather(task_with_no_grad(), task_with_grad())
+
+        asyncio.run(main())
+
+        assert results == {"requires_grad": True, "creator_is_none": False}
+
+    def test_pow_one_respects_no_grad(self):
+        with no_grad():
+            y = self.x_scalar**1
+
+        assert not y.requires_grad
+        assert y.creator is None
 
     def test_tensor_matrix_multiplication(self):
         z = self.x_vector @ self.y_vector
@@ -1068,6 +1129,15 @@ class TestTensorIAdd(TestTensor):
         assert array_equal(self.x_vector_no_grad.data, [4.0, 6.0])
         self.x_vector_no_grad.backward()
         assert array_equal(self.y_vector.grad.data, [1.0, 1.0])
+
+    def test_iadd_scalar_constant_does_not_enable_grad(self):
+        x = Tensor([1.0, 2.0], requires_grad=False)
+
+        x += 1
+
+        assert not x.requires_grad
+        assert x.creator is None
+        assert array_equal(x.data, [2.0, 3.0])
 
 
 class TestTensorStack(TestTensor):
