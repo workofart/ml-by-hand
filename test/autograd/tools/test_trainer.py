@@ -338,6 +338,47 @@ class TestSimpleTrainer(BaseTrainerTest):
         self.assertAlmostEqual(avg_val_loss, 1.23, places=5)
         self.assertEqual(self.loss_fn.call_count, 1)
 
+    def test_evaluate_runs_without_grad_tracking(self):
+        class LinearModel(Module):
+            def __init__(self, input_size=5, output_size=3, **kwargs):
+                super().__init__()
+                self.weight = Tensor(
+                    xp.ones((input_size, output_size), dtype=xp.float32),
+                    requires_grad=True,
+                )
+
+            def forward(self, x):
+                return Tensor(x, requires_grad=False) @ self.parameters["weight"]
+
+        class RecordingLoss:
+            def __call__(self, y_pred, y_true, **kwargs):
+                self.last_pred = y_pred
+                self.last_loss = y_pred.sum()
+                return self.last_loss
+
+        trainer = SimpleTrainer(
+            model_cls=LinearModel,
+            optimizer_cls=MockOptimizerClass,
+            loss_fn=RecordingLoss(),
+            config=GenericTrainingConfig(
+                max_epochs=1,
+                checkpoint_freq=1,
+                model_kwargs={},
+                optimizer_kwargs={"lr": 0.01},
+                resume_epoch=None,
+            ),
+            output_type="logits",
+        )
+
+        avg_val_loss = trainer.evaluate(MockDataLoader(self.val_data))
+
+        self.assertIsNotNone(trainer.loss_fn.last_pred)
+        self.assertFalse(trainer.loss_fn.last_pred.requires_grad)
+        self.assertIsNone(trainer.loss_fn.last_pred.creator)
+        self.assertFalse(trainer.loss_fn.last_loss.requires_grad)
+        self.assertIsNone(trainer.loss_fn.last_loss.creator)
+        self.assertGreaterEqual(avg_val_loss, 0.0)
+
 
 class TestLLMTrainer(BaseTrainerTest):
     def setUp(self):
@@ -446,6 +487,89 @@ class TestLLMTrainer(BaseTrainerTest):
         callback.assert_called_once_with(
             trainer.model, trainer.forward_fn, self.val_loader, trainer.config
         )
+
+    def test_llm_evaluate_runs_without_grad_tracking(self):
+        class TinyLM(Module):
+            def __init__(self, vocab_size=10, **kwargs):
+                super().__init__()
+                self.logit_bias = Tensor(
+                    xp.arange(vocab_size, dtype=xp.float32), requires_grad=True
+                )
+
+            def forward(self, tokens, mask=None):
+                batch_size, seq_len = tokens.shape
+                logit_bias = self.parameters["logit_bias"]
+                return logit_bias.expand(batch_size, seq_len, logit_bias.shape[0])
+
+        class TinyForwardFn(AbstractLLMForwardFn):
+            def train(self, model, batch_data):
+                X, _, y, _, _, causal_mask = batch_data
+                return model(X, causal_mask), y
+
+            def sample(self, model, batch_data):
+                return model(batch_data, None), None
+
+        class RecordingLoss:
+            def __call__(self, y_pred, y_true, **kwargs):
+                self.last_pred = y_pred
+                self.last_loss = y_pred.sum()
+                return self.last_loss
+
+        trainer = LLMTrainer(
+            model_cls=TinyLM,
+            optimizer_cls=MockOptimizerClass,
+            loss_fn=RecordingLoss(),
+            forward_fn=TinyForwardFn(),
+            config=TransformerTrainingConfig(
+                max_epochs=1,
+                checkpoint_freq=1,
+                model_kwargs={},
+                optimizer_kwargs={"lr": 0.01},
+                resume_epoch=None,
+                label_smoothing=0.0,
+                teacher_enforcing=False,
+                include_decoder_input=False,
+                create_padding_masks=False,
+            ),
+        )
+
+        avg_val_loss = trainer.evaluate(self.val_loader)
+
+        self.assertIsNotNone(trainer.loss_fn.last_pred)
+        self.assertFalse(trainer.loss_fn.last_pred.requires_grad)
+        self.assertIsNone(trainer.loss_fn.last_pred.creator)
+        self.assertFalse(trainer.loss_fn.last_loss.requires_grad)
+        self.assertIsNone(trainer.loss_fn.last_loss.creator)
+        self.assertGreaterEqual(avg_val_loss, 0.0)
+
+    def test_llm_sample_mode_runs_without_grad_tracking(self):
+        class TinyLM(Module):
+            def __init__(self, vocab_size=8, **kwargs):
+                super().__init__()
+                self.logit_bias = Tensor(
+                    xp.arange(vocab_size, dtype=xp.float32), requires_grad=True
+                )
+
+            def forward(self, tokens, mask=None):
+                batch_size, seq_len = tokens.shape
+                logit_bias = self.parameters["logit_bias"]
+                return logit_bias.expand(batch_size, seq_len, logit_bias.shape[0])
+
+        class TinyForwardFn(AbstractLLMForwardFn):
+            def train(self, model, batch_data):
+                return model(batch_data, None), batch_data
+
+            def sample(self, model, batch_data):
+                return model(batch_data, None), None
+
+        model = TinyLM()
+        forward_fn = TinyForwardFn()
+        tokens = xp.zeros((2, 4), dtype=xp.int32)
+
+        logits, _ = forward_fn(model, tokens, mode="sample")
+
+        self.assertFalse(logits.requires_grad)
+        self.assertIsNone(logits.creator)
 
     @patch("autograd.tools.callback.text_utils.inference")
     def test_manual_qualitative_inference_helpers_do_not_depend_on_loader(

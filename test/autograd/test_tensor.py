@@ -3,7 +3,7 @@ from unittest import TestCase
 import torch  # for comparison
 
 from autograd.backend import xp
-from autograd.tensor import Tensor
+from autograd.tensor import Tensor, is_grad_enabled, no_grad
 from test.helpers import allclose, array_equal, isclose
 
 
@@ -113,6 +113,23 @@ class TestTensorOps(TestTensor):
         assert self.y_scalar.grad is None  # lazy init until backward is called
         assert self.x_scalar.requires_grad
         assert self.y_scalar.creator is None
+
+    def test_no_grad_context_disables_graph_construction(self):
+        assert is_grad_enabled()
+        with no_grad():
+            z = self.x_scalar + self.y_scalar
+            assert not z.requires_grad
+            assert z.creator is None
+            assert not self.x_scalar.detach().requires_grad
+        assert is_grad_enabled()
+
+    def test_no_grad_context_restores_previous_state(self):
+        with no_grad():
+            assert not is_grad_enabled()
+            with no_grad():
+                assert not is_grad_enabled()
+            assert not is_grad_enabled()
+        assert is_grad_enabled()
 
     def test_tensor_matrix_multiplication(self):
         z = self.x_vector @ self.y_vector

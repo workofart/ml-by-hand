@@ -23,7 +23,7 @@ from .functional import (
     tanh,
 )
 from .init import xavier_uniform
-from .tensor import Tensor
+from .tensor import Tensor, no_grad
 from .text.utils import prepare_mlx_attention_mask
 
 logger = logging.getLogger(__name__)
@@ -1708,7 +1708,8 @@ class AbstractLLMForwardFn(ABC):
         if mode == "train":
             return self.train(model, batch_data)
         elif mode == "sample":
-            return self.sample(model, batch_data)
+            with no_grad():
+                return self.sample(model, batch_data)
         else:
             raise ValueError(f"mode must be either 'train' or 'sample', got {mode}")
 

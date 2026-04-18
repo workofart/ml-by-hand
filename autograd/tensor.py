@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from abc import abstractmethod
+from contextlib import contextmanager
 from typing import (
     Any,
     List,
@@ -15,6 +16,23 @@ from typing import (
 from autograd.backend import ARRAY_TYPE, Array, ArrayLike, xp
 
 logger = logging.getLogger(__name__)
+
+_grad_enabled = True
+
+
+def is_grad_enabled() -> bool:
+    return _grad_enabled
+
+
+@contextmanager
+def no_grad():
+    global _grad_enabled
+    previous = _grad_enabled
+    _grad_enabled = False
+    try:
+        yield
+    finally:
+        _grad_enabled = previous
 
 
 class Function:
@@ -117,7 +135,7 @@ class Function:
 
         # Constant-only ops never participate in backprop, so avoid retaining
         # the function and its inputs as dead graph state.
-        requires_grad = any(inp.requires_grad for inp in tensors)
+        requires_grad = is_grad_enabled() and any(inp.requires_grad for inp in tensors)
         out = Tensor(
             out_data,
             creator=func if requires_grad else None,

@@ -12,7 +12,7 @@ from autograd.backend import (
     eval,
     xp,
 )
-from autograd.tensor import Tensor
+from autograd.tensor import Tensor, no_grad
 from autograd.tools.config_schema import (
     GenericTrainingConfig,
     TransformerTrainingConfig,
@@ -449,54 +449,57 @@ class SimpleTrainer(AbstractTrainer):
             float: The average validation loss over the entire validation dataset.
         """
         self.model.eval()
-        total_loss: Any = 0.0
-        batch_count = 0
-        all_preds, all_targets = [], []
-        for batch_data in val_data_loader:
-            if self._max_eval_steps_reached(batch_count):
-                break
-            batch_X, batch_y = batch_data
-            y_pred = self.model(batch_X)
-            loss = self.loss_fn(y_pred, batch_y)
-            total_loss += loss.data
-            batch_count += 1
-            all_preds.append(y_pred)
-            all_targets.append(batch_y)
-        avg_val_loss = total_loss / max(batch_count, 1)
-        avg_val_loss = float(xp.to_scalar(avg_val_loss))
+        try:
+            with no_grad():
+                total_loss: Any = 0.0
+                batch_count = 0
+                all_preds, all_targets = [], []
+                for batch_data in val_data_loader:
+                    if self._max_eval_steps_reached(batch_count):
+                        break
+                    batch_X, batch_y = batch_data
+                    y_pred = self.model(batch_X)
+                    loss = self.loss_fn(y_pred, batch_y)
+                    total_loss += loss.data
+                    batch_count += 1
+                    all_preds.append(y_pred)
+                    all_targets.append(batch_y)
+                avg_val_loss = total_loss / max(batch_count, 1)
+                avg_val_loss = float(xp.to_scalar(avg_val_loss))
 
-        # Compute additional metrics for classification or regression
-        y_pred_full = xp.concatenate([p.data for p in all_preds], axis=0)
-        y_true_full = xp.concatenate(all_targets, axis=0)
+                # Compute additional metrics for classification or regression
+                y_pred_full = xp.concatenate([p.data for p in all_preds], axis=0)
+                y_true_full = xp.concatenate(all_targets, axis=0)
 
-        if self.problem_type == "classification":
-            y_pred_proc, y_true_proc = self._post_process_classification(
-                y_pred_full, y_true_full
-            )
-            acc_val = accuracy(
-                xp.array(y_pred_proc).reshape(-1),
-                xp.array(y_true_proc, dtype=xp.int32).reshape(-1),
-            )
-            self.metrics["val_accuracy"].append(acc_val)
-
-            if self.sample_predictions:
-                sample_count = min(5, len(y_pred_proc))
-                if sample_count > 0:
-                    sample_lines = [
-                        f"Predicted: {y_pred_proc[i]}\nActual: {y_true_proc[i]}"
-                        for i in range(sample_count)
-                    ]
-                    logger.info(
-                        "Sample Predictions on Validation Batch:\n"
-                        + "\n".join(sample_lines)
+                if self.problem_type == "classification":
+                    y_pred_proc, y_true_proc = self._post_process_classification(
+                        y_pred_full, y_true_full
                     )
+                    acc_val = accuracy(
+                        xp.array(y_pred_proc).reshape(-1),
+                        xp.array(y_true_proc, dtype=xp.int32).reshape(-1),
+                    )
+                    self.metrics["val_accuracy"].append(acc_val)
 
-        else:
-            mse_val = mean_squared_error(y_pred_full, y_true_full)
-            self.metrics["val_mse"].append(mse_val)
+                    if self.sample_predictions:
+                        sample_count = min(5, len(y_pred_proc))
+                        if sample_count > 0:
+                            sample_lines = [
+                                f"Predicted: {y_pred_proc[i]}\nActual: {y_true_proc[i]}"
+                                for i in range(sample_count)
+                            ]
+                            logger.info(
+                                "Sample Predictions on Validation Batch:\n"
+                                + "\n".join(sample_lines)
+                            )
 
-        self.model.train()
-        return avg_val_loss
+                else:
+                    mse_val = mean_squared_error(y_pred_full, y_true_full)
+                    self.metrics["val_mse"].append(mse_val)
+
+                return avg_val_loss
+        finally:
+            self.model.train()
 
     def _post_process_classification(
         self, y_pred: Array, y_true: Array
@@ -671,22 +674,25 @@ class LLMTrainer(AbstractTrainer):
         """
         self.model.eval()
         try:
-            total_loss: Any = 0.0
-            batch_count = 0
-            for batch_data in tqdm(val_data_loader, desc="Evaluation", leave=False):
-                if self._max_eval_steps_reached(batch_count):
-                    break
-                pred_probs, y = self.forward_fn(self.model, batch_data, mode="train")
-                # TODO: Decide whether validation should use the same label_smoothing setting
-                # as training, or intentionally report unsmoothed cross-entropy.
-                loss = self.loss_fn(pred_probs, y, pad_idx=val_data_loader.pad_idx)
-                total_loss += loss.data
-                batch_count += 1
-            avg_val_loss = total_loss / max(batch_count, 1)
-            avg_val_loss = float(xp.to_scalar(avg_val_loss))
-            for callback in self.eval_callbacks:
-                callback(self.model, self.forward_fn, val_data_loader, self.config)
-            return avg_val_loss
+            with no_grad():
+                total_loss: Any = 0.0
+                batch_count = 0
+                for batch_data in tqdm(val_data_loader, desc="Evaluation", leave=False):
+                    if self._max_eval_steps_reached(batch_count):
+                        break
+                    pred_probs, y = self.forward_fn(
+                        self.model, batch_data, mode="train"
+                    )
+                    # TODO: Decide whether validation should use the same label_smoothing setting
+                    # as training, or intentionally report unsmoothed cross-entropy.
+                    loss = self.loss_fn(pred_probs, y, pad_idx=val_data_loader.pad_idx)
+                    total_loss += loss.data
+                    batch_count += 1
+                avg_val_loss = total_loss / max(batch_count, 1)
+                avg_val_loss = float(xp.to_scalar(avg_val_loss))
+                for callback in self.eval_callbacks:
+                    callback(self.model, self.forward_fn, val_data_loader, self.config)
+                return avg_val_loss
         finally:
             self.model.train()
 
