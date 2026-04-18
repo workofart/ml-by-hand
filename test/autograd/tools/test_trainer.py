@@ -211,10 +211,10 @@ class TestSimpleTrainer(BaseTrainerTest):
         self.assertEqual(self.trainer.optimizer.step_call_count, 4)
 
     def test_train_step_returns_loss(self):
-        """Check that the train_step returns the expected scalar loss."""
+        """Check that train_step returns the expected loss tensor."""
         batch = next(iter(self.train_data))
         loss_val = self.trainer.train_step(batch)
-        self.assertAlmostEqual(loss_val, 1.23, places=5)
+        self.assertAlmostEqual(float(loss_val.item()), 1.23, places=5)
 
     def test_save_metrics_persists_none_as_nan(self):
         self.trainer.metrics["epoch"] = [0]
@@ -410,10 +410,10 @@ class TestLLMTrainer(BaseTrainerTest):
         self.assertEqual(self.trainer.optimizer.step_call_count, 4)
 
     def test_train_step_returns_loss(self):
-        """Check that a single train step returns the constant scalar loss."""
+        """Check that a single train step returns the constant loss tensor."""
         batch = next(iter(self.train_data))
         loss_val = self.trainer.train_step(batch, self.train_loader)
-        self.assertAlmostEqual(loss_val, 1.23, places=5)
+        self.assertAlmostEqual(float(loss_val.item()), 1.23, places=5)
 
     def test_evaluate_does_not_require_loader_metadata(self):
         class MinimalLoader:
@@ -538,7 +538,9 @@ class TestLLMTrainer(BaseTrainerTest):
         train_loss = trainer.train_step(batch, loader)
         val_loss = trainer.evaluate(loader)
 
-        self.assertAlmostEqual(train_loss, float(expected_loss.item()), places=6)
+        self.assertAlmostEqual(
+            float(train_loss.item()), float(expected_loss.item()), places=6
+        )
         self.assertAlmostEqual(val_loss, float(expected_loss.item()), places=6)
 
     def test_fit_supports_unsized_streaming_data_loaders(self):

@@ -136,23 +136,28 @@ class AbstractTrainer(ABC):
         Returns:
             float: The average training loss over the epoch.
         """
-        total_loss = 0.0
+        total_loss: Any = 0.0
         batch_count = 0
         self.optimizer.zero_grad()
         for batch in tqdm(data_loader, desc="Training Batches", leave=False):
             if self._max_steps_reached():
                 break
             loss = self.train_step(batch, data_loader)
-            total_loss += loss
+            total_loss += loss.data
             if (batch_count + 1) % self.config.gradient_accumulation_steps == 0:
                 self.optimizer.step()  # increments .timestep, applies LR scheduler if present
-                self.metrics["grad_l2_norm"].append(grad_l2_norm(self.model.parameters))
+                self.metrics["grad_l2_norm"].append(
+                    grad_l2_norm(self.optimizer.model_parameters)
+                )
                 self.optimizer.zero_grad()
             batch_count += 1
             self.global_step += 1
         # TODO: Decide whether to flush leftover accumulated gradients at epoch end when
         # batch_count is not divisible by gradient_accumulation_steps.
-        return total_loss / max(batch_count, 1)
+        if batch_count == 0:
+            return 0.0
+        avg_loss = total_loss / max(batch_count, 1)
+        return float(xp.to_scalar(avg_loss))
 
     def _save_checkpoint(self, epoch: int, val_loss: Optional[float]):
         """Saves a model checkpoint if the validation loss improves.
@@ -204,16 +209,14 @@ class AbstractTrainer(ABC):
         logger.info(f"Saved training metrics to {path}")
 
     @abstractmethod
-    def train_step(self, batch_data, data_loader=None) -> float:
-        """Performs a single training step and returns the loss as a float.
-
-        Subclasses must implement the forward pass, loss computation, and backward pass here.
+    def train_step(self, batch_data, data_loader=None) -> Tensor:
+        """Perform a single training step and return the device loss tensor.
 
         Args:
             batch_data: A single batch of training data.
 
         Returns:
-            float: The computed loss value for the batch.
+            Tensor: The computed loss tensor for the batch.
         """
         pass
 
@@ -418,7 +421,7 @@ class SimpleTrainer(AbstractTrainer):
             else "regression"
         )
 
-    def train_step(self, batch_data, data_loader=None) -> float:
+    def train_step(self, batch_data, data_loader=None) -> Tensor:
         """Performs a forward pass, computes the loss, and backpropagates.
 
         Note that .zero_grad() and .step() calls are in the _train_one_epoch() function
@@ -428,13 +431,13 @@ class SimpleTrainer(AbstractTrainer):
             data_loader: (Optional) The data loader, if additional context is needed.
 
         Returns:
-            float: The computed loss for this batch.
+            Tensor: The computed loss for this batch.
         """
         batch_X, batch_y = batch_data
         y_pred = self.model(batch_X)
         loss = self.loss_fn(y_pred, batch_y)
         loss.backward()
-        return float(loss.item())
+        return loss
 
     def evaluate(self, val_data_loader) -> float:
         """Evaluates the model on the validation data loader.
@@ -446,7 +449,7 @@ class SimpleTrainer(AbstractTrainer):
             float: The average validation loss over the entire validation dataset.
         """
         self.model.eval()
-        total_loss = 0.0
+        total_loss: Any = 0.0
         batch_count = 0
         all_preds, all_targets = [], []
         for batch_data in val_data_loader:
@@ -455,11 +458,12 @@ class SimpleTrainer(AbstractTrainer):
             batch_X, batch_y = batch_data
             y_pred = self.model(batch_X)
             loss = self.loss_fn(y_pred, batch_y)
-            total_loss += float(loss.item())
+            total_loss += loss.data
             batch_count += 1
             all_preds.append(y_pred)
             all_targets.append(batch_y)
         avg_val_loss = total_loss / max(batch_count, 1)
+        avg_val_loss = float(xp.to_scalar(avg_val_loss))
 
         # Compute additional metrics for classification or regression
         y_pred_full = xp.concatenate([p.data for p in all_preds], axis=0)
@@ -630,7 +634,7 @@ class LLMTrainer(AbstractTrainer):
         self.forward_fn = forward_fn
         self.eval_callbacks = list(eval_callbacks or [])
 
-    def train_step(self, batch_data, data_loader) -> float:
+    def train_step(self, batch_data, data_loader) -> Tensor:
         """Performs a forward pass for language modeling, computes the loss, and backpropagates.
 
         This method expects batch_data in the form:
@@ -643,7 +647,7 @@ class LLMTrainer(AbstractTrainer):
             data_loader: The data loader, used here to get pad_idx (padding index).
 
         Returns:
-            float: The computed loss for this batch.
+            Tensor: The computed loss for this batch.
         """
         pred_probs, y = self.forward_fn(self.model, batch_data, mode="train")
         loss = self.loss_fn(
@@ -653,7 +657,7 @@ class LLMTrainer(AbstractTrainer):
             label_smoothing=self.config.label_smoothing,
         )
         loss.backward()
-        return float(loss.item())
+        return loss
 
     def evaluate(self, val_data_loader) -> float:
         """Evaluates the model on the validation data loader for language modeling.
@@ -667,7 +671,7 @@ class LLMTrainer(AbstractTrainer):
         """
         self.model.eval()
         try:
-            total_loss = 0.0
+            total_loss: Any = 0.0
             batch_count = 0
             for batch_data in tqdm(val_data_loader, desc="Evaluation", leave=False):
                 if self._max_eval_steps_reached(batch_count):
@@ -676,9 +680,10 @@ class LLMTrainer(AbstractTrainer):
                 # TODO: Decide whether validation should use the same label_smoothing setting
                 # as training, or intentionally report unsmoothed cross-entropy.
                 loss = self.loss_fn(pred_probs, y, pad_idx=val_data_loader.pad_idx)
-                total_loss += float(loss.item())
+                total_loss += loss.data
                 batch_count += 1
             avg_val_loss = total_loss / max(batch_count, 1)
+            avg_val_loss = float(xp.to_scalar(avg_val_loss))
             for callback in self.eval_callbacks:
                 callback(self.model, self.forward_fn, val_data_loader, self.config)
             return avg_val_loss

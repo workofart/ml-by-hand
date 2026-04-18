@@ -206,7 +206,7 @@ class BytePairEncoder:
 
         logger.info(f"Vocabulary size: {len(self._unicode_to_int_vocab)}")
         logger.info(f"Encoded data length: {len(encoded_data)}")
-        logger.debug(f"Sample encoded data (first 50 tokens): {encoded_data[:50]}")
+        logger.debug("Sample encoded data (first 50 tokens): %s", encoded_data[:50])
 
         return encoded_data
 
@@ -237,7 +237,7 @@ class BytePairEncoder:
             return self._unicode_to_int_vocab, self._int_to_unicode_vocab
 
         text_chunks = self._pretokenize(input_text)
-        logger.debug(f"Text chunks: {text_chunks[:10]}")
+        logger.debug("Text chunks: %s", text_chunks[:10])
 
         word_freq = Counter()
         for chunk in text_chunks:
@@ -329,7 +329,7 @@ class BytePairEncoder:
             >>> print(token_ids)  # Outputs a list of token IDs
         """
         text_chunks = self._pretokenize(input_text)
-        logger.debug(f"Text chunks: {text_chunks[:20]}")
+        logger.debug("Text chunks: %s", text_chunks[:20])
 
         if not text_chunks:
             return []

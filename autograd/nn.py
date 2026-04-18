@@ -534,8 +534,11 @@ class Linear(Module):
         if not isinstance(x, Tensor):
             x = Tensor(x)
 
-        logger.debug(f"{x.data.shape=}")
-        logger.debug(f"Linear forward {self._parameters['weight'].data.shape=}")
+        logger.debug("x.data.shape=%s", x.data.shape)
+        logger.debug(
+            "Linear forward weight.shape=%s",
+            self._parameters["weight"].data.shape,
+        )
 
         # this is just a linear transformation (dot matrix multiplication)
         return x @ self._parameters["weight"] + self._parameters["bias"]
