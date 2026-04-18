@@ -193,6 +193,15 @@ class TestEmbedding(TestCase):
             output.data, torch_output.detach().numpy(), rtol=1e-5, atol=1e-5
         ), "Embedding output doesn't match PyTorch's output"
 
+    def test_forward_raw_index_array(self):
+        output = self.embedding(self.x_data)
+        torch_output = self.torch_embedding(self.x_torch)
+
+        assert output.shape == (self.batch_size, self.seq_length, self.embedding_size)
+        assert allclose(
+            output.data, torch_output.detach().numpy(), rtol=1e-5, atol=1e-5
+        ), "Embedding output for raw indices doesn't match PyTorch's output"
+
     def test_backward(self):
         # Forward pass
         output = self.embedding(self.x)

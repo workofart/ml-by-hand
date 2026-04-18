@@ -1179,13 +1179,13 @@ class Embedding(Module):
             >>> x = Tensor(xp.array([[0, 1, 2], [3, 4, 5]]))
             >>> y = embed(x)  # Expected: (2, 3, 8)
         """
-        if not isinstance(x, Tensor):
-            x = Tensor(x)
-
         # indices.shape: (batch_size, seq_len)
         # result.shape: (batch_size, seq_len, embedding_size)
+        # Raw integer arrays do not participate in autograd, so avoid wrapping
+        # them in Tensor just to read the index values back out again.
+        indices = x.data if isinstance(x, Tensor) else x
         return self._parameters["weight"].gather(
-            index=cast(Any, cast(Any, x.data).astype(xp.int32))
+            index=cast(Any, xp.asarray(indices, dtype=xp.int32))
         )
 
 
