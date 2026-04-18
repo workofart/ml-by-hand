@@ -605,18 +605,20 @@ class TestConv2d(TestCase):
 
         # Create PyTorch tensors and layer
         x_torch = torch.tensor(x.data, requires_grad=True)
+        torch_dtype = x_torch.dtype
         conv_torch = torch.nn.Conv2d(2, 1, 3, padding="same")
+        conv_torch = conv_torch.to(dtype=torch_dtype)
         with torch.no_grad():
             conv_torch.weight.data = torch.tensor(
-                conv._parameters["weight"].data, dtype=torch.float32
+                conv._parameters["weight"].data, dtype=torch_dtype
             )
             conv_torch.bias.data = torch.tensor(
-                conv._parameters["bias"].data, dtype=torch.float32
+                conv._parameters["bias"].data, dtype=torch_dtype
             )
 
         # Forward pass in PyTorch
         output_torch = conv_torch(x_torch)
-        target_torch = torch.tensor(target.data, requires_grad=True)
+        target_torch = torch.tensor(target.data, dtype=torch_dtype, requires_grad=True)
         loss_torch = ((output_torch - target_torch) ** 2).sum()
 
         # Backward pass in PyTorch
