@@ -509,7 +509,7 @@ class Linear(Module):
 
         # weight is a matrix of shape (input_size, output_size)
         self._parameters["weight"] = xavier_uniform(
-            Tensor(xp.zeros((input_size, output_size)))
+            Tensor(xp.zeros((input_size, output_size), dtype=xp.float32))
         )
 
         # bias is always 1-dimensional
@@ -611,13 +611,17 @@ class Conv2d(Module):
                         self.in_channels,
                         self.kernel_size,
                         self.kernel_size,
-                    )
+                    ),
+                    dtype=xp.float32,
                 )
             )
         )
         if bias:
             self._parameters["bias"] = Tensor(
-                xp.random.uniform(0.0, 1.0, (self.out_channels,))
+                xp.asarray(
+                    xp.random.uniform(0.0, 1.0, (self.out_channels,)),
+                    dtype=xp.float32,
+                )
             )
 
     def forward(self, x: Union[Tensor, ArrayLike]) -> Tensor:
@@ -881,18 +885,20 @@ class RecurrentBlock(Module):
         self.dropout = Dropout(p=dropout_prob) if dropout_prob else None
 
         self._parameters["W_xh"] = xavier_uniform(
-            Tensor(xp.zeros((input_size, hidden_size)))
+            Tensor(xp.zeros((input_size, hidden_size), dtype=xp.float32))
         )
         self._parameters["W_hh"] = xavier_uniform(
-            Tensor(xp.zeros((hidden_size, hidden_size)))
+            Tensor(xp.zeros((hidden_size, hidden_size), dtype=xp.float32))
         )
-        self._parameters["bias"] = Tensor(xp.zeros((hidden_size,)))
+        self._parameters["bias"] = Tensor(xp.zeros((hidden_size,), dtype=xp.float32))
 
         if output_size:
             self._parameters["W_hy"] = xavier_uniform(
-                Tensor(xp.zeros((hidden_size, output_size)))
+                Tensor(xp.zeros((hidden_size, output_size), dtype=xp.float32))
             )
-            self._parameters["bias_y"] = Tensor(xp.zeros((output_size,)))
+            self._parameters["bias_y"] = Tensor(
+                xp.zeros((output_size,), dtype=xp.float32)
+            )
         else:
             optional_parameters = cast(dict[str, Optional[Tensor]], self._parameters)
             optional_parameters["W_hy"] = None
@@ -920,7 +926,9 @@ class RecurrentBlock(Module):
 
         batch_size = x.shape[0]
         seq_length = x.shape[1]
-        hidden_state = Tensor(xp.zeros((batch_size, self.hidden_size)))
+        hidden_state = Tensor(
+            xp.zeros((batch_size, self.hidden_size), dtype=xp.float32)
+        )
 
         # Iterate through the sequence (or time dimension)
         for t in range(seq_length):
@@ -1006,27 +1014,29 @@ class LongShortTermMemoryBlock(Module):
         self.dropout = Dropout(p=dropout_prob) if dropout_prob else None
 
         self._parameters["W_f"] = xavier_uniform(
-            Tensor(xp.zeros((input_size + hidden_size, hidden_size)))
+            Tensor(xp.zeros((input_size + hidden_size, hidden_size), dtype=xp.float32))
         )
         self._parameters["W_i"] = xavier_uniform(
-            Tensor(xp.zeros((input_size + hidden_size, hidden_size)))
+            Tensor(xp.zeros((input_size + hidden_size, hidden_size), dtype=xp.float32))
         )
         self._parameters["W_c"] = xavier_uniform(
-            Tensor(xp.zeros((input_size + hidden_size, hidden_size)))
+            Tensor(xp.zeros((input_size + hidden_size, hidden_size), dtype=xp.float32))
         )
         self._parameters["W_o"] = xavier_uniform(
-            Tensor(xp.zeros((input_size + hidden_size, hidden_size)))
+            Tensor(xp.zeros((input_size + hidden_size, hidden_size), dtype=xp.float32))
         )
-        self._parameters["bias_f"] = Tensor(xp.zeros((hidden_size,)))
-        self._parameters["bias_i"] = Tensor(xp.zeros((hidden_size,)))
-        self._parameters["bias_c"] = Tensor(xp.zeros((hidden_size,)))
-        self._parameters["bias_o"] = Tensor(xp.zeros((hidden_size,)))
+        self._parameters["bias_f"] = Tensor(xp.zeros((hidden_size,), dtype=xp.float32))
+        self._parameters["bias_i"] = Tensor(xp.zeros((hidden_size,), dtype=xp.float32))
+        self._parameters["bias_c"] = Tensor(xp.zeros((hidden_size,), dtype=xp.float32))
+        self._parameters["bias_o"] = Tensor(xp.zeros((hidden_size,), dtype=xp.float32))
 
         if output_size:
             self._parameters["W_hy"] = xavier_uniform(
-                Tensor(xp.zeros((hidden_size, output_size)))
+                Tensor(xp.zeros((hidden_size, output_size), dtype=xp.float32))
             )
-            self._parameters["bias_y"] = Tensor(xp.zeros((output_size,)))
+            self._parameters["bias_y"] = Tensor(
+                xp.zeros((output_size,), dtype=xp.float32)
+            )
         else:
             optional_parameters = cast(dict[str, Optional[Tensor]], self._parameters)
             optional_parameters["W_hy"] = None
@@ -1066,9 +1076,13 @@ class LongShortTermMemoryBlock(Module):
         hidden_state = (
             hidden_state
             if hidden_state
-            else Tensor(xp.zeros((batch_size, self.hidden_size)))
+            else Tensor(xp.zeros((batch_size, self.hidden_size), dtype=xp.float32))
         )
-        C_t = C_t if C_t else Tensor(xp.zeros((batch_size, self.hidden_size)))
+        C_t = (
+            C_t
+            if C_t
+            else Tensor(xp.zeros((batch_size, self.hidden_size), dtype=xp.float32))
+        )
 
         # Iterate through the sequence (or time dimension)
         for t in range(seq_length):
@@ -1158,7 +1172,10 @@ class Embedding(Module):
 
         # weight.shape: (input_size, embedding_size)
         self._parameters["weight"] = Tensor(
-            xp.random.normal(shape=(input_size, embedding_size), scale=0.01),
+            xp.asarray(
+                xp.random.normal(shape=(input_size, embedding_size), scale=0.01),
+                dtype=xp.float32,
+            ),
             requires_grad=True,
         )
 
@@ -1215,8 +1232,8 @@ class LayerNorm(Module):
         """
         super().__init__(**kwargs)
         self.epsilon = epsilon
-        self._parameters["gain"] = Tensor(xp.ones((input_size,)))
-        self._parameters["bias"] = Tensor(xp.zeros((input_size,)))
+        self._parameters["gain"] = Tensor(xp.ones((input_size,), dtype=xp.float32))
+        self._parameters["bias"] = Tensor(xp.zeros((input_size,), dtype=xp.float32))
 
     def forward(self, x: Tensor) -> Tensor:
         """
@@ -1290,8 +1307,8 @@ class BatchNorm(Module):
         self.epsilon = epsilon  # small constant for numeric stability
 
         # Running stats (used for inference)
-        self.running_mean = xp.zeros(input_size)
-        self.running_var = xp.ones(input_size)
+        self.running_mean = xp.zeros(input_size, dtype=xp.float32)
+        self.running_var = xp.ones(input_size, dtype=xp.float32)
 
         # gamma and beta are learnable parameters
         # gamma is responsible for scaling the normalized input
