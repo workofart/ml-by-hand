@@ -203,8 +203,9 @@ class Tensor:
         Initialize a `Tensor`.
 
         Args:
-            data (ArrayLike): The data for this tensor. It will be converted to an mx
-                of type float32.
+            data (ArrayLike): The data for this tensor. Python scalars/sequences are
+                materialized as float32 by default, while explicit backend arrays keep
+                their dtype.
             creator (Optional[Function], optional): The function that created this tensor.
                 Defaults to None if this tensor is a leaf.
             requires_grad (bool, optional): Whether this tensor requires gradients. Defaults to True.
@@ -225,11 +226,10 @@ class Tensor:
     @data.setter
     def data(self, value: ArrayLike) -> None:
         if isinstance(value, ARRAY_TYPE):
-            if getattr(value, "dtype", None) == xp.float32:
-                self._data = value
-                return
-        else:
-            self._data = xp.array(value, dtype=xp.float32)
+            # Preserve explicitly constructed backend array dtypes. This keeps
+            # the default float32 path for Python values while allowing
+            # opt-in lower precision experiments.
+            self._data = value
             return
         self._data = xp.array(value, dtype=xp.float32)
 

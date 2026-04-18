@@ -10,7 +10,10 @@ from test.helpers import allclose
 
 class TestActivationFunctions(TestCase):
     def setUp(self) -> None:
-        self.X = Tensor(data=xp.array([[1, 1, 1], [2, 2, 2]]), requires_grad=True)
+        self.X = Tensor(
+            data=xp.array([[1, 1, 1], [2, 2, 2]], dtype=xp.float32),
+            requires_grad=True,
+        )
 
     def test_sigmoid_forward(self):
         assert allclose(

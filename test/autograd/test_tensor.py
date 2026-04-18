@@ -79,6 +79,11 @@ class TestTensor(TestCase):
 
 
 class TestTensorOps(TestTensor):
+    def test_tensor_preserves_explicit_array_dtype(self):
+        x = Tensor(xp.array([1.0, 2.0], dtype=xp.float16), requires_grad=True)
+
+        assert x.data.dtype == xp.float16
+
     def test_tensor_negation(self):
         assert (-self.x_scalar).data == -2.0
 
