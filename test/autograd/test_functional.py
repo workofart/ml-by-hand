@@ -10,7 +10,10 @@ from test.helpers import allclose
 
 class TestActivationFunctions(TestCase):
     def setUp(self) -> None:
-        self.X = Tensor(data=xp.array([[1, 1, 1], [2, 2, 2]]), requires_grad=True)
+        self.X = Tensor(
+            data=xp.array([[1, 1, 1], [2, 2, 2]], dtype=xp.float32),
+            requires_grad=True,
+        )
 
     def test_sigmoid_forward(self):
         assert allclose(
@@ -120,11 +123,11 @@ class TestBinaryCrossEntropy(TestCase):
     def setUp(self) -> None:
         self.y_pred_logits = Tensor(data=xp.array([1.0, 2.0, 3.0]), requires_grad=True)
         self.y_pred_logits_torch = torch.tensor(
-            self.y_pred_logits.data, requires_grad=True
+            self.y_pred_logits.data, dtype=torch.float32, requires_grad=True
         )
         self.y_pred_probs = Tensor(data=xp.array([0.2, 0.3, 0.1]), requires_grad=True)
         self.y_pred_probs_torch = torch.tensor(
-            self.y_pred_probs.data, requires_grad=True
+            self.y_pred_probs.data, dtype=torch.float32, requires_grad=True
         )
         self.y_true = xp.array([0.0, 0.0, 1.0])
 
@@ -158,7 +161,7 @@ class TestBinaryCrossEntropy(TestCase):
             self.y_pred_logits, self.y_true
         )
         torch_bce_loss = torch.nn.functional.binary_cross_entropy_with_logits(
-            self.y_pred_logits_torch, torch.tensor(self.y_true)
+            self.y_pred_logits_torch, torch.tensor(self.y_true, dtype=torch.float32)
         )
         assert allclose(
             bce_loss.data,

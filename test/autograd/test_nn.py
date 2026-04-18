@@ -193,6 +193,15 @@ class TestEmbedding(TestCase):
             output.data, torch_output.detach().numpy(), rtol=1e-5, atol=1e-5
         ), "Embedding output doesn't match PyTorch's output"
 
+    def test_forward_raw_index_array(self):
+        output = self.embedding(self.x_data)
+        torch_output = self.torch_embedding(self.x_torch)
+
+        assert output.shape == (self.batch_size, self.seq_length, self.embedding_size)
+        assert allclose(
+            output.data, torch_output.detach().numpy(), rtol=1e-5, atol=1e-5
+        ), "Embedding output for raw indices doesn't match PyTorch's output"
+
     def test_backward(self):
         # Forward pass
         output = self.embedding(self.x)
@@ -596,18 +605,20 @@ class TestConv2d(TestCase):
 
         # Create PyTorch tensors and layer
         x_torch = torch.tensor(x.data, requires_grad=True)
+        torch_dtype = x_torch.dtype
         conv_torch = torch.nn.Conv2d(2, 1, 3, padding="same")
+        conv_torch = conv_torch.to(dtype=torch_dtype)
         with torch.no_grad():
             conv_torch.weight.data = torch.tensor(
-                conv._parameters["weight"].data, dtype=torch.float32
+                conv._parameters["weight"].data, dtype=torch_dtype
             )
             conv_torch.bias.data = torch.tensor(
-                conv._parameters["bias"].data, dtype=torch.float32
+                conv._parameters["bias"].data, dtype=torch_dtype
             )
 
         # Forward pass in PyTorch
         output_torch = conv_torch(x_torch)
-        target_torch = torch.tensor(target.data, requires_grad=True)
+        target_torch = torch.tensor(target.data, dtype=torch_dtype, requires_grad=True)
         loss_torch = ((output_torch - target_torch) ** 2).sum()
 
         # Backward pass in PyTorch

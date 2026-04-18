@@ -14,6 +14,7 @@ Data pipeline boundary:
 import csv
 import os
 from abc import ABC, abstractmethod
+from math import prod
 from typing import Any, Callable, Iterator, Optional, Sequence, Tuple, Union
 from urllib.request import urlopen
 
@@ -450,6 +451,9 @@ class Collator(ABC):
     def __call__(self, examples: Sequence[dict[str, Array]]) -> Any:
         pass
 
+    def batch_token_count(self, batch: Any) -> Optional[int]:
+        return None
+
 
 class PairedCollator(Collator):
     """
@@ -616,6 +620,10 @@ class LanguageModelingCollator(Collator):
             causal_mask,
         )
 
+    def batch_token_count(self, batch: Any) -> Optional[int]:
+        X_chunk, _, _, _, _, _ = batch
+        return int(prod(X_chunk.shape))
+
 
 class DataLoader:
     """
@@ -644,6 +652,11 @@ class DataLoader:
 
     def on_epoch_start(self) -> None:
         self.dataset.on_epoch_start()
+
+    def batch_token_count(self, batch: Any) -> Optional[int]:
+        if self.collate_fn is None:
+            return None
+        return self.collate_fn.batch_token_count(batch)
 
     def __iter__(self) -> Iterator[Any]:
         batch_examples = []

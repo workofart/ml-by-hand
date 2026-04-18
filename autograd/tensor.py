@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 from abc import abstractmethod
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import (
     Any,
     List,
@@ -15,6 +17,31 @@ from typing import (
 from autograd.backend import ARRAY_TYPE, Array, ArrayLike, xp
 
 logger = logging.getLogger(__name__)
+
+# We have to ensure that this flag doesn't leak across concurrent execution.
+# A ContextVar keeps the API simple while giving each thread / async task its
+# own view of the flag, which matches how users expect nested `with no_grad():`
+_grad_enabled: ContextVar[bool] = ContextVar("grad_enabled", default=True)
+
+
+def is_grad_enabled() -> bool:
+    return _grad_enabled.get()
+
+
+@contextmanager
+def no_grad():
+    # This context disables graph construction for Tensor ops routed through
+    # Function.apply. It does not implicitly change the default
+    # requires_grad=True behavior of direct Tensor(...) leaf construction.
+    # Entering the context changes the flag for this execution context only,
+    # and exiting restores the previous value. The ContextVar captures that
+    # previous state so nesting and exception paths both unwind correctly
+    # without manually tracking a stack.
+    token = _grad_enabled.set(False)
+    try:
+        yield
+    finally:
+        _grad_enabled.reset(token)
 
 
 class Function:
@@ -115,9 +142,14 @@ class Function:
         # Run forward pass with tensor.data already, so we don't need to get it again
         out_data = func.forward(*(inp.data for inp in tensors), **kwargs)
 
-        # Create output tensor
-        requires_grad = any(inp.requires_grad for inp in tensors)
-        out = Tensor(out_data, creator=func, requires_grad=requires_grad)
+        # Constant-only ops never participate in backprop, so avoid retaining
+        # the function and its inputs as dead graph state.
+        requires_grad = is_grad_enabled() and any(inp.requires_grad for inp in tensors)
+        out = Tensor(
+            out_data,
+            creator=func if requires_grad else None,
+            requires_grad=requires_grad,
+        )
         return out
 
     @staticmethod
@@ -180,11 +212,15 @@ class Tensor:
         Initialize a `Tensor`.
 
         Args:
-            data (ArrayLike): The data for this tensor. It will be converted to an mx
-                of type float32.
+            data (ArrayLike): The data for this tensor. Python scalars/sequences are
+                materialized as float32 by default, while explicit backend arrays keep
+                their dtype.
             creator (Optional[Function], optional): The function that created this tensor.
                 Defaults to None if this tensor is a leaf.
             requires_grad (bool, optional): Whether this tensor requires gradients. Defaults to True.
+                Note that this default is independent of the no_grad() context;
+                callers constructing leaf tensors inside no_grad() must still
+                pass requires_grad=False explicitly if they want a non-grad leaf.
 
         Examples:
             >>> x = Tensor([1, 2, 3]) # Expected: xp.array([1., 2., 3.], dtype=float32)
@@ -202,11 +238,10 @@ class Tensor:
     @data.setter
     def data(self, value: ArrayLike) -> None:
         if isinstance(value, ARRAY_TYPE):
-            if getattr(value, "dtype", None) == xp.float32:
-                self._data = value
-                return
-        else:
-            self._data = xp.array(value, dtype=xp.float32)
+            # Preserve explicitly constructed backend array dtypes. This keeps
+            # the default float32 path for Python values while allowing
+            # opt-in lower precision experiments.
+            self._data = value
             return
         self._data = xp.array(value, dtype=xp.float32)
 
@@ -398,6 +433,10 @@ class Tensor:
         if isinstance(other, int) and other >= 0:
             if other == 0:
                 return Tensor(xp.ones_like(self.data), requires_grad=False)
+            if other == 1:
+                return (
+                    self if is_grad_enabled() and self.requires_grad else self.detach()
+                )
 
             result = self
             for _ in range(other - 1):
@@ -423,7 +462,7 @@ class Tensor:
             Tensor: This tensor, after in-place addition.
         """
         if not isinstance(other, Tensor):
-            other = Tensor(other)
+            other = Tensor(other, requires_grad=False)
 
         # Use expand for broadcasting
         broadcast_shape = xp.broadcast_shapes(self.shape, other.shape)

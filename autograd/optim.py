@@ -253,23 +253,22 @@ class Optimizer:
         """
         # Compute the global norm of all gradients
         total_norm = 0.0
-
         for param in self.model_parameters.values():
             if param.grad is not None:
                 grad_data = param.grad.data
-                total_norm += (xp.abs(grad_data) ** norm_type).sum().item()
+                total_norm += (xp.abs(grad_data) ** norm_type).sum()
 
         # Take the appropriate root of the total_norm
         total_norm = total_norm ** (1.0 / norm_type)
 
-        # If total_norm is greater than max_norm, scale all gradients
-        if total_norm > max_norm:
-            scale_factor = max_norm / (
-                total_norm + 1e-10
-            )  # add small value for numerical stability
-            for param in self.model_parameters.values():
-                if param.grad is not None:
-                    param.grad.data *= scale_factor
+        # Clamp the scale factor instead of branching to avoid a device/host
+        # sync on the common no-clip path. This slightly relaxes strict
+        # "only clip if total_norm > max_norm" semantics because the epsilon
+        # can shrink norms that are just below max_norm.
+        scale_factor = xp.minimum(1.0, max_norm / (total_norm + 1e-10))
+        for param in self.model_parameters.values():
+            if param.grad is not None:
+                param.grad.data *= scale_factor
 
     def zero_grad(self) -> None:
         """

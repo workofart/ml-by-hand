@@ -288,6 +288,25 @@ class TestDataLoaders(unittest.TestCase):
         self.assertTrue(xp.array_equal(first_X, self.X[:4]))
         self.assertTrue(xp.array_equal(first_y, self.y[:4]))
 
+    def test_data_loader_batch_token_count_defaults_to_none_for_paired_batches(self):
+        dataset = PairedIterableDataset(self.X, self.y, shuffle=False)
+        loader = DataLoader(
+            dataset,
+            batch_size=4,
+            collate_fn=PairedCollator(),
+        )
+
+        batch = next(iter(loader))
+
+        self.assertIsNone(loader.batch_token_count(batch))
+
+    def test_data_loader_batch_token_count_delegates_to_lm_collator(self):
+        loader = self.make_pretraining_loader(batch_size=2, seq_len=4, shuffle=False)
+
+        batch = next(iter(loader))
+
+        self.assertEqual(loader.batch_token_count(batch), 8)
+
     def test_one_hot_collator_materializes_one_hot_inputs(self):
         collator = OneHotCollator(num_classes=4)
 
