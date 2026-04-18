@@ -1,6 +1,7 @@
 import os
 from collections import Counter
 from unittest import TestCase
+from unittest.mock import patch
 
 from autograd.text.tokenizer import BytePairEncoder
 from test.helpers import array_equal
@@ -47,6 +48,29 @@ class TestTokenizer(TestCase):
         }
         self.assertEqual(pair_counts, expected)
 
+    @patch(
+        "autograd.text.tokenizer.Pool", side_effect=AssertionError("pool not expected")
+    )
+    def test_pair_counting_skips_pool_for_small_corpus(self, _mock_pool):
+        bpe = BytePairEncoder(num_merges=50, n_workers=4)
+        word_freq = Counter(
+            {
+                (10, 11, 12): 3,
+                (11, 12, 12): 2,
+            }
+        )
+
+        pair_counts = bpe._get_initial_pair_counts(word_freq)
+
+        self.assertEqual(
+            pair_counts,
+            {
+                (10, 11): 3,
+                (11, 12): 5,
+                (12, 12): 2,
+            },
+        )
+
     def test_apply_merges_to_corpus(self):
         # Instead of test_merge_pairs, we test _apply_merges_to_corpus
         word_freq = Counter(
@@ -78,6 +102,19 @@ class TestTokenizer(TestCase):
         self.assertTrue((11, 12) in pair_counts)  # still remain in the pair_counts
         self.assertIn((256, 11), pair_counts)
         self.assertIn((11, 12), pair_counts)
+
+    @patch(
+        "autograd.text.tokenizer.Pool", side_effect=AssertionError("pool not expected")
+    )
+    def test_apply_merges_to_corpus_skips_pool_for_small_update_set(self, _mock_pool):
+        bpe = BytePairEncoder(num_merges=50, n_workers=4)
+        word_freq = Counter({(10, 11, 11, 12): 2})
+        pair_counts = {(10, 11): 2, (11, 11): 2, (11, 12): 2}
+
+        bpe._apply_merges_to_corpus((10, 11), 256, word_freq, pair_counts)
+
+        self.assertEqual(word_freq, Counter({(256, 11, 12): 2}))
+        self.assertEqual(pair_counts, {(11, 12): 2, (256, 11): 2})
 
     def test_encode_decode(self):
         input_text = self.original_text + "<|endoftext|>" + self.original_text
@@ -133,3 +170,33 @@ class TestTokenizer(TestCase):
 
         self.assertTrue(os.path.exists(self.bpe.encoded_data_path))
         self.assertTrue(array_equal(first, second))
+
+    @patch(
+        "autograd.text.tokenizer.Pool", side_effect=AssertionError("pool not expected")
+    )
+    def test_prepare_data_skips_pool_for_small_text(self, _mock_pool):
+        bpe = BytePairEncoder(
+            num_merges=2,
+            vocab_file_path="small_vocab.pkl",
+            encoded_data_path="small_encoded_data.npz",
+            n_workers=4,
+        )
+        self.addCleanup(
+            lambda: (
+                os.path.exists(bpe.vocab_file_path) and os.remove(bpe.vocab_file_path)
+            )
+        )
+        self.addCleanup(
+            lambda: (
+                os.path.exists(bpe.encoded_data_path)
+                and os.remove(bpe.encoded_data_path)
+            )
+        )
+
+        encoded = bpe.prepare_data(
+            "hello hello",
+            overwrite_vocabulary_file=True,
+            overwrite_encoded_data=True,
+        )
+
+        self.assertGreater(len(encoded), 0)

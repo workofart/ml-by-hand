@@ -69,6 +69,9 @@ class AbstractTrainer(ABC):
         )
         self.start_epoch = self.config.resume_epoch or 0
         self.global_step = int(self.checkpoint.get("step_count", 0))
+        # Contract: each metric history stores backend scalar arrays or None.
+        # Host conversion happens only at explicit consumption boundaries such
+        # as logging, checkpoint comparison, and persistence.
         self.metrics = defaultdict(list)
 
     def fit(
@@ -189,37 +192,47 @@ class AbstractTrainer(ABC):
         avg_loss = total_loss / max(batch_count, 1)
         return float(xp.to_scalar(avg_loss))
 
-    def _save_checkpoint(self, epoch: int, val_loss: Optional[float]):
+    def _save_checkpoint(self, epoch: int):
         """Saves a model checkpoint if the validation loss improves.
 
         Args:
             epoch (int): Current epoch number.
-            val_loss (Optional[float]): The validation loss at this epoch.
         """
-        if val_loss is not None and epoch % self.config.checkpoint_freq == 0:
-            if self.metrics["val_loss"] and val_loss < min(self.metrics["val_loss"]):
-                checkpoint = {
-                    "epoch": epoch + 1,
-                    "step_count": self.global_step,
-                    "model_state_dict": self.model.state_dict(),
-                    "optimizer_state_dict": self.optimizer.state_dict(),
-                    "model_init_kwargs": self.config.model_kwargs,
-                    "optimizer_init_kwargs": self.config.optimizer_kwargs,
-                    "config": self.config,
-                }
-                os.makedirs(self.CHECKPOINT_DIR, exist_ok=True)
-                cp_path_json = os.path.join(
-                    self.CHECKPOINT_DIR,
-                    f"{self.config.training_run_name}_{self.model.__class__.__name__}_{epoch}.json",
-                )
-                cp_path_npz = os.path.join(
-                    self.CHECKPOINT_DIR,
-                    f"{self.config.training_run_name}_{self.model.__class__.__name__}_{epoch}.npz",
-                )
-                save_checkpoint(
-                    checkpoint, json_path=cp_path_json, npz_path=cp_path_npz
-                )
-                logger.info(f"Saved checkpoint to {cp_path_json} and {cp_path_npz}")
+        if epoch % self.config.checkpoint_freq != 0:
+            return
+
+        val_losses = self.metrics["val_loss"]
+        if not val_losses or val_losses[-1] is None:
+            return
+
+        current_val_loss = float(xp.to_scalar(val_losses[-1]))
+        best_historical_val_loss = min(
+            (float(xp.to_scalar(loss)) for loss in val_losses[:-1] if loss is not None),
+            default=float("inf"),
+        )
+        if current_val_loss >= best_historical_val_loss:
+            return
+
+        checkpoint = {
+            "epoch": epoch + 1,
+            "step_count": self.global_step,
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "model_init_kwargs": self.config.model_kwargs,
+            "optimizer_init_kwargs": self.config.optimizer_kwargs,
+            "config": self.config,
+        }
+        os.makedirs(self.CHECKPOINT_DIR, exist_ok=True)
+        cp_path_json = os.path.join(
+            self.CHECKPOINT_DIR,
+            f"{self.config.training_run_name}_{self.model.__class__.__name__}_{epoch}.json",
+        )
+        cp_path_npz = os.path.join(
+            self.CHECKPOINT_DIR,
+            f"{self.config.training_run_name}_{self.model.__class__.__name__}_{epoch}.npz",
+        )
+        save_checkpoint(checkpoint, json_path=cp_path_json, npz_path=cp_path_npz)
+        logger.info(f"Saved checkpoint to {cp_path_json} and {cp_path_npz}")
 
     def _save_metrics(self):
         """Saves accumulated training metrics to a compressed NPZ file."""
@@ -229,11 +242,13 @@ class AbstractTrainer(ABC):
         path = os.path.join(self.METRICS_DIR, filename)
         metrics_mx = {}
         for key, values in self.metrics.items():
-            if any(value is None for value in values):
-                values = [float("nan") if value is None else value for value in values]
-                metrics_mx[key] = xp.array(values, dtype=xp.float32)
-            else:
-                metrics_mx[key] = xp.array(values)
+            metrics_mx[key] = xp.array(
+                [
+                    float("nan") if value is None else float(xp.to_scalar(value))
+                    for value in values
+                ],
+                dtype=xp.float32,
+            )
         eval(*metrics_mx.values())
         xp.savez_compressed(path, **metrics_mx)
         logger.info(f"Saved training metrics to {path}")
@@ -264,15 +279,29 @@ class AbstractTrainer(ABC):
             train_loss (float): The average training loss for this epoch.
             val_loss (Optional[float]): The validation loss for this epoch, if available.
         """
-        self._save_checkpoint(epoch, val_loss)
-        self.metrics["epoch"].append(epoch)
-        self.metrics["train_loss"].append(train_loss)
-        self.metrics["val_loss"].append(val_loss)
+
+        # The contract is that all the consumers (e.g. log lines below) of
+        # self.metrics will do the sync from GPU to CPU, whereas self.metrics
+        # itself will store GPU/on-device data structures.
+        self.metrics["epoch"].append(xp.array(epoch, dtype=xp.float32))
+        self.metrics["train_loss"].append(xp.array(train_loss, dtype=xp.float32))
+        self.metrics["val_loss"].append(
+            None if val_loss is None else xp.array(val_loss, dtype=xp.float32)
+        )
+        self._save_checkpoint(epoch)
 
         log_msg = f"[Epoch {epoch}]"
+        log_msg += f"\ntrain_loss = {train_loss:.4f}"
+        if val_loss is not None:
+            log_msg += f"\nval_loss = {val_loss:.4f}"
         for key in self.metrics:
-            if key != "epoch" and self.metrics[key][-1] is not None:
-                log_msg += f"\n{key} = {self.metrics[key][-1]:.4f}"
+            if key in {"epoch", "train_loss", "val_loss"}:
+                continue
+            # For other metrics, we will do the sync from GPU to CPU since we're
+            # not passing them in as function args here
+            if self.metrics[key][-1] is not None:
+                metric_value = float(xp.to_scalar(self.metrics[key][-1]))
+                log_msg += f"\n{key} = {metric_value:.4f}"
         log_msg += f"\nLR = {self.optimizer.lr:.4f}"
         logger.info(log_msg)
 
@@ -511,7 +540,9 @@ class SimpleTrainer(AbstractTrainer):
                         xp.array(y_pred_proc).reshape(-1),
                         xp.array(y_true_proc, dtype=xp.int32).reshape(-1),
                     )
-                    self.metrics["val_accuracy"].append(acc_val)
+                    self.metrics["val_accuracy"].append(
+                        xp.array(acc_val, dtype=xp.float32)
+                    )
 
                     if self.sample_predictions:
                         sample_count = min(5, len(y_pred_proc))
@@ -527,7 +558,7 @@ class SimpleTrainer(AbstractTrainer):
 
                 else:
                     mse_val = mean_squared_error(y_pred_full, y_true_full)
-                    self.metrics["val_mse"].append(mse_val)
+                    self.metrics["val_mse"].append(xp.array(mse_val, dtype=xp.float32))
 
                 return avg_val_loss
         finally:
@@ -739,7 +770,7 @@ class LLMTrainer(AbstractTrainer):
             self.model.train()
 
 
-def grad_l2_norm(parameters: Dict[str, Tensor]) -> float:
+def grad_l2_norm(parameters: Dict[str, Tensor]) -> Array:
     """Computes the L2 norm of the gradients for the given model parameters.
 
     Args:
@@ -747,7 +778,7 @@ def grad_l2_norm(parameters: Dict[str, Tensor]) -> float:
             for which to compute the gradient norm.
 
     Returns:
-        float: The L2 norm of all gradients (i.e., sqrt of sum of squared gradient values).
+        Array: Backend scalar containing the L2 norm of all gradients.
 
     Example:
         >>> from autograd.tensor import Tensor
@@ -758,8 +789,8 @@ def grad_l2_norm(parameters: Dict[str, Tensor]) -> float:
         >>> grad_norm
         0.2236068
     """
-    grad_norm = 0.0
+    grad_norm = xp.array(0.0, dtype=xp.float32)
     for p in parameters.values():
         if p.grad is not None:
             grad_norm += (p.grad.data**2).sum()
-    return float(xp.to_scalar(grad_norm**0.5))
+    return xp.sqrt(grad_norm)
