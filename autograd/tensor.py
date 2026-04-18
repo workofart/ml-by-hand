@@ -30,6 +30,9 @@ def is_grad_enabled() -> bool:
 
 @contextmanager
 def no_grad():
+    # This context disables graph construction for Tensor ops routed through
+    # Function.apply. It does not implicitly change the default
+    # requires_grad=True behavior of direct Tensor(...) leaf construction.
     # Entering the context changes the flag for this execution context only,
     # and exiting restores the previous value. The ContextVar captures that
     # previous state so nesting and exception paths both unwind correctly
@@ -215,6 +218,9 @@ class Tensor:
             creator (Optional[Function], optional): The function that created this tensor.
                 Defaults to None if this tensor is a leaf.
             requires_grad (bool, optional): Whether this tensor requires gradients. Defaults to True.
+                Note that this default is independent of the no_grad() context;
+                callers constructing leaf tensors inside no_grad() must still
+                pass requires_grad=False explicitly if they want a non-grad leaf.
 
         Examples:
             >>> x = Tensor([1, 2, 3]) # Expected: xp.array([1., 2., 3.], dtype=float32)

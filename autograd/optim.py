@@ -261,7 +261,10 @@ class Optimizer:
         # Take the appropriate root of the total_norm
         total_norm = total_norm ** (1.0 / norm_type)
 
-        # If total_norm is greater than max_norm, scale all gradients
+        # Clamp the scale factor instead of branching to avoid a device/host
+        # sync on the common no-clip path. This slightly relaxes strict
+        # "only clip if total_norm > max_norm" semantics because the epsilon
+        # can shrink norms that are just below max_norm.
         scale_factor = xp.minimum(1.0, max_norm / (total_norm + 1e-10))
         for param in self.model_parameters.values():
             if param.grad is not None:

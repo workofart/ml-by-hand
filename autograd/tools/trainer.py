@@ -166,6 +166,9 @@ class AbstractTrainer(ABC):
             if self._max_steps_reached():
                 break
             loss = self.train_step(batch, data_loader)
+            # Internal contract: train_step returns a device-backed loss Tensor so
+            # the epoch loop can accumulate on device and convert to a host float
+            # only once at the end of the epoch.
             total_loss += loss.data
             if (batch_count + 1) % self.config.gradient_accumulation_steps == 0:
                 self.optimizer.step()  # increments .timestep, applies LR scheduler if present
@@ -244,6 +247,8 @@ class AbstractTrainer(ABC):
 
         Returns:
             Tensor: The computed loss tensor for the batch.
+            Note that _train_one_epoch is responsible for
+            reducing epoch loss to a Python float.
         """
         pass
 
@@ -723,6 +728,10 @@ class LLMTrainer(AbstractTrainer):
                     batch_count += 1
                 avg_val_loss = total_loss / max(batch_count, 1)
                 avg_val_loss = float(xp.to_scalar(avg_val_loss))
+                # NOTE: eval callbacks currently run inside no_grad(). That is
+                # intentional for today's qualitative inference hooks, but any
+                # future gradient-based eval callback should be moved outside
+                # this context or given an explicit contract.
                 for callback in self.eval_callbacks:
                     callback(self.model, self.forward_fn, val_data_loader, self.config)
                 return avg_val_loss
