@@ -26,17 +26,18 @@ from autograd.tools.data import (
 from autograd.tools.trainer import LLMTrainer, SimpleTrainer
 
 
-class MockDataLoader:
+class MockDataLoader(DataLoader):
     """
     A simple loader that stores a list of batches in memory.
     Each time __iter__ is called, it yields those same batches again.
     """
 
-    def __init__(self, data, pad_idx=0, seq_len=1):
+    def __init__(self, data, pad_idx=0, seq_len=1, batch_token_count_fn=None):
         self.data = data
         self.pad_idx = pad_idx
         self.seq_len = seq_len
         self.bpe = MagicMock()
+        self.batch_token_count_fn = batch_token_count_fn
 
     def on_epoch_start(self):
         # If you want to shuffle or do something each epoch, do it here
@@ -49,6 +50,11 @@ class MockDataLoader:
         # A fresh iterator every time => each epoch can re-iterate from the start
         print(f"MockDataLoader: yielding {len(self.data)} batch(es)")
         return iter(self.data)
+
+    def batch_token_count(self, batch):
+        if self.batch_token_count_fn is None:
+            return None
+        return self.batch_token_count_fn(batch)
 
 
 class MockModelClass(Module):
@@ -120,6 +126,23 @@ class MockBPE:
             if token == "<SOS>":
                 return [1]
         return [ord(char) for char in token]
+
+
+class RecordingTqdm:
+    def __init__(self, iterable, desc=None, leave=False, elapsed_s=2.0):
+        self.iterable = iterable
+        self.desc = desc
+        self.leave = leave
+        self.format_dict = {"elapsed": elapsed_s}
+        self.postfixes = []
+
+    def __iter__(self):
+        return iter(self.iterable)
+
+    def set_postfix(self, ordered_dict=None, refresh=True, **kwargs):
+        postfix = dict(ordered_dict or {})
+        postfix.update(kwargs)
+        self.postfixes.append(postfix)
 
 
 class PromptMaskAwareForwardFn(AbstractLLMForwardFn):
@@ -412,8 +435,21 @@ class TestLLMTrainer(BaseTrainerTest):
         ]
 
         # Replace MagicMock with a real in-memory loader
-        self.train_loader = MockDataLoader(self.train_data, pad_idx=0, seq_len=seq_len)
-        self.val_loader = MockDataLoader(self.val_data, pad_idx=0, seq_len=seq_len)
+        def batch_token_count_fn(batch):
+            return int(batch[0].shape[0] * batch[0].shape[1])
+
+        self.train_loader = MockDataLoader(
+            self.train_data,
+            pad_idx=0,
+            seq_len=seq_len,
+            batch_token_count_fn=batch_token_count_fn,
+        )
+        self.val_loader = MockDataLoader(
+            self.val_data,
+            pad_idx=0,
+            seq_len=seq_len,
+            batch_token_count_fn=batch_token_count_fn,
+        )
 
         # We'll mock forward_fn to skip real model logic
         self.forward_fn = MagicMock()
@@ -450,25 +486,66 @@ class TestLLMTrainer(BaseTrainerTest):
         # 2 epochs * 2 train batches = 4 steps
         self.assertEqual(self.trainer.optimizer.step_call_count, 4)
 
+    @patch("autograd.tools.trainer.tqdm")
+    def test_fit_updates_tqdm_with_cumulative_tokens_and_token_throughput(
+        self, mock_tqdm
+    ):
+        progress_bars = []
+
+        def make_progress_bar(iterable, desc=None, leave=False):
+            progress_bar = RecordingTqdm(iterable, desc=desc, leave=leave)
+            progress_bars.append(progress_bar)
+            return progress_bar
+
+        mock_tqdm.side_effect = make_progress_bar
+        self.config.max_epochs = 1
+
+        self.trainer.fit(self.train_loader, self.val_loader)
+
+        training_bar = next(
+            bar for bar in progress_bars if bar.desc == "Training Batches"
+        )
+        self.assertEqual(
+            training_bar.postfixes,
+            [
+                {"tokens": "20", "tok/s": "10.0"},
+                {"tokens": "40", "tok/s": "20.0"},
+            ],
+        )
+
     def test_train_step_returns_loss(self):
         """Check that a single train step returns the constant loss tensor."""
         batch = next(iter(self.train_data))
         loss_val = self.trainer.train_step(batch, self.train_loader)
         self.assertAlmostEqual(float(loss_val.item()), 1.23, places=5)
 
-    def test_evaluate_does_not_require_loader_metadata(self):
-        class MinimalLoader:
-            pad_idx = 0
-
-            def __init__(self, data):
-                self.data = data
-
-            def __iter__(self):
-                return iter(self.data)
-
-        avg_val_loss = self.trainer.evaluate(MinimalLoader(self.val_data))
+    def test_evaluate_supports_data_loader_without_token_count(self):
+        avg_val_loss = self.trainer.evaluate(MockDataLoader(self.val_data))
 
         self.assertAlmostEqual(avg_val_loss, 1.23, places=5)
+
+    @patch("autograd.tools.trainer.tqdm")
+    def test_evaluate_updates_tqdm_with_cumulative_tokens_and_token_throughput(
+        self, mock_tqdm
+    ):
+        progress_bars = []
+
+        def make_progress_bar(iterable, desc=None, leave=False):
+            progress_bar = RecordingTqdm(iterable, desc=desc, leave=leave)
+            progress_bars.append(progress_bar)
+            return progress_bar
+
+        mock_tqdm.side_effect = make_progress_bar
+
+        avg_val_loss = self.trainer.evaluate(self.val_loader)
+
+        self.assertAlmostEqual(avg_val_loss, 1.23, places=5)
+        self.assertEqual(len(progress_bars), 1)
+        self.assertEqual(progress_bars[0].desc, "Evaluation")
+        self.assertEqual(
+            progress_bars[0].postfixes,
+            [{"tokens": "20", "tok/s": "10.0"}],
+        )
 
     def test_evaluate_runs_eval_callbacks_and_returns_val_loss(self):
         callback = MagicMock()
