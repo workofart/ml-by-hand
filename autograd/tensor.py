@@ -115,9 +115,14 @@ class Function:
         # Run forward pass with tensor.data already, so we don't need to get it again
         out_data = func.forward(*(inp.data for inp in tensors), **kwargs)
 
-        # Create output tensor
+        # Constant-only ops never participate in backprop, so avoid retaining
+        # the function and its inputs as dead graph state.
         requires_grad = any(inp.requires_grad for inp in tensors)
-        out = Tensor(out_data, creator=func, requires_grad=requires_grad)
+        out = Tensor(
+            out_data,
+            creator=func if requires_grad else None,
+            requires_grad=requires_grad,
+        )
         return out
 
     @staticmethod

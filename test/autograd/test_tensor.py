@@ -405,6 +405,11 @@ class TestTensorSum(TestTensor):
         s = self.x_vector_no_grad.sum()
         assert not s.requires_grad
 
+    def test_no_grad_ops_do_not_retain_creator(self):
+        z = (self.x_vector_no_grad + self.y_vector_no_grad) * 2.0
+        assert not z.requires_grad
+        assert z.creator is None
+
 
 class TestTensorMean(TestTensor):
     def setUp(self) -> None:
