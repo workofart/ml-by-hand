@@ -391,8 +391,8 @@ def inference(
         >>> class DummyModel(nn.Module):
         ...     def forward(self, x): return x
         >>> class DummyLLMForward(nn.AbstractLLMForwardFn):
-        ...     def sample(self, model, batch_data): return (np.array([[0,1,2]]), None)
-        ...     def train(self, model, batch_data): return (np.array([[0,1,2]]), None)
+        ...     def sample(self, model, batch_data): return np.array([[0,1,2]])
+        ...     def train(self, model, batch_data): return np.array([[0,1,2]])
         >>> model = DummyModel()
         >>> forward_fn = DummyLLMForward()
         >>> bpe = BytePairEncoder(num_merges=10)
@@ -458,7 +458,7 @@ def inference(
 
 
 def load_wiki_simple() -> str:
-    from autograd.tools.data import load_data
+    from autograd.data.utils import load_data
 
     if not os.path.exists("training_data/wiki_simple_english.txt"):
         print("Downloading data...")
@@ -480,7 +480,7 @@ def load_wiki_simple() -> str:
 
 
 def load_shakespeare_mini() -> str:
-    from autograd.tools.data import load_data
+    from autograd.data.utils import load_data
 
     data = load_data(
         "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt",

@@ -3,19 +3,19 @@ from typing import Any, Optional
 
 from autograd import functional, nn, optim
 from autograd.backend import xp
+from autograd.data.collator import Seq2SeqCollator
+from autograd.data.data_loader import DataLoader
+from autograd.data.utils import (
+    build_seq2seq_dataset_from_text_pairs,
+    load_parquet_rows,
+)
 from autograd.tensor import Tensor
-from autograd.text import utils as text_utils
 from autograd.text.tokenizer import BytePairEncoder
 from autograd.tools.callback import (
     run_sampling_inference,
     run_teacher_forcing_inference,
 )
 from autograd.tools.config_schema import CustomBpeConfig, TransformerTrainingConfig
-from autograd.tools.data import (
-    DataLoader,
-    LanguageModelingCollator,
-    TokenSequenceDataset,
-)
 from autograd.tools.trainer import LLMTrainer
 
 
@@ -523,26 +523,27 @@ class TransformerForwardFn(nn.AbstractLLMForwardFn):
     Forward function implementation for the Transformer model.
 
     This class implements the AbstractLLMForwardFn interface for the Transformer.
-    It provides separate methods for training (which returns logits and ground truth)
-    and sampling (which returns logits and None for the ground truth).
     """
 
-    def train(self, model: Transformer, batch_data: Any, **kwargs):
+    def train(self, model: Transformer, batch_data: Any):
         """
         Compute the forward pass during training.
 
         Args:
             model (Transformer): The Transformer model.
-            batch_data (Any): A tuple containing (X, decoder_input, y, src_mask, tgt_mask).
+            batch_data (Any): An encoder-decoder batch object.
 
         Returns:
-            Tuple[Tensor, Any]: The output logits and the target labels.
+            Tensor: The output logits.
         """
-        X, dec_inp, y, src_mask, tgt_mask = batch_data
-        logits = model(X, dec_inp, src_mask, tgt_mask)
-        return logits, y
+        return model(
+            batch_data.input_ids,
+            batch_data.decoder_input_ids,
+            batch_data.src_mask,
+            batch_data.tgt_mask,
+        )
 
-    def sample(self, model: Transformer, batch_data: Any, **kwargs):
+    def sample(self, model: Transformer, batch_data: Any):
         """
         Compute the forward pass during sampling.
 
@@ -551,10 +552,9 @@ class TransformerForwardFn(nn.AbstractLLMForwardFn):
             batch_data (Any): Input batch data used for sampling.
 
         Returns:
-            Tuple[Tensor, None]: The output logits and None (no ground truth during sampling).
+            Tensor: The output logits.
         """
-        logits = model(batch_data, batch_data, None, None)
-        return logits, None
+        return model(batch_data, batch_data, None, None)
 
 
 if __name__ == "__main__":
@@ -563,10 +563,10 @@ if __name__ == "__main__":
 
     The pipeline is as follows:
       1) Define a training configuration using TransformerTrainingConfig.
-      2) Load a text dataset (here, the "shakespeare_mini" dataset) via a helper function.
+      2) Load paired article/summary text examples.
       3) Create a BytePairEncoder (BPE) using custom BPE configuration from the training config.
-      4) Prepare the data by encoding the raw text into a sequence of integer tokens.
-      5) Split the encoded data into training and testing portions.
+      4) Train the tokenizer on the source/target training corpus.
+      5) Encode source and target text into paired token sequences.
       6) Update the model configuration with the vocabulary size from the BPE.
       7) Instantiate an LLMTrainer with the Transformer model, optimizer, loss function, and forward function.
       8) Create DataLoader objects for training and evaluation.
@@ -578,8 +578,8 @@ if __name__ == "__main__":
     train_global_batch_size = 16
     train_micro_batch_size = train_global_batch_size
     CONFIG = TransformerTrainingConfig(
-        training_run_name="shakespeare_mini",
-        dataset_name="shakespeare_mini",
+        training_run_name="wikisum_seq2seq",
+        dataset_name="wikisum_seq2seq",
         max_steps=500,
         max_eval_steps=16,
         checkpoint_freq=2,
@@ -604,15 +604,13 @@ if __name__ == "__main__":
             },
         },
         resume_epoch=None,
-        teacher_enforcing=True,
-        include_decoder_input=True,
-        create_padding_masks=True,
+        teacher_forcing=True,
         label_smoothing=0.1,
-        eval_start_string="First",
+        eval_start_string="How to cook rice",
         custom_bpe=CustomBpeConfig(
             num_merges=0,
-            encoded_data_path="training_data/bpe_0_shakespeare_encoded_data.npz",
-            vocab_path="training_data/shakespeare_vocab_0.pkl",
+            encoded_data_path="training_data/bpe_0_wikisum_seq2seq_encoded_data.npz",
+            vocab_path="training_data/wikisum_seq2seq_vocab_0.pkl",
             overwrite_encoded_data=False,
             overwrite_vocabulary_file=False,
             split_token="<|endoftext|>",
@@ -620,31 +618,37 @@ if __name__ == "__main__":
     )
 
     logger = logging.getLogger(__name__)
-    data = text_utils.load_shakespeare_mini()
+    train_data_url = "https://huggingface.co/datasets/d0rj/wikisum/resolve/main/data/train-00000-of-00001-b28959cff7dcaf55.parquet"
+    test_data_url = "https://huggingface.co/datasets/d0rj/wikisum/resolve/main/data/test-00000-of-00001-52a8a7cd640a9fff.parquet"
+    train_filename = "training_data/wikisum_train.parquet"
+    test_filename = "training_data/wikisum_test.parquet"
+    train_rows = load_parquet_rows(train_data_url, train_filename, max_rows=1024)
+    test_rows = load_parquet_rows(test_data_url, test_filename, max_rows=1024)
 
-    # Create a Byte Pair Encoder and prepare data
+    train_pairs = [(str(row["article"]), str(row["summary"])) for row in train_rows]
+    test_pairs = [(str(row["article"]), str(row["summary"])) for row in test_rows]
+
+    # Train the tokenizer on the paired source/target training corpus.
     if CONFIG.custom_bpe:
         bpe = BytePairEncoder(
             num_merges=CONFIG.custom_bpe.num_merges,
             vocab_file_path=CONFIG.custom_bpe.vocab_path,
             encoded_data_path=CONFIG.custom_bpe.encoded_data_path,
         )
-
-        encoded_data = bpe.prepare_data(
-            raw_text=data,
-            overwrite_encoded_data=CONFIG.custom_bpe.overwrite_encoded_data,
-            overwrite_vocabulary_file=CONFIG.custom_bpe.overwrite_vocabulary_file,
-            split_token=CONFIG.custom_bpe.split_token,
+        train_corpus = CONFIG.custom_bpe.split_token.join(
+            [source_text for source_text, _ in train_pairs]
+            + [target_text for _, target_text in train_pairs]
+        )
+        bpe.train_vocabulary(
+            train_corpus,
+            overwrite_saved_file=CONFIG.custom_bpe.overwrite_vocabulary_file,
         )
     else:
         raise ValueError(
             "Currently this original Transformers model can only be trained with the custom BytePairEncoder, please specify the custom_bpe config"
         )
 
-    # encoded_data is a list of integers without the concept of samples
-    n = int(len(encoded_data) * 0.9)
-    train_data, test_data = encoded_data[:n], encoded_data[n:]
-    print(f"Data length: {len(train_data)=} {len(test_data)=}")
+    print(f"Data length: {len(train_pairs)=} {len(test_pairs)=}")
 
     CONFIG.model_kwargs["vocab_size"] = bpe.n_vocab
 
@@ -658,50 +662,47 @@ if __name__ == "__main__":
 
     pad_idx = bpe.encode("<PAD>", allowed_special={"<PAD>"})[0]
     sos_idx = bpe.encode("<SOS>", allowed_special={"<SOS>"})[0]
+    train_dataset = build_seq2seq_dataset_from_text_pairs(
+        train_pairs,
+        bpe,
+        shuffle=True,
+        target_suffix=CONFIG.custom_bpe.split_token,
+    )
+    test_dataset = build_seq2seq_dataset_from_text_pairs(
+        test_pairs,
+        bpe,
+        shuffle=False,
+        target_suffix=CONFIG.custom_bpe.split_token,
+    )
 
     train_data_loader = DataLoader(
-        dataset=TokenSequenceDataset(
-            data=xp.array(train_data, dtype=xp.int32),
-            seq_len=trainer.model.max_seq_len,
-            shuffle=True,
-            random_window=True,
-        ),
+        dataset=train_dataset,
         batch_size=train_micro_batch_size,
-        collate_fn=LanguageModelingCollator(
-            max_tokens=trainer.model.max_seq_len + 1,
+        collate_fn=Seq2SeqCollator(
+            max_tokens=trainer.model.max_seq_len,
             pad_idx=pad_idx,
             sos_idx=sos_idx,
-            include_decoder_input=CONFIG.include_decoder_input,
-            create_padding_masks=CONFIG.create_padding_masks,
         ),
     )
     test_data_loader = DataLoader(
-        dataset=TokenSequenceDataset(
-            data=xp.array(test_data, dtype=xp.int32),
-            seq_len=trainer.model.max_seq_len,
-            shuffle=False,
-            random_window=True,
-        ),
-        batch_size=train_micro_batch_size // 2,
-        collate_fn=LanguageModelingCollator(
-            max_tokens=trainer.model.max_seq_len + 1,
+        dataset=test_dataset,
+        batch_size=max(1, train_micro_batch_size // 2),
+        collate_fn=Seq2SeqCollator(
+            max_tokens=trainer.model.max_seq_len,
             pad_idx=pad_idx,
             sos_idx=sos_idx,
-            include_decoder_input=CONFIG.include_decoder_input,
-            create_padding_masks=CONFIG.create_padding_masks,
         ),
     )
 
     trainer.fit(train_data_loader, test_data_loader)
 
-    if CONFIG.teacher_enforcing:
+    if CONFIG.teacher_forcing:
+        teacher_forcing_example = next(iter(test_dataset))
         run_teacher_forcing_inference(
             model=trainer.model,
             forward_fn=TransformerForwardFn(),
             bpe=bpe,
-            groundtruth_data=xp.array(
-                test_data[: trainer.model.max_seq_len // 3], dtype=xp.int32
-            ),
+            groundtruth_data=teacher_forcing_example["labels"],
             max_length=trainer.model.max_seq_len // 3,
         )
 
@@ -709,7 +710,7 @@ if __name__ == "__main__":
         model=trainer.model,
         forward_fn=TransformerForwardFn(),
         bpe=bpe,
-        start_tokens="All",
+        start_tokens=CONFIG.eval_start_string,
         max_length=int(trainer.model.max_seq_len * 0.9),
         top_k=CONFIG.eval_top_k,
     )

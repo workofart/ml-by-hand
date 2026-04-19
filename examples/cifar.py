@@ -3,13 +3,11 @@ import logging
 from openml.datasets import get_dataset  # pyright: ignore[reportMissingImports]
 
 from autograd import functional, nn, optim
+from autograd.data.collator import PairedCollator
+from autograd.data.data_loader import DataLoader
+from autograd.data.dataset import PairedIterableDataset
+from autograd.data.utils import train_test_split
 from autograd.tools.config_schema import GenericTrainingConfig
-from autograd.tools.data import (
-    DataLoader,
-    PairedCollator,
-    PairedIterableDataset,
-    train_test_split,
-)
 from autograd.tools.trainer import SimpleTrainer
 
 logger = logging.getLogger(__name__)

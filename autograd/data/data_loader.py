@@ -1,0 +1,68 @@
+"""
+Data pipeline boundary:
+
+1. Per-sample transforms/tokenization
+- dataset / transforms
+
+2. Batch assembly and batch-time shaping
+- collate_fn
+
+3. Training-specific logic
+- trainer / training loop / model forward
+"""
+
+from typing import Any, Callable, Sequence
+
+from autograd.data.dataset import IterableDataset
+
+CollateFn = Callable[[Sequence[Any]], Any]
+
+
+class DataLoader:
+    """
+    Generic example-batching loader.
+
+    Dataset yields examples.
+    DataLoader groups examples.
+    Collator creates batches.
+    """
+
+    def __init__(
+        self,
+        dataset: IterableDataset,
+        batch_size: int,
+        collate_fn: CollateFn | None = None,
+        *,
+        drop_last: bool = False,
+    ) -> None:
+        if batch_size < 1:
+            raise ValueError("batch_size must be >= 1")
+
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.collate_fn = collate_fn
+        self.drop_last = drop_last
+
+    def on_epoch_start(self) -> None:
+        self.dataset.on_epoch_start()
+
+    def __iter__(self):
+        examples = []
+
+        for example in self.dataset:
+            examples.append(example)
+
+            if len(examples) == self.batch_size:
+                yield self.collate_fn(examples) if self.collate_fn else examples
+                examples = []
+
+        if examples and not self.drop_last:
+            yield self.collate_fn(examples) if self.collate_fn else examples
+
+    def __len__(self) -> int:
+        n = len(self.dataset)
+
+        if self.drop_last:
+            return n // self.batch_size
+
+        return (n + self.batch_size - 1) // self.batch_size

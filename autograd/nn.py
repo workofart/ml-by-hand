@@ -1677,19 +1677,24 @@ class AbstractLLMForwardFn(ABC):
 
     Subclasses should implement the sample and train methods.
 
+    The trainer treats `batch_data` as opaque and relies on the forward function
+    to interpret architecture-specific batch objects. This keeps the LM training
+    loop shared across decoder-only and encoder-decoder models without forcing a
+    universal batch dict or tuple shape.
+
     Examples:
         >>> # Example subclass implementing the abstract methods.
         >>> class DummyLLMForward(AbstractLLMForwardFn):
         ...     def sample(self, model, batch_data):
-        ...         return model(batch_data), None
+        ...         return model(batch_data)
         ...     def train(self, model, batch_data):
-        ...         return model(batch_data), batch_data
+        ...         return model(batch_data.input_ids)
         >>> forward_fn = DummyLLMForward()
         >>> # Now forward_fn can be used as: forward_fn(model, data, mode="train")
     """
 
     @abstractmethod
-    def sample(self, model: Any, batch_data: Any) -> Tuple[Any, Any]:
+    def sample(self, model: Any, batch_data: Any) -> Any:
         """
         Generate samples from the model.
 
@@ -1698,12 +1703,12 @@ class AbstractLLMForwardFn(ABC):
             batch_data (Any): Data for the current batch.
 
         Returns:
-            Tuple[Any, Any]: A tuple containing generated outputs and auxiliary information.
+            Any: Model outputs for sampling mode.
         """
         pass
 
     @abstractmethod
-    def train(self, model: Any, batch_data: Any) -> Tuple[Any, Any]:
+    def train(self, model: Any, batch_data: Any) -> Any:
         """
         Compute the forward pass for training.
 
@@ -1712,13 +1717,11 @@ class AbstractLLMForwardFn(ABC):
             batch_data (Any): Data for the current batch.
 
         Returns:
-            Tuple[Any, Any]: A tuple containing prediction logits and ground truth labels.
+            Any: Training-mode model outputs, typically logits.
         """
         pass
 
-    def __call__(
-        self, model: Any, batch_data: Any, mode: str = "train"
-    ) -> Tuple[Any, Any]:
+    def __call__(self, model: Any, batch_data: Any, mode: str = "train") -> Any:
         """
         Execute a forward pass in either training or sampling mode.
 
@@ -1728,8 +1731,7 @@ class AbstractLLMForwardFn(ABC):
             mode (str, optional): Mode of operation, either "train" or "sample". Defaults to "train".
 
         Returns:
-            Tuple[Any, Any]: If mode is "train", returns (prediction_logits, ground_truth_labels).
-                              If mode is "sample", returns (prediction_logits, None).
+            Any: The output of `train(...)` or `sample(...)` for the requested mode.
 
         Raises:
             ValueError: If an invalid mode is provided.
