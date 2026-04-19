@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import math
 from functools import lru_cache
-from typing import Any, Optional, Tuple, Union, cast
+from typing import Any, Optional, Tuple, Union
 
 from autograd.backend import (
     Array,
@@ -520,7 +520,7 @@ class ScaledDotProductAttentionMLXCustom(Function):
         numerator without materializing the dense score matrix.
         """
         try:
-            import mlx.core.fast as mx_fast  # pyright: ignore[reportMissingImports]
+            import mlx.core.fast as mx_fast  # pyright: ignore[reportMissingModuleSource]
         except ModuleNotFoundError as exc:  # pragma: no cover - platform dependent
             raise RuntimeError("mlx_custom requires the MLX backend") from exc
 
@@ -999,9 +999,12 @@ class BinaryCrossEntropyWithLogits(Function):
         return grad_y_pred, None
 
 
+IGNORE_INDEX = -100
+
+
 class CrossEntropy(Function):
     """
-    Cross-Entropy Loss for multi-dimensional predictions with optional padding and label smoothing.
+    Cross-Entropy Loss for multi-dimensional predictions with optional ignored targets and label smoothing.
 
     This function accepts raw logits (not probabilities) and computes a stable log-softmax internally.
 
@@ -1010,27 +1013,25 @@ class CrossEntropy(Function):
         >>> from autograd.tensor import Tensor
         >>> y_pred = Tensor(xp.array([[2.0, 1.0, 0.1]]))
         >>> y_true = Tensor(xp.array([0]))
-        >>> loss = CrossEntropy.apply(y_pred, y_true, pad_idx=-1, label_smoothing=0.1) # Expected output: a loss value for the given logits and target
+        >>> loss = CrossEntropy.apply(y_pred, y_true, ignore_index=-100, label_smoothing=0.1)
     """
 
     def forward(
         self,
         y_pred: Array,
         y_true: Array,
-        pad_idx: Optional[int] = 0,
+        ignore_index: int = IGNORE_INDEX,
         label_smoothing: float = 0.0,
-        **kwargs: Any,
     ) -> Union[Array, float]:
         r"""
-        Computes the cross-entropy loss with optional padding and label smoothing.
+        Computes the cross-entropy loss with optional ignored targets and label smoothing.
 
         Args:
             y_pred (xp.ndarray): Raw logits. Shape can be $(batch\_size, feature\_dim)$ or $(batch\_size, seq\_len, feature\_dim)$.
             y_true (Union[xp.ndarray, Tensor]): True class indices. If $y_{pred}$ is 2D, shape is $(batch\_size,)$; if 3D, shape is $(batch\_size, seq\_len)$.
-            pad_idx (int, optional): Padding index to ignore in the loss. Defaults to 0.
+            ignore_index (int, optional): Target value to ignore in the loss and gradient.
+                Defaults to -100.
             label_smoothing (float, optional): Label smoothing factor. Defaults to 0.0. Label smoothing is applied if $label\_smoothing > 0$
-            **kwargs: Additional keyword arguments.
-
             For label smoothing, we follow the Inception paper notation.
             Here:
             - $x$ is the current training example
@@ -1058,7 +1059,7 @@ class CrossEntropy(Function):
         (Ref: "Rethinking the Inception Architecture for Computer Vision", https://arxiv.org/abs/1512.00567)
 
         Returns:
-            Union[xp.array, float]: The average cross-entropy loss over non-padding positions.
+            Union[xp.array, float]: The average cross-entropy loss over non-ignored positions.
         """
 
         y_true = xp.array(y_true, dtype=xp.int64)
@@ -1073,13 +1074,9 @@ class CrossEntropy(Function):
         else:
             batch_size, num_classes = y_pred.shape
 
-        # 2. Create a mask for non-pad positions (where y_true != pad_idx).
-        if pad_idx is None:
-            self.non_pad_mask = xp.ones(y_true.shape, dtype=xp.int32) == 1
-        else:
-            self.non_pad_mask = y_true != pad_idx
-        non_pad_weights = cast(Any, self.non_pad_mask).astype(xp.float32)
-        non_pad_count = max(1, int(non_pad_weights.sum()))
+        # 2. Mark which target positions contribute to the loss.
+        non_ignored_weights = (y_true != ignore_index).astype(xp.float32)
+        non_ignored_count = max(1.0, float(non_ignored_weights.sum()))
 
         # 3. Compute stable log-softmax:
         # log(softmax(y_pred)) = y_pred - log(sum(exp(y_pred)))
@@ -1112,19 +1109,20 @@ class CrossEntropy(Function):
         Here $p_{i,j}$ is the model probability for example i and class j.
         """
         # We implement the second line directly using log-softmax.
-        log_p_correct = log_softmax[xp.arange(len(y_true)), y_true]
+        safe_y_true = xp.where(non_ignored_weights > 0, y_true, 0)
+        log_p_correct = log_softmax[xp.arange(len(y_true)), safe_y_true]
         mean_log_p = xp.mean(log_softmax, axis=1)
         losses = -(
             (1.0 - label_smoothing) * log_p_correct + label_smoothing * mean_log_p
         )
 
-        # 5) Average the loss only over non-pad positions.
-        loss_val = xp.sum(losses * non_pad_weights) / non_pad_count
+        # 5) Average the loss only over non-ignored positions.
+        loss_val = xp.sum(losses * non_ignored_weights) / non_ignored_count
 
         # 6) Store for backward pass:
         self.log_softmax = log_softmax
-        self.y_true = y_true
-        self.pad_idx = pad_idx
+        self.y_true = safe_y_true
+        self.non_ignored_weights = non_ignored_weights
         self.label_smoothing = label_smoothing
         self.num_classes = num_classes
         return loss_val
@@ -1146,7 +1144,7 @@ class CrossEntropy(Function):
         $$
         T_{i,j} = (1 - \epsilon)\,y_{i,j} + \frac{\epsilon}{K}
         $$
-        The gradient is zeroed out for padding positions and scaled by the upstream gradient divided by the number of non-padding positions.
+        The gradient is zeroed out for ignored positions and scaled by the upstream gradient divided by the number of non-ignored positions.
 
         Args:
             grad (Tensor): Upstream gradient.
@@ -1157,11 +1155,9 @@ class CrossEntropy(Function):
         # 1. Softmax from log-softmax is safe: p_{i,j} = exp(log_sm[i,j])
         softmax_probs = xp.exp(self.log_softmax)
 
-        # 3. Identify which samples are non-padding
-        row_mask = xp.expand_dims(
-            cast(Any, self.non_pad_mask).astype(xp.float32), axis=1
-        )
-        non_pad_count = max(1, int(row_mask.sum()))
+        # 3. Identify which samples contribute to the loss.
+        row_mask = xp.expand_dims(self.non_ignored_weights, axis=1)
+        non_ignored_count = max(1.0, float(row_mask.sum()))
 
         r"""
         4. Label smoothing target distribution.
@@ -1178,9 +1174,9 @@ class CrossEntropy(Function):
         target = xp.scatter_add(target, correct_idx, 1.0 - self.label_smoothing)
         target *= row_mask
 
-        # 6. Multiply by upstream grad and average by non-padded positions
+        # 6. Multiply by upstream grad and average by non-ignored positions.
         grad_out = (softmax_probs - target) * row_mask
-        grad_out *= grad.data / non_pad_count
+        grad_out *= grad.data / non_ignored_count
 
         # 7. Reshape to original shape if 3D
         grad_out = grad_out.reshape(self.original_shape)
@@ -1416,9 +1412,8 @@ def binary_cross_entropy_with_logits(
 def cross_entropy(
     y_pred: Tensor,
     y_true: Union[Tensor, ArrayLike],
-    pad_idx: Optional[int] = None,
+    ignore_index: int = IGNORE_INDEX,
     label_smoothing: float = 0.0,
-    **kwargs: Any,
 ) -> Tensor:
     """
     Computes the cross-entropy loss for multi-class classification with logits.
@@ -1428,10 +1423,9 @@ def cross_entropy(
     Args:
         y_pred (Tensor): Raw logits.
         y_true (Union[Tensor, ArrayLike]): True class indices.
-        pad_idx (Optional[int], optional): Padding index to ignore in the loss. Defaults to None.
+        ignore_index (int, optional): Target value to ignore in the loss and gradient.
+            Defaults to -100.
         label_smoothing (float, optional): Label smoothing factor. Defaults to 0.0.
-        **kwargs: Additional keyword arguments.
-
     Returns:
         Tensor: The computed cross-entropy loss.
 
@@ -1440,12 +1434,15 @@ def cross_entropy(
         >>> from autograd.tensor import Tensor
         >>> y_pred = Tensor(xp.array([[2.0, 1.0, 0.1]]))
         >>> y_true = Tensor(xp.array([0]))
-        >>> loss = cross_entropy(y_pred, y_true, pad_idx=-1, label_smoothing=0.1)
+        >>> loss = cross_entropy(y_pred, y_true, ignore_index=-100, label_smoothing=0.1)
     """
     if not isinstance(y_true, Tensor):
         y_true = Tensor(y_true, requires_grad=False)
     return CrossEntropy.apply(
-        y_pred, y_true, pad_idx=pad_idx, label_smoothing=label_smoothing, **kwargs
+        y_pred,
+        y_true,
+        ignore_index=ignore_index,
+        label_smoothing=label_smoothing,
     )
 
 

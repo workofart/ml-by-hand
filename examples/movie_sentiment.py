@@ -3,15 +3,12 @@ import os
 
 from autograd import functional, nn, optim
 from autograd.backend import xp
+from autograd.data.collator import OneHotCollator
+from autograd.data.data_loader import DataLoader
+from autograd.data.dataset import PairedIterableDataset
+from autograd.data.utils import load_data, train_test_split
 from autograd.text.utils import create_vocabulary
 from autograd.tools.config_schema import GenericTrainingConfig
-from autograd.tools.data import (
-    DataLoader,
-    OneHotCollator,
-    PairedIterableDataset,
-    load_data,
-    train_test_split,
-)
 from autograd.tools.trainer import SimpleTrainer
 
 logger = logging.getLogger(__name__)

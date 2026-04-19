@@ -12,12 +12,11 @@ from autograd.backend import (
     eval,
     xp,
 )
-from autograd.tensor import Tensor, no_grad
+from autograd.tensor import Tensor
 from autograd.tools.config_schema import (
     GenericTrainingConfig,
     TransformerTrainingConfig,
 )
-from autograd.tools.data import DataLoader
 from autograd.tools.metrics import accuracy, mean_squared_error
 from autograd.tools.model import load_checkpoint, save_checkpoint
 
@@ -69,38 +68,41 @@ class AbstractTrainer(ABC):
         )
         self.start_epoch = self.config.resume_epoch or 0
         self.global_step = int(self.checkpoint.get("step_count", 0))
-        # Contract: each metric history stores backend scalar arrays or None.
-        # Host conversion happens only at explicit consumption boundaries such
-        # as logging, checkpoint comparison, and persistence.
         self.metrics = defaultdict(list)
 
-    def fit(
-        self,
-        train_data_loader: DataLoader,
-        val_data_loader: Optional[DataLoader] = None,
-    ):
+    def fit(self, train_data_loader, val_data_loader=None):
         """Performs the main training loop over the given data loaders.
 
         Args:
-            train_data_loader: Training data loader that yields training batches.
-            val_data_loader: (Optional) Validation data loader yielding validation
-                batches.
+            train_data_loader: An iterable or generator that yields training batches.
+            val_data_loader: (Optional) An iterable or generator that yields labeled
+                validation batches.
         """
         logger.info(
             f"Training {self.model.__class__.__name__} with "
             f"{(self.model.num_parameters() / 1e6):.2f}M parameters."
         )
+        if self.config.max_steps is None:
+            try:
+                len(train_data_loader)
+            except TypeError as exc:
+                raise ValueError(
+                    "Infinite training loaders require max_steps. "
+                    "Set max_steps or give the dataset examples_per_epoch."
+                ) from exc
         epoch = self.start_epoch
         while True:
             if self._max_epochs_reached(epoch) or self._max_steps_reached():
                 break
-            train_data_loader.on_epoch_start()
+            if hasattr(train_data_loader, "on_epoch_start"):
+                train_data_loader.on_epoch_start()
 
             self.model.train()
             train_loss = self._train_one_epoch(train_data_loader)
 
             if val_data_loader is not None:
-                val_data_loader.on_epoch_start()
+                if hasattr(val_data_loader, "on_epoch_start"):
+                    val_data_loader.on_epoch_start()
                 val_loss = self.evaluate(val_data_loader)
             else:
                 val_loss = None
@@ -131,25 +133,7 @@ class AbstractTrainer(ABC):
             and batch_count >= self.config.max_eval_steps
         )
 
-    def _update_progress_bar_tokens(
-        self,
-        progress_bar,
-        total_tokens: int,
-        batch_tokens: Optional[int],
-    ) -> int:
-        if batch_tokens is None:
-            return total_tokens
-        total_tokens += batch_tokens
-        if total_tokens <= 0:
-            return total_tokens
-        elapsed_s = float(progress_bar.format_dict.get("elapsed", 0.0) or 0.0)
-        postfix = {"tokens": f"{total_tokens:,}"}
-        if elapsed_s > 0.0:
-            postfix["tok/s"] = f"{total_tokens / elapsed_s:,.1f}"
-        progress_bar.set_postfix(postfix, refresh=False)
-        return total_tokens
-
-    def _train_one_epoch(self, data_loader: DataLoader) -> float:
+    def _train_one_epoch(self, data_loader) -> float:
         """Trains the model for one epoch on the provided data loader.
 
         This method handles gradient accumulation and parameter updates.
@@ -160,79 +144,79 @@ class AbstractTrainer(ABC):
         Returns:
             float: The average training loss over the epoch.
         """
-        total_loss: Any = 0.0
+        total_loss = 0.0
         batch_count = 0
-        total_tokens = 0
+        accumulation_steps = self.config.gradient_accumulation_steps
+        accumulated_batches = 0
         self.optimizer.zero_grad()
-        progress_bar = tqdm(data_loader, desc="Training Batches", leave=False)
-        for batch in progress_bar:
+        for batch in tqdm(data_loader, desc="Training Batches", leave=False):
             if self._max_steps_reached():
                 break
-            loss = self.train_step(batch, data_loader)
-            # Internal contract: train_step returns a device-backed loss Tensor so
-            # the epoch loop can accumulate on device and convert to a host float
-            # only once at the end of the epoch.
-            total_loss += loss.data
-            if (batch_count + 1) % self.config.gradient_accumulation_steps == 0:
+            loss = self.train_step(batch)
+            total_loss += loss
+            accumulated_batches += 1
+            if accumulated_batches == accumulation_steps:
+                self._scale_gradients(1.0 / accumulated_batches)
                 self.optimizer.step()  # increments .timestep, applies LR scheduler if present
-                self.metrics["grad_l2_norm"].append(
-                    grad_l2_norm(self.optimizer.model_parameters)
-                )
+                self.metrics["grad_l2_norm"].append(grad_l2_norm(self.model.parameters))
                 self.optimizer.zero_grad()
-            batch_tokens = data_loader.batch_token_count(batch)
-            total_tokens = self._update_progress_bar_tokens(
-                progress_bar, total_tokens, batch_tokens
-            )
+                accumulated_batches = 0
             batch_count += 1
             self.global_step += 1
-        # TODO: Decide whether to flush leftover accumulated gradients at epoch end when
-        # batch_count is not divisible by gradient_accumulation_steps.
-        if batch_count == 0:
-            return 0.0
-        avg_loss = total_loss / max(batch_count, 1)
-        return float(xp.to_scalar(avg_loss))
+        if accumulated_batches > 0:
+            self._scale_gradients(1.0 / accumulated_batches)
+            self.optimizer.step()
+            self.metrics["grad_l2_norm"].append(grad_l2_norm(self.model.parameters))
+            self.optimizer.zero_grad()
+        return total_loss / max(batch_count, 1)
 
-    def _save_checkpoint(self, epoch: int):
+    def _scale_gradients(self, scale: float) -> None:
+        if scale == 1.0:
+            return
+        # Normalize accumulated gradients so the optimizer step matches the
+        # average gradient over the effective batch, including partial tail groups.
+        for parameter in self.model.parameters.values():
+            if parameter.grad is not None:
+                parameter.grad.data *= scale
+
+    def _save_checkpoint(self, epoch: int, val_loss: Optional[float]):
         """Saves a model checkpoint if the validation loss improves.
 
         Args:
             epoch (int): Current epoch number.
+            val_loss (Optional[float]): The validation loss at this epoch.
         """
-        if epoch % self.config.checkpoint_freq != 0:
-            return
-
-        val_losses = self.metrics["val_loss"]
-        if not val_losses or val_losses[-1] is None:
-            return
-
-        current_val_loss = float(xp.to_scalar(val_losses[-1]))
-        best_historical_val_loss = min(
-            (float(xp.to_scalar(loss)) for loss in val_losses[:-1] if loss is not None),
-            default=float("inf"),
-        )
-        if current_val_loss >= best_historical_val_loss:
-            return
-
-        checkpoint = {
-            "epoch": epoch + 1,
-            "step_count": self.global_step,
-            "model_state_dict": self.model.state_dict(),
-            "optimizer_state_dict": self.optimizer.state_dict(),
-            "model_init_kwargs": self.config.model_kwargs,
-            "optimizer_init_kwargs": self.config.optimizer_kwargs,
-            "config": self.config,
-        }
-        os.makedirs(self.CHECKPOINT_DIR, exist_ok=True)
-        cp_path_json = os.path.join(
-            self.CHECKPOINT_DIR,
-            f"{self.config.training_run_name}_{self.model.__class__.__name__}_{epoch}.json",
-        )
-        cp_path_npz = os.path.join(
-            self.CHECKPOINT_DIR,
-            f"{self.config.training_run_name}_{self.model.__class__.__name__}_{epoch}.npz",
-        )
-        save_checkpoint(checkpoint, json_path=cp_path_json, npz_path=cp_path_npz)
-        logger.info(f"Saved checkpoint to {cp_path_json} and {cp_path_npz}")
+        if val_loss is not None and epoch % self.config.checkpoint_freq == 0:
+            # `val_loss` history can contain `None` from epochs without validation;
+            # exclude those before computing the current best checkpoint threshold.
+            historical_val_losses = [
+                recorded_val_loss
+                for recorded_val_loss in self.metrics["val_loss"]
+                if recorded_val_loss is not None
+            ]
+            if not historical_val_losses or val_loss < min(historical_val_losses):
+                checkpoint = {
+                    "epoch": epoch + 1,
+                    "step_count": self.global_step,
+                    "model_state_dict": self.model.state_dict(),
+                    "optimizer_state_dict": self.optimizer.state_dict(),
+                    "model_init_kwargs": self.config.model_kwargs,
+                    "optimizer_init_kwargs": self.config.optimizer_kwargs,
+                    "config": self.config,
+                }
+                os.makedirs(self.CHECKPOINT_DIR, exist_ok=True)
+                cp_path_json = os.path.join(
+                    self.CHECKPOINT_DIR,
+                    f"{self.config.training_run_name}_{self.model.__class__.__name__}_{epoch}.json",
+                )
+                cp_path_npz = os.path.join(
+                    self.CHECKPOINT_DIR,
+                    f"{self.config.training_run_name}_{self.model.__class__.__name__}_{epoch}.npz",
+                )
+                save_checkpoint(
+                    checkpoint, json_path=cp_path_json, npz_path=cp_path_npz
+                )
+                logger.info(f"Saved checkpoint to {cp_path_json} and {cp_path_npz}")
 
     def _save_metrics(self):
         """Saves accumulated training metrics to a compressed NPZ file."""
@@ -242,28 +226,26 @@ class AbstractTrainer(ABC):
         path = os.path.join(self.METRICS_DIR, filename)
         metrics_mx = {}
         for key, values in self.metrics.items():
-            metrics_mx[key] = xp.array(
-                [
-                    float("nan") if value is None else float(xp.to_scalar(value))
-                    for value in values
-                ],
-                dtype=xp.float32,
-            )
+            if any(value is None for value in values):
+                values = [float("nan") if value is None else value for value in values]
+                metrics_mx[key] = xp.array(values, dtype=xp.float32)
+            else:
+                metrics_mx[key] = xp.array(values)
         eval(*metrics_mx.values())
         xp.savez_compressed(path, **metrics_mx)
         logger.info(f"Saved training metrics to {path}")
 
     @abstractmethod
-    def train_step(self, batch_data, data_loader=None) -> Tensor:
-        """Perform a single training step and return the device loss tensor.
+    def train_step(self, batch_data) -> float:
+        """Performs a single training step and returns the loss as a float.
+
+        Subclasses must implement the forward pass, loss computation, and backward pass here.
 
         Args:
             batch_data: A single batch of training data.
 
         Returns:
-            Tensor: The computed loss tensor for the batch.
-            Note that _train_one_epoch is responsible for
-            reducing epoch loss to a Python float.
+            float: The computed loss value for the batch.
         """
         pass
 
@@ -279,34 +261,20 @@ class AbstractTrainer(ABC):
             train_loss (float): The average training loss for this epoch.
             val_loss (Optional[float]): The validation loss for this epoch, if available.
         """
-
-        # The contract is that all the consumers (e.g. log lines below) of
-        # self.metrics will do the sync from GPU to CPU, whereas self.metrics
-        # itself will store GPU/on-device data structures.
-        self.metrics["epoch"].append(xp.array(epoch, dtype=xp.float32))
-        self.metrics["train_loss"].append(xp.array(train_loss, dtype=xp.float32))
-        self.metrics["val_loss"].append(
-            None if val_loss is None else xp.array(val_loss, dtype=xp.float32)
-        )
-        self._save_checkpoint(epoch)
+        self._save_checkpoint(epoch, val_loss)
+        self.metrics["epoch"].append(epoch)
+        self.metrics["train_loss"].append(train_loss)
+        self.metrics["val_loss"].append(val_loss)
 
         log_msg = f"[Epoch {epoch}]"
-        log_msg += f"\ntrain_loss = {train_loss:.4f}"
-        if val_loss is not None:
-            log_msg += f"\nval_loss = {val_loss:.4f}"
         for key in self.metrics:
-            if key in {"epoch", "train_loss", "val_loss"}:
-                continue
-            # For other metrics, we will do the sync from GPU to CPU since we're
-            # not passing them in as function args here
-            if self.metrics[key][-1] is not None:
-                metric_value = float(xp.to_scalar(self.metrics[key][-1]))
-                log_msg += f"\n{key} = {metric_value:.4f}"
+            if key != "epoch" and self.metrics[key][-1] is not None:
+                log_msg += f"\n{key} = {self.metrics[key][-1]:.4f}"
         log_msg += f"\nLR = {self.optimizer.lr:.4f}"
         logger.info(log_msg)
 
     @abstractmethod
-    def evaluate(self, val_data_loader: DataLoader) -> float:
+    def evaluate(self, val_data_loader) -> float:
         """Evaluates the model on the validation set.
 
         Args:
@@ -482,87 +450,80 @@ class SimpleTrainer(AbstractTrainer):
             else "regression"
         )
 
-    def train_step(self, batch_data, data_loader=None) -> Tensor:
+    def train_step(self, batch_data) -> float:
         """Performs a forward pass, computes the loss, and backpropagates.
 
         Note that .zero_grad() and .step() calls are in the _train_one_epoch() function
 
         Args:
             batch_data: A tuple (batch_X, batch_y) for supervised learning.
-            data_loader: (Optional) The data loader, if additional context is needed.
 
         Returns:
-            Tensor: The computed loss for this batch.
+            float: The computed loss for this batch.
         """
         batch_X, batch_y = batch_data
         y_pred = self.model(batch_X)
         loss = self.loss_fn(y_pred, batch_y)
         loss.backward()
-        return loss
+        return float(loss.item())
 
-    def evaluate(self, val_data_loader: DataLoader) -> float:
+    def evaluate(self, val_data_loader) -> float:
         """Evaluates the model on the validation data loader.
 
         Args:
-            val_data_loader: Validation data loader providing validation batches.
+            val_data_loader: An iterable or generator providing validation batches.
 
         Returns:
             float: The average validation loss over the entire validation dataset.
         """
         self.model.eval()
-        try:
-            with no_grad():
-                total_loss: Any = 0.0
-                batch_count = 0
-                all_preds, all_targets = [], []
-                for batch_data in val_data_loader:
-                    if self._max_eval_steps_reached(batch_count):
-                        break
-                    batch_X, batch_y = batch_data
-                    y_pred = self.model(batch_X)
-                    loss = self.loss_fn(y_pred, batch_y)
-                    total_loss += loss.data
-                    batch_count += 1
-                    all_preds.append(y_pred)
-                    all_targets.append(batch_y)
-                avg_val_loss = total_loss / max(batch_count, 1)
-                avg_val_loss = float(xp.to_scalar(avg_val_loss))
+        total_loss = 0.0
+        batch_count = 0
+        all_preds, all_targets = [], []
+        for batch_data in val_data_loader:
+            if self._max_eval_steps_reached(batch_count):
+                break
+            batch_X, batch_y = batch_data
+            y_pred = self.model(batch_X)
+            loss = self.loss_fn(y_pred, batch_y)
+            total_loss += float(loss.item())
+            batch_count += 1
+            all_preds.append(y_pred)
+            all_targets.append(batch_y)
+        avg_val_loss = total_loss / max(batch_count, 1)
 
-                # Compute additional metrics for classification or regression
-                y_pred_full = xp.concatenate([p.data for p in all_preds], axis=0)
-                y_true_full = xp.concatenate(all_targets, axis=0)
+        # Compute additional metrics for classification or regression
+        y_pred_full = xp.concatenate([p.data for p in all_preds], axis=0)
+        y_true_full = xp.concatenate(all_targets, axis=0)
 
-                if self.problem_type == "classification":
-                    y_pred_proc, y_true_proc = self._post_process_classification(
-                        y_pred_full, y_true_full
+        if self.problem_type == "classification":
+            y_pred_proc, y_true_proc = self._post_process_classification(
+                y_pred_full, y_true_full
+            )
+            acc_val = accuracy(
+                xp.array(y_pred_proc).reshape(-1),
+                xp.array(y_true_proc, dtype=xp.int32).reshape(-1),
+            )
+            self.metrics["val_accuracy"].append(acc_val)
+
+            if self.sample_predictions:
+                sample_count = min(5, len(y_pred_proc))
+                if sample_count > 0:
+                    sample_lines = [
+                        f"Predicted: {y_pred_proc[i]}\nActual: {y_true_proc[i]}"
+                        for i in range(sample_count)
+                    ]
+                    logger.info(
+                        "Sample Predictions on Validation Batch:\n"
+                        + "\n".join(sample_lines)
                     )
-                    acc_val = accuracy(
-                        xp.array(y_pred_proc).reshape(-1),
-                        xp.array(y_true_proc, dtype=xp.int32).reshape(-1),
-                    )
-                    self.metrics["val_accuracy"].append(
-                        xp.array(acc_val, dtype=xp.float32)
-                    )
 
-                    if self.sample_predictions:
-                        sample_count = min(5, len(y_pred_proc))
-                        if sample_count > 0:
-                            sample_lines = [
-                                f"Predicted: {y_pred_proc[i]}\nActual: {y_true_proc[i]}"
-                                for i in range(sample_count)
-                            ]
-                            logger.info(
-                                "Sample Predictions on Validation Batch:\n"
-                                + "\n".join(sample_lines)
-                            )
+        else:
+            mse_val = mean_squared_error(y_pred_full, y_true_full)
+            self.metrics["val_mse"].append(mse_val)
 
-                else:
-                    mse_val = mean_squared_error(y_pred_full, y_true_full)
-                    self.metrics["val_mse"].append(xp.array(mse_val, dtype=xp.float32))
-
-                return avg_val_loss
-        finally:
-            self.model.train()
+        self.model.train()
+        return avg_val_loss
 
     def _post_process_classification(
         self, y_pred: Array, y_true: Array
@@ -588,7 +549,10 @@ class SimpleTrainer(AbstractTrainer):
 class LLMTrainer(AbstractTrainer):
     """Trainer specialized for language modeling or next-token prediction tasks.
 
-    Expects DataLoader batches of the form (X, dec_inp, y, src_mask, tgt_mask, causal_mask).
+    The trainer is task-specific to language modeling but architecture-agnostic
+    about batch shape. It delegates batch interpretation to `forward_fn`, which
+    lets decoder-only and encoder-decoder models consume different batch objects
+    while sharing the same training loop.
 
     Examples:
         The following example demonstrates how to instantiate and run a training loop
@@ -611,13 +575,13 @@ class LLMTrainer(AbstractTrainer):
         >>> optimizer_cls = optim.Adam
         >>> loss_fn = nn.CrossEntropyLoss()  # or any suitable loss function for language modeling
         >>>
+        >>> from autograd.data.types import CausalLMBatch
         >>> # Define a dummy forward function that complies with the expected interface.
-        >>> class DummyForwardFn:
-        ...     def __call__(self, model, batch_data, mode="train"):
-        ...         # Unpack batch_data; dummy implementation.
-        ...         X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_data
-        ...         logits = model(X)
-        ...         return logits, y
+        >>> class DummyForwardFn(nn.AbstractLLMForwardFn):
+        ...     def train(self, model, batch_data):
+        ...         return model(batch_data.input_ids)
+        ...     def sample(self, model, batch_data):
+        ...         return model(batch_data)
         >>>
         >>> forward_fn = DummyForwardFn()
         >>>
@@ -632,7 +596,7 @@ class LLMTrainer(AbstractTrainer):
         ...     checkpoint_freq=1,
         ...     resume_epoch=None,
         ...     label_smoothing=0.1,
-        ...     teacher_enforcing=False,
+        ...     teacher_forcing=False,
         ...     eval_start_string='Hello',
         ...     eval_top_k=5
         ... )
@@ -641,14 +605,9 @@ class LLMTrainer(AbstractTrainer):
         >>> trainer = LLMTrainer(model_cls, optimizer_cls, loss_fn, forward_fn, config)
         >>>
         >>> # Create dummy data loaders for language modeling.
-        >>> # Each batch is expected to be a tuple: (X, dec_inp, y, src_mask, tgt_mask, causal_mask).
-        >>> dummy_batch = (
-        ...     np.random.randint(0, 1000, (32, 10)),  # X
-        ...     np.random.randint(0, 1000, (32, 10)),  # dec_inp
-        ...     np.random.randint(0, 1000, (32, 10)),  # y
-        ...     None,  # src_mask (dummy)
-        ...     None,  # tgt_mask (dummy)
-        ...     None   # causal_mask (dummy)
+        >>> dummy_batch = CausalLMBatch(
+        ...     input_ids=np.random.randint(0, 1000, (32, 10)),
+        ...     labels=np.random.randint(0, 1000, (32, 10)),
         ... )
         >>> train_loader = [dummy_batch for _ in range(100)]
         >>> val_loader = [dummy_batch for _ in range(20)]
@@ -700,77 +659,61 @@ class LLMTrainer(AbstractTrainer):
         self.forward_fn = forward_fn
         self.eval_callbacks = list(eval_callbacks or [])
 
-    def train_step(self, batch_data, data_loader) -> Tensor:
+    def train_step(self, batch_data) -> float:
         """Performs a forward pass for language modeling, computes the loss, and backpropagates.
-
-        This method expects batch_data in the form:
-            (X, dec_inp, y, src_mask, tgt_mask, causal_mask).
 
         Note that .zero_grad() and .step() calls are in the _train_one_epoch() function
 
         Args:
-            batch_data: The batch data required for the model's forward pass.
-            data_loader: The data loader, used here to get pad_idx (padding index).
+            batch_data: An architecture-specific LM batch object with `labels`.
 
         Returns:
-            Tensor: The computed loss for this batch.
+            float: The computed loss for this batch.
         """
-        pred_probs, y = self.forward_fn(self.model, batch_data, mode="train")
+        logits = self.forward_fn.train(self.model, batch_data)
         loss = self.loss_fn(
-            pred_probs,
-            y,
-            pad_idx=data_loader.pad_idx,
+            logits,
+            batch_data.labels,
             label_smoothing=self.config.label_smoothing,
         )
         loss.backward()
-        return loss
+        return float(loss.item())
 
-    def evaluate(self, val_data_loader: DataLoader) -> float:
+    def evaluate(self, val_data_loader) -> float:
         """Evaluates the model on the validation data loader for language modeling.
 
         Args:
-            val_data_loader: Validation data loader providing batches with
-                (X, dec_inp, y, src_mask, tgt_mask, causal_mask).
+            val_data_loader: Validation data loader providing LM batches.
 
         Returns:
             float: The average validation loss over the language modeling validation set.
         """
         self.model.eval()
         try:
-            with no_grad():
-                total_loss: Any = 0.0
-                batch_count = 0
-                total_tokens = 0
-                progress_bar = tqdm(val_data_loader, desc="Evaluation", leave=False)
-                for batch_data in progress_bar:
-                    if self._max_eval_steps_reached(batch_count):
-                        break
-                    pred_probs, y = self.forward_fn(
-                        self.model, batch_data, mode="train"
-                    )
-                    # TODO: Decide whether validation should use the same label_smoothing setting
-                    # as training, or intentionally report unsmoothed cross-entropy.
-                    loss = self.loss_fn(pred_probs, y, pad_idx=val_data_loader.pad_idx)
-                    total_loss += loss.data
-                    batch_tokens = val_data_loader.batch_token_count(batch_data)
-                    total_tokens = self._update_progress_bar_tokens(
-                        progress_bar, total_tokens, batch_tokens
-                    )
-                    batch_count += 1
-                avg_val_loss = total_loss / max(batch_count, 1)
-                avg_val_loss = float(xp.to_scalar(avg_val_loss))
-                # NOTE: eval callbacks currently run inside no_grad(). That is
-                # intentional for today's qualitative inference hooks, but any
-                # future gradient-based eval callback should be moved outside
-                # this context or given an explicit contract.
-                for callback in self.eval_callbacks:
-                    callback(self.model, self.forward_fn, val_data_loader, self.config)
-                return avg_val_loss
+            total_loss = 0.0
+            batch_count = 0
+            for batch_data in tqdm(val_data_loader, desc="Evaluation", leave=False):
+                if self._max_eval_steps_reached(batch_count):
+                    break
+                logits = self.forward_fn.train(self.model, batch_data)
+                # TODO: Decide whether validation should use the same label_smoothing
+                # setting as training, or intentionally report unsmoothed cross-entropy.
+                loss = self.loss_fn(
+                    logits,
+                    batch_data.labels,
+                    label_smoothing=self.config.label_smoothing,
+                )
+                total_loss += float(loss.item())
+                batch_count += 1
+            avg_val_loss = total_loss / max(batch_count, 1)
+            for callback in self.eval_callbacks:
+                callback(self.model, self.forward_fn, val_data_loader, self.config)
+            return avg_val_loss
         finally:
             self.model.train()
 
 
-def grad_l2_norm(parameters: Dict[str, Tensor]) -> Array:
+def grad_l2_norm(parameters: Dict[str, Tensor]) -> float:
     """Computes the L2 norm of the gradients for the given model parameters.
 
     Args:
@@ -778,7 +721,7 @@ def grad_l2_norm(parameters: Dict[str, Tensor]) -> Array:
             for which to compute the gradient norm.
 
     Returns:
-        Array: Backend scalar containing the L2 norm of all gradients.
+        float: The L2 norm of all gradients (i.e., sqrt of sum of squared gradient values).
 
     Example:
         >>> from autograd.tensor import Tensor
@@ -789,8 +732,8 @@ def grad_l2_norm(parameters: Dict[str, Tensor]) -> Array:
         >>> grad_norm
         0.2236068
     """
-    grad_norm = xp.array(0.0, dtype=xp.float32)
+    grad_norm = 0.0
     for p in parameters.values():
         if p.grad is not None:
             grad_norm += (p.grad.data**2).sum()
-    return xp.sqrt(grad_norm)
+    return float(xp.to_scalar(grad_norm**0.5))

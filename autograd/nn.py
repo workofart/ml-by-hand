@@ -6,14 +6,13 @@ from typing import (
     Any,
     Callable,
     Dict,
-    Literal,
     Optional,
     Tuple,
     Union,
     cast,
 )
 
-from autograd.backend import ARRAY_TYPE, ArrayLike, xp
+from autograd.backend import ARRAY_TYPE, NAME, ArrayLike, xp
 
 from .functional import (
     relu,
@@ -1458,11 +1457,7 @@ class ScaledDotProductAttention(Module):
         >>> y = attn(query, key, value) # Expected shape: (2, 2, 4, 8)
     """
 
-    def __init__(
-        self,
-        dropout_prob: float = 0.1,
-        _implementation: Literal["dense", "mlx_custom"] = "dense",
-    ) -> None:
+    def __init__(self, dropout_prob: float = 0.1) -> None:
         """
         Initialize the ScaledDotProductAttention layer.
 
@@ -1470,7 +1465,6 @@ class ScaledDotProductAttention(Module):
             dropout_prob (float, optional): Dropout probability applied after softmax. Defaults to 0.1.
         """
         super().__init__()
-        self._implementation = _implementation
         self.dropout = Dropout(p=dropout_prob)
 
     def forward(
@@ -1479,6 +1473,7 @@ class ScaledDotProductAttention(Module):
         key: Tensor,
         value: Tensor,
         mask: Optional[Union[Tensor, ArrayLike]] = None,
+        is_causal: bool = False,
     ) -> Tensor:
         """
         Compute the scaled dot-product attention.
@@ -1493,6 +1488,8 @@ class ScaledDotProductAttention(Module):
                 are also accepted and routed through the implementation-specific
                 gating logic before falling back to dense when unsupported.
                 Defaults to None.
+            is_causal (bool, optional): Whether to apply structural causal masking
+                when no explicit mask is supplied. Defaults to False.
 
         Returns:
             Tensor: The attended output.
@@ -1506,16 +1503,17 @@ class ScaledDotProductAttention(Module):
             >>> value = Tensor(xp.random.randn(2, 2, 4, 8))
             >>> output = attn(query, key, value) # Expected: (2, 2, 4, 8)
         """
-        if self._implementation == "dense":
-            pass
-        elif self._implementation == "mlx_custom":
+        if mask is not None:
             mask_kind, _ = prepare_mlx_attention_mask(
                 mask,
                 query_shape=query.shape,
                 key_shape=key.shape,
             )
-
-            if mask_kind == "causal":
+            # Keep the training critical path on dense attention for now.
+            # The MLX custom kernel remains available for explicit standard
+            # causal masks while we continue evaluating its throughput tradeoff
+            # against the lower forward-activation footprint.
+            if NAME == "mlx" and mask_kind == "causal":
                 try:
                     return scaled_dot_product_attention_mlx_custom(
                         query,
@@ -1526,18 +1524,25 @@ class ScaledDotProductAttention(Module):
                     )
                 except (RuntimeError, ValueError):
                     pass
-            # Dense remains the contract fallback for everything outside the
-            # supported causal self-attention slice.
-        else:
-            raise ValueError(
-                f"Unknown attention implementation: {self._implementation}"
-            )
+        # Dense remains the contract fallback for structural causality and for
+        # everything outside the supported explicit causal self-attention slice.
 
         attention_size = Tensor(key.shape[-1])
 
         # scaled dot product
         # (batch_size, num_heads, sequence_len, sequence_len)
         att_score = (query @ key.transpose(2, 3)) / attention_size.sqrt()
+
+        # Non-MLX Causal Mask
+        if mask is None and is_causal:
+            seq_q = int(query.shape[-2])
+            seq_k = int(key.shape[-2])
+            mask = Tensor(
+                xp.triu(xp.ones((seq_q, seq_k), dtype=xp.float32), k=1).reshape(
+                    1, 1, seq_q, seq_k
+                ),
+                requires_grad=False,
+            )
 
         # mask (optional)
         if mask is not None:
@@ -1592,7 +1597,12 @@ class MultiHeadAttention(Module):
         self.fc = Linear(hidden_size, hidden_size)
 
     def forward(
-        self, query: Tensor, key: Tensor, value: Tensor, mask: Optional[Tensor] = None
+        self,
+        query: Tensor,
+        key: Tensor,
+        value: Tensor,
+        mask: Optional[Tensor] = None,
+        is_causal: bool = False,
     ) -> Tensor:
         """
         Compute the forward pass of the MultiHeadAttention layer.
@@ -1602,6 +1612,8 @@ class MultiHeadAttention(Module):
             key (Tensor): Key tensor.
             value (Tensor): Value tensor.
             mask (Optional[Tensor], optional): Mask tensor. Defaults to None.
+            is_causal (bool, optional): Whether to apply structural causal masking
+                when no explicit mask is supplied. Defaults to False.
 
         Returns:
             Tensor: Output tensor after multi-head attention.
@@ -1638,7 +1650,7 @@ class MultiHeadAttention(Module):
         )
 
         # 2. Apply Attention
-        att_score = self.attention(query, key, value, mask=mask)
+        att_score = self.attention(query, key, value, mask=mask, is_causal=is_causal)
 
         att_score = att_score.permute(
             0, 2, 1, 3
@@ -1665,19 +1677,24 @@ class AbstractLLMForwardFn(ABC):
 
     Subclasses should implement the sample and train methods.
 
+    The trainer treats `batch_data` as opaque and relies on the forward function
+    to interpret architecture-specific batch objects. This keeps the LM training
+    loop shared across decoder-only and encoder-decoder models without forcing a
+    universal batch dict or tuple shape.
+
     Examples:
         >>> # Example subclass implementing the abstract methods.
         >>> class DummyLLMForward(AbstractLLMForwardFn):
         ...     def sample(self, model, batch_data):
-        ...         return model(batch_data), None
+        ...         return model(batch_data)
         ...     def train(self, model, batch_data):
-        ...         return model(batch_data), batch_data
+        ...         return model(batch_data.input_ids)
         >>> forward_fn = DummyLLMForward()
         >>> # Now forward_fn can be used as: forward_fn(model, data, mode="train")
     """
 
     @abstractmethod
-    def sample(self, model: Any, batch_data: Any) -> Tuple[Any, Any]:
+    def sample(self, model: Any, batch_data: Any) -> Any:
         """
         Generate samples from the model.
 
@@ -1686,12 +1703,12 @@ class AbstractLLMForwardFn(ABC):
             batch_data (Any): Data for the current batch.
 
         Returns:
-            Tuple[Any, Any]: A tuple containing generated outputs and auxiliary information.
+            Any: Model outputs for sampling mode.
         """
         pass
 
     @abstractmethod
-    def train(self, model: Any, batch_data: Any) -> Tuple[Any, Any]:
+    def train(self, model: Any, batch_data: Any) -> Any:
         """
         Compute the forward pass for training.
 
@@ -1700,13 +1717,11 @@ class AbstractLLMForwardFn(ABC):
             batch_data (Any): Data for the current batch.
 
         Returns:
-            Tuple[Any, Any]: A tuple containing prediction logits and ground truth labels.
+            Any: Training-mode model outputs, typically logits.
         """
         pass
 
-    def __call__(
-        self, model: Any, batch_data: Any, mode: str = "train"
-    ) -> Tuple[Any, Any]:
+    def __call__(self, model: Any, batch_data: Any, mode: str = "train") -> Any:
         """
         Execute a forward pass in either training or sampling mode.
 
@@ -1716,8 +1731,7 @@ class AbstractLLMForwardFn(ABC):
             mode (str, optional): Mode of operation, either "train" or "sample". Defaults to "train".
 
         Returns:
-            Tuple[Any, Any]: If mode is "train", returns (prediction_logits, ground_truth_labels).
-                              If mode is "sample", returns (prediction_logits, None).
+            Any: The output of `train(...)` or `sample(...)` for the requested mode.
 
         Raises:
             ValueError: If an invalid mode is provided.

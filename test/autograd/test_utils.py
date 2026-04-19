@@ -1,7 +1,7 @@
 from unittest import TestCase
 
 from autograd.backend import xp
-from autograd.tools.data import train_test_split
+from autograd.data.utils import train_test_split
 from autograd.tools.metrics import accuracy, precision
 
 

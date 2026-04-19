@@ -374,6 +374,8 @@ class SGD(Optimizer):
         super().step()
 
         def update_fn(param: Any) -> None:
+            if param.grad is None:
+                return
             param.data -= self.lr * param.grad.data
 
         if "max_grad_norm" in self._hyperparams:

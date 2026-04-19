@@ -1,12 +1,10 @@
 from autograd import functional, nn, optim, tensor
+from autograd.data.collator import PairedCollator
+from autograd.data.data_loader import DataLoader
+from autograd.data.dataset import PairedIterableDataset
+from autograd.data.utils import load_data
 from autograd.text.utils import create_vocabulary, text_to_one_hot_and_sparse
 from autograd.tools.config_schema import GenericTrainingConfig
-from autograd.tools.data import (
-    DataLoader,
-    PairedCollator,
-    PairedIterableDataset,
-    load_data,
-)
 from autograd.tools.trainer import SimpleTrainer
 
 """

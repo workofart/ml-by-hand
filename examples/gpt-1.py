@@ -3,10 +3,18 @@
 import logging
 import sys
 from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from autograd import functional, nn, optim
 from autograd.backend import xp
+from autograd.data.collator import CausalLMWindowCollator
+from autograd.data.data_loader import DataLoader
+from autograd.data.dataset import TokenWindowDataset
+from autograd.data.types import CausalLMBatch
 from autograd.tensor import Tensor
 from autograd.text import utils as text_utils
 from autograd.text.tokenizer import BytePairEncoder
@@ -15,16 +23,7 @@ from autograd.tools.callback import (
     run_teacher_forcing_inference,
 )
 from autograd.tools.config_schema import CustomBpeConfig, TransformerTrainingConfig
-from autograd.tools.data import (
-    DataLoader,
-    LanguageModelingCollator,
-    TokenSequenceDataset,
-)
 from autograd.tools.trainer import LLMTrainer
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
 
 # TODO: Extract the common modules out to nn.py module
 from examples.transformers import (
@@ -70,7 +69,7 @@ class GPT1(nn.Module):
             ]
         )
 
-    def forward(self, tokens, mask: Optional[Tensor]):
+    def forward(self, tokens):
         """
         Following the same notation in the original paper
         Section 3.1 Unsupervised pre-training
@@ -88,7 +87,7 @@ class GPT1(nn.Module):
         h_0 = self.dropout(token_embedding + position_embedding)
 
         for sublayer in self.sublayers:
-            h_0 = sublayer(h_0, mask)
+            h_0 = sublayer(h_0)
 
         output = self.layer_norm(h_0)
         output = output @ self.token_embedding.parameters["weight"].T
@@ -116,23 +115,20 @@ class DecoderSublayer(nn.Module):
             dropout_prob=dropout_prob,
         )
 
-    def forward(self, x: Tensor, mask: Optional[Tensor]) -> Tensor:
+    def forward(self, x: Tensor) -> Tensor:
         x = self.add_and_norm1(
-            x, lambda x_: self.multi_head_attention(x_, x_, x_, mask=mask)
+            x, lambda x_: self.multi_head_attention(x_, x_, x_, is_causal=True)
         )
         x = self.add_and_norm2(x, self.feedforward)
         return x
 
 
 class GPT1ForwardFn(nn.AbstractLLMForwardFn):
-    def train(self, model: GPT1, batch_data: Any, **kwargs) -> Tuple[Any, Any]:
-        X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_data
-        logits = model(X, causal_mask)
-        return logits, y
+    def train(self, model: GPT1, batch_data: CausalLMBatch):
+        return model(batch_data.input_ids)
 
-    def sample(self, model: GPT1, batch_data: Any, **kwargs) -> Tuple[Any, Any]:
-        logits = model(batch_data, None)
-        return logits, None
+    def sample(self, model: GPT1, batch_data: Any):
+        return model(batch_data)
 
 
 if __name__ == "__main__":
@@ -171,9 +167,7 @@ if __name__ == "__main__":
             },
         },
         resume_epoch=None,
-        teacher_enforcing=True,
-        include_decoder_input=False,
-        create_padding_masks=False,
+        teacher_forcing=True,
         label_smoothing=0.1,
         eval_start_string="First",
         custom_bpe=CustomBpeConfig(
@@ -223,45 +217,32 @@ if __name__ == "__main__":
         forward_fn=GPT1ForwardFn(),
     )
 
-    pad_idx = bpe.encode("<PAD>", allowed_special={"<PAD>"})[0]
-    sos_idx = bpe.encode("<SOS>", allowed_special={"<SOS>"})[0]
-
     train_data_loader = DataLoader(
-        dataset=TokenSequenceDataset(
+        dataset=TokenWindowDataset(
             data=xp.array(train_data, dtype=xp.int32),
-            seq_len=trainer.model.max_seq_len,
-            shuffle=True,
-            random_window=True,
+            # CausalLMWindowCollator shifts one token to build input_ids/labels,
+            # so a length-T model context needs a raw window of length T + 1.
+            window_len=trainer.model.max_seq_len + 1,
+            sampling="random",
         ),
         batch_size=train_micro_batch_size,
-        collate_fn=LanguageModelingCollator(
-            max_tokens=trainer.model.max_seq_len + 1,
-            pad_idx=pad_idx,
-            sos_idx=sos_idx,
-            include_decoder_input=CONFIG.include_decoder_input,
-            create_padding_masks=CONFIG.create_padding_masks,
-        ),
+        collate_fn=CausalLMWindowCollator(),
     )
     test_data_loader = DataLoader(
-        dataset=TokenSequenceDataset(
+        dataset=TokenWindowDataset(
             data=xp.array(test_data, dtype=xp.int32),
-            seq_len=trainer.model.max_seq_len,
-            shuffle=False,
-            random_window=True,
+            # CausalLMWindowCollator shifts one token to build input_ids/labels,
+            # so a length-T model context needs a raw window of length T + 1.
+            window_len=trainer.model.max_seq_len + 1,
+            sampling="sequential",
         ),
-        batch_size=train_micro_batch_size // 2,
-        collate_fn=LanguageModelingCollator(
-            max_tokens=trainer.model.max_seq_len + 1,
-            pad_idx=pad_idx,
-            sos_idx=sos_idx,
-            include_decoder_input=CONFIG.include_decoder_input,
-            create_padding_masks=CONFIG.create_padding_masks,
-        ),
+        batch_size=max(1, train_micro_batch_size // 2),
+        collate_fn=CausalLMWindowCollator(),
     )
 
     trainer.fit(train_data_loader, test_data_loader)
 
-    if CONFIG.teacher_enforcing:
+    if CONFIG.teacher_forcing:
         run_teacher_forcing_inference(
             model=trainer.model,
             forward_fn=GPT1ForwardFn(),
@@ -276,7 +257,7 @@ if __name__ == "__main__":
         model=trainer.model,
         forward_fn=GPT1ForwardFn(),
         bpe=bpe,
-        start_tokens="All",
+        start_tokens=CONFIG.eval_start_string,
         max_length=int(trainer.model.max_seq_len * 0.9),
         top_k=CONFIG.eval_top_k,
     )

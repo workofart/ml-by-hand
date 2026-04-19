@@ -293,6 +293,15 @@ class TestSGD(TestCase):
             assert allclose(self.param1.data, expected_param1[_])
             assert allclose(self.param2.data, expected_param2[_])
 
+    def test_step_skips_parameters_without_gradients(self):
+        self.param1.grad = None
+        self.param2.grad = 0.2
+
+        self.optimizer.step()
+
+        assert allclose(self.param1.data, 1.0)
+        assert allclose(self.param2.data, 2.0 - (0.2 * 0.01))
+
 
 class TestAdam(TestCase):
     def setUp(self) -> None:

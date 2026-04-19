@@ -4,14 +4,11 @@ from openml.datasets import get_dataset  # pyright: ignore[reportMissingImports]
 
 from autograd import functional, nn, optim
 from autograd.backend import xp
+from autograd.data.collator import PairedCollator
+from autograd.data.data_loader import DataLoader
+from autograd.data.dataset import PairedIterableDataset, TransformDataset
+from autograd.data.utils import train_test_split
 from autograd.tools.config_schema import GenericTrainingConfig
-from autograd.tools.data import (
-    DataLoader,
-    PairedCollator,
-    PairedIterableDataset,
-    TransformDataset,
-    train_test_split,
-)
 from autograd.tools.metrics import accuracy, precision
 from autograd.tools.trainer import SimpleTrainer
 
@@ -264,7 +261,10 @@ def train_mnist_with_hinge_loss(
         train_loader = DataLoader(
             TransformDataset(
                 PairedIterableDataset(X_train, y_train, shuffle=True),
-                target_transform=target_transform_for_digit(digit),
+                transform=lambda example, digit=digit: {
+                    "inputs": example["inputs"],
+                    "targets": target_transform_for_digit(digit)(example["targets"]),
+                },
             ),
             batch_size=batch_size,
             collate_fn=PairedCollator(),
@@ -338,7 +338,10 @@ def train_mnist_one_vs_rest_model(
         train_loader = DataLoader(
             TransformDataset(
                 PairedIterableDataset(X_train, y_train, shuffle=True),
-                target_transform=target_transform_for_digit(digit),
+                transform=lambda example, digit=digit: {
+                    "inputs": example["inputs"],
+                    "targets": target_transform_for_digit(digit)(example["targets"]),
+                },
             ),
             batch_size=batch_size,
             collate_fn=PairedCollator(),

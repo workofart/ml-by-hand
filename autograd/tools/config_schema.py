@@ -14,7 +14,7 @@ class GenericTrainingConfig:
     This follows the same interface as the AbstractTrainer class in `autograd.tools.trainer.py`
     """
 
-    checkpoint_freq: float
+    checkpoint_freq: int
     # When we load from checkpoint, the below kwargs are restored from the checkpoint
     # and cannot be modified because they are inherently tied to the model and optimizer
     # state (e.g. hidden_size cannot be changed because the model artifact was created
@@ -43,6 +43,10 @@ class GenericTrainingConfig:
             raise ValueError(f"max_steps must be >= 1, got {self.max_steps}")
         if self.max_eval_steps is not None and self.max_eval_steps < 1:
             raise ValueError(f"max_eval_steps must be >= 1, got {self.max_eval_steps}")
+        if not isinstance(self.checkpoint_freq, int):
+            raise ValueError(
+                f"checkpoint_freq must be an int, got {self.checkpoint_freq!r}"
+            )
         if self.checkpoint_freq <= 0:
             raise ValueError(f"checkpoint_freq must be > 0, got {self.checkpoint_freq}")
         if self.global_batch_size < 1:
@@ -81,17 +85,8 @@ class CustomBpeConfig:
 @dataclass(kw_only=True)
 class TransformerTrainingConfig(GenericTrainingConfig):
     # Whether to check the model performance by feeding the groundtruth tokens to compare whether the model can predict the next token correctly.
-    teacher_enforcing: bool
+    teacher_forcing: bool
     custom_bpe: Union[CustomBpeConfig, None] = None
-    # If True, we create a separate 'dec_inp'
-    # array (common in seq2seq). If you just want normal GPT next-token,
-    # you can set this false.
-    include_decoder_input: bool
-    # If True, we create a padding for cases where
-    # we have sequences of different lengths across the training samples.
-    # If you're doing standard GPT, you'd typically want a causal mask, which is created
-    # by default, and isn't controlled by this flag.
-    create_padding_masks: bool
     label_smoothing: float  # TODO: refactor this into loss function config
     eval_start_string: Optional[str] = (
         "\n"  # starting token for the evaluation during training

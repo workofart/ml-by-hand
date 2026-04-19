@@ -3,10 +3,17 @@
 import logging
 import sys
 from pathlib import Path
-from typing import Any, Optional
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from autograd import functional, nn, optim
-from autograd.backend import xp
+from autograd.backend import Array, xp
+from autograd.data.collator import CausalLMWindowCollator
+from autograd.data.data_loader import DataLoader
+from autograd.data.dataset import TokenWindowDataset
+from autograd.data.types import CausalLMBatch
 from autograd.tensor import Tensor
 from autograd.text import utils as text_utils
 from autograd.text.tokenizer import BytePairEncoder
@@ -15,16 +22,7 @@ from autograd.tools.callback import (
     run_teacher_forcing_inference,
 )
 from autograd.tools.config_schema import CustomBpeConfig, TransformerTrainingConfig
-from autograd.tools.data import (
-    DataLoader,
-    LanguageModelingCollator,
-    TokenSequenceDataset,
-)
 from autograd.tools.trainer import LLMTrainer
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
 
 # The feedforward layer is the same as the original transformers
 from examples.transformers import (
@@ -86,11 +84,10 @@ class GPT2(nn.Module):
             lambda m: self._scale_weights(m, num_decoder_layers * 2)
         )  # there are 2 residual layers in each decoder sublayer
 
-    def forward(self, tokens: Tensor, mask: Optional[Tensor]) -> Tensor:
+    def forward(self, tokens: Tensor) -> Tensor:
         """
         Forward pass for GPT-2.
         tokens: shape (batch_size, seq_len)
-        mask: optional shape (batch_size, 1, seq_len, seq_len) for causal masking
         """
         batch_size, seq_len = tokens.shape
 
@@ -108,7 +105,7 @@ class GPT2(nn.Module):
 
         # Pass through each Decoder sublayer
         for sublayer in self.sublayers:
-            h_0 = sublayer(h_0, mask)
+            h_0 = sublayer(h_0)
 
         # Final normalization
         output = self.layer_norm(h_0)
@@ -168,13 +165,11 @@ class DecoderSublayer(nn.Module):
             dropout_prob=dropout_prob,
         )
 
-    def forward(self, x: Tensor, mask: Optional[Tensor]) -> Tensor:
+    def forward(self, x: Tensor) -> Tensor:
         # Pre-norm before attention
         a = self.layer_norm1(x)
 
-        x = x + self.multi_head_attention(
-            a, a, a, mask=mask
-        )  # (batch, seq_len, hidden_size)
+        x = x + self.multi_head_attention(a, a, a, is_causal=True)
 
         # Pre-norm before feed-forward
         b = self.layer_norm2(x)
@@ -187,19 +182,16 @@ class GPT2ForwardFn(nn.AbstractLLMForwardFn):
     A forward function for the GPT-2 model.
     """
 
-    def train(self, model: GPT2, batch_data: Any, **kwargs):
-        X, dec_inp, y, src_mask, tgt_mask, causal_mask = batch_data
-        logits = model(X, causal_mask)
-        return logits, y
+    def train(self, model: GPT2, batch: CausalLMBatch) -> Tensor:
+        return model(batch.input_ids)
 
-    def sample(self, model: GPT2, batch_data: Any, **kwargs):
-        logits = model(batch_data, None)
-        return logits, None
+    def sample(self, model: GPT2, input_ids: Array) -> Tensor:
+        return model(input_ids)
 
 
 if __name__ == "__main__":
     train_global_batch_size = 16
-    SHAPESPEARE_CONFIG = TransformerTrainingConfig(
+    SHAKESPEARE_CONFIG = TransformerTrainingConfig(
         training_run_name="shakespeare_mini",
         dataset_name="shakespeare_mini",
         max_steps=1000,
@@ -226,9 +218,7 @@ if __name__ == "__main__":
             },
         },
         resume_epoch=None,  # Set this to None if you don't want to load from checkpoint
-        teacher_enforcing=True,
-        include_decoder_input=False,
-        create_padding_masks=False,
+        teacher_forcing=True,
         label_smoothing=0.1,
         eval_start_string="First",
         eval_top_k=50,  # Shakespeare only has ~60 unique characters, and our if we do 3000 merges in BPE, our vocabulary size is 260, we so will just sample top 50.
@@ -259,7 +249,7 @@ if __name__ == "__main__":
             "num_attention_heads": 6,  # GPT-2 small uses 12
             "hidden_size": 768,  # GPT-2 small uses 768, must be divisible by num_attention_heads
             "dropout_prob": 0.2,
-            "max_seq_len": 384,  # GPT-2 uses 1024
+            "max_seq_len": 768,  # GPT-2 uses 1024
             "num_decoder_layers": 6,  # GPT-2 uses 12
         },
         optimizer_kwargs={
@@ -274,9 +264,7 @@ if __name__ == "__main__":
             },
         },
         resume_epoch=None,  # Set this to None if you don't want to load from checkpoint
-        teacher_enforcing=False,
-        include_decoder_input=False,
-        create_padding_masks=False,
+        teacher_forcing=False,
         label_smoothing=0.1,
         eval_start_string="April is",
         custom_bpe=CustomBpeConfig(
@@ -329,45 +317,32 @@ if __name__ == "__main__":
         forward_fn=GPT2ForwardFn(),
     )
 
-    pad_idx = bpe.encode("<PAD>", allowed_special={"<PAD>"})[0]
-    sos_idx = bpe.encode("<SOS>", allowed_special={"<SOS>"})[0]
-
     train_data_loader = DataLoader(
-        dataset=TokenSequenceDataset(
+        dataset=TokenWindowDataset(
             data=xp.array(train_data, dtype=xp.int32),
-            seq_len=trainer.model.max_seq_len,
-            shuffle=True,
-            random_window=True,
+            # CausalLMWindowCollator shifts one token to build input_ids/labels,
+            # so a length-T model context needs a raw window of length T + 1.
+            window_len=trainer.model.max_seq_len + 1,
+            sampling="random",
         ),
         batch_size=CONFIG.micro_batch_size,
-        collate_fn=LanguageModelingCollator(
-            max_tokens=trainer.model.max_seq_len + 1,
-            pad_idx=pad_idx,
-            sos_idx=sos_idx,
-            include_decoder_input=CONFIG.include_decoder_input,
-            create_padding_masks=CONFIG.create_padding_masks,
-        ),
+        collate_fn=CausalLMWindowCollator(),
     )
     test_data_loader = DataLoader(
-        dataset=TokenSequenceDataset(
+        dataset=TokenWindowDataset(
             data=xp.array(test_data, dtype=xp.int32),
-            seq_len=trainer.model.max_seq_len,
-            shuffle=False,
-            random_window=True,
+            # CausalLMWindowCollator shifts one token to build input_ids/labels,
+            # so a length-T model context needs a raw window of length T + 1.
+            window_len=trainer.model.max_seq_len + 1,
+            sampling="sequential",
         ),
-        batch_size=CONFIG.micro_batch_size // 2,
-        collate_fn=LanguageModelingCollator(
-            max_tokens=trainer.model.max_seq_len + 1,
-            pad_idx=pad_idx,
-            sos_idx=sos_idx,
-            include_decoder_input=CONFIG.include_decoder_input,
-            create_padding_masks=CONFIG.create_padding_masks,
-        ),
+        batch_size=max(1, CONFIG.micro_batch_size // 2),
+        collate_fn=CausalLMWindowCollator(),
     )
 
     trainer.fit(train_data_loader, test_data_loader)
 
-    if CONFIG.teacher_enforcing:
+    if CONFIG.teacher_forcing:
         run_teacher_forcing_inference(
             model=trainer.model,
             forward_fn=GPT2ForwardFn(),
@@ -384,8 +359,8 @@ if __name__ == "__main__":
             model=trainer.model,
             forward_fn=GPT2ForwardFn(),
             bpe=bpe,
-            start_tokens="\n",
+            start_tokens=CONFIG.eval_start_string,
             max_length=int(trainer.model.max_seq_len),
-            top_k=200,
+            top_k=CONFIG.eval_top_k,
         )
         print("\n------------------------\n")

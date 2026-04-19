@@ -6,12 +6,10 @@ from sklearn.datasets import load_breast_cancer, load_diabetes
 
 from autograd import functional, nn, optim
 from autograd.backend import xp
+from autograd.data.collator import PairedCollator
+from autograd.data.data_loader import DataLoader
+from autograd.data.dataset import PairedIterableDataset
 from autograd.tools.config_schema import GenericTrainingConfig
-from autograd.tools.data import (
-    DataLoader,
-    PairedCollator,
-    PairedIterableDataset,
-)
 from autograd.tools.metrics import accuracy, mean_squared_error
 from autograd.tools.trainer import SimpleTrainer
 

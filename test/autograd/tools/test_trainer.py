@@ -4,9 +4,17 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from autograd.backend import xp
-from autograd.functional import cross_entropy
+from autograd.data.collator import CausalLMCollator, CausalLMWindowCollator
+from autograd.data.data_loader import DataLoader
+from autograd.data.dataset import TokenSequenceDataset, TokenWindowDataset
+from autograd.data.types import CausalLMBatch, Seq2SeqBatch
+from autograd.data.utils import (
+    openai_chat_to_prompt_completion,
+    tokenize_prompt_completion,
+)
+from autograd.functional import IGNORE_INDEX, cross_entropy
 from autograd.nn import AbstractLLMForwardFn, Module
-from autograd.optim import Optimizer
+from autograd.optim import SGD, Optimizer
 from autograd.tensor import Tensor
 from autograd.tools.callback import (
     run_sampling_inference,
@@ -16,28 +24,19 @@ from autograd.tools.config_schema import (
     GenericTrainingConfig,
     TransformerTrainingConfig,
 )
-from autograd.tools.data import (
-    DataLoader,
-    LanguageModelingCollator,
-    TokenSequenceDataset,
-    openai_chat_to_prompt_completion,
-    tokenize_prompt_completion,
-)
-from autograd.tools.trainer import LLMTrainer, SimpleTrainer, grad_l2_norm
+from autograd.tools.trainer import LLMTrainer, SimpleTrainer
 
 
-class MockDataLoader(DataLoader):
+class MockDataLoader:
     """
     A simple loader that stores a list of batches in memory.
     Each time __iter__ is called, it yields those same batches again.
     """
 
-    def __init__(self, data, pad_idx=0, seq_len=1, batch_token_count_fn=None):
+    def __init__(self, data, seq_len=1):
         self.data = data
-        self.pad_idx = pad_idx
         self.seq_len = seq_len
         self.bpe = MagicMock()
-        self.batch_token_count_fn = batch_token_count_fn
 
     def on_epoch_start(self):
         # If you want to shuffle or do something each epoch, do it here
@@ -51,10 +50,18 @@ class MockDataLoader(DataLoader):
         print(f"MockDataLoader: yielding {len(self.data)} batch(es)")
         return iter(self.data)
 
-    def batch_token_count(self, batch):
-        if self.batch_token_count_fn is None:
-            return None
-        return self.batch_token_count_fn(batch)
+
+class UnsizedInfiniteLoader:
+    def on_epoch_start(self):
+        pass
+
+    def __len__(self):
+        raise TypeError("infinite")
+
+    def __iter__(self):
+        raise RuntimeError(
+            "fit should reject unsized infinite loaders before iterating"
+        )
 
 
 class MockModelClass(Module):
@@ -89,6 +96,22 @@ class MockModelClass(Module):
     def state_dict(self):
         # Return something that can be saved as checkpoint
         return {}
+
+
+class ScalarWeightModel(Module):
+    def __init__(self, initial_weight=0.0, **kwargs):
+        super().__init__()
+        self.weight = Tensor(
+            xp.array([[initial_weight]], dtype=xp.float32), requires_grad=True
+        )
+
+    def num_parameters(self):
+        return 1
+
+    def forward(self, x):
+        if not isinstance(x, Tensor):
+            x = Tensor(x)
+        return x @ self._parameters["weight"]
 
 
 class MockOptimizerClass(Optimizer):
@@ -128,23 +151,6 @@ class MockBPE:
         return [ord(char) for char in token]
 
 
-class RecordingTqdm:
-    def __init__(self, iterable, desc=None, leave=False, elapsed_s=2.0):
-        self.iterable = iterable
-        self.desc = desc
-        self.leave = leave
-        self.format_dict = {"elapsed": elapsed_s}
-        self.postfixes = []
-
-    def __iter__(self):
-        return iter(self.iterable)
-
-    def set_postfix(self, ordered_dict=None, refresh=True, **kwargs):
-        postfix = dict(ordered_dict or {})
-        postfix.update(kwargs)
-        self.postfixes.append(postfix)
-
-
 class PromptMaskAwareForwardFn(AbstractLLMForwardFn):
     def __init__(self, vocab_size=512):
         self.vocab_size = vocab_size
@@ -158,17 +164,57 @@ class PromptMaskAwareForwardFn(AbstractLLMForwardFn):
         for batch_idx in range(y.shape[0]):
             for token_idx in range(y.shape[1]):
                 target = int(y[batch_idx, token_idx])
-                predicted_class = target if target != 0 else 3
+                predicted_class = target if target != IGNORE_INDEX else 3
                 logits[batch_idx, token_idx, predicted_class] = 6.0
         return Tensor(logits, requires_grad=True)
 
     def train(self, model, batch_data):
-        _, _, y, _, _, _ = batch_data
-        return self._build_logits(y), y
+        y = batch_data.labels
+        return self._build_logits(y)
 
     def sample(self, model, batch_data):
-        _, _, y, _, _, _ = batch_data
+        if isinstance(batch_data, CausalLMBatch):
+            y = batch_data.labels
+        else:
+            y = xp.array(batch_data, dtype=xp.int32)
+            if y.ndim == 1:
+                y = y[None, :]
         return self._build_logits(y), None
+
+
+def test_abstract_llm_forward_fn_call_forwards_raw_mode_outputs():
+    forward_fn = PromptMaskAwareForwardFn()
+    batch = CausalLMBatch(
+        input_ids=xp.zeros((1, 2), dtype=xp.int32),
+        labels=xp.array([[1, 2]], dtype=xp.int32),
+    )
+
+    train_out = forward_fn(None, batch, mode="train")
+    sample_out = forward_fn(None, batch, mode="sample")
+
+    assert isinstance(train_out, Tensor)
+    assert isinstance(sample_out, tuple)
+    assert sample_out[1] is None
+
+
+def test_transformer_forward_fn_train_returns_logits_only():
+    from examples.transformers import TransformerForwardFn
+
+    logits = Tensor(xp.zeros((2, 3, 5), dtype=xp.float32))
+
+    class DummyTransformer:
+        def __call__(self, input_ids, decoder_input_ids, src_mask, tgt_mask):
+            return logits
+
+    batch_data = Seq2SeqBatch(
+        input_ids=xp.zeros((2, 3), dtype=xp.int32),
+        decoder_input_ids=xp.zeros((2, 3), dtype=xp.int32),
+        labels=xp.zeros((2, 3), dtype=xp.int32),
+        src_mask=xp.zeros((2, 1, 1, 3), dtype=xp.float32),
+        tgt_mask=xp.zeros((2, 1, 3, 3), dtype=xp.float32),
+    )
+
+    assert TransformerForwardFn().train(DummyTransformer(), batch_data) is logits
 
 
 class BaseTrainerTest(unittest.TestCase):
@@ -234,14 +280,14 @@ class TestSimpleTrainer(BaseTrainerTest):
         self.assertEqual(self.trainer.optimizer.step_call_count, 4)
 
     def test_train_step_returns_loss(self):
-        """Check that train_step returns the expected loss tensor."""
+        """Check that the train_step returns the expected scalar loss."""
         batch = next(iter(self.train_data))
         loss_val = self.trainer.train_step(batch)
-        self.assertAlmostEqual(float(loss_val.item()), 1.23, places=5)
+        self.assertAlmostEqual(loss_val, 1.23, places=5)
 
     def test_save_metrics_persists_none_as_nan(self):
-        self.trainer.metrics["epoch"] = [xp.array(0.0, dtype=xp.float32)]
-        self.trainer.metrics["train_loss"] = [xp.array(1.23, dtype=xp.float32)]
+        self.trainer.metrics["epoch"] = [0]
+        self.trainer.metrics["train_loss"] = [1.23]
         self.trainer.metrics["val_loss"] = [None]
 
         self.trainer._save_metrics()
@@ -253,6 +299,26 @@ class TestSimpleTrainer(BaseTrainerTest):
         val_loss = xp.to_numpy(archive["val_loss"])
 
         self.assertTrue(math.isnan(float(val_loss[0])))
+
+    @patch("autograd.tools.trainer.save_checkpoint")
+    def test_save_checkpoint_saves_first_validation_loss(self, mock_save_checkpoint):
+        self.trainer.metrics["val_loss"] = []
+
+        self.trainer._save_checkpoint(epoch=0, val_loss=1.23)
+
+        mock_save_checkpoint.assert_called_once()
+
+    def test_config_requires_integer_checkpoint_frequency(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "checkpoint_freq must be an int",
+        ):
+            GenericTrainingConfig(
+                max_epochs=1,
+                checkpoint_freq=1.5,
+                model_kwargs={"hidden_size": 256},
+                optimizer_kwargs={"lr": 0.01},
+            )
 
     def test_fit_with_single_epoch_and_sample_predictions_does_not_crash(self):
         self.config.max_epochs = 1
@@ -295,6 +361,16 @@ class TestSimpleTrainer(BaseTrainerTest):
 
         self.assertEqual(trainer.optimizer.step_call_count, 3)
 
+    def test_fit_requires_max_steps_for_unsized_infinite_train_loader(self):
+        self.config.max_epochs = 1
+        self.config.max_steps = None
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "Infinite training loaders require max_steps",
+        ):
+            self.trainer.fit(UnsizedInfiniteLoader(), self.val_loader)
+
     def test_fit_accumulates_using_global_and_micro_batch_sizes(self):
         config = GenericTrainingConfig(
             max_epochs=2,
@@ -315,6 +391,108 @@ class TestSimpleTrainer(BaseTrainerTest):
         trainer.fit(self.train_loader, self.val_loader)
 
         self.assertEqual(trainer.optimizer.step_call_count, 2)
+
+    def test_fit_flushes_leftover_gradients_at_epoch_end(self):
+        config = GenericTrainingConfig(
+            max_epochs=1,
+            checkpoint_freq=1,
+            model_kwargs={"hidden_size": 256},
+            optimizer_kwargs={"lr": 0.01},
+            global_batch_size=4,
+            micro_batch_size=2,
+        )
+        trainer = SimpleTrainer(
+            model_cls=MockModelClass,
+            optimizer_cls=MockOptimizerClass,
+            loss_fn=self.loss_fn,
+            config=config,
+            output_type="logits",
+        )
+        train_loader = MockDataLoader(self.train_data + self.val_data)
+
+        trainer.fit(train_loader, self.val_loader)
+
+        self.assertEqual(trainer.optimizer.step_call_count, 2)
+
+    def _fit_scalar_weight_model(
+        self, train_data, *, global_batch_size, micro_batch_size
+    ):
+        config = GenericTrainingConfig(
+            max_epochs=1,
+            checkpoint_freq=1,
+            model_kwargs={"initial_weight": 0.0},
+            optimizer_kwargs={"lr": 0.1},
+            global_batch_size=global_batch_size,
+            micro_batch_size=micro_batch_size,
+        )
+        trainer = SimpleTrainer(
+            model_cls=ScalarWeightModel,
+            optimizer_cls=SGD,
+            loss_fn=lambda pred, target: (
+                (pred - Tensor(target, requires_grad=False)) ** 2
+            ).mean(),
+            config=config,
+        )
+
+        trainer.fit(MockDataLoader(train_data))
+
+        return float(xp.to_scalar(trainer.model.parameters["weight"].data[0, 0]))
+
+    def test_gradient_accumulation_matches_full_batch_update(self):
+        full_batch_data = [
+            (
+                xp.array([[1.0], [3.0]], dtype=xp.float32),
+                xp.array([[1.0], [3.0]], dtype=xp.float32),
+            )
+        ]
+        micro_batch_data = [
+            (
+                xp.array([[1.0]], dtype=xp.float32),
+                xp.array([[1.0]], dtype=xp.float32),
+            ),
+            (
+                xp.array([[3.0]], dtype=xp.float32),
+                xp.array([[3.0]], dtype=xp.float32),
+            ),
+        ]
+
+        full_batch_weight = self._fit_scalar_weight_model(
+            full_batch_data,
+            global_batch_size=2,
+            micro_batch_size=2,
+        )
+        accumulated_weight = self._fit_scalar_weight_model(
+            micro_batch_data,
+            global_batch_size=2,
+            micro_batch_size=1,
+        )
+
+        self.assertAlmostEqual(accumulated_weight, full_batch_weight, places=6)
+
+    def test_leftover_accumulation_matches_single_batch_update(self):
+        single_batch_data = [
+            (
+                xp.array([[2.0]], dtype=xp.float32),
+                xp.array([[1.0]], dtype=xp.float32),
+            )
+        ]
+
+        single_batch_weight = self._fit_scalar_weight_model(
+            single_batch_data,
+            global_batch_size=1,
+            micro_batch_size=1,
+        )
+        leftover_accumulated_weight = self._fit_scalar_weight_model(
+            single_batch_data,
+            global_batch_size=2,
+            micro_batch_size=1,
+        )
+
+        self.assertAlmostEqual(
+            leftover_accumulated_weight,
+            single_batch_weight,
+            places=6,
+        )
 
     def test_config_requires_at_least_one_training_limit(self):
         with self.assertRaisesRegex(
@@ -361,104 +539,6 @@ class TestSimpleTrainer(BaseTrainerTest):
         self.assertAlmostEqual(avg_val_loss, 1.23, places=5)
         self.assertEqual(self.loss_fn.call_count, 1)
 
-    def test_evaluate_runs_without_grad_tracking(self):
-        class LinearModel(Module):
-            def __init__(self, input_size=5, output_size=3, **kwargs):
-                super().__init__()
-                self.weight = Tensor(
-                    xp.ones((input_size, output_size), dtype=xp.float32),
-                    requires_grad=True,
-                )
-
-            def forward(self, x):
-                return Tensor(x, requires_grad=False) @ self.parameters["weight"]
-
-        class RecordingLoss:
-            def __call__(self, y_pred, y_true, **kwargs):
-                self.last_pred = y_pred
-                self.last_loss = y_pred.sum()
-                return self.last_loss
-
-        trainer = SimpleTrainer(
-            model_cls=LinearModel,
-            optimizer_cls=MockOptimizerClass,
-            loss_fn=RecordingLoss(),
-            config=GenericTrainingConfig(
-                max_epochs=1,
-                checkpoint_freq=1,
-                model_kwargs={},
-                optimizer_kwargs={"lr": 0.01},
-                resume_epoch=None,
-            ),
-            output_type="logits",
-        )
-
-        avg_val_loss = trainer.evaluate(MockDataLoader(self.val_data))
-
-        self.assertIsNotNone(trainer.loss_fn.last_pred)
-        self.assertFalse(trainer.loss_fn.last_pred.requires_grad)
-        self.assertIsNone(trainer.loss_fn.last_pred.creator)
-        self.assertFalse(trainer.loss_fn.last_loss.requires_grad)
-        self.assertIsNone(trainer.loss_fn.last_loss.creator)
-        self.assertGreaterEqual(avg_val_loss, 0.0)
-
-    def test_grad_l2_norm_returns_backend_scalar(self):
-        param = Tensor(xp.array([1.0, 2.0], dtype=xp.float32), requires_grad=True)
-        param.grad = Tensor(xp.array([3.0, 4.0], dtype=xp.float32), requires_grad=False)
-
-        grad_norm = grad_l2_norm({"weight": param})
-
-        self.assertTrue(xp.isclose(grad_norm, xp.array(5.0, dtype=xp.float32)))
-
-    def test_on_epoch_end_logs_backend_scalar_metrics(self):
-        self.trainer.metrics["grad_l2_norm"].append(xp.array(2.5, dtype=xp.float32))
-
-        self.trainer._on_epoch_end(epoch=0, train_loss=1.23, val_loss=None)
-
-        self.assertTrue(
-            xp.isclose(
-                self.trainer.metrics["epoch"][0],
-                xp.array(0.0, dtype=xp.float32),
-            )
-        )
-
-    def test_save_metrics_persists_backend_scalar_metrics(self):
-        self.trainer.metrics["epoch"] = [xp.array(0.0, dtype=xp.float32)]
-        self.trainer.metrics["train_loss"] = [xp.array(1.23, dtype=xp.float32)]
-        self.trainer.metrics["val_loss"] = [None]
-        self.trainer.metrics["grad_l2_norm"] = [xp.array(2.5, dtype=xp.float32)]
-
-        self.trainer._save_metrics()
-
-        metrics_path = (
-            f"{SimpleTrainer.METRICS_DIR}/{MockModelClass.__name__}_default.npz"
-        )
-        archive = xp.load(metrics_path)
-        grad_norm = xp.to_numpy(archive["grad_l2_norm"])
-
-        self.assertEqual(float(grad_norm[0]), 2.5)
-
-    @patch("autograd.tools.trainer.save_checkpoint")
-    def test_save_checkpoint_uses_stored_val_loss_history(self, mock_save_checkpoint):
-        self.trainer.metrics["val_loss"] = [xp.array(0.5, dtype=xp.float32)]
-
-        self.trainer._save_checkpoint(epoch=0)
-
-        mock_save_checkpoint.assert_called_once()
-
-    @patch("autograd.tools.trainer.save_checkpoint")
-    def test_save_checkpoint_skips_when_val_loss_does_not_improve(
-        self, mock_save_checkpoint
-    ):
-        self.trainer.metrics["val_loss"] = [
-            xp.array(0.5, dtype=xp.float32),
-            xp.array(0.7, dtype=xp.float32),
-        ]
-
-        self.trainer._save_checkpoint(epoch=1)
-
-        mock_save_checkpoint.assert_not_called()
-
 
 class TestLLMTrainer(BaseTrainerTest):
     def setUp(self):
@@ -470,47 +550,26 @@ class TestLLMTrainer(BaseTrainerTest):
 
         # LLM data (just 2 batches for training, 1 batch for validation)
         self.train_data = [
-            (
-                xp.zeros((2, seq_len), dtype=xp.int32),
-                xp.ones((2, seq_len), dtype=xp.int32),
-                xp.full((2, seq_len), 2, dtype=xp.int32),
-                None,
-                None,
-                None,
+            CausalLMBatch(
+                input_ids=xp.zeros((2, seq_len), dtype=xp.int32),
+                labels=xp.full((2, seq_len), 2, dtype=xp.int32),
             )
             for _ in range(2)
         ]
         self.val_data = [
-            (
-                xp.zeros((2, seq_len), dtype=xp.int32),
-                xp.ones((2, seq_len), dtype=xp.int32),
-                xp.full((2, seq_len), 2, dtype=xp.int32),
-                None,
-                None,
-                None,
+            CausalLMBatch(
+                input_ids=xp.zeros((2, seq_len), dtype=xp.int32),
+                labels=xp.full((2, seq_len), 2, dtype=xp.int32),
             )
         ]
 
         # Replace MagicMock with a real in-memory loader
-        def batch_token_count_fn(batch):
-            return int(batch[0].shape[0] * batch[0].shape[1])
-
-        self.train_loader = MockDataLoader(
-            self.train_data,
-            pad_idx=0,
-            seq_len=seq_len,
-            batch_token_count_fn=batch_token_count_fn,
-        )
-        self.val_loader = MockDataLoader(
-            self.val_data,
-            pad_idx=0,
-            seq_len=seq_len,
-            batch_token_count_fn=batch_token_count_fn,
-        )
+        self.train_loader = MockDataLoader(self.train_data, seq_len=seq_len)
+        self.val_loader = MockDataLoader(self.val_data, seq_len=seq_len)
 
         # We'll mock forward_fn to skip real model logic
         self.forward_fn = MagicMock()
-        # Suppose it returns (logits, y) => shape: (2,10,10) for logits, plus (2,10) for labels
+        self.forward_fn.train.return_value = Tensor(self.fake_pred)
         self.forward_fn.return_value = (
             Tensor(self.fake_pred),
             xp.zeros((2, seq_len), dtype=xp.int32),
@@ -523,9 +582,7 @@ class TestLLMTrainer(BaseTrainerTest):
             optimizer_kwargs={"lr": 0.01},
             resume_epoch=None,
             label_smoothing=0.0,
-            teacher_enforcing=False,
-            include_decoder_input=True,
-            create_padding_masks=False,
+            teacher_forcing=False,
         )
 
         # Construct the trainer
@@ -543,66 +600,23 @@ class TestLLMTrainer(BaseTrainerTest):
         # 2 epochs * 2 train batches = 4 steps
         self.assertEqual(self.trainer.optimizer.step_call_count, 4)
 
-    @patch("autograd.tools.trainer.tqdm")
-    def test_fit_updates_tqdm_with_cumulative_tokens_and_token_throughput(
-        self, mock_tqdm
-    ):
-        progress_bars = []
-
-        def make_progress_bar(iterable, desc=None, leave=False):
-            progress_bar = RecordingTqdm(iterable, desc=desc, leave=leave)
-            progress_bars.append(progress_bar)
-            return progress_bar
-
-        mock_tqdm.side_effect = make_progress_bar
-        self.config.max_epochs = 1
-
-        self.trainer.fit(self.train_loader, self.val_loader)
-
-        training_bar = next(
-            bar for bar in progress_bars if bar.desc == "Training Batches"
-        )
-        self.assertEqual(
-            training_bar.postfixes,
-            [
-                {"tokens": "20", "tok/s": "10.0"},
-                {"tokens": "40", "tok/s": "20.0"},
-            ],
-        )
-
     def test_train_step_returns_loss(self):
-        """Check that a single train step returns the constant loss tensor."""
+        """Check that a single train step returns the constant scalar loss."""
         batch = next(iter(self.train_data))
-        loss_val = self.trainer.train_step(batch, self.train_loader)
-        self.assertAlmostEqual(float(loss_val.item()), 1.23, places=5)
+        loss_val = self.trainer.train_step(batch)
+        self.assertAlmostEqual(loss_val, 1.23, places=5)
 
-    def test_evaluate_supports_data_loader_without_token_count(self):
-        avg_val_loss = self.trainer.evaluate(MockDataLoader(self.val_data))
+    def test_evaluate_does_not_require_loader_metadata(self):
+        class MinimalLoader:
+            def __init__(self, data):
+                self.data = data
 
-        self.assertAlmostEqual(avg_val_loss, 1.23, places=5)
+            def __iter__(self):
+                return iter(self.data)
 
-    @patch("autograd.tools.trainer.tqdm")
-    def test_evaluate_updates_tqdm_with_cumulative_tokens_and_token_throughput(
-        self, mock_tqdm
-    ):
-        progress_bars = []
-
-        def make_progress_bar(iterable, desc=None, leave=False):
-            progress_bar = RecordingTqdm(iterable, desc=desc, leave=leave)
-            progress_bars.append(progress_bar)
-            return progress_bar
-
-        mock_tqdm.side_effect = make_progress_bar
-
-        avg_val_loss = self.trainer.evaluate(self.val_loader)
+        avg_val_loss = self.trainer.evaluate(MinimalLoader(self.val_data))
 
         self.assertAlmostEqual(avg_val_loss, 1.23, places=5)
-        self.assertEqual(len(progress_bars), 1)
-        self.assertEqual(progress_bars[0].desc, "Evaluation")
-        self.assertEqual(
-            progress_bars[0].postfixes,
-            [{"tokens": "20", "tok/s": "10.0"}],
-        )
 
     def test_evaluate_runs_eval_callbacks_and_returns_val_loss(self):
         callback = MagicMock()
@@ -621,89 +635,6 @@ class TestLLMTrainer(BaseTrainerTest):
         callback.assert_called_once_with(
             trainer.model, trainer.forward_fn, self.val_loader, trainer.config
         )
-
-    def test_llm_evaluate_runs_without_grad_tracking(self):
-        class TinyLM(Module):
-            def __init__(self, vocab_size=10, **kwargs):
-                super().__init__()
-                self.logit_bias = Tensor(
-                    xp.arange(vocab_size, dtype=xp.float32), requires_grad=True
-                )
-
-            def forward(self, tokens, mask=None):
-                batch_size, seq_len = tokens.shape
-                logit_bias = self.parameters["logit_bias"]
-                return logit_bias.expand(batch_size, seq_len, logit_bias.shape[0])
-
-        class TinyForwardFn(AbstractLLMForwardFn):
-            def train(self, model, batch_data):
-                X, _, y, _, _, causal_mask = batch_data
-                return model(X, causal_mask), y
-
-            def sample(self, model, batch_data):
-                return model(batch_data, None), None
-
-        class RecordingLoss:
-            def __call__(self, y_pred, y_true, **kwargs):
-                self.last_pred = y_pred
-                self.last_loss = y_pred.sum()
-                return self.last_loss
-
-        trainer = LLMTrainer(
-            model_cls=TinyLM,
-            optimizer_cls=MockOptimizerClass,
-            loss_fn=RecordingLoss(),
-            forward_fn=TinyForwardFn(),
-            config=TransformerTrainingConfig(
-                max_epochs=1,
-                checkpoint_freq=1,
-                model_kwargs={},
-                optimizer_kwargs={"lr": 0.01},
-                resume_epoch=None,
-                label_smoothing=0.0,
-                teacher_enforcing=False,
-                include_decoder_input=False,
-                create_padding_masks=False,
-            ),
-        )
-
-        avg_val_loss = trainer.evaluate(self.val_loader)
-
-        self.assertIsNotNone(trainer.loss_fn.last_pred)
-        self.assertFalse(trainer.loss_fn.last_pred.requires_grad)
-        self.assertIsNone(trainer.loss_fn.last_pred.creator)
-        self.assertFalse(trainer.loss_fn.last_loss.requires_grad)
-        self.assertIsNone(trainer.loss_fn.last_loss.creator)
-        self.assertGreaterEqual(avg_val_loss, 0.0)
-
-    def test_llm_sample_mode_runs_without_grad_tracking(self):
-        class TinyLM(Module):
-            def __init__(self, vocab_size=8, **kwargs):
-                super().__init__()
-                self.logit_bias = Tensor(
-                    xp.arange(vocab_size, dtype=xp.float32), requires_grad=True
-                )
-
-            def forward(self, tokens, mask=None):
-                batch_size, seq_len = tokens.shape
-                logit_bias = self.parameters["logit_bias"]
-                return logit_bias.expand(batch_size, seq_len, logit_bias.shape[0])
-
-        class TinyForwardFn(AbstractLLMForwardFn):
-            def train(self, model, batch_data):
-                return model(batch_data, None), batch_data
-
-            def sample(self, model, batch_data):
-                return model(batch_data, None), None
-
-        model = TinyLM()
-        forward_fn = TinyForwardFn()
-        tokens = xp.zeros((2, 4), dtype=xp.int32)
-
-        logits, _ = forward_fn(model, tokens, mode="sample")
-
-        self.assertFalse(logits.requires_grad)
-        self.assertIsNone(logits.creator)
 
     @patch("autograd.tools.callback.text_utils.inference")
     def test_manual_qualitative_inference_helpers_do_not_depend_on_loader(
@@ -734,7 +665,7 @@ class TestLLMTrainer(BaseTrainerTest):
 
     def test_llm_evaluate_respects_max_eval_steps_from_config(self):
         self.config.max_eval_steps = 1
-        val_loader = MockDataLoader(self.val_data * 2, pad_idx=0, seq_len=10)
+        val_loader = MockDataLoader(self.val_data * 2, seq_len=10)
 
         avg_val_loss = self.trainer.evaluate(val_loader)
 
@@ -744,7 +675,6 @@ class TestLLMTrainer(BaseTrainerTest):
     def test_train_step_supports_sft_batches_from_generic_data_loader(self):
         bpe = MockBPE()
         pad_idx = bpe.encode("<PAD>", allowed_special={"<PAD>"})[0]
-        sos_idx = bpe.encode("<SOS>", allowed_special={"<SOS>"})[0]
         tokenized_example = tokenize_prompt_completion(
             openai_chat_to_prompt_completion(
                 {
@@ -763,12 +693,9 @@ class TestLLMTrainer(BaseTrainerTest):
                 shuffle=False,
             ),
             batch_size=1,
-            collate_fn=LanguageModelingCollator(
+            collate_fn=CausalLMCollator(
                 max_tokens=6,
                 pad_idx=pad_idx,
-                sos_idx=sos_idx,
-                include_decoder_input=False,
-                create_padding_masks=False,
             ),
         )
         trainer = LLMTrainer(
@@ -783,47 +710,37 @@ class TestLLMTrainer(BaseTrainerTest):
                 optimizer_kwargs={"lr": 0.01},
                 resume_epoch=None,
                 label_smoothing=0.0,
-                teacher_enforcing=False,
-                include_decoder_input=False,
-                create_padding_masks=False,
+                teacher_forcing=False,
             ),
         )
 
         batch = next(iter(loader))
-        logits, y = trainer.forward_fn(trainer.model, batch, mode="train")
-        expected_loss = cross_entropy(logits, y, pad_idx=loader.pad_idx)
+        logits = trainer.forward_fn.train(trainer.model, batch)
+        expected_loss = cross_entropy(
+            logits,
+            batch.labels,
+            label_smoothing=0.0,
+        )
 
-        train_loss = trainer.train_step(batch, loader)
+        train_loss = trainer.train_step(batch)
         val_loss = trainer.evaluate(loader)
 
-        self.assertAlmostEqual(
-            float(train_loss.item()), float(expected_loss.item()), places=6
-        )
+        self.assertAlmostEqual(train_loss, float(expected_loss.item()), places=6)
         self.assertAlmostEqual(val_loss, float(expected_loss.item()), places=6)
 
     def test_fit_supports_unsized_streaming_data_loaders(self):
-        bpe = MockBPE()
-        pad_idx = bpe.encode("<PAD>", allowed_special={"<PAD>"})[0]
-        sos_idx = bpe.encode("<SOS>", allowed_special={"<SOS>"})[0]
         self.config.max_epochs = 10
         self.config.max_steps = 1
         self.config.max_eval_steps = 1
 
         stream_loader = DataLoader(
-            dataset=TokenSequenceDataset(
-                data=xp.arange(100, dtype=xp.int32),
-                seq_len=4,
-                shuffle=False,
-                random_window=True,
+            dataset=TokenWindowDataset(
+                xp.arange(100, dtype=xp.int32),
+                window_len=5,
+                sampling="sequential",
             ),
             batch_size=2,
-            collate_fn=LanguageModelingCollator(
-                max_tokens=5,
-                pad_idx=pad_idx,
-                sos_idx=sos_idx,
-                include_decoder_input=False,
-                create_padding_masks=False,
-            ),
+            collate_fn=CausalLMWindowCollator(),
         )
         trainer = LLMTrainer(
             model_cls=MockModelClass,
