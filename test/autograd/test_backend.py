@@ -7,6 +7,8 @@ import numpy as np
 import pytest
 
 from autograd.backend import (
+    get_random_state,
+    set_random_state,
     xp,
 )
 from autograd.nn import extract_windows
@@ -41,8 +43,12 @@ def _load_backend_module(monkeypatch, *, env_backend=None, fake_cupy=None):
 
 def _fake_cupy_module(device_count: int):
     random = SimpleNamespace(
+        seed=np.random.seed,
+        uniform=np.random.uniform,
         normal=np.random.normal,
+        randint=np.random.randint,
         binomial=np.random.binomial,
+        permutation=np.random.permutation,
         choice=np.random.choice,
     )
     return SimpleNamespace(
@@ -123,6 +129,28 @@ def test_random_bernoulli_returns_binary_mask():
     values = set(np.unique(xp.to_numpy(out)).tolist())
 
     assert values.issubset({0, 1, False, True})
+
+
+def test_active_backend_random_state_round_trip_replays_sample():
+    xp.random.seed(123)
+    saved_state = get_random_state()
+    first = xp.random.bernoulli(0.5, shape=(32,))
+    set_random_state(saved_state)
+    second = xp.random.bernoulli(0.5, shape=(32,))
+
+    assert np.array_equal(xp.to_numpy(first), xp.to_numpy(second))
+
+
+def test_numpy_random_state_round_trip_replays_sample(monkeypatch):
+    module = _load_backend_module(monkeypatch, env_backend="numpy")
+
+    module.xp.random.seed(123)
+    saved_state = module.get_random_state()
+    first = module.xp.random.bernoulli(0.5, shape=(32,))
+    module.set_random_state(saved_state)
+    second = module.xp.random.bernoulli(0.5, shape=(32,))
+
+    assert np.array_equal(module.xp.to_numpy(first), module.xp.to_numpy(second))
 
 
 def test_tensor_item_uses_backend_scalar_conversion():

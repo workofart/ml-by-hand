@@ -576,21 +576,21 @@ if __name__ == "__main__":
     No value is returned; training progress and generated outputs are logged.
     """
     train_global_batch_size = 16
-    train_micro_batch_size = train_global_batch_size
+    train_micro_batch_size = 4
     CONFIG = TransformerTrainingConfig(
         training_run_name="wikisum_seq2seq",
         dataset_name="wikisum_seq2seq",
-        max_steps=500,
+        max_steps=2000,
         max_eval_steps=16,
-        checkpoint_freq=2,
+        checkpoint_freq=500,
         global_batch_size=train_global_batch_size,
         micro_batch_size=train_micro_batch_size,
         model_kwargs={
-            "num_attention_heads": 4,
-            "hidden_size": 128,
+            "num_attention_heads": 12,
+            "hidden_size": 768,
             "dropout_prob": 0.1,
-            "max_seq_len": 96,
-            "num_decoder_layers": 4,
+            "max_seq_len": 512,
+            "num_decoder_layers": 12,
         },
         optimizer_kwargs={
             "lr": 1e-3,
@@ -599,8 +599,8 @@ if __name__ == "__main__":
             "weight_decay": 0.1,
             "lr_scheduler_kwargs": {
                 "lr_scheduler_cls": optim.CosineScheduler,
-                "warmup_steps": 100,
-                "lr_decay_iters": 500,
+                "warmup_steps": 300,
+                "lr_decay_iters": 2000,
             },
         },
         resume_epoch=None,
@@ -622,8 +622,8 @@ if __name__ == "__main__":
     test_data_url = "https://huggingface.co/datasets/d0rj/wikisum/resolve/main/data/test-00000-of-00001-52a8a7cd640a9fff.parquet"
     train_filename = "training_data/wikisum_train.parquet"
     test_filename = "training_data/wikisum_test.parquet"
-    train_rows = load_parquet_rows(train_data_url, train_filename, max_rows=1024)
-    test_rows = load_parquet_rows(test_data_url, test_filename, max_rows=1024)
+    train_rows = load_parquet_rows(train_data_url, train_filename)
+    test_rows = load_parquet_rows(test_data_url, test_filename)
 
     train_pairs = [(str(row["article"]), str(row["summary"])) for row in train_rows]
     test_pairs = [(str(row["article"]), str(row["summary"])) for row in test_rows]

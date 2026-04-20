@@ -270,7 +270,7 @@ class AbstractTrainer(ABC):
         for key in self.metrics:
             if key != "epoch" and self.metrics[key][-1] is not None:
                 log_msg += f"\n{key} = {self.metrics[key][-1]:.4f}"
-        log_msg += f"\nLR = {self.optimizer.lr:.4f}"
+        log_msg += f"\nLR = {self.optimizer.lr:.6f}"
         logger.info(log_msg)
 
     @abstractmethod
