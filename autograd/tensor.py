@@ -14,7 +14,14 @@ from typing import (
     cast,
 )
 
-from autograd.backend import ARRAY_TYPE, Array, ArrayLike, xp
+from autograd.backend import (
+    ARRAY_TYPE,
+    Array,
+    ArrayLike,
+    get_random_state,
+    set_random_state,
+    xp,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1103,6 +1110,75 @@ class Tensor:
 
     def __lt__(self, other: Union["Tensor", float, int]) -> Union[Array, bool]:
         return self.data < (other.data if isinstance(other, Tensor) else other)
+
+
+class _CheckpointFunction(Function):
+    def __init__(
+        self,
+        run_function,
+        tensors: Tuple[Tensor, ...],
+    ) -> None:
+        super().__init__(*tensors)
+        self.run_function = run_function
+        self.forward_rng_state = get_random_state()
+
+    def backward(self, grad: Tensor):
+        recomputed_inputs = tuple(
+            Tensor(tensor.data, requires_grad=tensor.requires_grad)
+            for tensor in self.tensors
+        )
+        current_rng_state = get_random_state()
+        try:
+            set_random_state(self.forward_rng_state)
+            recomputed_output = self.run_function(*recomputed_inputs)
+        finally:
+            set_random_state(current_rng_state)
+
+        if not isinstance(recomputed_output, Tensor):
+            raise TypeError(
+                "checkpointed function must return a Tensor, "
+                f"got {type(recomputed_output)!r}"
+            )
+        recomputed_output.backward(grad)
+        return tuple(
+            input_tensor.grad.data if input_tensor.grad is not None else None
+            for input_tensor in recomputed_inputs
+        )
+
+
+def checkpoint(
+    run_function: Any,
+    *tensors: Tensor,
+) -> Tensor:
+    if not callable(run_function):
+        raise TypeError(f"run_function must be callable, got {run_function!r}")
+    if not tensors:
+        raise ValueError("checkpoint requires at least one Tensor input")
+    if not all(isinstance(tensor, Tensor) for tensor in tensors):
+        raise TypeError("checkpoint only supports Tensor positional arguments")
+
+    requires_grad = is_grad_enabled() and any(
+        tensor.requires_grad for tensor in tensors
+    )
+    if not requires_grad:
+        output = run_function(*tensors)
+        if not isinstance(output, Tensor):
+            raise TypeError(
+                f"checkpointed function must return a Tensor, got {type(output)!r}"
+            )
+        return output
+
+    creator = _CheckpointFunction(
+        run_function,
+        cast(Tuple[Tensor, ...], tensors),
+    )
+    with no_grad():
+        output = run_function(*tensors)
+    if not isinstance(output, Tensor):
+        raise TypeError(
+            f"checkpointed function must return a Tensor, got {type(output)!r}"
+        )
+    return Tensor(output.data, creator=creator, requires_grad=True)
 
     def __le__(self, other: Union["Tensor", float, int]) -> Union[Array, bool]:
         return self.data <= (other.data if isinstance(other, Tensor) else other)

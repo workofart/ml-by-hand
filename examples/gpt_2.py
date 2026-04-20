@@ -14,7 +14,7 @@ from autograd.data.collator import CausalLMWindowCollator
 from autograd.data.data_loader import DataLoader
 from autograd.data.dataset import TokenWindowDataset
 from autograd.data.types import CausalLMBatch
-from autograd.tensor import Tensor
+from autograd.tensor import Tensor, checkpoint
 from autograd.text import utils as text_utils
 from autograd.text.tokenizer import BytePairEncoder
 from autograd.tools.callback import (
@@ -52,11 +52,13 @@ class GPT2(nn.Module):
         max_seq_len: int = 1024,  # GPT-2 small uses 1024 context window
         dropout_prob: float = 0.1,
         num_decoder_layers: int = 12,  # GPT-2 small has 12 layers
+        activation_checkpointing: bool = False,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
         self.hidden_size = hidden_size
         self.max_seq_len = max_seq_len
+        self.activation_checkpointing = activation_checkpointing
 
         # Token and positional embeddings
         self.token_embedding = nn.Embedding(vocab_size, hidden_size)
@@ -105,7 +107,10 @@ class GPT2(nn.Module):
 
         # Pass through each Decoder sublayer
         for sublayer in self.sublayers:
-            h_0 = sublayer(h_0)
+            if self._is_training and self.activation_checkpointing:
+                h_0 = checkpoint(sublayer, h_0)
+            else:
+                h_0 = sublayer(h_0)
 
         # Final normalization
         output = self.layer_norm(h_0)
