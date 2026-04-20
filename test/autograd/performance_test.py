@@ -21,6 +21,7 @@ from examples.gpt_2 import GPT2
 @dataclass(frozen=True)
 class MemorySnapshot:
     rss_bytes: int
+    swap_used_bytes: int
     device_active_bytes: Optional[int] = None
     device_cache_bytes: Optional[int] = None
     device_peak_bytes: Optional[int] = None
@@ -30,6 +31,7 @@ class MemorySnapshot:
 class CallProfile:
     elapsed_s: float
     rss_delta_bytes: int
+    swap_used_delta_bytes: int
     device_active_delta_bytes: Optional[int]
     device_cache_delta_bytes: Optional[int]
     device_peak_delta_bytes: Optional[int]
@@ -132,8 +134,10 @@ def capture_memory_snapshot(process=None):
     if process is None:
         process = psutil.Process(os.getpid())
     rss_bytes = int(process.memory_info().rss)
+    swap_used_bytes = int(psutil.swap_memory().used)
     return MemorySnapshot(
         rss_bytes=rss_bytes,
+        swap_used_bytes=swap_used_bytes,
         device_active_bytes=_device_memory_stat("get_active_memory"),
         device_cache_bytes=_device_memory_stat("get_cache_memory"),
         device_peak_bytes=_device_memory_stat("get_peak_memory"),
@@ -175,6 +179,8 @@ def measure_call(
     profile = CallProfile(
         elapsed_s=elapsed_s,
         rss_delta_bytes=end_snapshot.rss_bytes - start_snapshot.rss_bytes,
+        swap_used_delta_bytes=end_snapshot.swap_used_bytes
+        - start_snapshot.swap_used_bytes,
         device_active_delta_bytes=_delta(
             end_snapshot.device_active_bytes,
             start_snapshot.device_active_bytes,
@@ -391,6 +397,7 @@ class CIPipelinePerformanceTest(TestCase):
         optimizer_lr=0.01,
         loss_fn=functional.cross_entropy,
     ):
+        model.train()
         optimizer = optim.SGD(model.parameters, lr=optimizer_lr)
         metrics = {
             "forward_times": [],
@@ -399,9 +406,10 @@ class CIPipelinePerformanceTest(TestCase):
             "step_times": [],
             "throughput_per_second": [],
             "rss_deltas": [],
+            "swap_used_deltas": [],
             "device_active_deltas": [],
             "device_cache_deltas": [],
-            "device_peak_deltas": [],
+            "device_peak_bytes": [],
         }
 
         def _loss_and_backward(y_pred):
@@ -449,13 +457,16 @@ class CIPipelinePerformanceTest(TestCase):
             metrics["step_times"].append(step_elapsed)
             metrics["throughput_per_second"].append(throughput_count / step_elapsed)
             metrics["rss_deltas"].append(step_end.rss_bytes - step_start.rss_bytes)
+            metrics["swap_used_deltas"].append(
+                step_end.swap_used_bytes - step_start.swap_used_bytes
+            )
             metrics["device_active_deltas"].append(
                 _delta(step_end.device_active_bytes, step_start.device_active_bytes)
             )
             metrics["device_cache_deltas"].append(
                 _delta(step_end.device_cache_bytes, step_start.device_cache_bytes)
             )
-            metrics["device_peak_deltas"].append(step_end.device_peak_bytes)
+            metrics["device_peak_bytes"].append(step_end.device_peak_bytes)
 
         return self._summarize_metrics(metrics, throughput_unit)
 
@@ -495,12 +506,13 @@ class CIPipelinePerformanceTest(TestCase):
             "max": round(throughput_summary["max"], 2),
         }
         memory_summary = {
-            "host_rss_delta": self._byte_stats(metrics["rss_deltas"]),
+            "process_rss_delta": self._byte_stats(metrics["rss_deltas"]),
+            "system_swap_used_delta": self._byte_stats(metrics["swap_used_deltas"]),
         }
         for metric_suffix, values in (
             ("device_active_delta", metrics["device_active_deltas"]),
             ("device_cache_delta", metrics["device_cache_deltas"]),
-            ("device_peak_delta", metrics["device_peak_deltas"]),
+            ("device_peak_allocator", metrics["device_peak_bytes"]),
         ):
             values = [value for value in values if value is not None]
             if values:
@@ -520,26 +532,33 @@ class CIPipelinePerformanceTest(TestCase):
                 f"{case_metrics['throughput']['mean']} "
                 f"{case_metrics['throughput']['unit']}"
             ),
-            "host_rss_delta_mean": case_metrics["memory"]["host_rss_delta"]["mean"],
-        }
-        peak_key = f"{NAME}_device_peak_delta"
-        if peak_key in case_metrics["memory"]:
-            row[f"{NAME}_device_peak_delta_mean"] = case_metrics["memory"][peak_key][
+            "process_rss_delta_mean": case_metrics["memory"]["process_rss_delta"][
                 "mean"
-            ]
+            ],
+            "system_swap_used_delta_mean": case_metrics["memory"][
+                "system_swap_used_delta"
+            ]["mean"],
+        }
+        peak_key = f"{NAME}_device_peak_allocator"
+        if peak_key in case_metrics["memory"]:
+            row[f"{NAME}_device_peak_allocator_mean"] = case_metrics["memory"][
+                peak_key
+            ]["mean"]
         return row
 
     def _format_summary_table(self, rows):
+        backend_label = NAME.upper()
         columns = [
             ("case", "Case"),
             ("step_mean", "Step Mean"),
             ("step_std", "Step Std"),
             ("throughput", "Throughput"),
-            ("host_rss_delta_mean", "Host RSS Delta"),
+            ("process_rss_delta_mean", "Process RSS Delta"),
+            ("system_swap_used_delta_mean", "System Swap Used Delta"),
         ]
-        peak_key = f"{NAME}_device_peak_delta_mean"
+        peak_key = f"{NAME}_device_peak_allocator_mean"
         if any(peak_key in row for row in rows):
-            columns.append((peak_key, f"{NAME} Peak Delta"))
+            columns.append((peak_key, f"{backend_label} Peak Allocator"))
 
         widths = {}
         for key, header in columns:
