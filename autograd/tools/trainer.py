@@ -1,8 +1,9 @@
 import logging
 import os
 from abc import ABC, abstractmethod
-from collections import defaultdict
-from typing import Any, Callable, Dict, Optional, Sequence, Tuple, cast
+from dataclasses import dataclass, field
+from pprint import pformat
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple, cast
 
 from tqdm import tqdm
 
@@ -12,23 +13,192 @@ from autograd.backend import (
     eval,
     xp,
 )
-from autograd.tensor import Tensor
+from autograd.data.data_loader import DataLoader
+from autograd.tensor import Tensor, no_grad
 from autograd.tools.config_schema import (
     GenericTrainingConfig,
     TransformerTrainingConfig,
 )
-from autograd.tools.metrics import accuracy, mean_squared_error
 from autograd.tools.model import load_checkpoint, save_checkpoint
 
 logger = logging.getLogger(__name__)
+
+
+def _pformat_log_dict(payload: Mapping[str, Any]) -> str:
+    compact_payload = {
+        key: value for key, value in payload.items() if value is not None
+    }
+    return pformat(compact_payload, sort_dicts=False)
+
+
+def _format_log_values(
+    payload: Mapping[str, Any],
+    *,
+    default_precision: int = 4,
+    precision_overrides: Optional[Mapping[str, int]] = None,
+) -> dict[str, Any]:
+    formatted: dict[str, Any] = {}
+    for key, value in payload.items():
+        if value is None:
+            continue
+        if isinstance(value, float):
+            precision = (
+                default_precision
+                if precision_overrides is None
+                else precision_overrides.get(key, default_precision)
+            )
+            formatted[key] = f"{value:.{precision}f}"
+            continue
+        formatted[key] = value
+    return formatted
+
+
+@dataclass
+class TrainingState:
+    report_loss_sum: Optional[float | Array] = None
+    report_batches: int = 0
+    accumulated_batches: int = 0
+    eval_loss_sum: float = 0.0
+    eval_loss_batches: int = 0
+    eval_metric_totals: Dict[str, Dict[str, float]] = field(default_factory=dict)
+
+    def record_loss(self, loss: float | Tensor) -> None:
+        loss_data = loss.data if isinstance(loss, Tensor) else float(loss)
+        if self.report_loss_sum is None:
+            self.report_loss_sum = loss_data
+        else:
+            self.report_loss_sum = self.report_loss_sum + loss_data
+        self.report_batches += 1
+        self.accumulated_batches += 1
+
+    def record_eval_loss(self, loss: float | Tensor) -> None:
+        loss_value = loss.item() if isinstance(loss, Tensor) else float(loss)
+        self.eval_loss_sum += float(loss_value)
+        self.eval_loss_batches += 1
+
+    def record_eval_metric(
+        self,
+        name: str,
+        *,
+        numerator: float,
+        denominator: float,
+    ) -> None:
+        totals = self.eval_metric_totals.setdefault(
+            name,
+            {"numerator": 0.0, "denominator": 0.0},
+        )
+        totals["numerator"] += float(numerator)
+        totals["denominator"] += float(denominator)
+
+    @property
+    def train_loss(self) -> float:
+        if self.report_loss_sum is None:
+            return 0.0
+        return float(xp.to_scalar(self.report_loss_sum / max(self.report_batches, 1)))
+
+    @property
+    def val_loss(self) -> float:
+        return self.eval_loss_sum / max(self.eval_loss_batches, 1)
+
+    @property
+    def eval_metrics(self) -> Mapping[str, float]:
+        return {
+            name: totals["numerator"] / totals["denominator"]
+            for name, totals in self.eval_metric_totals.items()
+            if totals["denominator"] > 0
+        }
+
+    def to_metrics_row(
+        self,
+        *,
+        eval_state: Optional["TrainingState"] = None,
+    ) -> dict[str, Optional[float]]:
+        row: dict[str, Optional[float]] = {
+            "train_loss": self.train_loss,
+            "val_loss": None if eval_state is None else eval_state.val_loss,
+        }
+        if eval_state is not None:
+            for key, value in eval_state.eval_metrics.items():
+                row[f"val_{key}"] = value
+        return row
+
+    def reset_report(self) -> None:
+        self.report_loss_sum = None
+        self.report_batches = 0
+
+    def has_enough_batches(self, accumulation_steps: int):
+        return self.accumulated_batches >= accumulation_steps
+
+
+@dataclass(frozen=True)
+class TrainingPlan:
+    by_epoch: bool
+    target_step: int
+    report_every_steps: int
+    checkpoint_every: int
+    steps_per_epoch: Optional[int] = None
+    metrics_interval: int = 1
+
+    @classmethod
+    def for_steps(cls, max_steps: int, checkpoint_every: int) -> "TrainingPlan":
+        return cls(
+            by_epoch=False,
+            target_step=max_steps,
+            report_every_steps=checkpoint_every,
+            checkpoint_every=checkpoint_every,
+        )
+
+    @classmethod
+    def for_epochs(
+        cls,
+        max_epochs: int,
+        steps_per_epoch: int,
+        checkpoint_every: int,
+    ) -> "TrainingPlan":
+        if steps_per_epoch <= 0:
+            raise ValueError("steps_per_epoch must be > 0 in epoch mode.")
+
+        return cls(
+            by_epoch=True,
+            target_step=max_epochs * steps_per_epoch,
+            report_every_steps=steps_per_epoch,
+            checkpoint_every=checkpoint_every,
+            steps_per_epoch=steps_per_epoch,
+            metrics_interval=max(1, max_epochs // min(20, max_epochs)),
+        )
+
+    def completed_epochs(self, step: int) -> int:
+        if self.steps_per_epoch is None:
+            raise ValueError("steps_per_epoch is required in epoch mode.")
+        return step // self.steps_per_epoch
+
+    def progress_value(self, step: int) -> int:
+        return self.completed_epochs(step) if self.by_epoch else step
+
+    def progress_label(self) -> str:
+        return "Epoch" if self.by_epoch else "Step"
+
+    def is_done(self, step: int) -> bool:
+        return step >= self.target_step
+
+    def should_report(self, step: int) -> bool:
+        return self.is_done(step) or step % self.report_every_steps == 0
+
+    def should_checkpoint(self, step: int) -> bool:
+        return self.progress_value(step) % self.checkpoint_every == 0
+
+    def should_save_metrics(self, step: int) -> bool:
+        if not self.by_epoch:
+            return True
+        return self.progress_value(step) % self.metrics_interval == 0
 
 
 class AbstractTrainer(ABC):
     """Base trainer that defines a high-level training loop.
 
     Subclasses should implement domain-specific steps such as:
-    - forward pass and loss computation in `train_step`
-    - evaluation logic in `evaluate`
+    - forward pass and loss computation in `_compute_loss`
+    - evaluation logic in `_evaluate`
 
     Attributes:
         CHECKPOINT_DIR (str): Default directory for checkpoints.
@@ -55,9 +225,10 @@ class AbstractTrainer(ABC):
             config (GenericTrainingConfig): Training configuration object.
             **kwargs: Additional arguments for specialized trainers (e.g., checkpoint paths).
         """
-        self.config = config or {}
+        self.config = config
         self.loss_fn = loss_fn
-        self.kwargs = kwargs
+        # `resume_epoch` is only a checkpoint lookup hint here. Runtime training
+        # progress comes from the loaded checkpoint metadata, especially step_count.
         self.model, self.optimizer, self.checkpoint = self._load_model_and_optimizer(
             model_class=model_cls,
             optimizer_class=optimizer_cls,
@@ -66,166 +237,260 @@ class AbstractTrainer(ABC):
             resume_epoch=config.resume_epoch,
             checkpoint_path=kwargs.get("checkpoint_path"),
         )
-        self.start_epoch = self.config.resume_epoch or 0
+        # `global_step` counts consumed training batches / microbatches,
+        # not optimizer updates. Under gradient accumulation, multiple
+        # microbatches can contribute to one optimizer step.
         self.global_step = int(self.checkpoint.get("step_count", 0))
-        self.metrics = defaultdict(list)
+        self.metric_rows: list[dict[str, Optional[float]]] = []
+        self.best_val_loss: Optional[float] = self.checkpoint.get("best_val_loss")
+        self.last_grad_l2_norm: Optional[float] = None
 
-    def fit(self, train_data_loader, val_data_loader=None):
+    def fit(
+        self,
+        train_data_loader: DataLoader,
+        val_data_loader: Optional[DataLoader] = None,
+    ):
         """Performs the main training loop over the given data loaders.
 
         Args:
             train_data_loader: An iterable or generator that yields training batches.
             val_data_loader: (Optional) An iterable or generator that yields labeled
                 validation batches.
+
+        Notes:
+            `global_step` counts consumed training batches / microbatches.
+            It does not count optimizer updates when gradient accumulation is enabled.
         """
+
+        self._validate_fit_inputs(train_data_loader)
+
         logger.info(
             f"Training {self.model.__class__.__name__} with "
             f"{(self.model.num_parameters() / 1e6):.2f}M parameters."
         )
-        if self.config.max_steps is None:
-            try:
-                len(train_data_loader)
-            except TypeError as exc:
-                raise ValueError(
-                    "Infinite training loaders require max_steps. "
-                    "Set max_steps or give the dataset examples_per_epoch."
-                ) from exc
-        epoch = self.start_epoch
-        while True:
-            if self._max_epochs_reached(epoch) or self._max_steps_reached():
-                break
-            if hasattr(train_data_loader, "on_epoch_start"):
+        accumulation_steps = int(self.config.gradient_accumulation_steps)
+        if self.config.max_steps is not None:
+            plan = TrainingPlan.for_steps(
+                max_steps=self.config.max_steps,
+                checkpoint_every=self.config.checkpoint_freq,
+            )
+        else:
+            plan = TrainingPlan.for_epochs(
+                max_epochs=cast(int, self.config.max_epochs),
+                steps_per_epoch=len(train_data_loader),
+                checkpoint_every=self.config.checkpoint_freq,
+            )
+
+        self._log_fit_start(plan)
+
+        state = TrainingState()
+        if self.global_step >= plan.target_step:
+            return
+
+        self.model.train()
+        self.optimizer.zero_grad()
+
+        with tqdm(
+            total=plan.target_step,
+            initial=self.global_step,
+            desc="Training",
+            leave=False,
+        ) as progress_bar:
+            while not plan.is_done(self.global_step):
                 train_data_loader.on_epoch_start()
+                batches_this_pass = 0
 
-            self.model.train()
-            train_loss = self._train_one_epoch(train_data_loader)
+                for batch in train_data_loader:
+                    batches_this_pass += 1
 
-            if val_data_loader is not None:
-                if hasattr(val_data_loader, "on_epoch_start"):
-                    val_data_loader.on_epoch_start()
-                val_loss = self.evaluate(val_data_loader)
+                    loss = self._compute_loss(batch)
+                    loss.backward()
+                    state.record_loss(loss)
+
+                    self.global_step += 1
+                    progress_bar.update(1)
+
+                    # whether we should flush
+                    if state.has_enough_batches(
+                        accumulation_steps
+                    ) or plan.should_report(self.global_step):
+                        self.optimizer_step(
+                            state,
+                            record_grad_norm=plan.should_report(self.global_step),
+                        )
+
+                    if plan.should_report(self.global_step):
+                        eval_state = (
+                            self.evaluate(val_data_loader)
+                            if val_data_loader is not None
+                            else None
+                        )
+                        self.report(state, plan, eval_state)
+
+                    if plan.is_done(self.global_step):
+                        break
+
+                if (
+                    plan.by_epoch
+                    and plan.steps_per_epoch is not None
+                    and batches_this_pass != plan.steps_per_epoch
+                ):
+                    raise ValueError(
+                        "In epoch mode, len(train_data_loader) must match the actual "
+                        "number of batches yielded per loader pass."
+                    )
+
+                # This is after all the batches in the data loader
+                self.optimizer_step(
+                    state,
+                    record_grad_norm=False,
+                )
+
+    def optimizer_step(
+        self, state: TrainingState, *, record_grad_norm: bool = True
+    ) -> None:
+        if state.accumulated_batches == 0:
+            return
+
+        self.optimizer.scale_gradients(1.0 / state.accumulated_batches)
+
+        if record_grad_norm:
+            self.last_grad_l2_norm = self.optimizer.grad_l2_norm()
+        self.optimizer.step()
+        self.optimizer.zero_grad()
+        state.accumulated_batches = 0
+
+    def evaluate(self, val_data_loader: DataLoader) -> TrainingState:
+        val_data_loader.on_epoch_start()
+        was_training = getattr(self.model, "_is_training", None)
+        self.model.eval()
+        try:
+            with no_grad():
+                return self._evaluate(val_data_loader)
+        finally:
+            if was_training is False:
+                self.model.eval()
             else:
-                val_loss = None
+                self.model.train()
 
-            self._on_epoch_end(epoch, train_loss, val_loss)
+    def report(
+        self,
+        state: TrainingState,
+        plan: TrainingPlan,
+        eval_state: Optional[TrainingState],
+    ) -> None:
+        completed_epochs = (
+            plan.completed_epochs(self.global_step) if plan.by_epoch else None
+        )
+        progress_value = plan.progress_value(self.global_step)
+        row: dict[str, Optional[float]] = {
+            "epoch": completed_epochs,
+            "step": float(self.global_step),
+            **state.to_metrics_row(eval_state=eval_state),
+            "grad_l2_norm": self.last_grad_l2_norm,
+        }
 
-            if epoch % self._metrics_save_interval() == 0:
-                self._save_metrics()
-            epoch += 1
+        if plan.should_checkpoint(self.global_step):
+            self._maybe_save_checkpoint(plan=plan, eval_state=eval_state)
 
-    def _max_epochs_reached(self, epoch: int) -> bool:
-        return self.config.max_epochs is not None and epoch >= self.config.max_epochs
-
-    def _metrics_save_interval(self) -> int:
-        if self.config.max_epochs is None:
-            return 1
-        return max(1, self.config.max_epochs // min(20, self.config.max_epochs))
-
-    def _max_steps_reached(self) -> bool:
-        return (
-            self.config.max_steps is not None
-            and self.global_step >= self.config.max_steps
+        self.metric_rows.append(row)
+        log_payload = _format_log_values(
+            {**row, "step": self.global_step, "lr": self.optimizer.lr},
+            precision_overrides={"lr": 6},
+        )
+        logger.info(
+            "[%s %s]\n%s",
+            plan.progress_label(),
+            progress_value,
+            _pformat_log_dict(log_payload),
         )
 
-    def _max_eval_steps_reached(self, batch_count: int) -> bool:
-        return (
-            self.config.max_eval_steps is not None
-            and batch_count >= self.config.max_eval_steps
-        )
+        if plan.should_save_metrics(self.global_step):
+            self._save_metrics()
 
-    def _train_one_epoch(self, data_loader) -> float:
-        """Trains the model for one epoch on the provided data loader.
+        state.reset_report()
 
-        This method handles gradient accumulation and parameter updates.
+    @abstractmethod
+    def _compute_loss(self, batch_data) -> Tensor:
+        """Returns the scalar loss Tensor for a single training batch.
+
+        Subclasses must implement the forward pass and loss computation here.
+        `fit()` owns `.backward()`.
 
         Args:
-            data_loader: An iterable or generator that yields training batches.
+            batch_data: A single batch of training data.
 
         Returns:
-            float: The average training loss over the epoch.
+            Tensor: Scalar loss Tensor for the batch.
         """
-        total_loss = 0.0
-        batch_count = 0
-        accumulation_steps = self.config.gradient_accumulation_steps
-        accumulated_batches = 0
-        self.optimizer.zero_grad()
-        for batch in tqdm(data_loader, desc="Training Batches", leave=False):
-            if self._max_steps_reached():
-                break
-            loss = self.train_step(batch)
-            total_loss += loss
-            accumulated_batches += 1
-            if accumulated_batches == accumulation_steps:
-                self._scale_gradients(1.0 / accumulated_batches)
-                self.optimizer.step()  # increments .timestep, applies LR scheduler if present
-                self.metrics["grad_l2_norm"].append(grad_l2_norm(self.model.parameters))
-                self.optimizer.zero_grad()
-                accumulated_batches = 0
-            batch_count += 1
-            self.global_step += 1
-        if accumulated_batches > 0:
-            self._scale_gradients(1.0 / accumulated_batches)
-            self.optimizer.step()
-            self.metrics["grad_l2_norm"].append(grad_l2_norm(self.model.parameters))
-            self.optimizer.zero_grad()
-        return total_loss / max(batch_count, 1)
+        pass
 
-    def _scale_gradients(self, scale: float) -> None:
-        if scale == 1.0:
-            return
-        # Normalize accumulated gradients so the optimizer step matches the
-        # average gradient over the effective batch, including partial tail groups.
-        for parameter in self.model.parameters.values():
-            if parameter.grad is not None:
-                parameter.grad.data *= scale
-
-    def _save_checkpoint(self, epoch: int, val_loss: Optional[float]):
-        """Saves a model checkpoint if the validation loss improves.
+    @abstractmethod
+    def _evaluate(self, val_data_loader) -> TrainingState:
+        """Evaluates the model on the validation set.
 
         Args:
-            epoch (int): Current epoch number.
-            val_loss (Optional[float]): The validation loss at this epoch.
+            val_data_loader: Validation data loader providing validation batches.
+
+        Returns:
+            TrainingState: Raw validation aggregates for the current report.
         """
-        if val_loss is not None and epoch % self.config.checkpoint_freq == 0:
-            # `val_loss` history can contain `None` from epochs without validation;
-            # exclude those before computing the current best checkpoint threshold.
-            historical_val_losses = [
-                recorded_val_loss
-                for recorded_val_loss in self.metrics["val_loss"]
-                if recorded_val_loss is not None
-            ]
-            if not historical_val_losses or val_loss < min(historical_val_losses):
-                checkpoint = {
-                    "epoch": epoch + 1,
-                    "step_count": self.global_step,
-                    "model_state_dict": self.model.state_dict(),
-                    "optimizer_state_dict": self.optimizer.state_dict(),
-                    "model_init_kwargs": self.config.model_kwargs,
-                    "optimizer_init_kwargs": self.config.optimizer_kwargs,
-                    "config": self.config,
-                }
-                os.makedirs(self.CHECKPOINT_DIR, exist_ok=True)
-                cp_path_json = os.path.join(
-                    self.CHECKPOINT_DIR,
-                    f"{self.config.training_run_name}_{self.model.__class__.__name__}_{epoch}.json",
-                )
-                cp_path_npz = os.path.join(
-                    self.CHECKPOINT_DIR,
-                    f"{self.config.training_run_name}_{self.model.__class__.__name__}_{epoch}.npz",
-                )
-                save_checkpoint(
-                    checkpoint, json_path=cp_path_json, npz_path=cp_path_npz
-                )
-                logger.info(f"Saved checkpoint to {cp_path_json} and {cp_path_npz}")
+        pass
+
+    def _maybe_save_checkpoint(
+        self,
+        *,
+        plan: TrainingPlan,
+        eval_state: Optional[TrainingState],
+    ) -> None:
+        if eval_state is not None:
+            val_loss = eval_state.val_loss
+            if self.best_val_loss is not None and val_loss >= self.best_val_loss:
+                return
+            self.best_val_loss = val_loss
+
+        completed_epochs = (
+            plan.completed_epochs(self.global_step) if plan.by_epoch else 0
+        )
+        checkpoint_index = plan.progress_value(self.global_step)
+
+        checkpoint = {
+            "epoch": completed_epochs,
+            "step_count": self.global_step,
+            "steps_per_epoch": plan.steps_per_epoch,
+            "best_val_loss": self.best_val_loss,
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "model_init_kwargs": self.checkpoint.get(
+                "model_init_kwargs", self.config.model_kwargs
+            ),
+            "optimizer_init_kwargs": self.checkpoint.get(
+                "optimizer_init_kwargs", self.config.optimizer_kwargs
+            ),
+            "config_repr": repr(self.config),
+        }
+        checkpoint_name = (
+            f"{self.config.training_run_name}_"
+            f"{self.model.__class__.__name__}_{checkpoint_index}"
+        )
+        cp_path_json, cp_path_npz = save_checkpoint(
+            checkpoint,
+            checkpoint_dir=self.CHECKPOINT_DIR,
+            checkpoint_name=checkpoint_name,
+        )
+        logger.info(f"Saved checkpoint to {cp_path_json} and {cp_path_npz}")
 
     def _save_metrics(self):
         """Saves accumulated training metrics to a compressed NPZ file."""
+        # TODO: consider moving this to a centralized utility module instead of keeping it here
         os.makedirs(self.METRICS_DIR, exist_ok=True)
         run_name = self.config.training_run_name or "default"
         filename = f"{self.model.__class__.__name__}_{run_name}.npz"
         path = os.path.join(self.METRICS_DIR, filename)
+        keys = sorted({key for row in self.metric_rows for key in row})
         metrics_mx = {}
-        for key, values in self.metrics.items():
+        for key in keys:
+            values = [row.get(key) for row in self.metric_rows]
             if any(value is None for value in values):
                 values = [float("nan") if value is None else value for value in values]
                 metrics_mx[key] = xp.array(values, dtype=xp.float32)
@@ -233,57 +498,44 @@ class AbstractTrainer(ABC):
                 metrics_mx[key] = xp.array(values)
         eval(*metrics_mx.values())
         xp.savez_compressed(path, **metrics_mx)
-        logger.info(f"Saved training metrics to {path}")
 
-    @abstractmethod
-    def train_step(self, batch_data) -> float:
-        """Performs a single training step and returns the loss as a float.
+    def _validate_fit_inputs(self, train_data_loader: DataLoader) -> None:
+        if self.config.max_steps is not None:
+            return
 
-        Subclasses must implement the forward pass, loss computation, and backward pass here.
+        try:
+            steps_per_epoch = len(train_data_loader)
+        except TypeError as exc:
+            raise ValueError(
+                "Infinite training loaders require max_steps. "
+                "Set max_steps or give the dataset examples_per_epoch."
+            ) from exc
 
-        Args:
-            batch_data: A single batch of training data.
+        if steps_per_epoch <= 0:
+            raise ValueError("train_data_loader must yield at least one batch.")
 
-        Returns:
-            float: The computed loss value for the batch.
-        """
-        pass
+        if self.checkpoint:
+            loaded_steps_per_epoch = self.checkpoint.get("steps_per_epoch")
+            if loaded_steps_per_epoch != steps_per_epoch:
+                raise ValueError(
+                    "Cannot resume epoch-mode checkpoint with changed steps_per_epoch."
+                )
 
-    def _on_epoch_end(self, epoch: int, train_loss: float, val_loss: Optional[float]):
-        """Hook called at the end of each epoch to handle checkpointing and logging.
-
-        Note: `save_checkpoint` needs to come first because it compares
-        against historical metrics to determine whether to save
-        the checkpoint
-
-        Args:
-            epoch (int): Current epoch number.
-            train_loss (float): The average training loss for this epoch.
-            val_loss (Optional[float]): The validation loss for this epoch, if available.
-        """
-        self._save_checkpoint(epoch, val_loss)
-        self.metrics["epoch"].append(epoch)
-        self.metrics["train_loss"].append(train_loss)
-        self.metrics["val_loss"].append(val_loss)
-
-        log_msg = f"[Epoch {epoch}]"
-        for key in self.metrics:
-            if key != "epoch" and self.metrics[key][-1] is not None:
-                log_msg += f"\n{key} = {self.metrics[key][-1]:.4f}"
-        log_msg += f"\nLR = {self.optimizer.lr:.6f}"
-        logger.info(log_msg)
-
-    @abstractmethod
-    def evaluate(self, val_data_loader) -> float:
-        """Evaluates the model on the validation set.
-
-        Args:
-            val_data_loader: Validation data loader providing validation batches.
-
-        Returns:
-            float: The average validation loss over the validation set.
-        """
-        pass
+    def _log_fit_start(self, plan: TrainingPlan) -> None:
+        target_label = "steps" if not plan.by_epoch else "epochs"
+        payload = {
+            "mode": target_label,
+            "target_step": plan.target_step,
+            "report_every_steps": plan.report_every_steps,
+            "global_batch_size": self.config.global_batch_size,
+            "micro_batch_size": self.config.micro_batch_size,
+            "gradient_accumulation_steps": self.config.gradient_accumulation_steps,
+            "target_epochs": (
+                cast(int, self.config.max_epochs) if plan.by_epoch else None
+            ),
+            "steps_per_epoch": plan.steps_per_epoch,
+        }
+        logger.info("Fit plan:\n%s", _pformat_log_dict(payload))
 
     def _load_model_and_optimizer(
         self,
@@ -294,9 +546,11 @@ class AbstractTrainer(ABC):
         resume_epoch: Optional[int] = None,
         checkpoint_path: Optional[str] = None,
     ) -> Tuple[Any, Any, dict]:
-        """Loads model & optimizer states from checkpoint if resume_epoch is given.
+        """Loads model & optimizer states from checkpoint if a checkpoint is requested.
 
-        If no checkpoint is found or resume_epoch is None, initializes them from scratch.
+        `resume_epoch` is only a filename lookup hint. Once a checkpoint is loaded,
+        runtime progress comes from checkpoint metadata such as `step_count`.
+        If no checkpoint is requested, initializes from scratch.
 
         Note on configs in checkpoint:
             When we load from checkpoint, the model and optimizer configs are restored from the
@@ -311,7 +565,8 @@ class AbstractTrainer(ABC):
             optimizer_class (type[optim.Optimizer]): Class object for the optimizer.
             model_kwargs (Dict[str, Any]): Keyword arguments for model initialization.
             optimizer_kwargs (Dict[str, Any]): Keyword arguments for optimizer initialization.
-            resume_epoch (Optional[int]): If provided, attempts to load from checkpoint at this epoch.
+            resume_epoch (Optional[int]): Optional checkpoint filename hint used when
+                `checkpoint_path` is not provided.
             checkpoint_path (Optional[str]): If provided, path of the checkpoint file.
 
         Returns:
@@ -338,6 +593,24 @@ class AbstractTrainer(ABC):
 
             logger.info(f"Attempting to load from checkpoint: {ckpt_json}, {ckpt_npz}")
             loaded_ckpt = load_checkpoint(ckpt_json, ckpt_npz)
+            loaded_step_count = int(loaded_ckpt.get("step_count", 0))
+            if (
+                self.config.max_steps is not None
+                and loaded_step_count > self.config.max_steps
+            ):
+                raise ValueError("Checkpoint step exceeds max_steps.")
+
+            if self.config.max_steps is None:
+                loaded_steps_per_epoch = loaded_ckpt.get("steps_per_epoch")
+                if loaded_steps_per_epoch is None:
+                    raise ValueError(
+                        "Epoch-mode resume requires steps_per_epoch metadata in the checkpoint."
+                    )
+                if loaded_step_count % int(loaded_steps_per_epoch) != 0:
+                    raise ValueError(
+                        "Epoch-mode resume requires an epoch-boundary checkpoint. "
+                        "Store dataloader/sampler state if mid-epoch resume is needed."
+                    )
 
             # If your checkpoint has hyperparams or constructor kwargs,
             # you can either override model_kwargs or do a partial merge:
@@ -410,9 +683,9 @@ class SimpleTrainer(AbstractTrainer):
         >>> # Instantiate the trainer.
         >>> trainer = SimpleTrainer(model_cls, optimizer_cls, loss_fn, config, output_type='softmax')
         >>>
-        >>> # Create dummy data loaders (using lists as an example).
-        >>> train_loader = [ (np.random.rand(32, 10), np.random.rand(32, 2)) for _ in range(100) ]
-        >>> val_loader = [ (np.random.rand(32, 10), np.random.rand(32, 2)) for _ in range(20) ]
+        >>> # Create DataLoader instances for train/validation data.
+        >>> train_loader = ...
+        >>> val_loader = ...
         >>>
         >>> # Run the training loop.
         >>> trainer.fit(train_loader, val_loader)
@@ -450,80 +723,67 @@ class SimpleTrainer(AbstractTrainer):
             else "regression"
         )
 
-    def train_step(self, batch_data) -> float:
-        """Performs a forward pass, computes the loss, and backpropagates.
-
-        Note that .zero_grad() and .step() calls are in the _train_one_epoch() function
-
-        Args:
-            batch_data: A tuple (batch_X, batch_y) for supervised learning.
-
-        Returns:
-            float: The computed loss for this batch.
-        """
+    def _compute_loss(self, batch_data) -> Tensor:
         batch_X, batch_y = batch_data
         y_pred = self.model(batch_X)
-        loss = self.loss_fn(y_pred, batch_y)
-        loss.backward()
-        return float(loss.item())
+        return self.loss_fn(y_pred, batch_y)
 
-    def evaluate(self, val_data_loader) -> float:
-        """Evaluates the model on the validation data loader.
-
-        Args:
-            val_data_loader: An iterable or generator providing validation batches.
-
-        Returns:
-            float: The average validation loss over the entire validation dataset.
-        """
-        self.model.eval()
-        total_loss = 0.0
-        batch_count = 0
-        all_preds, all_targets = [], []
+    def _evaluate(self, val_data_loader) -> TrainingState:
+        state = TrainingState()
+        sample_pairs: list[tuple[Any, Any]] = []
         for batch_data in val_data_loader:
-            if self._max_eval_steps_reached(batch_count):
+            if (
+                self.config.max_eval_steps is not None
+                and state.eval_loss_batches >= self.config.max_eval_steps
+            ):
                 break
             batch_X, batch_y = batch_data
             y_pred = self.model(batch_X)
             loss = self.loss_fn(y_pred, batch_y)
-            total_loss += float(loss.item())
-            batch_count += 1
-            all_preds.append(y_pred)
-            all_targets.append(batch_y)
-        avg_val_loss = total_loss / max(batch_count, 1)
+            state.record_eval_loss(loss)
 
-        # Compute additional metrics for classification or regression
-        y_pred_full = xp.concatenate([p.data for p in all_preds], axis=0)
-        y_true_full = xp.concatenate(all_targets, axis=0)
+            if self.problem_type == "classification":
+                y_pred_proc, y_true_proc = self._post_process_classification(
+                    y_pred.data, batch_y
+                )
+                y_pred_flat = xp.array(y_pred_proc).reshape(-1)
+                y_true_flat = xp.array(y_true_proc, dtype=xp.int32).reshape(-1)
+                correct = float(
+                    xp.to_scalar(xp.sum(xp.array(y_pred_flat == y_true_flat)))
+                )
+                state.record_eval_metric(
+                    "accuracy",
+                    numerator=correct,
+                    denominator=float(y_true_flat.size),
+                )
+
+                if self.sample_predictions and len(sample_pairs) < 5:
+                    sample_count = min(5 - len(sample_pairs), len(y_pred_proc))
+                    for i in range(sample_count):
+                        sample_pairs.append((y_pred_proc[i], y_true_proc[i]))
+            else:
+                diff = xp.array(y_pred.data) - xp.array(batch_y)
+                squared_error_sum = float(xp.to_scalar(xp.sum(diff**2)))
+                state.record_eval_metric(
+                    "mse",
+                    numerator=squared_error_sum,
+                    denominator=float(diff.size),
+                )
+
+        if state.eval_loss_batches == 0:
+            raise ValueError("val_data_loader yielded no batches.")
 
         if self.problem_type == "classification":
-            y_pred_proc, y_true_proc = self._post_process_classification(
-                y_pred_full, y_true_full
-            )
-            acc_val = accuracy(
-                xp.array(y_pred_proc).reshape(-1),
-                xp.array(y_true_proc, dtype=xp.int32).reshape(-1),
-            )
-            self.metrics["val_accuracy"].append(acc_val)
-
-            if self.sample_predictions:
-                sample_count = min(5, len(y_pred_proc))
-                if sample_count > 0:
-                    sample_lines = [
-                        f"Predicted: {y_pred_proc[i]}\nActual: {y_true_proc[i]}"
-                        for i in range(sample_count)
-                    ]
-                    logger.info(
-                        "Sample Predictions on Validation Batch:\n"
-                        + "\n".join(sample_lines)
-                    )
-
-        else:
-            mse_val = mean_squared_error(y_pred_full, y_true_full)
-            self.metrics["val_mse"].append(mse_val)
-
-        self.model.train()
-        return avg_val_loss
+            if sample_pairs:
+                sample_lines = [
+                    f"Predicted: {pred}\nActual: {target}"
+                    for pred, target in sample_pairs
+                ]
+                logger.info(
+                    "Sample Predictions on Validation Batch:\n"
+                    + "\n".join(sample_lines)
+                )
+        return state
 
     def _post_process_classification(
         self, y_pred: Array, y_true: Array
@@ -604,13 +864,13 @@ class LLMTrainer(AbstractTrainer):
         >>> # Instantiate the trainer.
         >>> trainer = LLMTrainer(model_cls, optimizer_cls, loss_fn, forward_fn, config)
         >>>
-        >>> # Create dummy data loaders for language modeling.
+        >>> # Create DataLoader instances for language modeling.
         >>> dummy_batch = CausalLMBatch(
         ...     input_ids=np.random.randint(0, 1000, (32, 10)),
         ...     labels=np.random.randint(0, 1000, (32, 10)),
         ... )
-        >>> train_loader = [dummy_batch for _ in range(100)]
-        >>> val_loader = [dummy_batch for _ in range(20)]
+        >>> train_loader = ...
+        >>> val_loader = ...
         >>>
         >>> # Run the training loop.
         >>> trainer.fit(train_loader, val_loader)
@@ -659,81 +919,37 @@ class LLMTrainer(AbstractTrainer):
         self.forward_fn = forward_fn
         self.eval_callbacks = list(eval_callbacks or [])
 
-    def train_step(self, batch_data) -> float:
-        """Performs a forward pass for language modeling, computes the loss, and backpropagates.
-
-        Note that .zero_grad() and .step() calls are in the _train_one_epoch() function
-
-        Args:
-            batch_data: An architecture-specific LM batch object with `labels`.
-
-        Returns:
-            float: The computed loss for this batch.
-        """
+    def _compute_loss(self, batch_data) -> Tensor:
         logits = self.forward_fn.train(self.model, batch_data)
-        loss = self.loss_fn(
+        # TODO: Decide whether validation should use the same label_smoothing
+        # setting as training, or intentionally report unsmoothed cross-entropy.
+        return self.loss_fn(
             logits,
             batch_data.labels,
             label_smoothing=self.config.label_smoothing,
         )
-        loss.backward()
-        return float(loss.item())
 
-    def evaluate(self, val_data_loader) -> float:
+    def _evaluate(self, val_data_loader) -> TrainingState:
         """Evaluates the model on the validation data loader for language modeling.
 
         Args:
             val_data_loader: Validation data loader providing LM batches.
 
         Returns:
-            float: The average validation loss over the language modeling validation set.
+            EvalResult: The average validation loss and derived metrics.
         """
-        self.model.eval()
-        try:
-            total_loss = 0.0
-            batch_count = 0
-            for batch_data in tqdm(val_data_loader, desc="Evaluation", leave=False):
-                if self._max_eval_steps_reached(batch_count):
-                    break
-                logits = self.forward_fn.train(self.model, batch_data)
-                # TODO: Decide whether validation should use the same label_smoothing
-                # setting as training, or intentionally report unsmoothed cross-entropy.
-                loss = self.loss_fn(
-                    logits,
-                    batch_data.labels,
-                    label_smoothing=self.config.label_smoothing,
-                )
-                total_loss += float(loss.item())
-                batch_count += 1
-            avg_val_loss = total_loss / max(batch_count, 1)
-            for callback in self.eval_callbacks:
-                callback(self.model, self.forward_fn, val_data_loader, self.config)
-            return avg_val_loss
-        finally:
-            self.model.train()
+        state = TrainingState()
+        for batch_data in tqdm(val_data_loader, desc="Evaluation", leave=False):
+            if (
+                self.config.max_eval_steps is not None
+                and state.eval_loss_batches >= self.config.max_eval_steps
+            ):
+                break
+            loss = self._compute_loss(batch_data)
+            state.record_eval_loss(loss)
+        if state.eval_loss_batches == 0:
+            raise ValueError("val_data_loader yielded no batches.")
 
-
-def grad_l2_norm(parameters: Dict[str, Tensor]) -> float:
-    """Computes the L2 norm of the gradients for the given model parameters.
-
-    Args:
-        parameters (Dict[str, Tensor]): A dictionary of named parameters (Tensor objects)
-            for which to compute the gradient norm.
-
-    Returns:
-        float: The L2 norm of all gradients (i.e., sqrt of sum of squared gradient values).
-
-    Example:
-        >>> from autograd.tensor import Tensor
-        >>> params = {"weight": Tensor([1, 2], requires_grad=True)}
-        >>> # Suppose weight.grad = Tensor([0.1, -0.2])
-        >>> params["weight"].grad = Tensor([0.1, -0.2])
-        >>> grad_norm = grad_l2_norm(params)
-        >>> grad_norm
-        0.2236068
-    """
-    grad_norm = 0.0
-    for p in parameters.values():
-        if p.grad is not None:
-            grad_norm += (p.grad.data**2).sum()
-    return float(xp.to_scalar(grad_norm**0.5))
+        for callback in self.eval_callbacks:
+            callback(self.model, self.forward_fn, val_data_loader, self.config)
+        return state

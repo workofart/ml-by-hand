@@ -37,6 +37,8 @@ class GenericTrainingConfig:
     def __post_init__(self) -> None:
         if self.max_epochs is None and self.max_steps is None:
             raise ValueError("At least one of max_epochs or max_steps must be set")
+        if self.max_epochs is not None and self.max_steps is not None:
+            raise ValueError("max_epochs and max_steps are mutually exclusive")
         if self.max_epochs is not None and self.max_epochs < 1:
             raise ValueError(f"max_epochs must be >= 1, got {self.max_epochs}")
         if self.max_steps is not None and self.max_steps < 1:

@@ -245,17 +245,18 @@ if __name__ == "__main__":
     WIKI_CONFIG = TransformerTrainingConfig(
         training_run_name="wiki",
         dataset_name="wiki_simple_english",
-        max_steps=10000,
+        max_steps=200000,
         max_eval_steps=200,
-        checkpoint_freq=200,
+        checkpoint_freq=10000,
         global_batch_size=32,
         micro_batch_size=1,
         model_kwargs={
-            "num_attention_heads": 6,  # GPT-2 small uses 12
-            "hidden_size": 768,  # GPT-2 small uses 768, must be divisible by num_attention_heads
+            "num_attention_heads": 12,  # GPT-2 small uses 12
+            "hidden_size": 1536,  # GPT-2 small uses 768, must be divisible by num_attention_heads
             "dropout_prob": 0.2,
-            "max_seq_len": 768,  # GPT-2 uses 1024
-            "num_decoder_layers": 6,  # GPT-2 uses 12
+            "max_seq_len": 1024,  # GPT-2 uses 1024
+            "num_decoder_layers": 12,  # GPT-2 uses 12
+            "activation_checkpointing": True,
         },
         optimizer_kwargs={
             "lr": 1e-3,
@@ -264,8 +265,8 @@ if __name__ == "__main__":
             "weight_decay": 0.1,
             "lr_scheduler_kwargs": {
                 "lr_scheduler_cls": optim.CosineScheduler,
-                "warmup_steps": 1500,  # 15% of max_steps
-                "lr_decay_iters": 8000,  # 80% of max_steps
+                "warmup_steps": 30000,  # 15% of max_steps
+                "lr_decay_iters": 160000,  # 80% of max_steps
             },
         },
         resume_epoch=None,  # Set this to None if you don't want to load from checkpoint
