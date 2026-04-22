@@ -6,6 +6,7 @@ from unittest import TestCase
 from autograd.backend import xp
 from autograd.init import xavier_uniform
 from autograd.nn import Module
+from autograd.optim import CosineScheduler
 from autograd.tensor import Tensor
 from autograd.tools.model import load_checkpoint, save_checkpoint
 
@@ -28,8 +29,12 @@ class TestModel(TestCase):
     def setUp(self):
         # Create a test model with some initial arguments
         self.model = MockModule(999, kwarg0="testing_kwarg0")
-        self.json_path = "test_model.json"
-        self.npz_path = "test_model.npz"
+        self.checkpoint_dir = "."
+        self.checkpoint_name = "test_model"
+        self.json_path = os.path.join(
+            self.checkpoint_dir, f"{self.checkpoint_name}.json"
+        )
+        self.npz_path = os.path.join(self.checkpoint_dir, f"{self.checkpoint_name}.npz")
 
     def tearDown(self):
         # Clean up any generated files
@@ -57,7 +62,9 @@ class TestModel(TestCase):
         original_params = deepcopy(self.model.parameters)
 
         save_checkpoint(
-            self.model.state_dict(), json_path=self.json_path, npz_path=self.npz_path
+            self.model.state_dict(),
+            checkpoint_dir=self.checkpoint_dir,
+            checkpoint_name=self.checkpoint_name,
         )
 
         # 2. Perform a forward/backward pass to change the parameters
@@ -105,7 +112,9 @@ class TestModel(TestCase):
         original_params = deepcopy(new_model.parameters)
         # Save the model including the states
         save_checkpoint(
-            self.model.state_dict(), json_path=self.json_path, npz_path=self.npz_path
+            self.model.state_dict(),
+            checkpoint_dir=self.checkpoint_dir,
+            checkpoint_name=self.checkpoint_name,
         )
 
         # Manually change the new model's states from the default
@@ -132,7 +141,9 @@ class TestModel(TestCase):
 
     def test_save_checkpoint_uses_backend_neutral_array_metadata(self):
         save_checkpoint(
-            self.model.state_dict(), json_path=self.json_path, npz_path=self.npz_path
+            self.model.state_dict(),
+            checkpoint_dir=self.checkpoint_dir,
+            checkpoint_name=self.checkpoint_name,
         )
 
         with open(self.json_path, "r", encoding="utf-8") as handle:
@@ -142,9 +153,31 @@ class TestModel(TestCase):
         self.assertIn("array", meta_types)
         self.assertNotIn("np.ndarray", meta_types)
 
+    def test_save_checkpoint_builds_paths_from_checkpoint_name(self):
+        checkpoint_dir = "test_checkpoints"
+        checkpoint_name = "mock_run_MockModule_7"
+        json_path, npz_path = save_checkpoint(
+            self.model.state_dict(),
+            checkpoint_dir=checkpoint_dir,
+            checkpoint_name=checkpoint_name,
+        )
+
+        self.assertEqual(json_path, f"{checkpoint_dir}/{checkpoint_name}.json")
+        self.assertEqual(npz_path, f"{checkpoint_dir}/{checkpoint_name}.npz")
+        self.assertTrue(os.path.exists(json_path))
+        self.assertTrue(os.path.exists(npz_path))
+
+        for path in (json_path, npz_path):
+            if os.path.exists(path):
+                os.remove(path)
+        if os.path.isdir(checkpoint_dir):
+            os.rmdir(checkpoint_dir)
+
     def test_load_checkpoint_accepts_legacy_np_ndarray_metadata(self):
         save_checkpoint(
-            self.model.state_dict(), json_path=self.json_path, npz_path=self.npz_path
+            self.model.state_dict(),
+            checkpoint_dir=self.checkpoint_dir,
+            checkpoint_name=self.checkpoint_name,
         )
 
         with open(self.json_path, "r", encoding="utf-8") as handle:
@@ -174,3 +207,14 @@ class TestModel(TestCase):
             xp.allclose(self.model.stateful_states, xp.array([1, 1, 1])),
             "Legacy array metadata should still deserialize correctly.",
         )
+
+    def test_save_load_preserves_class_objects(self):
+        save_checkpoint(
+            {"lr_scheduler_cls": CosineScheduler},
+            checkpoint_dir=self.checkpoint_dir,
+            checkpoint_name=self.checkpoint_name,
+        )
+
+        loaded = load_checkpoint(json_path=self.json_path, npz_path=self.npz_path)
+
+        self.assertIs(loaded["lr_scheduler_cls"], CosineScheduler)

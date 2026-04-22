@@ -14,7 +14,7 @@ from autograd.data.collator import CausalLMWindowCollator
 from autograd.data.data_loader import DataLoader
 from autograd.data.dataset import TokenWindowDataset
 from autograd.data.types import CausalLMBatch
-from autograd.tensor import Tensor
+from autograd.tensor import Tensor, checkpoint
 from autograd.text import utils as text_utils
 from autograd.text.tokenizer import BytePairEncoder
 from autograd.tools.callback import (
@@ -52,11 +52,13 @@ class GPT2(nn.Module):
         max_seq_len: int = 1024,  # GPT-2 small uses 1024 context window
         dropout_prob: float = 0.1,
         num_decoder_layers: int = 12,  # GPT-2 small has 12 layers
+        activation_checkpointing: bool = False,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
         self.hidden_size = hidden_size
         self.max_seq_len = max_seq_len
+        self.activation_checkpointing = activation_checkpointing
 
         # Token and positional embeddings
         self.token_embedding = nn.Embedding(vocab_size, hidden_size)
@@ -105,7 +107,10 @@ class GPT2(nn.Module):
 
         # Pass through each Decoder sublayer
         for sublayer in self.sublayers:
-            h_0 = sublayer(h_0)
+            if self._is_training and self.activation_checkpointing:
+                h_0 = checkpoint(sublayer, h_0)
+            else:
+                h_0 = sublayer(h_0)
 
         # Final normalization
         output = self.layer_norm(h_0)
@@ -240,17 +245,19 @@ if __name__ == "__main__":
     WIKI_CONFIG = TransformerTrainingConfig(
         training_run_name="wiki",
         dataset_name="wiki_simple_english",
-        max_steps=10000,
+        max_steps=200000,
         max_eval_steps=200,
-        checkpoint_freq=200,
+        checkpoint_freq=10000,
+        report_every_steps=200,
         global_batch_size=32,
         micro_batch_size=1,
         model_kwargs={
-            "num_attention_heads": 6,  # GPT-2 small uses 12
-            "hidden_size": 768,  # GPT-2 small uses 768, must be divisible by num_attention_heads
+            "num_attention_heads": 12,  # GPT-2 small uses 12
+            "hidden_size": 1536,  # GPT-2 small uses 768, must be divisible by num_attention_heads
             "dropout_prob": 0.2,
-            "max_seq_len": 768,  # GPT-2 uses 1024
-            "num_decoder_layers": 6,  # GPT-2 uses 12
+            "max_seq_len": 1024,  # GPT-2 uses 1024
+            "num_decoder_layers": 12,  # GPT-2 uses 12
+            "activation_checkpointing": True,
         },
         optimizer_kwargs={
             "lr": 1e-3,
@@ -259,11 +266,11 @@ if __name__ == "__main__":
             "weight_decay": 0.1,
             "lr_scheduler_kwargs": {
                 "lr_scheduler_cls": optim.CosineScheduler,
-                "warmup_steps": 1500,  # 15% of max_steps
-                "lr_decay_iters": 8000,  # 80% of max_steps
+                "warmup_steps": 30000,  # 15% of max_steps
+                "lr_decay_iters": 160000,  # 80% of max_steps
             },
         },
-        resume_epoch=None,  # Set this to None if you don't want to load from checkpoint
+        resume_epoch=30000,  # Set this to None if you don't want to load from checkpoint
         teacher_forcing=False,
         label_smoothing=0.1,
         eval_start_string="April is",

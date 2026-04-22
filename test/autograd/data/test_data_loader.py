@@ -10,6 +10,7 @@ from autograd.data.collator import (
 )
 from autograd.data.data_loader import DataLoader
 from autograd.data.dataset import (
+    IterableDataset,
     PairedIterableDataset,
     Seq2SeqDataset,
     TokenSequenceDataset,
@@ -36,6 +37,22 @@ class MockBPE:
             if token == "<SOS>":
                 return [1]
         return [ord(char) for char in token]
+
+
+class EmptyDataset(IterableDataset):
+    def __iter__(self):
+        return iter(())
+
+    def __len__(self):
+        return 0
+
+
+class BuggyEmptyPassDataset(IterableDataset):
+    def __iter__(self):
+        return iter(())
+
+    def __len__(self):
+        return 3
 
 
 class TestDataLoader(unittest.TestCase):
@@ -172,6 +189,38 @@ class TestDataLoader(unittest.TestCase):
         ) // self.batch_size_simple
 
         self.assertEqual(len(loader), expected_batches)
+
+    def test_data_loader_rejects_empty_dataset_iteration(self):
+        loader = DataLoader(EmptyDataset(), batch_size=1)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "DataLoader yielded no batches",
+        ):
+            next(iter(loader))
+
+    def test_data_loader_rejects_dataset_that_yields_nothing_for_pass(self):
+        loader = DataLoader(BuggyEmptyPassDataset(), batch_size=2)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "DataLoader yielded no batches",
+        ):
+            next(iter(loader))
+
+    def test_data_loader_rejects_drop_last_when_only_partial_batch_exists(self):
+        loader = DataLoader(
+            PairedIterableDataset(self.X[:1], self.y[:1], shuffle=False),
+            batch_size=2,
+            collate_fn=PairedCollator(),
+            drop_last=True,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "DataLoader yielded no batches",
+        ):
+            next(iter(loader))
 
     def test_pretraining_data_loader_on_epoch_start_reseeds_without_crashing(self):
         loader = self.make_pretraining_loader(shuffle=True)

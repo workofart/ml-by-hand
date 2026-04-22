@@ -280,6 +280,23 @@ class Optimizer:
 
         self._recursive_param_op(self.model_parameters, update_fn)
 
+    def scale_gradients(self, scale: float) -> None:
+        """Scale all parameter gradients in-place by ``scale``."""
+        if scale == 1.0:
+            return
+
+        for param in self.model_parameters.values():
+            if param.grad is not None:
+                param.grad.data *= scale
+
+    def grad_l2_norm(self) -> float:
+        """Return the L2 norm of all current parameter gradients."""
+        grad_norm = 0.0
+        for param in self.model_parameters.values():
+            if param.grad is not None:
+                grad_norm += (param.grad.data**2).sum()
+        return float(xp.to_scalar(grad_norm**0.5))
+
     def state_dict(self) -> Dict[str, Any]:
         """
         Return a dictionary representing the optimizer's state for checkpointing.

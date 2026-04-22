@@ -122,6 +122,29 @@ class TestOptimizer(TestCase):
         self.optimizer.step()
         self.assertEqual(self.optimizer.timestep, initial_ts + 1)
 
+    def test_scale_gradients_scales_all_parameter_gradients(self):
+        self.params["param1"].grad = Tensor(xp.array([1.0, -2.0], dtype=xp.float32))
+        self.params["param2"].grad = Tensor(xp.array([3.0, 4.0], dtype=xp.float32))
+
+        self.optimizer.scale_gradients(0.5)
+
+        assert allclose(
+            self.params["param1"].grad.data,
+            xp.array([0.5, -1.0], dtype=xp.float32),
+        )
+        assert allclose(
+            self.params["param2"].grad.data,
+            xp.array([1.5, 2.0], dtype=xp.float32),
+        )
+
+    def test_grad_l2_norm_matches_expected_value(self):
+        self.params["param1"].grad = Tensor(xp.array([3.0, 4.0], dtype=xp.float32))
+        self.params["param2"].grad = Tensor(xp.array([12.0], dtype=xp.float32))
+
+        grad_norm = self.optimizer.grad_l2_norm()
+
+        self.assertAlmostEqual(grad_norm, 13.0, places=6)
+
     def test_scheduler_accepts_class_object(self):
         optimizer = Optimizer(
             self.params,

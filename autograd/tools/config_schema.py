@@ -25,6 +25,21 @@ class GenericTrainingConfig:
     max_epochs: Optional[int] = None
     max_steps: Optional[int] = None
     max_eval_steps: Optional[int] = None
+    # Controls how often step-mode training reports/logs/evaluates.
+    # This is intentionally separate from checkpoint_freq: reporting cadence
+    # should not imply checkpoint cadence.
+    #
+    # Important: this is not another batch-size knob. micro_batch_size controls
+    # per-forward/backward memory, and global_batch_size controls gradient
+    # accumulation / optimizer-update cadence. report_every_steps only controls
+    # how long trainer-side reporting state can stay unsynchronized before we
+    # scalarize/log it.
+    #
+    # On MLX, larger values can retain deferred metric/loss accumulation work
+    # for longer before a host sync point, which may show up as bursty sync or
+    # allocator pressure even though the effective training batch size is
+    # unchanged.
+    report_every_steps: Optional[int] = None
     # Whether to load from a checkpoint
     resume_epoch: Optional[int] = None
     training_run_name: str = "default"
@@ -37,12 +52,24 @@ class GenericTrainingConfig:
     def __post_init__(self) -> None:
         if self.max_epochs is None and self.max_steps is None:
             raise ValueError("At least one of max_epochs or max_steps must be set")
+        if self.max_epochs is not None and self.max_steps is not None:
+            raise ValueError("max_epochs and max_steps are mutually exclusive")
         if self.max_epochs is not None and self.max_epochs < 1:
             raise ValueError(f"max_epochs must be >= 1, got {self.max_epochs}")
         if self.max_steps is not None and self.max_steps < 1:
             raise ValueError(f"max_steps must be >= 1, got {self.max_steps}")
         if self.max_eval_steps is not None and self.max_eval_steps < 1:
             raise ValueError(f"max_eval_steps must be >= 1, got {self.max_eval_steps}")
+        if self.report_every_steps is not None:
+            if not isinstance(self.report_every_steps, int):
+                raise ValueError(
+                    "report_every_steps must be an int, "
+                    f"got {self.report_every_steps!r}"
+                )
+            if self.report_every_steps < 1:
+                raise ValueError(
+                    f"report_every_steps must be >= 1, got {self.report_every_steps}"
+                )
         if not isinstance(self.checkpoint_freq, int):
             raise ValueError(
                 f"checkpoint_freq must be an int, got {self.checkpoint_freq!r}"

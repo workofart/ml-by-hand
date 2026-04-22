@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 from typing import Any, Dict
@@ -14,8 +15,11 @@ SerializedMeta = Dict[str, Any]
 
 
 def save_checkpoint(
-    obj: Any, json_path: str = "checkpoint.json", npz_path: str = "checkpoint.npz"
-) -> None:
+    obj: Any,
+    *,
+    checkpoint_dir: str = ".",
+    checkpoint_name: str = "checkpoint",
+) -> tuple[str, str]:
     """Save a Python object (model state, etc.) into JSON and NPZ files.
 
     This function splits the saved content into:
@@ -25,10 +29,10 @@ def save_checkpoint(
     Args:
         obj: The Python object to serialize, typically a model's state_dict or
             other checkpoint data structure.
-        json_path (str): The file path to save the JSON metadata. Defaults to
-            'checkpoint.json'.
-        npz_path (str): The file path to save the NPZ data. Defaults to
-            'checkpoint.npz'.
+        checkpoint_dir (str): Directory where checkpoint files are written.
+            Defaults to the current directory.
+        checkpoint_name (str): Basename for the checkpoint files written inside
+            `checkpoint_dir`. Defaults to `checkpoint`.
 
     Raises:
         OSError: If there is an error writing to the specified files.
@@ -42,8 +46,11 @@ def save_checkpoint(
         ...     },
         ...     "epoch": 5
         ... }
-        >>> save_checkpoint(obj_to_save, "my_model.json", "my_model.npz")
+        >>> save_checkpoint(obj_to_save, checkpoint_name="my_model")
     """
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    json_path = os.path.join(checkpoint_dir, f"{checkpoint_name}.json")
+    npz_path = os.path.join(checkpoint_dir, f"{checkpoint_name}.npz")
 
     def _serialize(
         obj: Any, arrays: Dict[str, Any], prefix: str = ""
@@ -101,6 +108,13 @@ def save_checkpoint(
         if isinstance(obj, (int, float, str, bool, type(None))):
             return {"_type": "scalar", "value": obj}
 
+        if isinstance(obj, type):
+            return {
+                "_type": "class",
+                "module": obj.__module__,
+                "qualname": obj.__qualname__,
+            }
+
         # Fallback for other types
         return {"_type": "raw", "value": str(obj)}
 
@@ -113,6 +127,7 @@ def save_checkpoint(
 
     # Save arrays to NPZ
     xp.savez_compressed(npz_path, **arrays_dict)
+    return json_path, npz_path
 
 
 def load_checkpoint(
@@ -176,6 +191,13 @@ def load_checkpoint(
 
         if t == "array":
             return data[meta["key"]]
+
+        if t == "class":
+            module = importlib.import_module(meta["module"])
+            resolved = module
+            for attr in meta["qualname"].split("."):
+                resolved = getattr(resolved, attr)
+            return resolved
 
         if "key" in meta and "items" not in meta and "value" not in meta:
             return data[meta["key"]]
