@@ -248,6 +248,7 @@ if __name__ == "__main__":
         max_steps=200000,
         max_eval_steps=200,
         checkpoint_freq=10000,
+        report_every_steps=200,
         global_batch_size=32,
         micro_batch_size=1,
         model_kwargs={
@@ -269,7 +270,7 @@ if __name__ == "__main__":
                 "lr_decay_iters": 160000,  # 80% of max_steps
             },
         },
-        resume_epoch=None,  # Set this to None if you don't want to load from checkpoint
+        resume_epoch=30000,  # Set this to None if you don't want to load from checkpoint
         teacher_forcing=False,
         label_smoothing=0.1,
         eval_start_string="April is",

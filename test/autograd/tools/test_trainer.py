@@ -516,6 +516,30 @@ class TestSimpleTrainer(BaseTrainerTest):
         self.assertEqual(eval_steps, [2, 3])
 
     @patch("autograd.tools.trainer.save_checkpoint")
+    def test_fit_with_max_steps_can_report_before_checkpoint_steps(
+        self, mock_save_checkpoint
+    ):
+        self.config.max_epochs = None
+        self.config.max_steps = 3
+        self.config.checkpoint_freq = 10
+        self.config.report_every_steps = 2
+        train_loader = make_data_loader(self.train_data * 3)
+        eval_steps = []
+
+        def record_eval(_):
+            eval_steps.append(self.trainer.global_step)
+            eval_state = TrainingState()
+            eval_state.record_eval_loss(1.23)
+            return eval_state
+
+        self.trainer._evaluate = MagicMock(side_effect=record_eval)
+
+        self.trainer.fit(train_loader, self.val_loader)
+
+        self.assertEqual(eval_steps, [2, 3])
+        mock_save_checkpoint.assert_not_called()
+
+    @patch("autograd.tools.trainer.save_checkpoint")
     def test_fit_with_max_steps_saves_checkpoint_on_checkpoint_steps(
         self, mock_save_checkpoint
     ):
@@ -723,6 +747,7 @@ class TestSimpleTrainer(BaseTrainerTest):
         trainer.global_step = len(self.train_loader)
         plan = TrainingPlan.for_steps(
             max_steps=config.max_steps,
+            report_every_steps=config.report_every_steps or config.checkpoint_freq,
             checkpoint_every=config.checkpoint_freq,
         )
         eval_state = TrainingState()
@@ -1243,18 +1268,20 @@ class TestSimpleTrainer(BaseTrainerTest):
         config = GenericTrainingConfig(
             max_steps=3,
             checkpoint_freq=2,
+            report_every_steps=1,
             model_kwargs={"hidden_size": 256},
             optimizer_kwargs={"lr": 0.01},
         )
 
         plan = TrainingPlan.for_steps(
             max_steps=config.max_steps,
+            report_every_steps=config.report_every_steps,
             checkpoint_every=config.checkpoint_freq,
         )
 
         self.assertFalse(plan.by_epoch)
         self.assertEqual(plan.target_step, 3)
-        self.assertEqual(plan.report_every_steps, 2)
+        self.assertEqual(plan.report_every_steps, 1)
         self.assertEqual(plan.checkpoint_every, 2)
         self.assertIsNone(plan.steps_per_epoch)
         self.assertEqual(plan.metrics_interval, 1)

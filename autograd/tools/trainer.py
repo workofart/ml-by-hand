@@ -134,17 +134,27 @@ class TrainingState:
 class TrainingPlan:
     by_epoch: bool
     target_step: int
+    # Note that the reporting frequency also dictates the MLX lazy-to-materialize trigger
+    # Don't set this too high, otherwise, MLX could accumulate a lot of operations and
+    # might directly reach "RuntimeError: [metal::malloc] Resource limit exceeded"
     report_every_steps: int
     checkpoint_every: int
     steps_per_epoch: Optional[int] = None
     metrics_interval: int = 1
 
     @classmethod
-    def for_steps(cls, max_steps: int, checkpoint_every: int) -> "TrainingPlan":
+    def for_steps(
+        cls,
+        max_steps: int,
+        report_every_steps: int,
+        checkpoint_every: int,
+    ) -> "TrainingPlan":
+        if report_every_steps <= 0:
+            raise ValueError("report_every_steps must be > 0 in step mode.")
         return cls(
             by_epoch=False,
             target_step=max_steps,
-            report_every_steps=checkpoint_every,
+            report_every_steps=report_every_steps,
             checkpoint_every=checkpoint_every,
         )
 
@@ -270,8 +280,17 @@ class AbstractTrainer(ABC):
         )
         accumulation_steps = int(self.config.gradient_accumulation_steps)
         if self.config.max_steps is not None:
+            # Step-mode reporting/eval cadence is separate from checkpoint
+            # cadence. A larger report_every_steps does not change the effective
+            # training batch size; it only delays reporting/sync points.
+            # On MLX, delaying those sync points can retain deferred
+            # loss/metric work longer and make the eventual host scalarization
+            # more bursty.
             plan = TrainingPlan.for_steps(
                 max_steps=self.config.max_steps,
+                report_every_steps=(
+                    self.config.report_every_steps or self.config.checkpoint_freq
+                ),
                 checkpoint_every=self.config.checkpoint_freq,
             )
         else:
