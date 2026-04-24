@@ -3,7 +3,16 @@ import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pprint import pformat
-from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple, cast
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    cast,
+)
 
 from tqdm import tqdm
 
@@ -329,17 +338,17 @@ class AbstractTrainer(ABC):
 
                     self.global_step += 1
                     progress_bar.update(1)
+                    should_report = plan.should_report(self.global_step)
 
-                    # whether we should flush
-                    if state.has_enough_batches(
-                        accumulation_steps
-                    ) or plan.should_report(self.global_step):
+                    if state.has_enough_batches(accumulation_steps):
                         self.optimizer_step(
                             state,
-                            record_grad_norm=plan.should_report(self.global_step),
+                            # Always clip when configured, but only read back
+                            # the grad norm on steps that will report it.
+                            record_grad_norm=should_report,
                         )
 
-                    if plan.should_report(self.global_step):
+                    if should_report:
                         eval_state = (
                             self.evaluate(val_data_loader)
                             if val_data_loader is not None
@@ -361,22 +370,26 @@ class AbstractTrainer(ABC):
                     )
 
                 # This is after all the batches in the data loader
-                self.optimizer_step(
-                    state,
-                    record_grad_norm=False,
-                )
+                self.optimizer_step(state, record_grad_norm=False)
 
     def optimizer_step(
-        self, state: TrainingState, *, record_grad_norm: bool = True
+        self,
+        state: TrainingState,
+        *,
+        record_grad_norm: bool = True,
     ) -> None:
         if state.accumulated_batches == 0:
             return
 
         self.optimizer.scale_gradients(1.0 / state.accumulated_batches)
-
-        if record_grad_norm:
-            self.last_grad_l2_norm = self.optimizer.grad_l2_norm()
+        grad_l2_norm = None
+        if self.config.max_grad_norm is not None:
+            grad_l2_norm = self.optimizer.clip_grad_norm(self.config.max_grad_norm)
         self.optimizer.step()
+        if record_grad_norm and grad_l2_norm is not None:
+            self.last_grad_l2_norm = float(xp.to_scalar(grad_l2_norm))
+        else:
+            self.last_grad_l2_norm = None
         self.optimizer.zero_grad()
         state.accumulated_batches = 0
 
@@ -407,8 +420,9 @@ class AbstractTrainer(ABC):
             "epoch": completed_epochs,
             "step": float(self.global_step),
             **state.to_metrics_row(eval_state=eval_state),
-            "grad_l2_norm": self.last_grad_l2_norm,
         }
+        if self.last_grad_l2_norm is not None:
+            row["grad_l2_norm"] = self.last_grad_l2_norm
 
         if plan.should_checkpoint(self.global_step):
             self._maybe_save_checkpoint(plan=plan, eval_state=eval_state)

@@ -52,6 +52,8 @@ class GenericTrainingConfig:
     global_batch_size: int = 1
     # Per-forward/backward batch size that must fit in memory.
     micro_batch_size: int = 1
+    # Optional trainer-level gradient clipping threshold.
+    max_grad_norm: Optional[float] = None
 
     def __post_init__(self) -> None:
         if self.max_epochs is None and self.max_steps is None:
@@ -93,6 +95,8 @@ class GenericTrainingConfig:
                 "global_batch_size must be divisible by micro_batch_size, "
                 f"got {self.global_batch_size} and {self.micro_batch_size}"
             )
+        if self.max_grad_norm is not None and self.max_grad_norm <= 0:
+            raise ValueError(f"max_grad_norm must be > 0, got {self.max_grad_norm}")
         self._validate_checkpoint_accumulation_alignment()
 
     @property

@@ -476,9 +476,9 @@ if __name__ == "__main__":
             max_epochs=10,
             checkpoint_freq=10,
             model_kwargs={},
+            max_grad_norm=1.0,
             optimizer_kwargs={
                 "lr": 1e-3,
-                "max_grad_norm": 1.0,
             },
         ),
         msg="ResNet-based",

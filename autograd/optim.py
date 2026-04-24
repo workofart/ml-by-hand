@@ -4,7 +4,7 @@ from abc import abstractmethod
 from collections import defaultdict
 from typing import Any, Callable, Dict, Optional
 
-from autograd.backend import xp
+from autograd.backend import eval_backend, xp
 from autograd.tensor import Tensor
 
 logger = logging.getLogger(__name__)
@@ -243,7 +243,11 @@ class Optimizer:
         elif hasattr(params, "grad"):
             update_fn(params)
 
-    def _clip_grad_norm(self, max_norm: float, norm_type: float = 2.0) -> None:
+    def clip_grad_norm(
+        self,
+        max_norm: float,
+        norm_type: float = 2.0,
+    ) -> Any:
         r"""
         Scale the gradients of all parameters in-place so that their norm is at most max_norm.
 
@@ -260,7 +264,7 @@ class Optimizer:
             norm_type (float, optional): The type of norm to use (default is 2, Euclidean norm a.k.a. L2 norm).
         """
         # Compute the global norm of all gradients
-        total_norm = 0.0
+        total_norm = xp.asarray(0.0, dtype=xp.float32)
         for param in self.model_parameters.values():
             if param.grad is not None:
                 grad_data = param.grad.data
@@ -277,6 +281,10 @@ class Optimizer:
         for param in self.model_parameters.values():
             if param.grad is not None:
                 param.grad.data *= scale_factor
+
+        # Return the backend scalar lazily. Callers that need to log this value
+        # own the device-to-host scalarization.
+        return total_norm
 
     def zero_grad(self) -> None:
         """
@@ -299,7 +307,7 @@ class Optimizer:
 
     def grad_l2_norm(self) -> float:
         """Return the L2 norm of all current parameter gradients."""
-        grad_norm = 0.0
+        grad_norm = xp.asarray(0.0, dtype=xp.float32)
         for param in self.model_parameters.values():
             if param.grad is not None:
                 grad_norm += (param.grad.data**2).sum()
@@ -365,11 +373,11 @@ class Optimizer:
     def step(self) -> None:
         """
         Perform a single optimization step.
-
-        This method increments the timestep and updates the learning rate.
         """
-        self.timestep += 1
-        self.update_lr()
+        raise NotImplementedError
+
+    def _eval_backend(self) -> None:
+        eval_backend(self.model_parameters, self._states)
 
 
 class SGD(Optimizer):
@@ -393,20 +401,19 @@ class SGD(Optimizer):
         Perform a single optimization step using SGD.
 
         This method updates each parameter by subtracting the product of the learning rate
-        and the parameter's gradient. If 'max_grad_norm' is specified in hyperparameters,
-        gradient clipping is applied before the update.
+        and the parameter's gradient.
         """
-        super().step()
+        self.timestep += 1
+        self.update_lr()
 
         def update_fn(param: Any) -> None:
             if param.grad is None:
                 return
             param.data -= self.lr * param.grad.data
 
-        if "max_grad_norm" in self._hyperparams:
-            self._clip_grad_norm(self._hyperparams["max_grad_norm"], norm_type=2.0)
-
         self._recursive_param_op(self.model_parameters, update_fn)
+        self._eval_backend()
+        return None
 
 
 class Adam(Optimizer):
@@ -459,14 +466,12 @@ class Adam(Optimizer):
         """
         Perform a single optimization step using the Adam algorithm.
 
-        This method updates the biased first and second moment estimates,
+        This method updates the biased first and second order momentum estimates,
         applies bias correction, performs a decoupled weight decay step if specified,
         and updates the parameters accordingly.
         """
-        super().step()
-
-        if "max_grad_norm" in self._hyperparams:
-            self._clip_grad_norm(self._hyperparams["max_grad_norm"], norm_type=2.0)
+        self.timestep += 1
+        self.update_lr()
 
         beta1 = self._hyperparams["beta1"]
         beta2 = self._hyperparams["beta2"]
@@ -499,3 +504,5 @@ class Adam(Optimizer):
             if weight_decay > 0.0:
                 param.data = param.data - self.lr * weight_decay * param.data
             param.data -= self.lr * m_hat / (xp.sqrt(v_hat) + epsilon)
+        self._eval_backend()
+        return None

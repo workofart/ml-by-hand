@@ -1043,6 +1043,30 @@ class TestSimpleTrainer(BaseTrainerTest):
 
         self.assertEqual(trainer.optimizer.step_call_count, 2)
 
+    def test_fit_reporting_does_not_force_partial_optimizer_steps(self):
+        config = GenericTrainingConfig(
+            max_steps=40,
+            checkpoint_freq=40,
+            report_every_steps=10,
+            model_kwargs={"hidden_size": 256},
+            optimizer_kwargs={"lr": 0.01},
+            global_batch_size=4,
+            micro_batch_size=1,
+        )
+        trainer = SimpleTrainer(
+            model_cls=MockModelClass,
+            optimizer_cls=MockOptimizerClass,
+            loss_fn=self.loss_fn,
+            config=config,
+            output_type="logits",
+        )
+        train_loader = make_data_loader(self.train_data * 20)
+
+        trainer.fit(train_loader)
+
+        self.assertEqual(trainer.global_step, 40)
+        self.assertEqual(trainer.optimizer.step_call_count, 10)
+
     def test_fit_flushes_leftover_gradients_at_epoch_end(self):
         config = GenericTrainingConfig(
             max_epochs=1,
@@ -1069,13 +1093,13 @@ class TestSimpleTrainer(BaseTrainerTest):
         state = TrainingState()
         self.trainer.last_grad_l2_norm = 7.0
 
-        self.trainer.optimizer_step(state, record_grad_norm=False)
+        self.trainer.optimizer_step(state)
 
         self.assertEqual(self.trainer.optimizer.step_call_count, 0)
         self.assertEqual(self.trainer.last_grad_l2_norm, 7.0)
         self.assertEqual(state.accumulated_batches, 0)
 
-    def test_fit_records_grad_norm_only_on_report_steps(self):
+    def test_fit_does_not_report_grad_norm_without_clipping(self):
         config = GenericTrainingConfig(
             max_steps=4,
             checkpoint_freq=4,
@@ -1094,12 +1118,13 @@ class TestSimpleTrainer(BaseTrainerTest):
         train_loader = make_data_loader(self.train_data * 2)
 
         with patch.object(
-            trainer.optimizer, "grad_l2_norm", return_value=7.0
-        ) as mock_grad_l2_norm:
+            trainer.optimizer,
+            "grad_l2_norm",
+            side_effect=AssertionError("trainer should not call grad_l2_norm"),
+        ):
             trainer.fit(train_loader)
 
-        self.assertEqual(mock_grad_l2_norm.call_count, 1)
-        self.assertEqual(trainer.metric_rows[0]["grad_l2_norm"], 7.0)
+        self.assertNotIn("grad_l2_norm", trainer.metric_rows[0])
 
     def _fit_scalar_weight_model(
         self, train_data, *, global_batch_size, micro_batch_size
@@ -1161,7 +1186,8 @@ class TestSimpleTrainer(BaseTrainerTest):
             max_epochs=1,
             checkpoint_freq=1,
             model_kwargs={"initial_weight": 0.0},
-            optimizer_kwargs={"lr": 0.0, "max_grad_norm": 1.0},
+            optimizer_kwargs={"lr": 0.0},
+            max_grad_norm=1.0,
             global_batch_size=1,
             micro_batch_size=1,
         )
@@ -1184,6 +1210,50 @@ class TestSimpleTrainer(BaseTrainerTest):
 
         trainer.fit(train_loader)
 
+        self.assertAlmostEqual(trainer.metric_rows[0]["grad_l2_norm"], 20.0, places=5)
+
+    def test_clip_enabled_uses_clip_grad_norm_for_reporting(self):
+        config = GenericTrainingConfig(
+            max_epochs=1,
+            checkpoint_freq=1,
+            model_kwargs={"initial_weight": 0.0},
+            optimizer_kwargs={"lr": 0.0},
+            max_grad_norm=1.0,
+            global_batch_size=1,
+            micro_batch_size=1,
+        )
+        trainer = SimpleTrainer(
+            model_cls=ScalarWeightModel,
+            optimizer_cls=SGD,
+            loss_fn=lambda pred, target: (
+                (pred - Tensor(target, requires_grad=False)) ** 2
+            ).mean(),
+            config=config,
+        )
+        train_loader = make_data_loader(
+            [
+                (
+                    xp.array([[1.0]], dtype=xp.float32),
+                    xp.array([[10.0]], dtype=xp.float32),
+                )
+            ]
+        )
+
+        with (
+            patch.object(
+                trainer.optimizer,
+                "grad_l2_norm",
+                side_effect=AssertionError("trainer should not call grad_l2_norm"),
+            ),
+            patch.object(
+                trainer.optimizer,
+                "clip_grad_norm",
+                wraps=trainer.optimizer.clip_grad_norm,
+            ) as mock_clip_grad_norm,
+        ):
+            trainer.fit(train_loader)
+
+        self.assertEqual(mock_clip_grad_norm.call_count, 1)
         self.assertAlmostEqual(trainer.metric_rows[0]["grad_l2_norm"], 20.0, places=5)
 
     def test_leftover_accumulation_matches_single_batch_update(self):

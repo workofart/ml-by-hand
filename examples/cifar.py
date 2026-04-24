@@ -277,7 +277,8 @@ if __name__ == "__main__":
         max_epochs=30,
         checkpoint_freq=100,
         model_kwargs={"num_classes": 10},
-        optimizer_kwargs={"lr": 3e-3, "max_grad_norm": 1.0},
+        optimizer_kwargs={"lr": 3e-3},
+        max_grad_norm=1.0,
     )
     train_cifar_multiclass_model(
         train_data_loader,
@@ -295,7 +296,8 @@ if __name__ == "__main__":
         max_epochs=100,
         checkpoint_freq=100,
         model_kwargs={"num_classes": 10},
-        optimizer_kwargs={"lr": 1e-3, "max_grad_norm": 1.0},
+        optimizer_kwargs={"lr": 1e-3},
+        max_grad_norm=1.0,
     )
     train_cifar_multiclass_model(
         train_data_loader,
@@ -313,7 +315,8 @@ if __name__ == "__main__":
         max_epochs=100,
         checkpoint_freq=100,
         model_kwargs={"num_classes": 10},
-        optimizer_kwargs={"lr": 1e-3, "max_grad_norm": 1.0},
+        optimizer_kwargs={"lr": 1e-3},
+        max_grad_norm=1.0,
     )
     train_cifar_multiclass_model(
         train_data_loader,
@@ -356,7 +359,8 @@ if __name__ == "__main__":
         max_epochs=100,
         checkpoint_freq=100,
         model_kwargs={"num_classes": 100},
-        optimizer_kwargs={"lr": 1e-3, "max_grad_norm": 1.0},
+        optimizer_kwargs={"lr": 1e-3},
+        max_grad_norm=1.0,
     )
     train_cifar_multiclass_model(
         train_data_loader,
@@ -374,7 +378,8 @@ if __name__ == "__main__":
         max_epochs=100,
         checkpoint_freq=100,
         model_kwargs={"num_classes": 100},
-        optimizer_kwargs={"lr": 1e-3, "max_grad_norm": 1.0},
+        optimizer_kwargs={"lr": 1e-3},
+        max_grad_norm=1.0,
     )
     train_cifar_multiclass_model(
         train_data_loader,
@@ -392,7 +397,8 @@ if __name__ == "__main__":
         max_epochs=100,
         checkpoint_freq=100,
         model_kwargs={"num_classes": 100},
-        optimizer_kwargs={"lr": 1e-3, "max_grad_norm": 1.0},
+        optimizer_kwargs={"lr": 1e-3},
+        max_grad_norm=1.0,
     )
     train_cifar_multiclass_model(
         train_data_loader,

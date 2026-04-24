@@ -148,6 +148,7 @@ if __name__ == "__main__":
         checkpoint_freq=2,
         global_batch_size=train_global_batch_size,
         micro_batch_size=train_micro_batch_size,
+        max_grad_norm=1.0,
         model_kwargs={
             "num_attention_heads": 6,
             "hidden_size": 144,
@@ -158,7 +159,6 @@ if __name__ == "__main__":
         optimizer_kwargs={
             "lr": 1e-3,
             "beta2": 0.99,
-            "max_grad_norm": 1.0,
             "weight_decay": 0.1,
             "lr_scheduler_kwargs": {
                 "lr_scheduler_cls": optim.CosineScheduler,
