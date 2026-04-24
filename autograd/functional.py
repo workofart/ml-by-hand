@@ -1063,6 +1063,8 @@ class CrossEntropy(Function):
         """
 
         y_true = xp.array(y_true, dtype=xp.int64)
+        if y_pred.dtype in (xp.float16, xp.bfloat16):
+            y_pred = y_pred.astype(xp.float32)
 
         # 1. If 3D logits, flatten them for simpler processing while preserving
         # the original shape for the backward pass.

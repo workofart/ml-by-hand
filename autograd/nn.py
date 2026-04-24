@@ -1251,14 +1251,20 @@ class LayerNorm(Module):
             >>> x = Tensor(xp.random.randn(2, 10))
             >>> y = ln(x)  # Expected: (2, 10)
         """
+
+        # For mixed precision, keep LayerNorm statistics in fp32 for stability.
+        input_dtype = x.data.dtype
+        low_precision_input = input_dtype in (xp.float16, xp.bfloat16)
+        stats_x = x.astype(xp.float32) if low_precision_input else x
+
         # Equation 4 in section 3.1 in the paper
-        mean = x.mean(
+        mean = stats_x.mean(
             axis=-1, keepdims=True
         )  # (batch_size, seq_len, 1), across "input_size" dimension
-        var = ((x - mean) ** 2).mean(
+        var = ((stats_x - mean) ** 2).mean(
             axis=-1, keepdims=True
         )  # (batch_size, seq_len, 1), across "input_size" dimension
-        x_norm = (x - mean) / (
+        x_norm = (stats_x - mean) / (
             var + self.epsilon
         ).sqrt()  # (batch_size, seq_len, input_size)
 
@@ -1266,6 +1272,10 @@ class LayerNorm(Module):
         output = x_norm * self._parameters["gain"].expand(
             x_norm.shape
         ) + self._parameters["bias"].expand(x_norm.shape)
+
+        # For mixed precision, return to the activation dtype so the following dense ops stay low precision.
+        if low_precision_input:
+            output = output.astype(input_dtype)
         return output
 
 
