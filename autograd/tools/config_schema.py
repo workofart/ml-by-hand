@@ -42,6 +42,10 @@ class GenericTrainingConfig:
     report_every_steps: Optional[int] = None
     # Whether to load from a checkpoint
     resume_epoch: Optional[int] = None
+    # Optional checkpoint basename (without .json/.npz) used to initialize
+    # model weights before training. The configured architecture must match
+    # the checkpoint; mismatches should fail during load_state_dict.
+    pretrained_checkpoint_path: Optional[str] = None
     training_run_name: str = "default"
     dataset_name: Optional[str] = ""
     # Effective batch size after gradient accumulation.
@@ -89,10 +93,32 @@ class GenericTrainingConfig:
                 "global_batch_size must be divisible by micro_batch_size, "
                 f"got {self.global_batch_size} and {self.micro_batch_size}"
             )
+        self._validate_checkpoint_accumulation_alignment()
 
     @property
     def gradient_accumulation_steps(self) -> int:
         return self.global_batch_size // self.micro_batch_size
+
+    def _validate_checkpoint_accumulation_alignment(self) -> None:
+        if self.max_steps is None:
+            return
+
+        accumulation_steps = self.gradient_accumulation_steps
+        if accumulation_steps == 1 or self.checkpoint_freq > self.max_steps:
+            return
+
+        if self.checkpoint_freq % accumulation_steps != 0:
+            raise ValueError(
+                "checkpoint_freq must be divisible by gradient_accumulation_steps "
+                "when step-mode checkpointing uses gradient accumulation, "
+                f"got checkpoint_freq={self.checkpoint_freq}, "
+                f"gradient_accumulation_steps={accumulation_steps}. "
+                "Otherwise a checkpoint can be written before optimizer.step() "
+                "has materialized optimizer state for the accumulated gradients. "
+                "Use a checkpoint_freq that is a multiple of "
+                "gradient_accumulation_steps; if you need a final checkpoint, "
+                "max_steps should land on the same boundary."
+            )
 
 
 @dataclass

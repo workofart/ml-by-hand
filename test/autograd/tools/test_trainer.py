@@ -763,6 +763,88 @@ class TestSimpleTrainer(BaseTrainerTest):
         self.assertEqual(checkpoint["optimizer_init_kwargs"], loaded_optimizer_kwargs)
 
     @patch("autograd.tools.trainer.load_checkpoint")
+    def test_pretrained_checkpoint_path_loads_weights_but_resets_training_state(
+        self, mock_load_checkpoint
+    ):
+        class TrackingModel(MockModelClass):
+            def __init__(self, hidden_size=128, **kwargs):
+                super().__init__(hidden_size=hidden_size, **kwargs)
+                self.loaded_state_dict = None
+
+            def load_state_dict(self, state_dict):
+                self.loaded_state_dict = state_dict
+
+        class TrackingOptimizer(MockOptimizerClass):
+            def __init__(self, parameters, lr=1e-3, **kwargs):
+                super().__init__(parameters, lr=lr, **kwargs)
+                self.loaded_state_dict = None
+
+            def load_state_dict(self, state_dict):
+                self.loaded_state_dict = state_dict
+
+        model_state_dict = {"weights": "from-pretrain"}
+        optimizer_state_dict = {"step": 123}
+        mock_load_checkpoint.return_value = {
+            "epoch": 9,
+            "step_count": len(self.train_loader),
+            "steps_per_epoch": len(self.train_loader),
+            "best_val_loss": 0.25,
+            "model_state_dict": model_state_dict,
+            "optimizer_state_dict": optimizer_state_dict,
+            "model_init_kwargs": {"hidden_size": 512},
+            "optimizer_init_kwargs": {"lr": 0.02},
+        }
+        config = GenericTrainingConfig(
+            max_epochs=1,
+            checkpoint_freq=1,
+            model_kwargs={"hidden_size": 256},
+            optimizer_kwargs={"lr": 0.01},
+            resume_epoch=None,
+            pretrained_checkpoint_path="dummy_pretrained",
+        )
+
+        trainer = SimpleTrainer(
+            model_cls=TrackingModel,
+            optimizer_cls=TrackingOptimizer,
+            loss_fn=self.loss_fn,
+            config=config,
+            output_type="logits",
+        )
+
+        self.assertEqual(trainer.model.hidden_size, 256)
+        self.assertEqual(trainer.model.loaded_state_dict, model_state_dict)
+        self.assertIsNone(trainer.optimizer.loaded_state_dict)
+        self.assertEqual(trainer.optimizer.lr, 0.01)
+        self.assertEqual(trainer.global_step, 0)
+        self.assertIsNone(trainer.best_val_loss)
+        self.assertEqual(trainer.checkpoint, {})
+        mock_load_checkpoint.assert_called_once_with(
+            "dummy_pretrained.json", "dummy_pretrained.npz"
+        )
+
+    def test_pretrained_checkpoint_path_conflicts_with_resume_epoch(self):
+        config = GenericTrainingConfig(
+            max_epochs=1,
+            checkpoint_freq=1,
+            model_kwargs={"hidden_size": 256},
+            optimizer_kwargs={"lr": 0.01},
+            resume_epoch=1,
+            pretrained_checkpoint_path="dummy_pretrained",
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "pretrained_checkpoint_path cannot be combined with resume_epoch or checkpoint_path",
+        ):
+            SimpleTrainer(
+                model_cls=MockModelClass,
+                optimizer_cls=MockOptimizerClass,
+                loss_fn=self.loss_fn,
+                config=config,
+                output_type="logits",
+            )
+
+    @patch("autograd.tools.trainer.load_checkpoint")
     def test_checkpoint_path_resume_uses_checkpoint_progress_not_config_hint(
         self, mock_load_checkpoint
     ):
@@ -844,8 +926,8 @@ class TestSimpleTrainer(BaseTrainerTest):
 
     def test_fit_flushes_pending_gradients_before_report_boundary(self):
         config = GenericTrainingConfig(
-            max_steps=1,
-            checkpoint_freq=1,
+            max_steps=2,
+            checkpoint_freq=2,
             model_kwargs={"hidden_size": 256},
             optimizer_kwargs={"lr": 0.01},
             global_batch_size=2,

@@ -495,6 +495,13 @@ class TestAdam(TestCase):
 
 
 class TestCosineScheduler(TestCase):
+    def test_rejects_decay_not_past_warmup(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "CosineScheduler requires lr_decay_iters > warmup_steps",
+        ):
+            CosineScheduler(warmup_steps=1, lr_decay_iters=1)
+
     def setUp(self):
         self.warmup_steps = 100
         self.lr_decay_iters = 5000
