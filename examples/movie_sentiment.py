@@ -243,6 +243,7 @@ if __name__ == "__main__":
             "hidden_size": 64,
             "output_size": 1,
         },
-        optimizer_kwargs={"lr": 0.001, "max_grad_norm": 1.0},
+        optimizer_kwargs={"lr": 0.001},
+        max_grad_norm=1.0,
     )
     main(LSTM, train_data_loader, test_data_loader, config_lstm)

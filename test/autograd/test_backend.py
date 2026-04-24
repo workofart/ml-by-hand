@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from autograd.backend import (
+    eval_backend,
     get_random_state,
     set_random_state,
     xp,
@@ -72,6 +73,13 @@ def test_scatter_add_accumulates_repeated_indices():
 
     assert np.array_equal(xp.to_numpy(dst), np.array([0.0, 0.0, 0.0], dtype=np.float32))
     assert np.array_equal(xp.to_numpy(out), np.array([0.0, 5.0, 0.0], dtype=np.float32))
+
+
+def test_eval_backend_accepts_nested_arrays_and_tensors():
+    tensor = Tensor(xp.asarray([1.0], dtype=xp.float32))
+    nested = {"tensor": tensor, "array": xp.asarray([2.0], dtype=xp.float32)}
+
+    eval_backend(nested, [xp.asarray([3.0], dtype=xp.float32)], None)
 
 
 def test_as_strided_view_matches_explicit_windows():

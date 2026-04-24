@@ -1186,7 +1186,8 @@ class TestSimpleTrainer(BaseTrainerTest):
             max_epochs=1,
             checkpoint_freq=1,
             model_kwargs={"initial_weight": 0.0},
-            optimizer_kwargs={"lr": 0.0, "max_grad_norm": 1.0},
+            optimizer_kwargs={"lr": 0.0},
+            max_grad_norm=1.0,
             global_batch_size=1,
             micro_batch_size=1,
         )
@@ -1216,7 +1217,8 @@ class TestSimpleTrainer(BaseTrainerTest):
             max_epochs=1,
             checkpoint_freq=1,
             model_kwargs={"initial_weight": 0.0},
-            optimizer_kwargs={"lr": 0.0, "max_grad_norm": 1.0},
+            optimizer_kwargs={"lr": 0.0},
+            max_grad_norm=1.0,
             global_batch_size=1,
             micro_batch_size=1,
         )
@@ -1245,8 +1247,8 @@ class TestSimpleTrainer(BaseTrainerTest):
             ),
             patch.object(
                 trainer.optimizer,
-                "_clip_grad_norm",
-                wraps=trainer.optimizer._clip_grad_norm,
+                "clip_grad_norm",
+                wraps=trainer.optimizer.clip_grad_norm,
             ) as mock_clip_grad_norm,
         ):
             trainer.fit(train_loader)

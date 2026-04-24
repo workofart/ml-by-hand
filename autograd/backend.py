@@ -78,6 +78,25 @@ def eval(*xs: Any) -> None:
         xp.eval(*xs)
 
 
+def eval_backend(*values: Any) -> None:
+    """
+    Force MLX's lazy parameter/state updates at optimizer-step boundaries.
+
+    Without this explicit boundary, update graphs can be evaluated later at
+    less predictable synchronization points such as scalar reads or checkpoints.
+    """
+    if not IS_MLX:
+        return
+
+    from mlx.utils import tree_map
+
+    def unwrap_tensor(value: Any) -> Any:
+        data = getattr(value, "data", None)
+        return data if hasattr(data, "shape") else value
+
+    eval(tree_map(unwrap_tensor, values))
+
+
 def _scatter_add(dst: Any, idx: Any, updates: Any):
     if IS_MLX:
         return dst.at[idx].add(updates)

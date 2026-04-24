@@ -3,7 +3,16 @@ import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pprint import pformat
-from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple, cast
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    cast,
+)
 
 from tqdm import tqdm
 
@@ -332,7 +341,12 @@ class AbstractTrainer(ABC):
                     should_report = plan.should_report(self.global_step)
 
                     if state.has_enough_batches(accumulation_steps):
-                        self.optimizer_step(state)
+                        self.optimizer_step(
+                            state,
+                            # Always clip when configured, but only read back
+                            # the grad norm on steps that will report it.
+                            record_grad_norm=should_report,
+                        )
 
                     if should_report:
                         eval_state = (
@@ -356,14 +370,26 @@ class AbstractTrainer(ABC):
                     )
 
                 # This is after all the batches in the data loader
-                self.optimizer_step(state)
+                self.optimizer_step(state, record_grad_norm=False)
 
-    def optimizer_step(self, state: TrainingState) -> None:
+    def optimizer_step(
+        self,
+        state: TrainingState,
+        *,
+        record_grad_norm: bool = True,
+    ) -> None:
         if state.accumulated_batches == 0:
             return
 
         self.optimizer.scale_gradients(1.0 / state.accumulated_batches)
-        self.last_grad_l2_norm = self.optimizer.step()
+        grad_l2_norm = None
+        if self.config.max_grad_norm is not None:
+            grad_l2_norm = self.optimizer.clip_grad_norm(self.config.max_grad_norm)
+        self.optimizer.step()
+        if record_grad_norm and grad_l2_norm is not None:
+            self.last_grad_l2_norm = float(xp.to_scalar(grad_l2_norm))
+        else:
+            self.last_grad_l2_norm = None
         self.optimizer.zero_grad()
         state.accumulated_batches = 0
 

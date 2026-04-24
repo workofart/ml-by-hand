@@ -1,6 +1,7 @@
 import math
 from copy import deepcopy
 from unittest import TestCase
+from unittest.mock import patch
 
 import torch  # for test validation
 
@@ -117,10 +118,9 @@ class TestOptimizer(TestCase):
             assert allclose(old_sd["states"]["v"][pid], new_sd["states"]["v"][pid])
         self.assertEqual(old_sd["states"]["timestep"], new_sd["states"]["timestep"])
 
-    def test_timestep_increment(self):
-        initial_ts = self.optimizer.timestep
-        self.optimizer.step()
-        self.assertEqual(self.optimizer.timestep, initial_ts + 1)
+    def test_base_optimizer_step_is_not_implemented(self):
+        with self.assertRaises(NotImplementedError):
+            self.optimizer.step()
 
     def test_scale_gradients_scales_all_parameter_gradients(self):
         self.params["param1"].grad = Tensor(xp.array([1.0, -2.0], dtype=xp.float32))
@@ -192,7 +192,7 @@ class TestOptimizer(TestCase):
         torch_final_g2 = t2.grad.detach().numpy()
 
         # ------ Custom clip ------
-        self.optimizer._clip_grad_norm(max_norm=1.0, norm_type=2.0)
+        self.optimizer.clip_grad_norm(max_norm=1.0, norm_type=2.0)
 
         # Compare final gradients
         custom_final_g1 = self.params["param1"].grad.data
@@ -208,9 +208,27 @@ class TestOptimizer(TestCase):
         self.params["param1"].grad = Tensor(g1)
         self.params["param2"].grad = Tensor(g2)
 
-        grad_norm = self.optimizer._clip_grad_norm(max_norm=1.0, norm_type=2.0)
+        grad_norm = self.optimizer.clip_grad_norm(max_norm=1.0, norm_type=2.0)
 
-        self.assertAlmostEqual(grad_norm, 13.0, places=6)
+        self.assertAlmostEqual(float(xp.to_scalar(grad_norm)), 13.0, places=6)
+
+    def test_clip_grad_norm_returns_lazy_backend_norm(self):
+        g1 = xp.array([3.0, 4.0], dtype=xp.float32)
+        g2 = xp.array([12.0], dtype=xp.float32)
+
+        self.params["param1"].grad = Tensor(g1)
+        self.params["param2"].grad = Tensor(g2)
+
+        with patch.object(
+            xp,
+            "to_scalar",
+            side_effect=AssertionError("clip should return a lazy backend scalar"),
+        ):
+            grad_norm = self.optimizer.clip_grad_norm(max_norm=1.0, norm_type=2.0)
+
+        clipped_norm = self.optimizer.grad_l2_norm()
+        self.assertAlmostEqual(float(xp.to_scalar(grad_norm)), 13.0, places=6)
+        self.assertAlmostEqual(clipped_norm, 1.0, places=5)
 
     def test_clip_grad_norm_l2_above_threshold(self):
         g1 = xp.array([3.0, 4.0, 5.0], dtype=xp.float32)
@@ -230,7 +248,7 @@ class TestOptimizer(TestCase):
         torch_final_g2 = t2.grad.detach().numpy()
 
         # Custom
-        self.optimizer._clip_grad_norm(max_norm=5.0, norm_type=2.0)
+        self.optimizer.clip_grad_norm(max_norm=5.0, norm_type=2.0)
         custom_final_g1 = self.params["param1"].grad.data
         custom_final_g2 = self.params["param2"].grad.data
 
@@ -255,7 +273,7 @@ class TestOptimizer(TestCase):
         torch_final_g2 = t2.grad.detach().numpy()
 
         # Custom
-        self.optimizer._clip_grad_norm(max_norm=20.0, norm_type=1.0)
+        self.optimizer.clip_grad_norm(max_norm=20.0, norm_type=1.0)
         custom_final_g1 = self.params["param1"].grad.data
         custom_final_g2 = self.params["param2"].grad.data
 
@@ -281,7 +299,7 @@ class TestOptimizer(TestCase):
         torch_final_g2 = t2.grad.detach().numpy()
 
         # Custom
-        self.optimizer._clip_grad_norm(max_norm=5.0, norm_type=2.0)
+        self.optimizer.clip_grad_norm(max_norm=5.0, norm_type=2.0)
         custom_final_g1 = self.params["param1"].grad.data
         custom_final_g2 = self.params["param2"].grad.data
 
@@ -305,6 +323,14 @@ class TestSGD(TestCase):
         self.optimizer.zero_grad()
         self.assertEqual(self.param1.grad, None)
         self.assertEqual(self.param2.grad, None)
+
+    def test_step_increments_timestep(self):
+        initial_ts = self.optimizer.timestep
+        self.param1.grad = 0.1
+
+        self.optimizer.step()
+
+        self.assertEqual(self.optimizer.timestep, initial_ts + 1)
 
     def test_step(self):
         self.param1.grad = 0.1
@@ -335,6 +361,21 @@ class TestSGD(TestCase):
 
         assert allclose(self.param1.data, 1.0)
         assert allclose(self.param2.data, 2.0 - (0.2 * 0.01))
+
+    def test_step_evaluates_after_parameter_update(self):
+        self.param1.grad = 0.1
+
+        observed = []
+
+        def record_eval(params, states):
+            observed.append((self.param1.data, states["timestep"]))
+
+        with patch("autograd.optim.eval_backend", side_effect=record_eval):
+            self.optimizer.step()
+
+        self.assertEqual(len(observed), 1)
+        assert allclose(observed[0][0], 1.0 - 0.1 * 0.01)
+        self.assertEqual(observed[0][1], 1)
 
 
 class TestAdam(TestCase):
