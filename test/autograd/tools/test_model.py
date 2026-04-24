@@ -1,5 +1,6 @@
 import json
 import os
+import tempfile
 from copy import deepcopy
 from unittest import TestCase
 
@@ -29,7 +30,8 @@ class TestModel(TestCase):
     def setUp(self):
         # Create a test model with some initial arguments
         self.model = MockModule(999, kwarg0="testing_kwarg0")
-        self.checkpoint_dir = "."
+        self._tmp_dir = tempfile.TemporaryDirectory(dir="/tmp")
+        self.checkpoint_dir = self._tmp_dir.name
         self.checkpoint_name = "test_model"
         self.json_path = os.path.join(
             self.checkpoint_dir, f"{self.checkpoint_name}.json"
@@ -41,6 +43,7 @@ class TestModel(TestCase):
         for f in [self.json_path, self.npz_path]:
             if os.path.exists(f):
                 os.remove(f)
+        self._tmp_dir.cleanup()
 
     def _meta_types(self, node):
         types = []
@@ -154,7 +157,7 @@ class TestModel(TestCase):
         self.assertNotIn("np.ndarray", meta_types)
 
     def test_save_checkpoint_builds_paths_from_checkpoint_name(self):
-        checkpoint_dir = "test_checkpoints"
+        checkpoint_dir = os.path.join(self._tmp_dir.name, "test_checkpoints")
         checkpoint_name = "mock_run_MockModule_7"
         json_path, npz_path = save_checkpoint(
             self.model.state_dict(),

@@ -3,8 +3,12 @@ from collections import Counter
 from unittest import TestCase
 from unittest.mock import patch
 
+import numpy as np
+
 from autograd.text.tokenizer import BytePairEncoder
 from test.helpers import array_equal
+
+ORIGINAL_NP_CONCATENATE = np.concatenate
 
 
 class TestTokenizer(TestCase):
@@ -122,6 +126,34 @@ class TestTokenizer(TestCase):
         decoded = self.bpe.decode(encoded)
         self.assertEqual(input_text, decoded)
 
+    def test_encode_matches_learned_merge_replay(self):
+        self.bpe.train_vocabulary(self.original_text, overwrite_saved_file=True)
+
+        def replay_learned_merges(text):
+            tokens = []
+            for chunk in self.bpe._pretokenize(text):
+                if chunk in self.bpe.SPECIAL_TOKENS:
+                    tokens.append(self.bpe._unicode_to_int_vocab[chunk.encode("utf-8")])
+                else:
+                    tokens.extend(
+                        self.bpe._unicode_to_int_vocab[bytes([b])]
+                        for b in chunk.encode("utf-8")
+                    )
+
+            pairs = set(zip(tokens, tokens[1:]))
+            for pair, new_id in self.bpe.learned_merges:
+                if pair in pairs:
+                    tokens = list(BytePairEncoder._merge_pairs(pair, new_id, tokens))
+                    pairs = set(zip(tokens, tokens[1:]))
+            return tokens
+
+        for text in [
+            self.original_text,
+            self.original_text + "<|endoftext|>" + self.original_text,
+            "low lower newest widest",
+        ]:
+            self.assertEqual(self.bpe.encode(text), replay_learned_merges(text))
+
     def test_special_tokens_encoded_as_single_id(self):
         # This checks special tokens remain single ID
         st_id = self.bpe._unicode_to_int_vocab[
@@ -200,3 +232,154 @@ class TestTokenizer(TestCase):
         )
 
         self.assertGreater(len(encoded), 0)
+
+    @patch("autograd.text.tokenizer.Pool")
+    def test_prepare_data_disables_per_chunk_encode_progress_in_parallel(
+        self, mock_pool
+    ):
+        class RecordingBPE(BytePairEncoder):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.show_progress_calls = []
+
+            def encode(self, input_text: str, *, show_progress: bool = True, **kwargs):
+                self.show_progress_calls.append(show_progress)
+                return super().encode(input_text, show_progress=show_progress, **kwargs)
+
+        class FakePool:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def imap(self, func, iterable):
+                for item in iterable:
+                    yield func(item)
+
+        bpe = RecordingBPE(
+            num_merges=0,
+            vocab_file_path="parallel_vocab.pkl",
+            encoded_data_path="parallel_encoded_data.npz",
+            n_workers=2,
+        )
+        self.addCleanup(
+            lambda: (
+                os.path.exists(bpe.vocab_file_path) and os.remove(bpe.vocab_file_path)
+            )
+        )
+        self.addCleanup(
+            lambda: (
+                os.path.exists(bpe.encoded_data_path)
+                and os.remove(bpe.encoded_data_path)
+            )
+        )
+        mock_pool.return_value = FakePool()
+
+        encoded = bpe.prepare_data(
+            "x" * 20000,
+            overwrite_vocabulary_file=True,
+            overwrite_encoded_data=True,
+        )
+
+        self.assertGreater(len(encoded), 0)
+        self.assertEqual(bpe.show_progress_calls, [False, False])
+
+    def test_encode_disables_progress_by_default(self):
+        with patch("autograd.text.tokenizer.tqdm") as mock_tqdm:
+            self.bpe.encode("hello")
+
+        self.assertTrue(mock_tqdm.called)
+        self.assertTrue(mock_tqdm.call_args.kwargs["disable"])
+
+    @patch("autograd.text.tokenizer.Pool")
+    @patch("autograd.text.tokenizer.xp.concatenate")
+    @patch("autograd.text.tokenizer.xp.savez_compressed")
+    def test_prepare_data_concatenates_parallel_chunks_once(
+        self, _mock_savez, mock_concatenate, mock_pool
+    ):
+        class RecordingBPE(BytePairEncoder):
+            def train_vocabulary(
+                self, input_text: str, overwrite_saved_file: bool = False
+            ):
+                return self._unicode_to_int_vocab, self._int_to_unicode_vocab
+
+            def encode(self, input_text: str, *, show_progress: bool = True, **kwargs):
+                return [len(input_text)]
+
+        class FakePool:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def imap(self, func, iterable):
+                for item in iterable:
+                    yield func(item)
+
+        def counted_concatenate(arrays, axis=0):
+            return ORIGINAL_NP_CONCATENATE(arrays, axis=axis)
+
+        bpe = RecordingBPE(
+            num_merges=0,
+            vocab_file_path="concat_vocab.pkl",
+            encoded_data_path="concat_encoded_data.npz",
+            n_workers=2,
+        )
+        self.addCleanup(
+            lambda: (
+                os.path.exists(bpe.encoded_data_path)
+                and os.remove(bpe.encoded_data_path)
+            )
+        )
+        mock_pool.return_value = FakePool()
+        mock_concatenate.side_effect = counted_concatenate
+
+        encoded = bpe.prepare_data(
+            "x" * 20000,
+            overwrite_vocabulary_file=False,
+            overwrite_encoded_data=True,
+        )
+
+        self.assertEqual(mock_concatenate.call_count, 1)
+        self.assertEqual(encoded.tolist(), [10000, 10000])
+
+    @patch(
+        "autograd.text.tokenizer.Pool", side_effect=AssertionError("pool not expected")
+    )
+    def test_prepare_data_enables_progress_for_single_text_encode(self, _mock_pool):
+        class RecordingBPE(BytePairEncoder):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.show_progress_calls = []
+
+            def encode(self, input_text: str, *, show_progress: bool = False, **kwargs):
+                self.show_progress_calls.append(show_progress)
+                return super().encode(input_text, show_progress=show_progress, **kwargs)
+
+        bpe = RecordingBPE(
+            num_merges=2,
+            vocab_file_path="single_progress_vocab.pkl",
+            encoded_data_path="single_progress_encoded_data.npz",
+            n_workers=4,
+        )
+        self.addCleanup(
+            lambda: (
+                os.path.exists(bpe.vocab_file_path) and os.remove(bpe.vocab_file_path)
+            )
+        )
+        self.addCleanup(
+            lambda: (
+                os.path.exists(bpe.encoded_data_path)
+                and os.remove(bpe.encoded_data_path)
+            )
+        )
+
+        bpe.prepare_data(
+            "hello hello",
+            overwrite_vocabulary_file=True,
+            overwrite_encoded_data=True,
+        )
+
+        self.assertEqual(bpe.show_progress_calls, [True])

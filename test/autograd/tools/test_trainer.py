@@ -1,5 +1,6 @@
 import math
 import os
+import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -272,13 +273,23 @@ class BaseTrainerTest(unittest.TestCase):
     def setUp(self):
         # A mock loss function returning a constant scalar
         self.loss_fn = MagicMock(return_value=Tensor(1.23))
+        self._tmp_dir = tempfile.TemporaryDirectory(dir="/tmp")
+        self._trainer_dirs = {}
+        self.checkpoint_dir = os.path.join(self._tmp_dir.name, "checkpoints")
+        self.metrics_dir = os.path.join(self._tmp_dir.name, "training_runs")
+        for trainer_cls in (SimpleTrainer, LLMTrainer):
+            self._trainer_dirs[trainer_cls] = (
+                trainer_cls.CHECKPOINT_DIR,
+                trainer_cls.METRICS_DIR,
+            )
+            trainer_cls.CHECKPOINT_DIR = self.checkpoint_dir
+            trainer_cls.METRICS_DIR = self.metrics_dir
 
     def tearDown(self) -> None:
-        metrics_path = (
-            f"{SimpleTrainer.METRICS_DIR}/{MockModelClass.__name__}_default.npz"
-        )
-        if os.path.exists(metrics_path):
-            os.remove(metrics_path)
+        for trainer_cls, (checkpoint_dir, metrics_dir) in self._trainer_dirs.items():
+            trainer_cls.CHECKPOINT_DIR = checkpoint_dir
+            trainer_cls.METRICS_DIR = metrics_dir
+        self._tmp_dir.cleanup()
 
 
 class TestSimpleTrainer(BaseTrainerTest):
