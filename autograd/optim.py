@@ -4,7 +4,7 @@ from abc import abstractmethod
 from collections import defaultdict
 from typing import Any, Callable, Dict, Optional
 
-from autograd.backend import eval_backend, xp
+from autograd.backend import LOW_PRECISION_FLOAT_DTYPES, eval_backend, xp
 from autograd.tensor import Tensor
 
 logger = logging.getLogger(__name__)
@@ -490,7 +490,7 @@ class Adam(Optimizer):
 
             # For mixed precision, keep Adam statistics in fp32 for stability.
             param_dtype = param.data.dtype
-            if grad.dtype in (xp.float16, xp.bfloat16):
+            if grad.dtype in LOW_PRECISION_FLOAT_DTYPES:
                 grad = grad.astype(xp.float32)
             new_m = beta1 * m_old + (1 - beta1) * grad  # update first order momentum
             new_v = beta2 * v_old + (1 - beta2) * (
@@ -511,7 +511,7 @@ class Adam(Optimizer):
             param.data -= self.lr * m_hat / (xp.sqrt(v_hat) + epsilon)
 
             # For mixed precision, return to the param_dtype so the following dense ops stay low precision.
-            if param_dtype in (xp.float16, xp.bfloat16):
+            if param_dtype in LOW_PRECISION_FLOAT_DTYPES:
                 param.data = param.data.astype(param_dtype)
         self._eval_backend()
         return None

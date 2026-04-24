@@ -9,7 +9,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from autograd import functional, nn, optim
-from autograd.backend import Array, xp
+from autograd.backend import LOW_PRECISION_FLOAT_DTYPES, Array, xp
 from autograd.data.collator import CausalLMWindowCollator
 from autograd.data.data_loader import DataLoader
 from autograd.data.dataset import TokenWindowDataset
@@ -178,7 +178,7 @@ class DecoderSublayer(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         input_dtype = x.data.dtype
-        low_precision_input = input_dtype in (xp.float16, xp.bfloat16)
+        low_precision_input = input_dtype in LOW_PRECISION_FLOAT_DTYPES
 
         # Pre-norm before attention
         a = self.layer_norm1(x)

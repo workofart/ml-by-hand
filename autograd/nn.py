@@ -12,7 +12,7 @@ from typing import (
     cast,
 )
 
-from autograd.backend import ARRAY_TYPE, NAME, ArrayLike, xp
+from autograd.backend import ARRAY_TYPE, LOW_PRECISION_FLOAT_DTYPES, NAME, ArrayLike, xp
 
 from .functional import (
     relu,
@@ -1254,7 +1254,7 @@ class LayerNorm(Module):
 
         # For mixed precision, keep LayerNorm statistics in fp32 for stability.
         input_dtype = x.data.dtype
-        low_precision_input = input_dtype in (xp.float16, xp.bfloat16)
+        low_precision_input = input_dtype in LOW_PRECISION_FLOAT_DTYPES
         stats_x = x.astype(xp.float32) if low_precision_input else x
 
         # Equation 4 in section 3.1 in the paper
