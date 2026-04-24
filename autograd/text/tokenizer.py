@@ -2,6 +2,7 @@ import logging
 import os
 import pickle
 from collections import Counter
+from functools import partial
 from multiprocessing import Pool, cpu_count
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -205,15 +206,27 @@ class BytePairEncoder:
                     for i in range(0, len(raw_text), chunk_size)
                 ]
                 with Pool(self.n_workers) as pool:
-                    partial_encoded = pool.map(self.encode, text_chunks)
+                    partial_encoded = list(
+                        tqdm(
+                            pool.imap(
+                                partial(self.encode, show_progress=False),
+                                text_chunks,
+                            ),
+                            total=len(text_chunks),
+                            desc="Encoding text chunks",
+                            unit="chunk",
+                        )
+                    )
             else:
-                partial_encoded = [self.encode(raw_text)]
+                partial_encoded = [self.encode(raw_text, show_progress=True)]
 
-            encoded_data = xp.array([], dtype=xp.int32)
-            for part in partial_encoded:
-                encoded_data = xp.concatenate(
-                    [encoded_data, xp.array(part, dtype=xp.int32)]
-                )
+            encoded_parts = [xp.array(part, dtype=xp.int32) for part in partial_encoded]
+            if not encoded_parts:
+                encoded_data = xp.array([], dtype=xp.int32)
+            elif len(encoded_parts) == 1:
+                encoded_data = encoded_parts[0]
+            else:
+                encoded_data = xp.concatenate(encoded_parts)
 
             # 4) Save to disk
             xp.savez_compressed(self.encoded_data_path, arr_0=encoded_data)
@@ -321,7 +334,9 @@ class BytePairEncoder:
 
         return self._unicode_to_int_vocab, self._int_to_unicode_vocab
 
-    def encode(self, input_text: str, **kwargs) -> List[int]:
+    def encode(
+        self, input_text: str, *, show_progress: bool = False, **kwargs
+    ) -> List[int]:
         """Encodes a raw input string into a list of BPE token IDs.
 
         The process is:
@@ -360,15 +375,22 @@ class BytePairEncoder:
                         self._unicode_to_int_vocab[bytes([b_int])]
                     )
 
-        # Apply learned merges in a naive pass
+        # Learned merges are replayed in training order. `pairs` only skips the
+        # full token scan when a learned pair is absent from the current input.
+        token_ids: Sequence[int] = byte_encoded_chars
+        pairs = set(zip(token_ids, token_ids[1:]))
         for pair, new_id in tqdm(
-            self.learned_merges, desc="Applying merges to encode", leave=False
+            self.learned_merges,
+            desc="Applying merges to encode",
+            leave=False,
+            disable=not show_progress,
         ):
-            byte_encoded_chars = list(
-                self._merge_pairs(pair, new_id, byte_encoded_chars)
-            )
+            if pair not in pairs:
+                continue
+            token_ids = self._merge_pairs(pair, new_id, token_ids)
+            pairs = set(zip(token_ids, token_ids[1:]))
 
-        return byte_encoded_chars
+        return list(token_ids)
 
     def decode(self, encoded_tokens: List[int]) -> str:
         """Decodes a sequence of BPE token IDs back into a string.
@@ -559,10 +581,12 @@ class BytePairEncoder:
             >>> merged = BytePairEncoder._merge_pairs((65, 66), 300, corpus) # Expected: (300, 67, 300) or similar depending on merge implementation
         """
         merged_tokens: List[int] = []
+        first, second = pair
         i = 0
-        while i < len(corpus):
+        last = len(corpus) - 1
+        while i <= last:
             # If we see the pair, merge them
-            if i < len(corpus) - 1 and (corpus[i], corpus[i + 1]) == pair:
+            if i < last and corpus[i] == first and corpus[i + 1] == second:
                 merged_tokens.append(new_idx)
                 i += 2
             else:

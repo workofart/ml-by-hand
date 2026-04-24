@@ -1,5 +1,6 @@
 import logging
 import os
+import tempfile
 from unittest import TestCase
 
 from sklearn.datasets import load_breast_cancer, load_diabetes
@@ -47,6 +48,15 @@ class RegressionModel(nn.Module):
 
 
 class TestTrain(TestCase):
+    def setUp(self) -> None:
+        self._tmp_dir = tempfile.TemporaryDirectory(dir="/tmp")
+        self._trainer_dirs = (
+            SimpleTrainer.CHECKPOINT_DIR,
+            SimpleTrainer.METRICS_DIR,
+        )
+        SimpleTrainer.CHECKPOINT_DIR = os.path.join(self._tmp_dir.name, "checkpoints")
+        SimpleTrainer.METRICS_DIR = os.path.join(self._tmp_dir.name, "training_runs")
+
     def tearDown(self) -> None:
         reg_metrics_path = (
             f"{SimpleTrainer.METRICS_DIR}/{RegressionModel.__name__}_default.npz"
@@ -58,6 +68,11 @@ class TestTrain(TestCase):
             os.remove(reg_metrics_path)
         if os.path.exists(classifier_metrics_path):
             os.remove(classifier_metrics_path)
+        (
+            SimpleTrainer.CHECKPOINT_DIR,
+            SimpleTrainer.METRICS_DIR,
+        ) = self._trainer_dirs
+        self._tmp_dir.cleanup()
 
     def test_binary_classification(self):
         X, y = load_breast_cancer(return_X_y=True)
