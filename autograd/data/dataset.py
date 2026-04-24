@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Iterator, Literal, Optional, Sequence
 
+import numpy as np
+
 from autograd.backend import Array, xp
 from autograd.data.types import TokenWindowExample
 
@@ -287,12 +289,13 @@ class TokenWindowDataset(IterableDataset):
                     if self.examples_per_epoch is None
                     else min(self.offset_buffer_size, self.examples_per_epoch - yielded)
                 )
+                # Keeping offsets on CPU so we're using numpy explicitly
 
-                offsets = xp.random.randint(
+                offsets = np.random.randint(
                     0,
                     self.valid_window_count,  # exclusive high
-                    (remaining,),
-                    dtype=xp.int32,
+                    size=remaining,
+                    dtype=np.int32,
                 )
 
                 for offset in offsets:

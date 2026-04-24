@@ -127,6 +127,7 @@ def _to_numpy(x: Any):
 # -----------------------------------------------------------------------------
 
 _backend_random = xp.random
+_host_random_seed = _host_np.random.seed
 _native_random_fns = {
     n: getattr(_backend_random, n, None)
     for n in (
@@ -162,6 +163,7 @@ def _seed_backend_random(seed: int) -> None:
     fn = _native_random_fns["seed"]
     if callable(fn):
         fn(seed)
+    _host_random_seed(seed)
     if IS_MLX:
         _backend_random_state = _backend_random.key(seed)
 
