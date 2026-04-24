@@ -243,7 +243,7 @@ class Optimizer:
         elif hasattr(params, "grad"):
             update_fn(params)
 
-    def _clip_grad_norm(self, max_norm: float, norm_type: float = 2.0) -> None:
+    def _clip_grad_norm(self, max_norm: float, norm_type: float = 2.0) -> float:
         r"""
         Scale the gradients of all parameters in-place so that their norm is at most max_norm.
 
@@ -260,7 +260,7 @@ class Optimizer:
             norm_type (float, optional): The type of norm to use (default is 2, Euclidean norm a.k.a. L2 norm).
         """
         # Compute the global norm of all gradients
-        total_norm = 0.0
+        total_norm = xp.asarray(0.0, dtype=xp.float32)
         for param in self.model_parameters.values():
             if param.grad is not None:
                 grad_data = param.grad.data
@@ -277,6 +277,8 @@ class Optimizer:
         for param in self.model_parameters.values():
             if param.grad is not None:
                 param.grad.data *= scale_factor
+
+        return float(xp.to_scalar(total_norm))
 
     def zero_grad(self) -> None:
         """
@@ -299,7 +301,7 @@ class Optimizer:
 
     def grad_l2_norm(self) -> float:
         """Return the L2 norm of all current parameter gradients."""
-        grad_norm = 0.0
+        grad_norm = xp.asarray(0.0, dtype=xp.float32)
         for param in self.model_parameters.values():
             if param.grad is not None:
                 grad_norm += (param.grad.data**2).sum()
@@ -362,7 +364,7 @@ class Optimizer:
                             f"Skipping state for param {param_name} not found in current model"
                         )
 
-    def step(self) -> None:
+    def step(self) -> Optional[float]:
         """
         Perform a single optimization step.
 
@@ -370,6 +372,7 @@ class Optimizer:
         """
         self.timestep += 1
         self.update_lr()
+        return None
 
 
 class SGD(Optimizer):
@@ -388,7 +391,7 @@ class SGD(Optimizer):
         """
         super(SGD, self).__init__(model_parameters, lr=lr, **kwargs)
 
-    def step(self) -> None:
+    def step(self) -> Optional[float]:
         """
         Perform a single optimization step using SGD.
 
@@ -403,10 +406,14 @@ class SGD(Optimizer):
                 return
             param.data -= self.lr * param.grad.data
 
+        grad_l2_norm = None
         if "max_grad_norm" in self._hyperparams:
-            self._clip_grad_norm(self._hyperparams["max_grad_norm"], norm_type=2.0)
+            grad_l2_norm = self._clip_grad_norm(
+                self._hyperparams["max_grad_norm"], norm_type=2.0
+            )
 
         self._recursive_param_op(self.model_parameters, update_fn)
+        return grad_l2_norm
 
 
 class Adam(Optimizer):
@@ -455,7 +462,7 @@ class Adam(Optimizer):
         self._states["m"] = defaultdict(float)  # first momentum estimate
         self._states["v"] = defaultdict(float)  # second momentum estimate
 
-    def step(self) -> None:
+    def step(self) -> Optional[float]:
         """
         Perform a single optimization step using the Adam algorithm.
 
@@ -465,8 +472,11 @@ class Adam(Optimizer):
         """
         super().step()
 
+        grad_l2_norm = None
         if "max_grad_norm" in self._hyperparams:
-            self._clip_grad_norm(self._hyperparams["max_grad_norm"], norm_type=2.0)
+            grad_l2_norm = self._clip_grad_norm(
+                self._hyperparams["max_grad_norm"], norm_type=2.0
+            )
 
         beta1 = self._hyperparams["beta1"]
         beta2 = self._hyperparams["beta2"]
@@ -499,3 +509,4 @@ class Adam(Optimizer):
             if weight_decay > 0.0:
                 param.data = param.data - self.lr * weight_decay * param.data
             param.data -= self.lr * m_hat / (xp.sqrt(v_hat) + epsilon)
+        return grad_l2_norm

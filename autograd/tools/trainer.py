@@ -329,17 +329,12 @@ class AbstractTrainer(ABC):
 
                     self.global_step += 1
                     progress_bar.update(1)
+                    should_report = plan.should_report(self.global_step)
 
-                    # whether we should flush
-                    if state.has_enough_batches(
-                        accumulation_steps
-                    ) or plan.should_report(self.global_step):
-                        self.optimizer_step(
-                            state,
-                            record_grad_norm=plan.should_report(self.global_step),
-                        )
+                    if state.has_enough_batches(accumulation_steps):
+                        self.optimizer_step(state)
 
-                    if plan.should_report(self.global_step):
+                    if should_report:
                         eval_state = (
                             self.evaluate(val_data_loader)
                             if val_data_loader is not None
@@ -361,22 +356,14 @@ class AbstractTrainer(ABC):
                     )
 
                 # This is after all the batches in the data loader
-                self.optimizer_step(
-                    state,
-                    record_grad_norm=False,
-                )
+                self.optimizer_step(state)
 
-    def optimizer_step(
-        self, state: TrainingState, *, record_grad_norm: bool = True
-    ) -> None:
+    def optimizer_step(self, state: TrainingState) -> None:
         if state.accumulated_batches == 0:
             return
 
         self.optimizer.scale_gradients(1.0 / state.accumulated_batches)
-
-        if record_grad_norm:
-            self.last_grad_l2_norm = self.optimizer.grad_l2_norm()
-        self.optimizer.step()
+        self.last_grad_l2_norm = self.optimizer.step()
         self.optimizer.zero_grad()
         state.accumulated_batches = 0
 
@@ -407,8 +394,9 @@ class AbstractTrainer(ABC):
             "epoch": completed_epochs,
             "step": float(self.global_step),
             **state.to_metrics_row(eval_state=eval_state),
-            "grad_l2_norm": self.last_grad_l2_norm,
         }
+        if self.last_grad_l2_norm is not None:
+            row["grad_l2_norm"] = self.last_grad_l2_norm
 
         if plan.should_checkpoint(self.global_step):
             self._maybe_save_checkpoint(plan=plan, eval_state=eval_state)

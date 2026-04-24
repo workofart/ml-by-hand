@@ -201,6 +201,17 @@ class TestOptimizer(TestCase):
         assert allclose(custom_final_g1, torch_final_g1, rtol=1e-6, atol=1e-7)
         assert allclose(custom_final_g2, torch_final_g2, rtol=1e-6, atol=1e-7)
 
+    def test_clip_grad_norm_returns_pre_clip_l2_norm(self):
+        g1 = xp.array([3.0, 4.0], dtype=xp.float32)
+        g2 = xp.array([12.0], dtype=xp.float32)
+
+        self.params["param1"].grad = Tensor(g1)
+        self.params["param2"].grad = Tensor(g2)
+
+        grad_norm = self.optimizer._clip_grad_norm(max_norm=1.0, norm_type=2.0)
+
+        self.assertAlmostEqual(grad_norm, 13.0, places=6)
+
     def test_clip_grad_norm_l2_above_threshold(self):
         g1 = xp.array([3.0, 4.0, 5.0], dtype=xp.float32)
         g2 = xp.array([6.0, 7.0, 8.0], dtype=xp.float32)
