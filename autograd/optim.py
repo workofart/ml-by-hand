@@ -59,6 +59,14 @@ class CosineScheduler(LRScheduler):
             lr_decay_iters (int, optional): Step at which learning rate decay ends. Defaults to 200.
             min_lr (float, optional): Minimum learning rate. Defaults to 1e-4.
         """
+        if warmup_steps < 0:
+            raise ValueError(f"warmup_steps must be >= 0, got {warmup_steps}")
+        if lr_decay_iters <= warmup_steps:
+            raise ValueError(
+                "CosineScheduler requires lr_decay_iters > warmup_steps, "
+                f"got warmup_steps={warmup_steps}, lr_decay_iters={lr_decay_iters}"
+            )
+
         self.warmup_steps = warmup_steps
         self.lr_decay_iters = lr_decay_iters
         self.min_lr = min_lr
