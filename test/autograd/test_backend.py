@@ -141,6 +141,15 @@ def test_active_backend_random_state_round_trip_replays_sample():
     assert np.array_equal(xp.to_numpy(first), xp.to_numpy(second))
 
 
+def test_backend_seed_replays_host_numpy_random_sample():
+    xp.random.seed(123)
+    first = np.random.randint(0, 100, size=8, dtype=np.int32)
+    xp.random.seed(123)
+    second = np.random.randint(0, 100, size=8, dtype=np.int32)
+
+    assert np.array_equal(first, second)
+
+
 def test_numpy_random_state_round_trip_replays_sample(monkeypatch):
     module = _load_backend_module(monkeypatch, env_backend="numpy")
 

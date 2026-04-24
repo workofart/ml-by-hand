@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,27 +12,12 @@ from autograd.data.dataset import (
     TokenWindowDataset,
     TransformDataset,
 )
-from autograd.data.utils import (
-    openai_chat_to_prompt_completion,
-    tokenize_prompt_completion,
-)
-
-
-class MockBPE:
-    def encode(self, token, allowed_special=set()):
-        if token in allowed_special:
-            if token == "<PAD>":
-                return [0]
-            if token == "<SOS>":
-                return [1]
-        return [ord(char) for char in token]
 
 
 class TestDataset(unittest.TestCase):
     def setUp(self):
         self.X = xp.arange(20).reshape(10, 2)
         self.y = xp.arange(10)
-        self.bpe = MockBPE()
 
     def test_paired_iterable_dataset_yields_single_example(self):
         dataset = PairedIterableDataset(self.X, self.y, shuffle=False)
@@ -131,21 +117,10 @@ class TestDataset(unittest.TestCase):
                 shuffle=False,
             )
 
-    def test_token_sequence_dataset_holds_tokenized_prompt_completion_examples(self):
-        tokenized_example = tokenize_prompt_completion(
-            openai_chat_to_prompt_completion(
-                {
-                    "messages": [
-                        {"role": "system", "content": "ABC"},
-                        {"role": "assistant", "content": "DE"},
-                    ]
-                }
-            ),
-            self.bpe,
-        )
+    def test_token_sequence_dataset_holds_tokenized_causal_lm_examples(self):
         dataset = TokenSequenceDataset(
-            token_sequences=[tokenized_example["tokens"]],
-            loss_masks=[tokenized_example["loss_mask"]],
+            token_sequences=[xp.array([65, 66, 67, 2, 68, 69, 2], dtype=xp.int32)],
+            loss_masks=[xp.array([0, 0, 0, 0, 1, 1, 1], dtype=xp.int32)],
             shuffle=False,
         )
 
@@ -153,12 +128,12 @@ class TestDataset(unittest.TestCase):
 
         self.assertTrue(
             xp.array_equal(
-                example["tokens"], xp.array([65, 66, 67, 68, 69], dtype=xp.int32)
+                example["tokens"], xp.array([65, 66, 67, 2, 68, 69, 2], dtype=xp.int32)
             )
         )
         self.assertTrue(
             xp.array_equal(
-                example["loss_mask"], xp.array([0, 0, 0, 1, 1], dtype=xp.int32)
+                example["loss_mask"], xp.array([0, 0, 0, 0, 1, 1, 1], dtype=xp.int32)
             )
         )
 
@@ -237,3 +212,32 @@ def test_token_window_dataset_rejects_examples_per_epoch_for_sequential_sampling
             sampling="sequential",
             examples_per_epoch=3,
         )
+
+
+def test_token_window_dataset_random_offsets_do_not_use_backend_scalar_rng(
+    monkeypatch,
+):
+    dataset = TokenWindowDataset(
+        xp.arange(20, dtype=xp.int32),
+        window_len=5,
+        sampling="random",
+        examples_per_epoch=4,
+        offset_buffer_size=2,
+    )
+    monkeypatch.setattr(
+        "autograd.data.dataset.xp",
+        SimpleNamespace(
+            random=SimpleNamespace(
+                randint=lambda *args, **kwargs: (_ for _ in ()).throw(
+                    AssertionError(
+                        "backend random offsets would require scalar readback"
+                    )
+                ),
+            ),
+        ),
+    )
+
+    offsets = [example.offset for example in dataset]
+
+    assert len(offsets) == 4
+    assert all(0 <= offset < dataset.valid_window_count for offset in offsets)
