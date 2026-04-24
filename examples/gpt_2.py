@@ -9,7 +9,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from autograd import functional, nn, optim
-from autograd.backend import Array, xp
+from autograd.backend import LOW_PRECISION_FLOAT_DTYPES, Array, xp
 from autograd.data.collator import CausalLMWindowCollator
 from autograd.data.data_loader import DataLoader
 from autograd.data.dataset import TokenWindowDataset
@@ -53,9 +53,12 @@ class GPT2(nn.Module):
         dropout_prob: float = 0.1,
         num_decoder_layers: int = 12,  # GPT-2 small has 12 layers
         activation_checkpointing: bool = False,
+        parameter_dtype=None,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
+        if isinstance(parameter_dtype, str):
+            parameter_dtype = getattr(xp, parameter_dtype)
         self.hidden_size = hidden_size
         self.max_seq_len = max_seq_len
         self.activation_checkpointing = activation_checkpointing
@@ -85,6 +88,9 @@ class GPT2(nn.Module):
         self.apply(
             lambda m: self._scale_weights(m, num_decoder_layers * 2)
         )  # there are 2 residual layers in each decoder sublayer
+        if parameter_dtype is not None:
+            for parameter in self.parameters.values():
+                parameter.data = parameter.data.astype(parameter_dtype)
 
     def forward(self, tokens: Tensor) -> Tensor:
         """
@@ -171,14 +177,24 @@ class DecoderSublayer(nn.Module):
         )
 
     def forward(self, x: Tensor) -> Tensor:
+        input_dtype = x.data.dtype
+        low_precision_input = input_dtype in LOW_PRECISION_FLOAT_DTYPES
+
         # Pre-norm before attention
         a = self.layer_norm1(x)
 
         x = x + self.multi_head_attention(a, a, a, is_causal=True)
+        if low_precision_input:
+            # Dense attention can promote through its fp32 mask path; cast the residual
+            # stream back so later matmuls keep the intended low-precision activations.
+            x = x.astype(input_dtype)
 
         # Pre-norm before feed-forward
         b = self.layer_norm2(x)
         x = x + self.feedforward(b)
+        if low_precision_input:
+            # Linear bias/addition can also promote; preserve the block's input dtype.
+            x = x.astype(input_dtype)
         return x
 
 
@@ -259,6 +275,7 @@ if __name__ == "__main__":
             "max_seq_len": 1024,  # GPT-2 uses 1024
             "num_decoder_layers": 12,  # GPT-2 uses 12
             "activation_checkpointing": True,
+            "parameter_dtype": "bfloat16",
         },
         optimizer_kwargs={
             "lr": 1e-3,

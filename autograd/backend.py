@@ -66,6 +66,14 @@ if IS_CUPY and xp.cuda.runtime.getDeviceCount() <= 0:
     )
 
 ARRAY_TYPE = type(xp.array(0, dtype=xp.float32)) if IS_MLX else xp.ndarray
+LOW_PRECISION_FLOAT_DTYPES = tuple(
+    dtype
+    for dtype in (
+        getattr(xp, "float16", None),
+        getattr(xp, "bfloat16", None),
+    )
+    if dtype is not None
+)
 
 
 # ---------------------------------------------------------------------------

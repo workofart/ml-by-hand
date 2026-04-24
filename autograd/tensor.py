@@ -506,6 +506,9 @@ class Tensor:
 
         return SetItem.apply(self, value, idx=idx)
 
+    def astype(self, dtype: Any) -> "Tensor":
+        return Cast.apply(self, dtype=dtype)
+
     def sum(
         self, axis: Optional[Union[int, Tuple[int, ...]]] = None, keepdims: bool = False
     ) -> "Tensor":
@@ -1667,6 +1670,15 @@ class SetItem(Function):
             >>> # During backprop, only index 1 will contribute to the gradient.
         """
         return grad.data[self.idx]
+
+
+class Cast(Function):
+    def forward(self, x: Array, dtype: Any) -> Array:
+        self.input_dtype = x.dtype
+        return x.astype(dtype)
+
+    def backward(self, grad: "Tensor") -> Array:
+        return grad.data.astype(self.input_dtype)
 
 
 class Sqrt(Function):
