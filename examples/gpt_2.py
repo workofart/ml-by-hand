@@ -246,11 +246,11 @@ if __name__ == "__main__":
         training_run_name="wiki",
         dataset_name="wiki_simple_english",
         max_steps=200000,
-        max_eval_steps=200,
-        checkpoint_freq=10000,
-        report_every_steps=200,
+        max_eval_steps=20,
+        checkpoint_freq=2000,
+        report_every_steps=100,
         global_batch_size=32,
-        micro_batch_size=1,
+        micro_batch_size=4,
         max_grad_norm=1.0,
         model_kwargs={
             "num_attention_heads": 12,  # GPT-2 small uses 12
@@ -270,7 +270,7 @@ if __name__ == "__main__":
                 "lr_decay_iters": 160000,  # 80% of max_steps
             },
         },
-        resume_epoch=30000,  # Set this to None if you don't want to load from checkpoint
+        resume_epoch=55000,  # Set this to None if you don't want to load from checkpoint
         teacher_forcing=False,
         label_smoothing=0.1,
         eval_start_string="April is",
