@@ -1502,19 +1502,32 @@ class Matmul(Function):
             # shape of grad_x should match x.data.shape
 
         if y.requires_grad:
-            # Transpose x on the last two dims (x^T)
-            x_t = xp.swapaxes(x.data, -1, -2)
-            raw_grad_y = xp.matmul(x_t, grad.data)
-            # Now if y was 2D => shape (m, p), but raw_grad_y might be (B,m,p). We sum over batch dims.
-            # Let's figure out how many leading dims y has (besides the last 2).
-            if y.data.ndim == 2 and raw_grad_y.ndim > 2:
-                # sum over all batch/time dims => axis=0..(raw_grad_y.ndim-2)
-                # e.g. raw_grad_y is (B, m, p), we want (m, p)
-                axes_to_sum = tuple(range(raw_grad_y.ndim - 2))
-                grad_y = xp.sum(raw_grad_y, axis=axes_to_sum)
+            if y.data.ndim == 2 and x.data.ndim > 2:
+                # When x is batched but y is a shared 2D weight matrix:
+                #   x: (..., m), grad: (..., p), y: (m, p)
+                # flatten the leading dims so we compute the final weight
+                # gradient directly as:
+                #   x_flat.T @ grad_flat -> (m, p)
+                # instead of first materializing a batched (..., m, p)
+                # temporary and summing it afterward.
+                x_flat = x.data.reshape(-1, x.data.shape[-1])
+                grad_flat = grad.data.reshape(-1, grad.data.shape[-1])
+                grad_y = xp.matmul(xp.swapaxes(x_flat, -1, -2), grad_flat)
             else:
-                # If y had a batch dimension as well, raw_grad_y already has the right shape
-                grad_y = raw_grad_y
+                # Otherwise preserve the general batched matmul path, including
+                # cases where y itself has batch dimensions.
+                x_t = xp.swapaxes(x.data, -1, -2)
+                raw_grad_y = xp.matmul(x_t, grad.data)
+                # Now if y was 2D => shape (m, p), but raw_grad_y might be (B,m,p). We sum over batch dims.
+                # Let's figure out how many leading dims y has (besides the last 2).
+                if y.data.ndim == 2 and raw_grad_y.ndim > 2:
+                    # sum over all batch/time dims => axis=0..(raw_grad_y.ndim-2)
+                    # e.g. raw_grad_y is (B, m, p), we want (m, p)
+                    axes_to_sum = tuple(range(raw_grad_y.ndim - 2))
+                    grad_y = xp.sum(raw_grad_y, axis=axes_to_sum)
+                else:
+                    # If y had a batch dimension as well, raw_grad_y already has the right shape
+                    grad_y = raw_grad_y
 
         return grad_x, grad_y
 
