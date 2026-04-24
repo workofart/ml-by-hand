@@ -1,6 +1,7 @@
 import asyncio
 import threading
 from unittest import TestCase
+from unittest.mock import patch
 
 import torch  # for comparison
 
@@ -377,6 +378,44 @@ class TestTensorOps(TestTensor):
         # Verify our manual computation matches PyTorch
         assert array_equal(manual_x_grad, x_torch.grad.numpy())
         assert array_equal(manual_w_grad, w_torch.grad.numpy())
+
+    def test_backward_batched_input_2d_weight_avoids_batched_weight_grad_matmul(self):
+        batch_size, seq_len, hidden_size, vocab_size = 2, 3, 4, 5
+        x = Tensor(
+            xp.random.normal(shape=(batch_size, seq_len, hidden_size)).astype(
+                xp.float32
+            ),
+            requires_grad=True,
+        )
+        w = Tensor(
+            xp.random.normal(shape=(hidden_size, vocab_size)).astype(xp.float32),
+            requires_grad=True,
+        )
+
+        z = x @ w
+
+        matmul_calls = []
+        original_matmul = xp.matmul
+
+        def recording_matmul(lhs, rhs):
+            matmul_calls.append((lhs.shape, rhs.shape))
+            return original_matmul(lhs, rhs)
+
+        with patch("autograd.tensor.xp.matmul", side_effect=recording_matmul):
+            z.backward(xp.ones_like(z.data))
+
+        assert not any(
+            len(lhs_shape) > 2 and len(rhs_shape) > 2
+            for lhs_shape, rhs_shape in matmul_calls
+        )
+
+        x_torch = torch.tensor(x.data, requires_grad=True)
+        w_torch = torch.tensor(w.data, requires_grad=True)
+        z_torch = x_torch @ w_torch
+        z_torch.backward(torch.ones_like(z_torch))
+
+        assert allclose(x.grad.data, x_torch.grad.numpy(), rtol=1e-4, atol=1e-5)
+        assert allclose(w.grad.data, w_torch.grad.numpy(), rtol=1e-4, atol=1e-5)
 
     def test_batch_multiplication(self):
         """Test element-wise multiplication with batched tensors"""
