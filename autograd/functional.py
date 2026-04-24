@@ -1072,26 +1072,67 @@ class CrossEntropy(Function):
             y_pred = y_pred.reshape(batch_size * seq_len, num_classes)
             y_true = y_true.reshape(batch_size * seq_len)
         else:
-            batch_size, num_classes = y_pred.shape
+            num_classes = y_pred.shape[-1]  # avoid returning batch_size to save memory
 
         # 2. Mark which target positions contribute to the loss.
         non_ignored_weights = (y_true != ignore_index).astype(xp.float32)
-        non_ignored_count = max(1.0, float(non_ignored_weights.sum()))
+        safe_y_true = xp.where(non_ignored_weights > 0, y_true, 0)
+        non_ignored_count = xp.maximum(
+            xp.sum(non_ignored_weights),
+            xp.array(1.0, dtype=xp.float32),
+        )
 
-        # 3. Compute stable log-softmax:
-        # log(softmax(y_pred)) = y_pred - log(sum(exp(y_pred)))
-        # However, log(sum(exp(y_pred))) can overflow if y_pred is large.
-        # To avoid this, we use the following trick:
-        # shifted = y_pred - max(y_pred) along each row
+        r"""
+        3. Shift the logits so the softmax-related terms stay numerically stable.
+
+        This is algebraically the same cross-entropy as the standard
+        log-softmax formulation; we are only changing how we materialize the
+        intermediate tensors.
+
+        Starting from
+        $$
+        \log \operatorname{softmax}(y_{\text{pred}})_{i,j}
+        = y_{\text{pred}, i,j} - \log \sum_k \exp(y_{\text{pred}, i,k})
+        $$
+        define
+        $$
+        \operatorname{shifted}_{i,j}
+        = y_{\text{pred}, i,j} - \max_k y_{\text{pred}, i,k}
+        $$
+        Then
+        $$
+        \exp(\operatorname{shifted}_{i,j})
+        = \exp(y_{\text{pred}, i,j} - \max_k y_{\text{pred}, i,k})
+        = \frac{\exp(y_{\text{pred}, i,j})}{\exp(\max_k y_{\text{pred}, i,k})}
+        $$
+        and because softmax is invariant to subtracting the same constant from
+        every entry in a row,
+        $$
+        \log \operatorname{softmax}(y_{\text{pred}})_{i,j}
+        = \operatorname{shifted}_{i,j}
+        - \log \sum_k \exp(\operatorname{shifted}_{i,k})
+        $$
+        $$
+        \operatorname{softmax}(y_{\text{pred}})_{i,j}
+        = \frac{\exp(\operatorname{shifted}_{i,j})}
+        {\sum_k \exp(\operatorname{shifted}_{i,k})}
+        $$
+
+        The largest value in each shifted row is 0, so the exponentials are
+        numerically safe to compute. We store the probabilities
+        $p_{i,j} = \operatorname{softmax}(y_{\text{pred}})_{i,j}$ for backward,
+        and reconstruct only the specific log-softmax terms needed by the loss,
+        rather than materializing the full log-softmax matrix.
+        """
         shifted = y_pred - xp.max(y_pred, axis=1, keepdims=True)
-
-        # Going back to the log-softmax formula:
-        # log(softmax(y_pred)) = y_pred - log(sum(exp(y_pred)))
-        # Instead of computing exp(y_pred), we compute exp(shifted):
-        # exp(shifted) = exp(y_pred - max(y_pred)) = exp(y_pred) / exp(max(y_pred))
-        # Then we have: log(softmax(shifted)) = shifted - log(sum(exp(shifted)))
-        # the largest value in shifted is 0, so sum(exp(shifted)) is safe to compute.
-        log_softmax = shifted - xp.log(xp.sum(xp.exp(shifted), axis=1, keepdims=True))
+        exp_shifted = xp.exp(shifted)
+        denom = xp.sum(exp_shifted, axis=1, keepdims=True)
+        probs = exp_shifted / denom
+        # TODO: If CE memory becomes a bottleneck, consider rematerializing
+        # softmax in backward instead of storing this full probability matrix.
+        # denom has shape (N, 1); squeeze the singleton dimension so it can be
+        # subtracted from the per-row terms below.
+        log_denom = xp.log(denom[:, 0])
 
         r"""
         4. Compute the label-smoothed cross-entropy for each element i.
@@ -1108,10 +1149,11 @@ class CrossEntropy(Function):
         $$
         Here $p_{i,j}$ is the model probability for example i and class j.
         """
-        # We implement the second line directly using log-softmax.
-        safe_y_true = xp.where(non_ignored_weights > 0, y_true, 0)
-        log_p_correct = log_softmax[xp.arange(len(y_true)), safe_y_true]
-        mean_log_p = xp.mean(log_softmax, axis=1)
+        # Since log_softmax[i, j] = shifted[i, j] - log_denom[i], we can compute
+        # the two terms needed by the smoothed loss directly without
+        # materializing the full log_softmax matrix.
+        log_p_correct = shifted[xp.arange(len(y_true)), safe_y_true] - log_denom
+        mean_log_p = xp.mean(shifted, axis=1) - log_denom
         losses = -(
             (1.0 - label_smoothing) * log_p_correct + label_smoothing * mean_log_p
         )
@@ -1120,9 +1162,10 @@ class CrossEntropy(Function):
         loss_val = xp.sum(losses * non_ignored_weights) / non_ignored_count
 
         # 6) Store for backward pass:
-        self.log_softmax = log_softmax
+        self.probs = probs
         self.y_true = safe_y_true
         self.non_ignored_weights = non_ignored_weights
+        self.non_ignored_count = non_ignored_count
         self.label_smoothing = label_smoothing
         self.num_classes = num_classes
         return loss_val
@@ -1135,12 +1178,8 @@ class CrossEntropy(Function):
         $$
         \frac{\partial L}{\partial logits_{i,j}} = p_{i,j} - T_{i,j}
         $$
-        where
-        $$
-        p_{i,j} = exp(log\_softmax_{i,j})
-        $$
-        is the model probability for example $i$ and class $j$, and the target
-        distribution $T_{i,j}$ is defined as:
+        where $p_{i,j}$ is the stored model probability for example $i$ and class
+        $j$, and the target distribution $T_{i,j}$ is defined as:
         $$
         T_{i,j} = (1 - \epsilon)\,y_{i,j} + \frac{\epsilon}{K}
         $$
@@ -1152,33 +1191,45 @@ class CrossEntropy(Function):
         Returns:
             Tuple[xp.ndarray, None]: A tuple containing the gradient with respect to the logits and None for $y_{true}$.
         """
-        # 1. Softmax from log-softmax is safe: p_{i,j} = exp(log_sm[i,j])
-        softmax_probs = xp.exp(self.log_softmax)
+        # 1. Start from a dense copy of the probabilities.
+        # We will transform this buffer into p_{i,j} - T_{i,j} in-place, which
+        # avoids building a separate dense target tensor of the same shape.
+        grad_out = self.probs * 1.0
 
-        # 3. Identify which samples contribute to the loss.
+        # 2. Expand the non-ignored mask so it can zero out whole rows in the
+        # logits-shaped gradient matrix.
         row_mask = xp.expand_dims(self.non_ignored_weights, axis=1)
-        non_ignored_count = max(1.0, float(row_mask.sum()))
 
         r"""
-        4. Label smoothing target distribution.
+        3. Subtract the label-smoothed target distribution.
         $$
         q'(k \mid x) = (1 - \epsilon)\,\delta_{k,y} + \frac{\epsilon}{K}
         $$
         where $\delta_{k,y}$ is the Kronecker delta.
-        so for each row we start from the uniform eps / K mass on every class,
-        then add the remaining (1 - eps) mass to the correct class.
+
+        Since grad_out starts as $p_{i,j}$, subtracting $\frac{\epsilon}{K}$
+        from every class and then subtracting $(1 - \epsilon)$ from the correct
+        class gives exactly
+        $$
+        p_{i,j} - \left((1 - \epsilon)\,\delta_{k,y} + \frac{\epsilon}{K}\right)
+        = p_{i,j} - T_{i,j}
+        $$
         """
-        off_value = self.label_smoothing / self.num_classes
-        target = xp.ones_like(softmax_probs) * off_value
-        correct_idx = (xp.arange(self.y_true.shape[0]), self.y_true)
-        target = xp.scatter_add(target, correct_idx, 1.0 - self.label_smoothing)
-        target *= row_mask
+        if self.label_smoothing:
+            grad_out -= self.label_smoothing / self.num_classes
+        grad_out[
+            xp.arange(self.y_true.shape[0]),
+            self.y_true,
+        ] -= 1.0 - self.label_smoothing
 
-        # 6. Multiply by upstream grad and average by non-ignored positions.
-        grad_out = (softmax_probs - target) * row_mask
-        grad_out *= grad.data / non_ignored_count
+        # 4. Zero ignored rows.
+        grad_out *= row_mask
 
-        # 7. Reshape to original shape if 3D
+        # 5. Apply the upstream gradient and divide by the number of
+        # non-ignored positions to match the forward average.
+        grad_out *= grad.data / self.non_ignored_count
+
+        # 6. Reshape to original shape if the forward pass flattened 3D logits.
         grad_out = grad_out.reshape(self.original_shape)
 
         # We do not need grad for y_true

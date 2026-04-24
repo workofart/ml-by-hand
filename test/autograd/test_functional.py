@@ -1,4 +1,5 @@
 from unittest import TestCase
+from unittest.mock import patch
 
 import torch  # for test comparisons
 
@@ -279,6 +280,25 @@ class TestCrossEntropy(TestCase):
         loss.backward()
         torch_loss.backward()
         assert allclose(logits.grad.data, logits_torch.grad.detach().numpy(), atol=1e-6)
+
+    def test_cross_entropy_backward_does_not_build_dense_target_distribution(self):
+        logits = Tensor(
+            data=xp.array([[1.5, -0.2, 0.3], [0.1, 0.4, -1.0]], dtype=xp.float32),
+            requires_grad=True,
+        )
+        targets = xp.array([0, 1], dtype=xp.int64)
+
+        loss = functional.cross_entropy(logits, targets, label_smoothing=0.1)
+
+        with patch.object(
+            functional.xp,
+            "ones_like",
+            side_effect=AssertionError("cross entropy backward built a dense target"),
+        ):
+            loss.backward(xp.array(1.0, dtype=xp.float32))
+
+        assert logits.grad is not None
+        assert logits.grad.shape == logits.shape
 
 
 class TestHingeLoss(TestCase):
