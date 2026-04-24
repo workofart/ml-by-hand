@@ -42,6 +42,10 @@ class GenericTrainingConfig:
     report_every_steps: Optional[int] = None
     # Whether to load from a checkpoint
     resume_epoch: Optional[int] = None
+    # Optional checkpoint basename (without .json/.npz) used to initialize
+    # model weights before training. The configured architecture must match
+    # the checkpoint; mismatches should fail during load_state_dict.
+    pretrained_checkpoint_path: Optional[str] = None
     training_run_name: str = "default"
     dataset_name: Optional[str] = ""
     # Effective batch size after gradient accumulation.

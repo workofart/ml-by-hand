@@ -245,6 +245,7 @@ class AbstractTrainer(ABC):
             model_kwargs=config.model_kwargs,
             optimizer_kwargs=config.optimizer_kwargs,
             resume_epoch=config.resume_epoch,
+            pretrained_checkpoint_path=config.pretrained_checkpoint_path,
             checkpoint_path=kwargs.get("checkpoint_path"),
         )
         # `global_step` counts consumed training batches / microbatches,
@@ -533,7 +534,7 @@ class AbstractTrainer(ABC):
         if steps_per_epoch <= 0:
             raise ValueError("train_data_loader must yield at least one batch.")
 
-        if self.checkpoint:
+        if self.global_step > 0:
             loaded_steps_per_epoch = self.checkpoint.get("steps_per_epoch")
             if loaded_steps_per_epoch != steps_per_epoch:
                 raise ValueError(
@@ -563,6 +564,7 @@ class AbstractTrainer(ABC):
         model_kwargs: Dict[str, Any],
         optimizer_kwargs: Dict[str, Any],
         resume_epoch: Optional[int] = None,
+        pretrained_checkpoint_path: Optional[str] = None,
         checkpoint_path: Optional[str] = None,
     ) -> Tuple[Any, Any, dict]:
         """Loads model & optimizer states from checkpoint if a checkpoint is requested.
@@ -586,6 +588,9 @@ class AbstractTrainer(ABC):
             optimizer_kwargs (Dict[str, Any]): Keyword arguments for optimizer initialization.
             resume_epoch (Optional[int]): Optional checkpoint filename hint used when
                 `checkpoint_path` is not provided.
+            pretrained_checkpoint_path (Optional[str]): Optional checkpoint basename
+                (without .json/.npz) used to initialize model weights into a freshly
+                initialized model/optimizer from the current config.
             checkpoint_path (Optional[str]): If provided, path of the checkpoint file.
 
         Returns:
@@ -594,6 +599,29 @@ class AbstractTrainer(ABC):
                 - optimizer (optim.Optimizer): The loaded or newly instantiated optimizer.
                 - checkpoint (dict): Dictionary of checkpoint data if loaded, otherwise empty.
         """
+
+        if pretrained_checkpoint_path is not None:
+            if resume_epoch is not None or checkpoint_path is not None:
+                raise ValueError(
+                    "pretrained_checkpoint_path cannot be combined with resume_epoch "
+                    "or checkpoint_path."
+                )
+
+            ckpt_json = f"{pretrained_checkpoint_path}.json"
+            ckpt_npz = f"{pretrained_checkpoint_path}.npz"
+            logger.info(
+                f"Attempting to load pretrained weights from checkpoint: {ckpt_json}, {ckpt_npz}"
+            )
+            loaded_ckpt = load_checkpoint(ckpt_json, ckpt_npz)
+
+            model = model_class(**model_kwargs)
+            optimizer = optimizer_class(model.parameters, **optimizer_kwargs)
+            # The configured model architecture must match the checkpoint.
+            model.load_state_dict(loaded_ckpt["model_state_dict"])
+            logger.info(
+                f"Loaded pretrained {model_class.__name__} weights from {pretrained_checkpoint_path}"
+            )
+            return model, optimizer, {}
 
         if resume_epoch is not None or checkpoint_path is not None:
             # Look for checkpoint files
