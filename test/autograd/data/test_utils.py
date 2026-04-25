@@ -11,8 +11,6 @@ from autograd.data.utils import (
     build_seq2seq_dataset_from_text_pairs,
     load_data,
     load_parquet_rows,
-    openai_chat_to_prompt_completion,
-    tokenize_prompt_completion,
 )
 
 
@@ -106,36 +104,6 @@ class TestDataUtils(unittest.TestCase):
                 ["great movie, would watch again", "positive"],
                 ["bad ending", "negative"],
             ],
-        )
-
-    def test_openai_chat_to_prompt_completion_extracts_text(self):
-        example = openai_chat_to_prompt_completion(
-            {
-                "messages": [
-                    {"role": "system", "content": "ABC"},
-                    {"role": "assistant", "content": "DE"},
-                ]
-            }
-        )
-
-        self.assertEqual(example["prompt_text"], "ABC")
-        self.assertEqual(example["completion_text"], "DE")
-
-    def test_tokenize_prompt_completion_builds_tokens_and_loss_mask(self):
-        example = tokenize_prompt_completion(
-            {"prompt_text": "ABC", "completion_text": "DE"},
-            self.bpe,
-        )
-
-        self.assertTrue(
-            xp.array_equal(
-                example["tokens"], xp.array([65, 66, 67, 68, 69], dtype=xp.int32)
-            )
-        )
-        self.assertTrue(
-            xp.array_equal(
-                example["loss_mask"], xp.array([0, 0, 0, 1, 1], dtype=xp.int32)
-            )
         )
 
     def test_build_seq2seq_dataset_from_text_pairs_encodes_source_and_target(self):

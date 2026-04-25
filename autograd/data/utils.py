@@ -74,61 +74,6 @@ def load_parquet_rows(
     return cast(list[dict[str, Any]], data)
 
 
-def openai_chat_to_prompt_completion(chat_example: dict[str, Any]) -> dict[str, str]:
-    """
-    Converts one OpenAI chat-format SFT record into prompt/completion text.
-    """
-    messages = chat_example.get("messages")
-    if not messages:
-        raise ValueError("chat example must contain at least one message")
-    if messages[-1].get("role") != "assistant":
-        raise ValueError("chat example must end with an assistant message")
-
-    prompt_parts = []
-    for message in messages[:-1]:
-        content = message.get("content")
-        if not isinstance(content, str):
-            raise ValueError("message content must be a string")
-        prompt_parts.append(content)
-
-    response_content = messages[-1].get("content")
-    if not isinstance(response_content, str):
-        raise ValueError("message content must be a string")
-
-    return {
-        "prompt_text": "".join(prompt_parts),
-        "completion_text": response_content,
-    }
-
-
-def tokenize_prompt_completion(
-    prompt_completion_example: dict[str, str], bpe
-) -> dict[str, Array]:
-    """
-    Tokenizes one prompt/completion example into LM tokens and a loss mask.
-    """
-    prompt_tokens = xp.array(
-        bpe.encode(prompt_completion_example["prompt_text"]),
-        dtype=xp.int32,
-    )
-    completion_tokens = xp.array(
-        bpe.encode(prompt_completion_example["completion_text"]),
-        dtype=xp.int32,
-    )
-    if len(completion_tokens) == 0:
-        raise ValueError("assistant completion must contain at least one token")
-    return {
-        "tokens": xp.concatenate([prompt_tokens, completion_tokens], axis=0),
-        "loss_mask": xp.concatenate(
-            [
-                xp.zeros(prompt_tokens.shape, dtype=xp.int32),
-                xp.ones(completion_tokens.shape, dtype=xp.int32),
-            ],
-            axis=0,
-        ),
-    }
-
-
 def build_seq2seq_dataset_from_text_pairs(
     text_pairs: Sequence[tuple[str, str]],
     bpe,
