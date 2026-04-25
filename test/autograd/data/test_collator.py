@@ -6,24 +6,35 @@ import pytest
 
 from autograd.backend import xp
 from autograd.data.collator import (
-    CausalLMCollator,
+    BatchMaxLengthCausalLMCollator,
     CausalLMWindowCollator,
+    FixedLengthCausalLMCollator,
     OneHotCollator,
     PairedCollator,
     Seq2SeqCollator,
-    pack_tokens,
+    create_padding_mask,
+    truncate_and_pad_tokens,
 )
 from autograd.data.types import CausalLMBatch, Seq2SeqBatch, TokenWindowExample
-from autograd.data.utils import (
-    openai_chat_to_prompt_completion,
-    tokenize_prompt_completion,
-)
 from autograd.functional import IGNORE_INDEX
 
 
-def mock_padding_mask(X_chunk, pad_idx):
+def mock_padding_mask(X_chunk, pad_idx, dims=None):
+    if dims is not None:
+        return xp.zeros(dims)
+    if len(X_chunk.shape) == 1:
+        return xp.zeros((1, 1, X_chunk.shape[0]))
     batch_size, seq_len = X_chunk.shape
     return xp.zeros((batch_size, 1, 1, seq_len))
+
+
+def make_causal_lm_collator(
+    max_tokens: int, pad_idx: int
+) -> FixedLengthCausalLMCollator:
+    return FixedLengthCausalLMCollator(
+        max_tokens=max_tokens,
+        pad_idx=pad_idx,
+    )
 
 
 class MockBPE:
@@ -33,23 +44,78 @@ class MockBPE:
                 return [0]
             if token == "<SOS>":
                 return [1]
-        return [ord(char) for char in token]
+            if token == "<|endoftext|>":
+                return [2]
+        special_token = "<|endoftext|>"
+        if token == special_token:
+            return [2]
+
+        encoded = []
+        start = 0
+        while True:
+            special_index = token.find(special_token, start)
+            if special_index == -1:
+                encoded.extend(ord(char) for char in token[start:])
+                break
+            encoded.extend(ord(char) for char in token[start:special_index])
+            encoded.append(2)
+            start = special_index + len(special_token)
+        return encoded
 
 
 class TestCollator(unittest.TestCase):
     def setUp(self):
         self.bpe = MockBPE()
 
-    def test_pack_tokens_left_truncates_then_pads(self):
-        packed = pack_tokens(
+    def test_create_padding_mask_default_dims(self):
+        token_indices = xp.array(
+            [
+                [1, 2, 0, 0],
+                [3, 4, 5, 0],
+            ],
+            dtype=xp.int32,
+        )
+
+        mask = create_padding_mask(token_indices, pad_idx=0, dims=None)
+
+        self.assertEqual(mask.shape, (2, 1, 1, 4))
+        assert xp.array_equal(mask[0, 0, 0], xp.array([0, 0, 1, 1]))
+        assert xp.array_equal(mask[1, 0, 0], xp.array([0, 0, 0, 1]))
+
+    def test_create_padding_mask_custom_dims(self):
+        token_indices = xp.array([[1, 0, 0], [2, 2, 0]], dtype=xp.int32)
+
+        mask = create_padding_mask(token_indices, pad_idx=0, dims=(2, 1, 3))
+
+        self.assertEqual(mask.shape, (2, 1, 3))
+        assert xp.array_equal(mask[0, 0], xp.array([0, 1, 1]))
+        assert xp.array_equal(mask[1, 0], xp.array([0, 0, 1]))
+
+    def test_truncate_and_pad_tokens_left_truncates_then_right_pads(self):
+        tokens = truncate_and_pad_tokens(
             tokens=xp.array([10, 11, 12, 13, 20, 21, 22], dtype=xp.int32),
             max_tokens=5,
             pad_idx=0,
         )
 
         self.assertTrue(
-            xp.array_equal(packed, xp.array([12, 13, 20, 21, 22], dtype=xp.int32))
+            xp.array_equal(tokens, xp.array([12, 13, 20, 21, 22], dtype=xp.int32))
         )
+
+    def test_causal_lm_collator_requires_aligned_tokens_and_loss_mask(self):
+        collator = make_causal_lm_collator(max_tokens=5, pad_idx=0)
+
+        with self.assertRaisesRegex(
+            ValueError, "tokens and loss_mask must have the same length"
+        ):
+            collator(
+                [
+                    {
+                        "tokens": xp.array([10, 11, 12], dtype=xp.int32),
+                        "loss_mask": xp.array([1, 1], dtype=xp.int32),
+                    }
+                ]
+            )
 
     def test_paired_collator_batches_examples(self):
         collator = PairedCollator()
@@ -120,11 +186,15 @@ class TestCollator(unittest.TestCase):
         self.assertTrue(xp.array_equal(batch_y, xp.array([1, 0], dtype=xp.int32)))
 
     @patch(
-        "autograd.data.collator.text_utils.create_padding_mask",
+        "autograd.data.collator.create_padding_mask",
         side_effect=mock_padding_mask,
     )
     def test_encoder_decoder_collator_uses_seq2seq_examples(self, mock_padding):
-        collator = Seq2SeqCollator(max_tokens=4, pad_idx=0, sos_idx=1)
+        collator = Seq2SeqCollator(
+            max_tokens=4,
+            pad_idx=0,
+            sos_idx=1,
+        )
 
         batch = collator(
             [
@@ -192,27 +262,12 @@ def test_window_collator_requires_shiftable_window():
         CausalLMWindowCollator()([example])
 
 
-def test_causal_lm_collator_builds_masked_sft_batch():
-    class DummyBPE:
-        def encode(self, text, allowed_special=None):
-            return [ord(char) for char in text]
-
-    tokenized_example = tokenize_prompt_completion(
-        openai_chat_to_prompt_completion(
-            {
-                "messages": [
-                    {"role": "user", "content": "ABC"},
-                    {"role": "assistant", "content": "DE"},
-                ]
-            }
-        ),
-        DummyBPE(),
-    )
-    batch = CausalLMCollator(max_tokens=6, pad_idx=0)(
+def test_causal_lm_collator_builds_prompt_masked_batch():
+    batch = make_causal_lm_collator(max_tokens=6, pad_idx=0)(
         [
             {
-                "tokens": tokenized_example["tokens"],
-                "loss_mask": tokenized_example["loss_mask"],
+                "tokens": xp.array([65, 66, 67, 2, 68, 69, 2], dtype=xp.int32),
+                "loss_mask": xp.array([0, 0, 0, 0, 1, 1, 1], dtype=xp.int32),
             }
         ]
     )
@@ -220,25 +275,47 @@ def test_causal_lm_collator_builds_masked_sft_batch():
     assert isinstance(batch, CausalLMBatch)
     np.testing.assert_array_equal(
         xp.to_numpy(batch.input_ids[0]),
-        np.array([65, 66, 67, 68, 69], dtype=np.int32),
+        np.array([66, 67, 2, 68, 69], dtype=np.int32),
     )
     np.testing.assert_array_equal(
         xp.to_numpy(batch.labels[0]),
-        np.array([IGNORE_INDEX, IGNORE_INDEX, 68, 69, IGNORE_INDEX], dtype=np.int32),
+        np.array([IGNORE_INDEX, IGNORE_INDEX, 68, 69, 2], dtype=np.int32),
     )
     assert not hasattr(batch, "loss_mask")
 
 
+def test_batch_max_length_causal_lm_collator_pads_to_longest_row():
+    batch = BatchMaxLengthCausalLMCollator(
+        max_tokens=8,
+        pad_idx=0,
+    )(
+        [
+            {
+                "tokens": xp.array([10, 11, 12], dtype=xp.int32),
+                "loss_mask": xp.array([0, 1, 1], dtype=xp.int32),
+            },
+            {
+                "tokens": xp.array([20, 21, 22, 23, 24], dtype=xp.int32),
+                "loss_mask": xp.array([0, 0, 1, 1, 1], dtype=xp.int32),
+            },
+        ]
+    )
+
+    assert batch.input_ids.shape == (2, 4)
+    assert batch.labels.shape == (2, 4)
+    np.testing.assert_array_equal(
+        xp.to_numpy(batch.input_ids[0]),
+        np.array([10, 11, 12, 0], dtype=np.int32),
+    )
+    np.testing.assert_array_equal(
+        xp.to_numpy(batch.labels[0]),
+        np.array([11, 12, IGNORE_INDEX, IGNORE_INDEX], dtype=np.int32),
+    )
+
+
 def test_causal_lm_collator_requires_max_tokens_at_least_two():
     with pytest.raises(ValueError, match="max_tokens must be >= 2 for causal LM"):
-        CausalLMCollator(max_tokens=1, pad_idx=0)
-
-
-def test_causal_lm_collator_rejects_empty_batch():
-    collator = CausalLMCollator(max_tokens=4, pad_idx=0)
-
-    with pytest.raises(ValueError, match="examples must not be empty"):
-        collator([])
+        make_causal_lm_collator(max_tokens=1, pad_idx=0)
 
 
 def test_causal_lm_batch_rejects_loss_mask():

@@ -29,7 +29,15 @@ reportIncompatibleMethodOverride = "none"
 exclude = [
     ".venv",
     "build",
+    "checkpoints",
+    "dist",
+    "drafts",
+    "htmlcov",
+    "training_data",
     "training_runs",
+    "**/.pytest_cache",
+    "**/.ruff_cache",
+    "**/__pycache__",
     "**/test/**",    # Ignore all files in the "test" directory
 ]
 

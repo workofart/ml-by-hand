@@ -249,41 +249,6 @@ def prepare_mlx_attention_mask(
     return "explicit_additive", xp.array(raw_mask, dtype=xp.float32) * -1e9
 
 
-def create_padding_mask(
-    token_indices: Array,
-    pad_idx: int = 0,
-    dims: Optional[Tuple[int, ...]] = None,
-) -> Array:
-    """
-    Creates a padding mask with configurable output dimensions.
-
-    Args:
-        token_indices (Array): shape (batch_size, seq_len) containing token indices
-        pad_idx (int): Integer indicating the padding token index
-        dims (tuple or None): Desired shape. If None, (batch_size, 1, 1, seq_len).
-
-    Returns:
-        Array: A mask array where positions of 'pad_idx' are 1.0
-
-    Examples:
-        >>> token_indices = np.array([[1, 0, 2], [0, 3, 4]])
-        >>> mask = create_padding_mask(token_indices, pad_idx=0)
-        >>> print(mask.shape)
-        (2, 1, 1, 3)
-    """
-    token_indices = xp.array(token_indices)
-    pad_positions = (token_indices == pad_idx).astype(xp.float32)
-
-    if dims is None:
-        # Default shape for standard attention: (batch_size, 1, 1, seq_len)
-        return xp.expand_dims(xp.expand_dims(pad_positions, axis=1), axis=1)
-    else:
-        # We will simply reshape pad_positions to the desired dims
-        # assuming the number of elements matches.
-        mask = pad_positions.reshape(dims)
-        return mask
-
-
 def clean_and_tokenize(
     text: str, pattern: str = r"\w+|[^\w\s]|[\n\s]", lowercase: bool = True
 ) -> List[str]:

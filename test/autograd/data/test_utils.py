@@ -6,7 +6,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from autograd.backend import xp
-from autograd.data.dataset import Seq2SeqDataset
+from autograd.data.dataset import PairedMapDataset
 from autograd.data.utils import (
     build_seq2seq_dataset_from_text_pairs,
     load_data,
@@ -25,9 +25,21 @@ class MockBPE:
                 return [1]
             if token == "<|endoftext|>":
                 return [2]
-        if token == "<|endoftext|>":
+        special_token = "<|endoftext|>"
+        if token == special_token:
             return [2]
-        return [ord(char) for char in token]
+
+        encoded = []
+        start = 0
+        while True:
+            special_index = token.find(special_token, start)
+            if special_index == -1:
+                encoded.extend(ord(char) for char in token[start:])
+                break
+            encoded.extend(ord(char) for char in token[start:special_index])
+            encoded.append(2)
+            start = special_index + len(special_token)
+        return encoded
 
 
 class TestDataUtils(unittest.TestCase):
@@ -130,11 +142,10 @@ class TestDataUtils(unittest.TestCase):
         dataset = build_seq2seq_dataset_from_text_pairs(
             [("ABC", "DE")],
             self.bpe,
-            shuffle=False,
             target_suffix="<|endoftext|>",
         )
 
-        self.assertIsInstance(dataset, Seq2SeqDataset)
+        self.assertIsInstance(dataset, PairedMapDataset)
         example = next(iter(dataset))
         self.assertTrue(
             xp.array_equal(example["input_ids"], xp.array([65, 66, 67], dtype=xp.int32))

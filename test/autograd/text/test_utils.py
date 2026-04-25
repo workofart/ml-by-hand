@@ -6,7 +6,6 @@ from autograd.backend import xp
 from autograd.text.utils import (
     clean_and_tokenize,
     create_causal_mask,
-    create_padding_mask,
     create_vocabulary,
     inference,
     text_to_one_hot_and_sparse,
@@ -78,37 +77,6 @@ class TestTextUtils(TestCase):
         pad_idx = vocab["<PAD>"]
         # "I love apples" => 3 words => last index should be pad_idx
         self.assertEqual(matrix[0, 3], pad_idx)
-
-    def test_create_padding_mask_default_dims(self):
-        token_indices = xp.array(
-            [
-                [1, 2, 0, 0],  # 0 => pad
-                [3, 4, 5, 0],
-            ],
-            dtype=xp.int32,
-        )
-
-        mask = create_padding_mask(token_indices, pad_idx=0, dims=None)
-        # shape => (batch_size=2, 1, 1, seq_len=4)
-        self.assertEqual(mask.shape, (2, 1, 1, 4))
-
-        # 1.0 where token_indices==0
-        # first row => positions 2,3 are 1
-        assert xp.array_equal(mask[0, 0, 0], xp.array([0, 0, 1, 1]))
-        assert xp.array_equal(mask[1, 0, 0], xp.array([0, 0, 0, 1]))
-
-    def test_create_padding_mask_custom_dims(self):
-        token_indices = xp.array([[1, 0, 0], [2, 2, 0]], dtype=xp.int32)
-
-        # Suppose we want dims = (batch_size, 1, 3)
-        # i.e. (2, 1, 3) => effectively shape for broadcasting
-        mask = create_padding_mask(token_indices, pad_idx=0, dims=(2, 1, 3))
-
-        self.assertEqual(mask.shape, (2, 1, 3))
-        # For first row => [1,0,0] => pad=0 => positions 1,2 => mask=1 => [0,1,1]
-        assert xp.array_equal(mask[0, 0], xp.array([0, 1, 1]))
-        # For second row => [2,2,0] => only last is 0 => [0,0,1]
-        assert xp.array_equal(mask[1, 0], xp.array([0, 0, 1]))
 
     def test_create_causal_mask_lookforward(self):
         seq_len = 4

@@ -6,7 +6,7 @@ from urllib.request import urlopen
 from pyarrow import parquet as pq  # pyright: ignore[reportMissingImports]
 
 from autograd.backend import Array, xp
-from autograd.data.dataset import Seq2SeqDataset
+from autograd.data.dataset import PairedMapDataset
 
 
 def train_test_split(
@@ -133,9 +133,8 @@ def build_seq2seq_dataset_from_text_pairs(
     text_pairs: Sequence[tuple[str, str]],
     bpe,
     *,
-    shuffle: bool,
     target_suffix: str = "",
-) -> Seq2SeqDataset:
+) -> PairedMapDataset:
     input_sequences = []
     label_sequences = []
 
@@ -160,8 +159,10 @@ def build_seq2seq_dataset_from_text_pairs(
     if not input_sequences:
         raise ValueError("text_pairs must contain at least one example")
 
-    return Seq2SeqDataset(
-        input_sequences=input_sequences,
-        label_sequences=label_sequences,
-        shuffle=shuffle,
+    return PairedMapDataset(
+        input_sequences,
+        label_sequences,
+        input_key="input_ids",
+        target_key="labels",
+        dtype=xp.int32,
     )

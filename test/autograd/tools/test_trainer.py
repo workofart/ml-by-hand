@@ -5,18 +5,10 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from autograd.backend import xp
-from autograd.data.collator import CausalLMCollator, CausalLMWindowCollator
+from autograd.data.collator import FixedLengthCausalLMCollator
 from autograd.data.data_loader import DataLoader
-from autograd.data.dataset import (
-    IterableDataset,
-    TokenSequenceDataset,
-    TokenWindowDataset,
-)
+from autograd.data.dataset import MapDataset, PairedMapDataset
 from autograd.data.types import CausalLMBatch, Seq2SeqBatch
-from autograd.data.utils import (
-    openai_chat_to_prompt_completion,
-    tokenize_prompt_completion,
-)
 from autograd.functional import IGNORE_INDEX, cross_entropy
 from autograd.nn import AbstractLLMForwardFn, Module
 from autograd.optim import SGD, Optimizer
@@ -41,41 +33,20 @@ def identity_collate(batch_items):
     return batch_items[0]
 
 
-class InMemoryBatchDataset(IterableDataset):
+class InMemoryBatchDataset(MapDataset):
     def __init__(self, data):
-        self.data = data
+        super().__init__(data)
         self.epoch_start_calls = 0
 
     def on_epoch_start(self):
         self.epoch_start_calls += 1
-
-    def __iter__(self):
-        return iter(self.data)
-
-    def __len__(self):
-        return len(self.data)
-
-
-class UnsizedInfiniteDataset(IterableDataset):
-    def __len__(self):
-        raise TypeError("infinite")
-
-    def __iter__(self):
-        raise RuntimeError(
-            "fit should reject unsized infinite loaders before iterating"
-        )
-
-
-class UnsizedEmptyPassDataset(IterableDataset):
-    def __iter__(self):
-        return iter(())
 
 
 def make_data_loader(data):
     return DataLoader(
         dataset=InMemoryBatchDataset(data),
         batch_size=1,
-        collate_fn=identity_collate,
+        collator=identity_collate,
     )
 
 
@@ -175,7 +146,23 @@ class MockBPE:
                 return [0]
             if token == "<SOS>":
                 return [1]
-        return [ord(char) for char in token]
+            if token == "<|endoftext|>":
+                return [2]
+        special_token = "<|endoftext|>"
+        if token == special_token:
+            return [2]
+
+        encoded = []
+        start = 0
+        while True:
+            special_index = token.find(special_token, start)
+            if special_index == -1:
+                encoded.extend(ord(char) for char in token[start:])
+                break
+            encoded.extend(ord(char) for char in token[start:special_index])
+            encoded.append(2)
+            start = special_index + len(special_token)
+        return encoded
 
 
 class FakeTqdm:
@@ -403,7 +390,8 @@ class TestSimpleTrainer(BaseTrainerTest):
         )
         plan = TrainingPlan.for_epochs(
             max_epochs=self.config.max_epochs,
-            steps_per_epoch=len(self.train_loader),
+            batch_count=len(self.train_loader),
+            accumulation_steps=self.config.gradient_accumulation_steps,
             checkpoint_every=self.config.checkpoint_freq,
         )
         eval_state = TrainingState()
@@ -468,6 +456,37 @@ class TestSimpleTrainer(BaseTrainerTest):
         self.assertEqual(mock_tqdm.call_args.kwargs["desc"], "Training")
         self.assertEqual(sum(progress_bar.updates), 3)
         self.assertEqual(progress_bar.postfixes, [])
+
+    @patch("autograd.tools.trainer.tqdm")
+    def test_fit_updates_progress_after_accumulation_optimizer_step(self, mock_tqdm):
+        config = GenericTrainingConfig(
+            max_steps=2,
+            checkpoint_freq=10,
+            model_kwargs={"hidden_size": 256},
+            optimizer_kwargs={"lr": 0.01},
+            global_batch_size=2,
+            micro_batch_size=1,
+        )
+        trainer = SimpleTrainer(
+            model_cls=MockModelClass,
+            optimizer_cls=MockOptimizerClass,
+            loss_fn=self.loss_fn,
+            config=config,
+            output_type="logits",
+        )
+        update_optimizer_counts = []
+
+        class RecordingProgress(FakeTqdm):
+            def update(self, n=1):
+                super().update(n)
+                update_optimizer_counts.append(trainer.optimizer.step_call_count)
+
+        mock_tqdm.return_value = RecordingProgress()
+        train_loader = make_data_loader(self.train_data)
+
+        trainer.fit(train_loader)
+
+        self.assertEqual(update_optimizer_counts, [1, 2])
 
     def test_fit_does_not_call_tensor_item_for_train_loss_each_batch(self):
         self.config.max_epochs = None
@@ -954,7 +973,7 @@ class TestSimpleTrainer(BaseTrainerTest):
 
         trainer.fit(self.train_loader, self.val_loader)
 
-        self.assertEqual(trainer.optimizer.step_call_count, 1)
+        self.assertEqual(trainer.optimizer.step_call_count, 2)
 
     def test_fit_restarts_epoch_lifecycle_when_step_budget_exhausts_loader(self):
         self.config.max_epochs = None
@@ -987,33 +1006,54 @@ class TestSimpleTrainer(BaseTrainerTest):
         trainer.fit(train_loader)
 
         self.assertEqual(trainer.global_step, 3)
-        self.assertEqual(trainer.optimizer.step_call_count, 2)
-        self.assertEqual(train_loader.dataset.epoch_start_calls, 2)
+        self.assertEqual(trainer.optimizer.step_call_count, 3)
+        self.assertEqual(train_loader.dataset.epoch_start_calls, 3)
 
-    def test_fit_requires_max_steps_for_unsized_infinite_train_loader(self):
-        self.config.max_epochs = 1
-        self.config.max_steps = None
+    @patch("autograd.tools.trainer.save_checkpoint")
+    def test_fit_reports_after_final_partial_optimizer_step(self, mock_save_checkpoint):
+        mock_save_checkpoint.return_value = (
+            "checkpoints/default_MockModelClass_2.json",
+            "checkpoints/default_MockModelClass_2.npz",
+        )
+        config = GenericTrainingConfig(
+            max_steps=2,
+            checkpoint_freq=2,
+            model_kwargs={"hidden_size": 256},
+            optimizer_kwargs={"lr": 0.01},
+            global_batch_size=4,
+            micro_batch_size=1,
+        )
+        trainer = SimpleTrainer(
+            model_cls=MockModelClass,
+            optimizer_cls=MockOptimizerClass,
+            loss_fn=self.loss_fn,
+            config=config,
+            output_type="logits",
+        )
+        eval_observed_step_counts = []
 
-        with self.assertRaisesRegex(
-            ValueError,
-            "Infinite training loaders require max_steps",
-        ):
-            self.trainer.fit(
-                DataLoader(
-                    dataset=UnsizedInfiniteDataset(),
-                    batch_size=1,
-                    collate_fn=identity_collate,
-                ),
-                self.val_loader,
-            )
+        def record_eval(_):
+            eval_observed_step_counts.append(trainer.optimizer.step_call_count)
+            eval_state = TrainingState()
+            eval_state.record_eval_loss(1.23)
+            return eval_state
+
+        trainer._evaluate = MagicMock(side_effect=record_eval)
+        train_loader = make_data_loader(self.train_data * 2 + self.val_data)
+
+        trainer.fit(train_loader, self.val_loader)
+
+        self.assertEqual(eval_observed_step_counts, [2])
+        checkpoint = mock_save_checkpoint.call_args.args[0]
+        self.assertEqual(checkpoint["step_count"], 2)
 
     def test_fit_step_mode_rejects_loader_that_yields_no_batches(self):
         self.config.max_epochs = None
         self.config.max_steps = 1
         empty_loader = DataLoader(
-            dataset=UnsizedEmptyPassDataset(),
+            dataset=MapDataset([]),
             batch_size=1,
-            collate_fn=identity_collate,
+            collator=identity_collate,
         )
 
         with self.assertRaisesRegex(
@@ -1065,7 +1105,30 @@ class TestSimpleTrainer(BaseTrainerTest):
         trainer.fit(train_loader)
 
         self.assertEqual(trainer.global_step, 40)
-        self.assertEqual(trainer.optimizer.step_call_count, 10)
+        self.assertEqual(trainer.optimizer.step_call_count, 40)
+
+    def test_fit_max_steps_counts_optimizer_steps_with_accumulation(self):
+        config = GenericTrainingConfig(
+            max_steps=3,
+            checkpoint_freq=10,
+            model_kwargs={"hidden_size": 256},
+            optimizer_kwargs={"lr": 0.01},
+            global_batch_size=2,
+            micro_batch_size=1,
+        )
+        trainer = SimpleTrainer(
+            model_cls=MockModelClass,
+            optimizer_cls=MockOptimizerClass,
+            loss_fn=self.loss_fn,
+            config=config,
+            output_type="logits",
+        )
+        train_loader = make_data_loader(self.train_data * 3)
+
+        trainer.fit(train_loader)
+
+        self.assertEqual(trainer.global_step, 3)
+        self.assertEqual(trainer.optimizer.step_call_count, 3)
 
     def test_fit_flushes_leftover_gradients_at_epoch_end(self):
         config = GenericTrainingConfig(
@@ -1378,7 +1441,8 @@ class TestSimpleTrainer(BaseTrainerTest):
         self.trainer.global_step = len(self.train_loader)
         plan = TrainingPlan.for_epochs(
             max_epochs=self.config.max_epochs,
-            steps_per_epoch=len(self.train_loader),
+            batch_count=len(self.train_loader),
+            accumulation_steps=self.config.gradient_accumulation_steps,
             checkpoint_every=self.config.checkpoint_freq,
         )
         state = TrainingState()
@@ -1403,7 +1467,8 @@ class TestSimpleTrainer(BaseTrainerTest):
         self.trainer.global_step = len(self.train_loader)
         plan = TrainingPlan.for_epochs(
             max_epochs=self.config.max_epochs,
-            steps_per_epoch=len(self.train_loader),
+            batch_count=len(self.train_loader),
+            accumulation_steps=self.config.gradient_accumulation_steps,
             checkpoint_every=self.config.checkpoint_freq,
         )
         state = TrainingState()
@@ -1452,7 +1517,8 @@ class TestSimpleTrainer(BaseTrainerTest):
     def test_fit_plan_derives_epoch_mode_fields_from_config(self):
         plan = TrainingPlan.for_epochs(
             max_epochs=self.config.max_epochs,
-            steps_per_epoch=len(self.train_loader),
+            batch_count=len(self.train_loader),
+            accumulation_steps=self.config.gradient_accumulation_steps,
             checkpoint_every=self.config.checkpoint_freq,
         )
 
@@ -1465,6 +1531,19 @@ class TestSimpleTrainer(BaseTrainerTest):
         self.assertEqual(plan.checkpoint_every, self.config.checkpoint_freq)
         self.assertEqual(plan.steps_per_epoch, len(self.train_loader))
         self.assertEqual(plan.metrics_interval, 1)
+
+    def test_fit_plan_converts_epochs_to_optimizer_steps_with_accumulation(self):
+        plan = TrainingPlan.for_epochs(
+            max_epochs=3,
+            batch_count=5,
+            accumulation_steps=2,
+            checkpoint_every=1,
+        )
+
+        self.assertEqual(plan.steps_per_epoch, 3)
+        self.assertEqual(plan.target_step, 9)
+        self.assertEqual(plan.report_every_steps, 3)
+        self.assertEqual(plan.completed_epochs(6), 2)
 
     def test_evaluate_does_not_mutate_trainer_metrics(self):
         eval_result = self.trainer.evaluate(self.val_loader)
@@ -1613,28 +1692,19 @@ class TestLLMTrainer(BaseTrainerTest):
         self.assertAlmostEqual(avg_val_loss.val_loss, 1.23, places=5)
         self.assertEqual(self.loss_fn.call_count, 1)
 
-    def test_compute_loss_supports_sft_batches_from_generic_data_loader(self):
+    def test_compute_loss_supports_prompt_masked_causal_lm_batches(self):
         bpe = MockBPE()
         pad_idx = bpe.encode("<PAD>", allowed_special={"<PAD>"})[0]
-        tokenized_example = tokenize_prompt_completion(
-            openai_chat_to_prompt_completion(
-                {
-                    "messages": [
-                        {"role": "user", "content": "ABC"},
-                        {"role": "assistant", "content": "CB"},
-                    ]
-                }
-            ),
-            bpe,
-        )
         loader = DataLoader(
-            dataset=TokenSequenceDataset(
-                token_sequences=[tokenized_example["tokens"]],
-                loss_masks=[tokenized_example["loss_mask"]],
-                shuffle=False,
+            dataset=PairedMapDataset(
+                [xp.array([65, 66, 67, 2, 67, 66, 2], dtype=xp.int32)],
+                [xp.array([0, 0, 0, 0, 1, 1, 1], dtype=xp.int32)],
+                input_key="tokens",
+                target_key="loss_mask",
+                dtype=xp.int32,
             ),
             batch_size=1,
-            collate_fn=CausalLMCollator(
+            collator=FixedLengthCausalLMCollator(
                 max_tokens=6,
                 pad_idx=pad_idx,
             ),
@@ -1670,29 +1740,3 @@ class TestLLMTrainer(BaseTrainerTest):
             float(train_loss.item()), float(expected_loss.item()), places=6
         )
         self.assertAlmostEqual(val_loss.val_loss, float(expected_loss.item()), places=6)
-
-    def test_fit_supports_unsized_streaming_data_loaders(self):
-        self.config.max_epochs = None
-        self.config.max_steps = 1
-        self.config.max_eval_steps = 1
-
-        stream_loader = DataLoader(
-            dataset=TokenWindowDataset(
-                xp.arange(100, dtype=xp.int32),
-                window_len=5,
-                sampling="sequential",
-            ),
-            batch_size=2,
-            collate_fn=CausalLMWindowCollator(),
-        )
-        trainer = LLMTrainer(
-            model_cls=MockModelClass,
-            optimizer_cls=MockOptimizerClass,
-            loss_fn=cross_entropy,
-            forward_fn=PromptMaskAwareForwardFn(),
-            config=self.config,
-        )
-
-        trainer.fit(stream_loader, stream_loader)
-
-        self.assertEqual(trainer.optimizer.step_call_count, 1)

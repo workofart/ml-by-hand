@@ -11,9 +11,9 @@ import psutil
 from autograd import functional, nn, optim
 from autograd.backend import IS_CUPY, NAME, xp
 from autograd.backend import eval as backend_eval
-from autograd.data.collator import CausalLMCollator, PairedCollator
+from autograd.data.collator import FixedLengthCausalLMCollator, PairedCollator
 from autograd.data.data_loader import DataLoader
-from autograd.data.dataset import PairedIterableDataset, TokenSequenceDataset
+from autograd.data.dataset import PairedMapDataset
 from autograd.tensor import Tensor
 from examples.gpt_2 import GPT2
 
@@ -342,9 +342,9 @@ class CIPipelinePerformanceTest(TestCase):
             dtype=xp.int64,
         )
         loader = DataLoader(
-            dataset=PairedIterableDataset(inputs, targets, shuffle=False),
+            dataset=PairedMapDataset(inputs, targets),
             batch_size=input_shape[0],
-            collate_fn=PairedCollator(),
+            collator=PairedCollator(),
         )
         batch_inputs, batch_targets = next(iter(loader))
         return (
@@ -366,12 +366,15 @@ class CIPipelinePerformanceTest(TestCase):
             for _ in range(batch_size)
         ]
         loader = DataLoader(
-            dataset=TokenSequenceDataset(
-                token_sequences=token_sequences,
-                shuffle=False,
+            dataset=PairedMapDataset(
+                token_sequences,
+                [xp.ones((seq_len + 1,), dtype=xp.int32) for _ in range(batch_size)],
+                input_key="tokens",
+                target_key="loss_mask",
+                dtype=xp.int32,
             ),
             batch_size=batch_size,
-            collate_fn=CausalLMCollator(
+            collator=FixedLengthCausalLMCollator(
                 max_tokens=seq_len + 1,
                 pad_idx=0,
             ),

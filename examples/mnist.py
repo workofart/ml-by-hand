@@ -6,7 +6,8 @@ from autograd import functional, nn, optim
 from autograd.backend import xp
 from autograd.data.collator import PairedCollator
 from autograd.data.data_loader import DataLoader
-from autograd.data.dataset import PairedIterableDataset, TransformDataset
+from autograd.data.dataset import PairedMapDataset
+from autograd.data.sampler import RandomSampler
 from autograd.data.utils import train_test_split
 from autograd.tools.config_schema import GenericTrainingConfig
 from autograd.tools.metrics import accuracy, precision
@@ -258,16 +259,15 @@ def train_mnist_with_hinge_loss(
 
     for digit in range(10):
         logger.info(f"Training digit={digit}")
+        train_dataset = PairedMapDataset(
+            X_train,
+            target_transform_for_digit(digit)(y_train),
+        )
         train_loader = DataLoader(
-            TransformDataset(
-                PairedIterableDataset(X_train, y_train, shuffle=True),
-                transform=lambda example, digit=digit: {
-                    "inputs": example["inputs"],
-                    "targets": target_transform_for_digit(digit)(example["targets"]),
-                },
-            ),
+            train_dataset,
             batch_size=batch_size,
-            collate_fn=PairedCollator(),
+            collator=PairedCollator(),
+            sampler=RandomSampler(train_dataset),
         )
         # Build a training configuration for the trainer.
         config = GenericTrainingConfig(
@@ -335,16 +335,15 @@ def train_mnist_one_vs_rest_model(
 
     for digit in range(10):
         logger.info(f"Training digit={digit}")
+        train_dataset = PairedMapDataset(
+            X_train,
+            target_transform_for_digit(digit)(y_train),
+        )
         train_loader = DataLoader(
-            TransformDataset(
-                PairedIterableDataset(X_train, y_train, shuffle=True),
-                transform=lambda example, digit=digit: {
-                    "inputs": example["inputs"],
-                    "targets": target_transform_for_digit(digit)(example["targets"]),
-                },
-            ),
+            train_dataset,
             batch_size=batch_size,
-            collate_fn=PairedCollator(),
+            collator=PairedCollator(),
+            sampler=RandomSampler(train_dataset),
         )
         # Build the training configuration.
         config = GenericTrainingConfig(
@@ -454,15 +453,17 @@ if __name__ == "__main__":
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.1)
 
     # Create data loaders with a consistent batch size.
+    train_dataset = PairedMapDataset(X_train, y_train)
     train_data_loader = DataLoader(
-        PairedIterableDataset(X_train, y_train, shuffle=True),
+        train_dataset,
         batch_size=512,
-        collate_fn=PairedCollator(),
+        collator=PairedCollator(),
+        sampler=RandomSampler(train_dataset),
     )
     val_data_loader = DataLoader(
-        PairedIterableDataset(X_test, y_test, shuffle=False),
+        PairedMapDataset(X_test, y_test),
         batch_size=512,
-        collate_fn=PairedCollator(),
+        collator=PairedCollator(),
     )
 
     # Train several multi-class models.

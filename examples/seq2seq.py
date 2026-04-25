@@ -1,7 +1,8 @@
 from autograd import functional, nn, optim, tensor
 from autograd.data.collator import PairedCollator
 from autograd.data.data_loader import DataLoader
-from autograd.data.dataset import PairedIterableDataset
+from autograd.data.dataset import PairedMapDataset
+from autograd.data.sampler import RandomSampler
 from autograd.data.utils import load_data
 from autograd.text.utils import create_vocabulary, text_to_one_hot_and_sparse
 from autograd.tools.config_schema import GenericTrainingConfig
@@ -174,15 +175,17 @@ def main():
         train_y, vocab, max_sequence_length=60
     )
 
+    train_dataset = PairedMapDataset(features, labels_vocab_idx)
     train_data_loader = DataLoader(
-        PairedIterableDataset(features, labels_vocab_idx, shuffle=True),
+        train_dataset,
         batch_size=32,
-        collate_fn=PairedCollator(),
+        collator=PairedCollator(),
+        sampler=RandomSampler(train_dataset),
     )
     test_data_loader = DataLoader(
-        PairedIterableDataset(test_features, test_labels_vocab_idx, shuffle=False),
+        PairedMapDataset(test_features, test_labels_vocab_idx),
         batch_size=32,
-        collate_fn=PairedCollator(),
+        collator=PairedCollator(),
     )
 
     # Build a training configuration for the Seq2Seq model.
