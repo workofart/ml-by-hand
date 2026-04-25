@@ -7,6 +7,10 @@ from autograd.data.collator import (
     CausalLMWindowCollator,
     PairedCollator,
     Seq2SeqCollator,
+    build_causal_lm_inputs_and_labels,
+    pack_tokens,
+    pad_aligned_right,
+    truncate_aligned_left,
 )
 from autograd.data.data_loader import DataLoader
 from autograd.data.dataset import (
@@ -16,11 +20,8 @@ from autograd.data.dataset import (
     TokenSequenceDataset,
     TokenWindowDataset,
 )
+from autograd.data.sft import tokenize_sft_messages
 from autograd.data.types import CausalLMBatch, Seq2SeqBatch
-from autograd.data.utils import (
-    openai_chat_to_prompt_completion,
-    tokenize_prompt_completion,
-)
 from autograd.functional import IGNORE_INDEX
 
 
@@ -36,7 +37,23 @@ class MockBPE:
                 return [0]
             if token == "<SOS>":
                 return [1]
-        return [ord(char) for char in token]
+            if token == "<|endoftext|>":
+                return [2]
+        special_token = "<|endoftext|>"
+        if token == special_token:
+            return [2]
+
+        encoded = []
+        start = 0
+        while True:
+            special_index = token.find(special_token, start)
+            if special_index == -1:
+                encoded.extend(ord(char) for char in token[start:])
+                break
+            encoded.extend(ord(char) for char in token[start:special_index])
+            encoded.append(2)
+            start = special_index + len(special_token)
+        return encoded
 
 
 class EmptyDataset(IterableDataset):
@@ -113,6 +130,7 @@ class TestDataLoader(unittest.TestCase):
                 max_tokens=seq_len,
                 pad_idx=pad_idx,
                 sos_idx=self.bpe.encode("<SOS>", allowed_special={"<SOS>"})[0],
+                packer=pack_tokens,
             )
         else:
             dataset = TokenWindowDataset(
@@ -140,10 +158,7 @@ class TestDataLoader(unittest.TestCase):
         )
         pad_idx = self.bpe.encode("<PAD>", allowed_special={"<PAD>"})[0]
         tokenized_examples = [
-            tokenize_prompt_completion(
-                openai_chat_to_prompt_completion(example), self.bpe
-            )
-            for example in chat_examples
+            tokenize_sft_messages(example, self.bpe) for example in chat_examples
         ]
         return DataLoader(
             dataset=TokenSequenceDataset(
@@ -155,6 +170,9 @@ class TestDataLoader(unittest.TestCase):
             collate_fn=CausalLMCollator(
                 max_tokens=seq_len + 1,
                 pad_idx=pad_idx,
+                truncator=truncate_aligned_left,
+                padder=pad_aligned_right,
+                label_builder=build_causal_lm_inputs_and_labels,
             ),
         )
 
@@ -356,7 +374,7 @@ class TestDataLoader(unittest.TestCase):
             xp.array_equal(
                 batch.labels[0],
                 xp.array(
-                    [IGNORE_INDEX, IGNORE_INDEX, 68, 69, IGNORE_INDEX],
+                    [IGNORE_INDEX, IGNORE_INDEX, 68, 69, 2],
                     dtype=xp.int32,
                 ),
             )
@@ -385,14 +403,14 @@ class TestDataLoader(unittest.TestCase):
         self.assertTrue(
             xp.array_equal(
                 batch.input_ids[0],
-                xp.array([65, 66, 67, 68, 69], dtype=xp.int32),
+                xp.array([116, 58, 32, 68, 69], dtype=xp.int32),
             )
         )
         self.assertTrue(
             xp.array_equal(
                 batch.labels[0],
                 xp.array(
-                    [IGNORE_INDEX, IGNORE_INDEX, 68, 69, IGNORE_INDEX],
+                    [IGNORE_INDEX, IGNORE_INDEX, 68, 69, 2],
                     dtype=xp.int32,
                 ),
             )
@@ -417,13 +435,13 @@ class TestDataLoader(unittest.TestCase):
 
         self.assertTrue(
             xp.array_equal(
-                batch.input_ids[0], xp.array([67, 68, 69, 70], dtype=xp.int32)
+                batch.input_ids[0], xp.array([32, 69, 70, 71], dtype=xp.int32)
             )
         )
         self.assertTrue(
             xp.array_equal(
                 batch.labels[0],
-                xp.array([IGNORE_INDEX, 69, 70, 71], dtype=xp.int32),
+                xp.array([69, 70, 71, 2], dtype=xp.int32),
             )
         )
 

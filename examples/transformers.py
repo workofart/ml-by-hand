@@ -3,7 +3,7 @@ from typing import Any, Optional
 
 from autograd import functional, nn, optim
 from autograd.backend import xp
-from autograd.data.collator import Seq2SeqCollator
+from autograd.data.collator import Seq2SeqCollator, pack_tokens
 from autograd.data.data_loader import DataLoader
 from autograd.data.utils import (
     build_seq2seq_dataset_from_text_pairs,
@@ -682,6 +682,7 @@ if __name__ == "__main__":
             max_tokens=trainer.model.max_seq_len,
             pad_idx=pad_idx,
             sos_idx=sos_idx,
+            packer=pack_tokens,
         ),
     )
     test_data_loader = DataLoader(
@@ -691,6 +692,7 @@ if __name__ == "__main__":
             max_tokens=trainer.model.max_seq_len,
             pad_idx=pad_idx,
             sos_idx=sos_idx,
+            packer=pack_tokens,
         ),
     )
 

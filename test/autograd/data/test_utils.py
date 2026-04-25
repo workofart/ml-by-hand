@@ -25,9 +25,21 @@ class MockBPE:
                 return [1]
             if token == "<|endoftext|>":
                 return [2]
-        if token == "<|endoftext|>":
+        special_token = "<|endoftext|>"
+        if token == special_token:
             return [2]
-        return [ord(char) for char in token]
+
+        encoded = []
+        start = 0
+        while True:
+            special_index = token.find(special_token, start)
+            if special_index == -1:
+                encoded.extend(ord(char) for char in token[start:])
+                break
+            encoded.extend(ord(char) for char in token[start:special_index])
+            encoded.append(2)
+            start = special_index + len(special_token)
+        return encoded
 
 
 class TestDataUtils(unittest.TestCase):

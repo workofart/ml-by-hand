@@ -5,7 +5,13 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from autograd.backend import xp
-from autograd.data.collator import CausalLMCollator, CausalLMWindowCollator
+from autograd.data.collator import (
+    CausalLMCollator,
+    CausalLMWindowCollator,
+    build_causal_lm_inputs_and_labels,
+    pad_aligned_right,
+    truncate_aligned_left,
+)
 from autograd.data.data_loader import DataLoader
 from autograd.data.dataset import (
     IterableDataset,
@@ -13,10 +19,6 @@ from autograd.data.dataset import (
     TokenWindowDataset,
 )
 from autograd.data.types import CausalLMBatch, Seq2SeqBatch
-from autograd.data.utils import (
-    openai_chat_to_prompt_completion,
-    tokenize_prompt_completion,
-)
 from autograd.functional import IGNORE_INDEX, cross_entropy
 from autograd.nn import AbstractLLMForwardFn, Module
 from autograd.optim import SGD, Optimizer
@@ -175,7 +177,23 @@ class MockBPE:
                 return [0]
             if token == "<SOS>":
                 return [1]
-        return [ord(char) for char in token]
+            if token == "<|endoftext|>":
+                return [2]
+        special_token = "<|endoftext|>"
+        if token == special_token:
+            return [2]
+
+        encoded = []
+        start = 0
+        while True:
+            special_index = token.find(special_token, start)
+            if special_index == -1:
+                encoded.extend(ord(char) for char in token[start:])
+                break
+            encoded.extend(ord(char) for char in token[start:special_index])
+            encoded.append(2)
+            start = special_index + len(special_token)
+        return encoded
 
 
 class FakeTqdm:
@@ -468,6 +486,37 @@ class TestSimpleTrainer(BaseTrainerTest):
         self.assertEqual(mock_tqdm.call_args.kwargs["desc"], "Training")
         self.assertEqual(sum(progress_bar.updates), 3)
         self.assertEqual(progress_bar.postfixes, [])
+
+    @patch("autograd.tools.trainer.tqdm")
+    def test_fit_updates_progress_after_accumulation_optimizer_step(self, mock_tqdm):
+        config = GenericTrainingConfig(
+            max_steps=2,
+            checkpoint_freq=10,
+            model_kwargs={"hidden_size": 256},
+            optimizer_kwargs={"lr": 0.01},
+            global_batch_size=2,
+            micro_batch_size=1,
+        )
+        trainer = SimpleTrainer(
+            model_cls=MockModelClass,
+            optimizer_cls=MockOptimizerClass,
+            loss_fn=self.loss_fn,
+            config=config,
+            output_type="logits",
+        )
+        update_optimizer_counts = []
+
+        class RecordingProgress(FakeTqdm):
+            def update(self, n=1):
+                super().update(n)
+                update_optimizer_counts.append(trainer.optimizer.step_call_count)
+
+        mock_tqdm.return_value = RecordingProgress()
+        train_loader = make_data_loader(self.train_data)
+
+        trainer.fit(train_loader)
+
+        self.assertEqual(update_optimizer_counts, [0, 1])
 
     def test_fit_does_not_call_tensor_item_for_train_loss_each_batch(self):
         self.config.max_epochs = None
@@ -1613,30 +1662,22 @@ class TestLLMTrainer(BaseTrainerTest):
         self.assertAlmostEqual(avg_val_loss.val_loss, 1.23, places=5)
         self.assertEqual(self.loss_fn.call_count, 1)
 
-    def test_compute_loss_supports_sft_batches_from_generic_data_loader(self):
+    def test_compute_loss_supports_prompt_masked_causal_lm_batches(self):
         bpe = MockBPE()
         pad_idx = bpe.encode("<PAD>", allowed_special={"<PAD>"})[0]
-        tokenized_example = tokenize_prompt_completion(
-            openai_chat_to_prompt_completion(
-                {
-                    "messages": [
-                        {"role": "user", "content": "ABC"},
-                        {"role": "assistant", "content": "CB"},
-                    ]
-                }
-            ),
-            bpe,
-        )
         loader = DataLoader(
             dataset=TokenSequenceDataset(
-                token_sequences=[tokenized_example["tokens"]],
-                loss_masks=[tokenized_example["loss_mask"]],
+                token_sequences=[xp.array([65, 66, 67, 2, 67, 66, 2], dtype=xp.int32)],
+                loss_masks=[xp.array([0, 0, 0, 0, 1, 1, 1], dtype=xp.int32)],
                 shuffle=False,
             ),
             batch_size=1,
             collate_fn=CausalLMCollator(
                 max_tokens=6,
                 pad_idx=pad_idx,
+                truncator=truncate_aligned_left,
+                padder=pad_aligned_right,
+                label_builder=build_causal_lm_inputs_and_labels,
             ),
         )
         trainer = LLMTrainer(

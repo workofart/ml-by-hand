@@ -337,7 +337,6 @@ class AbstractTrainer(ABC):
                     state.record_loss(loss)
 
                     self.global_step += 1
-                    progress_bar.update(1)
                     should_report = plan.should_report(self.global_step)
 
                     if state.has_enough_batches(accumulation_steps):
@@ -347,6 +346,8 @@ class AbstractTrainer(ABC):
                             # the grad norm on steps that will report it.
                             record_grad_norm=should_report,
                         )
+
+                    progress_bar.update(1)
 
                     if should_report:
                         eval_state = (

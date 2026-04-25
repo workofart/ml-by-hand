@@ -11,7 +11,13 @@ import psutil
 from autograd import functional, nn, optim
 from autograd.backend import IS_CUPY, NAME, xp
 from autograd.backend import eval as backend_eval
-from autograd.data.collator import CausalLMCollator, PairedCollator
+from autograd.data.collator import (
+    CausalLMCollator,
+    PairedCollator,
+    build_causal_lm_inputs_and_labels,
+    pad_aligned_right,
+    truncate_aligned_left,
+)
 from autograd.data.data_loader import DataLoader
 from autograd.data.dataset import PairedIterableDataset, TokenSequenceDataset
 from autograd.tensor import Tensor
@@ -368,12 +374,18 @@ class CIPipelinePerformanceTest(TestCase):
         loader = DataLoader(
             dataset=TokenSequenceDataset(
                 token_sequences=token_sequences,
+                loss_masks=[
+                    xp.ones((seq_len + 1,), dtype=xp.int32) for _ in range(batch_size)
+                ],
                 shuffle=False,
             ),
             batch_size=batch_size,
             collate_fn=CausalLMCollator(
                 max_tokens=seq_len + 1,
                 pad_idx=0,
+                truncator=truncate_aligned_left,
+                padder=pad_aligned_right,
+                label_builder=build_causal_lm_inputs_and_labels,
             ),
         )
         batch = next(iter(loader))
