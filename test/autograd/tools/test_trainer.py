@@ -5,19 +5,9 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from autograd.backend import xp
-from autograd.data.collator import (
-    CausalLMCollator,
-    CausalLMWindowCollator,
-    build_causal_lm_inputs_and_labels,
-    pad_aligned_right,
-    truncate_aligned_left,
-)
+from autograd.data.collator import FixedLengthCausalLMCollator
 from autograd.data.data_loader import DataLoader
-from autograd.data.dataset import (
-    IterableDataset,
-    TokenSequenceDataset,
-    TokenWindowDataset,
-)
+from autograd.data.dataset import MapDataset, PairedMapDataset
 from autograd.data.types import CausalLMBatch, Seq2SeqBatch
 from autograd.functional import IGNORE_INDEX, cross_entropy
 from autograd.nn import AbstractLLMForwardFn, Module
@@ -43,41 +33,20 @@ def identity_collate(batch_items):
     return batch_items[0]
 
 
-class InMemoryBatchDataset(IterableDataset):
+class InMemoryBatchDataset(MapDataset):
     def __init__(self, data):
-        self.data = data
+        super().__init__(data)
         self.epoch_start_calls = 0
 
     def on_epoch_start(self):
         self.epoch_start_calls += 1
-
-    def __iter__(self):
-        return iter(self.data)
-
-    def __len__(self):
-        return len(self.data)
-
-
-class UnsizedInfiniteDataset(IterableDataset):
-    def __len__(self):
-        raise TypeError("infinite")
-
-    def __iter__(self):
-        raise RuntimeError(
-            "fit should reject unsized infinite loaders before iterating"
-        )
-
-
-class UnsizedEmptyPassDataset(IterableDataset):
-    def __iter__(self):
-        return iter(())
 
 
 def make_data_loader(data):
     return DataLoader(
         dataset=InMemoryBatchDataset(data),
         batch_size=1,
-        collate_fn=identity_collate,
+        collator=identity_collate,
     )
 
 
@@ -1078,30 +1047,13 @@ class TestSimpleTrainer(BaseTrainerTest):
         checkpoint = mock_save_checkpoint.call_args.args[0]
         self.assertEqual(checkpoint["step_count"], 2)
 
-    def test_fit_requires_max_steps_for_unsized_infinite_train_loader(self):
-        self.config.max_epochs = 1
-        self.config.max_steps = None
-
-        with self.assertRaisesRegex(
-            ValueError,
-            "Infinite training loaders require max_steps",
-        ):
-            self.trainer.fit(
-                DataLoader(
-                    dataset=UnsizedInfiniteDataset(),
-                    batch_size=1,
-                    collate_fn=identity_collate,
-                ),
-                self.val_loader,
-            )
-
     def test_fit_step_mode_rejects_loader_that_yields_no_batches(self):
         self.config.max_epochs = None
         self.config.max_steps = 1
         empty_loader = DataLoader(
-            dataset=UnsizedEmptyPassDataset(),
+            dataset=MapDataset([]),
             batch_size=1,
-            collate_fn=identity_collate,
+            collator=identity_collate,
         )
 
         with self.assertRaisesRegex(
@@ -1744,18 +1696,17 @@ class TestLLMTrainer(BaseTrainerTest):
         bpe = MockBPE()
         pad_idx = bpe.encode("<PAD>", allowed_special={"<PAD>"})[0]
         loader = DataLoader(
-            dataset=TokenSequenceDataset(
-                token_sequences=[xp.array([65, 66, 67, 2, 67, 66, 2], dtype=xp.int32)],
-                loss_masks=[xp.array([0, 0, 0, 0, 1, 1, 1], dtype=xp.int32)],
-                shuffle=False,
+            dataset=PairedMapDataset(
+                [xp.array([65, 66, 67, 2, 67, 66, 2], dtype=xp.int32)],
+                [xp.array([0, 0, 0, 0, 1, 1, 1], dtype=xp.int32)],
+                input_key="tokens",
+                target_key="loss_mask",
+                dtype=xp.int32,
             ),
             batch_size=1,
-            collate_fn=CausalLMCollator(
+            collator=FixedLengthCausalLMCollator(
                 max_tokens=6,
                 pad_idx=pad_idx,
-                truncator=truncate_aligned_left,
-                padder=pad_aligned_right,
-                label_builder=build_causal_lm_inputs_and_labels,
             ),
         )
         trainer = LLMTrainer(
@@ -1789,29 +1740,3 @@ class TestLLMTrainer(BaseTrainerTest):
             float(train_loss.item()), float(expected_loss.item()), places=6
         )
         self.assertAlmostEqual(val_loss.val_loss, float(expected_loss.item()), places=6)
-
-    def test_fit_supports_unsized_streaming_data_loaders(self):
-        self.config.max_epochs = None
-        self.config.max_steps = 1
-        self.config.max_eval_steps = 1
-
-        stream_loader = DataLoader(
-            dataset=TokenWindowDataset(
-                xp.arange(100, dtype=xp.int32),
-                window_len=5,
-                sampling="sequential",
-            ),
-            batch_size=2,
-            collate_fn=CausalLMWindowCollator(),
-        )
-        trainer = LLMTrainer(
-            model_cls=MockModelClass,
-            optimizer_cls=MockOptimizerClass,
-            loss_fn=cross_entropy,
-            forward_fn=PromptMaskAwareForwardFn(),
-            config=self.config,
-        )
-
-        trainer.fit(stream_loader, stream_loader)
-
-        self.assertEqual(trainer.optimizer.step_call_count, 1)

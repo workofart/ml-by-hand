@@ -6,7 +6,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from autograd.backend import xp
-from autograd.data.dataset import Seq2SeqDataset
+from autograd.data.dataset import PairedMapDataset
 from autograd.data.utils import (
     build_seq2seq_dataset_from_text_pairs,
     load_data,
@@ -142,11 +142,10 @@ class TestDataUtils(unittest.TestCase):
         dataset = build_seq2seq_dataset_from_text_pairs(
             [("ABC", "DE")],
             self.bpe,
-            shuffle=False,
             target_suffix="<|endoftext|>",
         )
 
-        self.assertIsInstance(dataset, Seq2SeqDataset)
+        self.assertIsInstance(dataset, PairedMapDataset)
         example = next(iter(dataset))
         self.assertTrue(
             xp.array_equal(example["input_ids"], xp.array([65, 66, 67], dtype=xp.int32))

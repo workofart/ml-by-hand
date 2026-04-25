@@ -3,31 +3,44 @@ from unittest.mock import patch
 
 from autograd.backend import xp
 from autograd.data.collator import (
-    CausalLMCollator,
     CausalLMWindowCollator,
     PairedCollator,
     Seq2SeqCollator,
-    build_causal_lm_inputs_and_labels,
-    pack_tokens,
-    pad_aligned_right,
-    truncate_aligned_left,
 )
 from autograd.data.data_loader import DataLoader
 from autograd.data.dataset import (
-    IterableDataset,
-    PairedIterableDataset,
-    Seq2SeqDataset,
-    TokenSequenceDataset,
-    TokenWindowDataset,
+    MapDataset,
+    PairedMapDataset,
+    TokenWindowMapDataset,
 )
-from autograd.data.sft import tokenize_sft_messages
+from autograd.data.sampler import (
+    RandomSampler,
+    Sampler,
+    SequentialSampler,
+    TokenLengthGroupedRandomSampler,
+)
 from autograd.data.types import CausalLMBatch, Seq2SeqBatch
-from autograd.functional import IGNORE_INDEX
 
 
-def mock_padding_mask(X_chunk, pad_idx):
+def mock_padding_mask(X_chunk, pad_idx, dims=None):
+    if dims is not None:
+        return xp.zeros(dims)
     batch_size, seq_len = X_chunk.shape
     return xp.zeros((batch_size, 1, 1, seq_len))
+
+
+def make_token_dataset(token_sequences, loss_masks=None):
+    if loss_masks is None:
+        loss_masks = [
+            xp.ones((len(tokens),), dtype=xp.int32) for tokens in token_sequences
+        ]
+    return PairedMapDataset(
+        token_sequences,
+        loss_masks,
+        input_key="tokens",
+        target_key="loss_mask",
+        dtype=xp.int32,
+    )
 
 
 class MockBPE:
@@ -56,28 +69,15 @@ class MockBPE:
         return encoded
 
 
-class EmptyDataset(IterableDataset):
+class StaticSampler(Sampler):
+    def __init__(self, indices):
+        self.indices = indices
+
     def __iter__(self):
-        return iter(())
+        return iter(self.indices)
 
     def __len__(self):
-        return 0
-
-
-class BuggyEmptyPassDataset(IterableDataset):
-    def __iter__(self):
-        return iter(())
-
-    def __len__(self):
-        return 3
-
-
-class ShortPassDataset(IterableDataset):
-    def __iter__(self):
-        return iter(range(2))
-
-    def __len__(self):
-        return 3
+        return len(self.indices)
 
 
 class TestDataLoader(unittest.TestCase):
@@ -85,20 +85,6 @@ class TestDataLoader(unittest.TestCase):
         self.X = xp.arange(20).reshape(10, 2)
         self.y = xp.arange(10)
         self.data = xp.arange(200)
-        self.chat_examples = [
-            {
-                "messages": [
-                    {"role": "system", "content": "ABC"},
-                    {"role": "assistant", "content": "DE"},
-                ]
-            },
-            {
-                "messages": [
-                    {"role": "user", "content": "Q"},
-                    {"role": "assistant", "content": "RS"},
-                ]
-            },
-        ]
         self.seq_len = 10
         self.batch_size_simple = 3
         self.batch_size_llm = 4
@@ -129,85 +115,59 @@ class TestDataLoader(unittest.TestCase):
                 data[offset + seq_len : offset + (2 * seq_len)]
                 for offset in range(window_count)
             ]
-            dataset = Seq2SeqDataset(
-                input_sequences=sources,
-                label_sequences=targets,
-                shuffle=shuffle,
+            dataset = PairedMapDataset(
+                sources,
+                targets,
+                input_key="input_ids",
+                target_key="labels",
+                dtype=xp.int32,
             )
+            sampler = RandomSampler(dataset) if shuffle else None
             collator = Seq2SeqCollator(
                 max_tokens=seq_len,
                 pad_idx=pad_idx,
                 sos_idx=self.bpe.encode("<SOS>", allowed_special={"<SOS>"})[0],
-                packer=pack_tokens,
             )
         else:
-            dataset = TokenWindowDataset(
+            dataset = TokenWindowMapDataset(
                 xp.array(data),
                 window_len=seq_len + 1,
-                sampling="random" if shuffle else "sequential",
+            )
+            sampler = (
+                RandomSampler(dataset, replacement=True, num_samples=len(dataset))
+                if shuffle
+                else SequentialSampler(dataset)
             )
             collator = CausalLMWindowCollator()
         return DataLoader(
             dataset,
             batch_size=batch_size,
-            collate_fn=collator,
-        )
-
-    def make_sft_loader(
-        self,
-        chat_examples=None,
-        *,
-        batch_size=1,
-        seq_len=5,
-        shuffle=False,
-    ):
-        chat_examples = (
-            chat_examples if chat_examples is not None else self.chat_examples
-        )
-        pad_idx = self.bpe.encode("<PAD>", allowed_special={"<PAD>"})[0]
-        tokenized_examples = [
-            tokenize_sft_messages(example, self.bpe) for example in chat_examples
-        ]
-        return DataLoader(
-            dataset=TokenSequenceDataset(
-                token_sequences=[example["tokens"] for example in tokenized_examples],
-                loss_masks=[example["loss_mask"] for example in tokenized_examples],
-                shuffle=shuffle,
-            ),
-            batch_size=batch_size,
-            collate_fn=CausalLMCollator(
-                max_tokens=seq_len + 1,
-                pad_idx=pad_idx,
-                truncator=truncate_aligned_left,
-                padder=pad_aligned_right,
-                label_builder=build_causal_lm_inputs_and_labels,
-            ),
+            collator=collator,
+            sampler=sampler,
         )
 
     def test_data_loader_no_shuffle(self):
-        dataset = PairedIterableDataset(self.X, self.y, shuffle=False)
+        dataset = PairedMapDataset(self.X, self.y)
         loader = DataLoader(
             dataset,
             batch_size=self.batch_size_simple,
-            collate_fn=PairedCollator(),
+            collator=PairedCollator(),
         )
 
-        expected_indices = xp.arange(len(self.X))
         batches = list(loader)
         expected_batches = (
             len(self.X) + self.batch_size_simple - 1
         ) // self.batch_size_simple
 
-        self.assertTrue(xp.array_equal(dataset.indices, expected_indices))
         self.assertEqual(len(batches), expected_batches)
         reconstructed_y = xp.concatenate([batch[1] for batch in batches])
         self.assertTrue(xp.array_equal(reconstructed_y, self.y))
 
     def test_data_loader_length(self):
         loader = DataLoader(
-            PairedIterableDataset(self.X, self.y, shuffle=False),
+            PairedMapDataset(self.X, self.y),
             batch_size=self.batch_size_simple,
-            collate_fn=PairedCollator(),
+            collator=PairedCollator(),
         )
 
         expected_batches = (
@@ -217,7 +177,7 @@ class TestDataLoader(unittest.TestCase):
         self.assertEqual(len(loader), expected_batches)
 
     def test_data_loader_rejects_empty_dataset_iteration(self):
-        loader = DataLoader(EmptyDataset(), batch_size=1)
+        loader = DataLoader(MapDataset([]), batch_size=1)
 
         with self.assertRaisesRegex(
             ValueError,
@@ -226,7 +186,7 @@ class TestDataLoader(unittest.TestCase):
             next(iter(loader))
 
     def test_data_loader_rejects_empty_dataset_length(self):
-        loader = DataLoader(EmptyDataset(), batch_size=1)
+        loader = DataLoader(MapDataset([]), batch_size=1)
 
         with self.assertRaisesRegex(
             ValueError,
@@ -234,29 +194,11 @@ class TestDataLoader(unittest.TestCase):
         ):
             len(loader)
 
-    def test_data_loader_rejects_dataset_that_yields_nothing_for_pass(self):
-        loader = DataLoader(BuggyEmptyPassDataset(), batch_size=2)
-
-        with self.assertRaisesRegex(
-            ValueError,
-            "DataLoader yielded no batches",
-        ):
-            next(iter(loader))
-
-    def test_data_loader_rejects_len_iteration_batch_count_mismatch(self):
-        loader = DataLoader(ShortPassDataset(), batch_size=1)
-
-        with self.assertRaisesRegex(
-            ValueError,
-            "DataLoader yielded a different number of batches than len",
-        ):
-            list(loader)
-
     def test_data_loader_rejects_drop_last_when_only_partial_batch_exists(self):
         loader = DataLoader(
-            PairedIterableDataset(self.X[:1], self.y[:1], shuffle=False),
+            PairedMapDataset(self.X[:1], self.y[:1]),
             batch_size=2,
-            collate_fn=PairedCollator(),
+            collator=PairedCollator(),
             drop_last=True,
         )
 
@@ -268,9 +210,9 @@ class TestDataLoader(unittest.TestCase):
 
     def test_data_loader_rejects_drop_last_zero_batch_length(self):
         loader = DataLoader(
-            PairedIterableDataset(self.X[:1], self.y[:1], shuffle=False),
+            PairedMapDataset(self.X[:1], self.y[:1]),
             batch_size=2,
-            collate_fn=PairedCollator(),
+            collator=PairedCollator(),
             drop_last=True,
         )
 
@@ -280,23 +222,43 @@ class TestDataLoader(unittest.TestCase):
         ):
             len(loader)
 
+    def test_data_loader_rejects_non_integer_sampler_index(self):
+        dataset = make_token_dataset([xp.arange(2, dtype=xp.int32)])
+        loader = DataLoader(dataset, batch_size=1, sampler=StaticSampler(["0"]))
+
+        with self.assertRaisesRegex(TypeError, "sampler yielded non-integer index"):
+            next(iter(loader))
+
+    def test_data_loader_rejects_out_of_range_sampler_index(self):
+        dataset = make_token_dataset([xp.arange(2, dtype=xp.int32)])
+        loader = DataLoader(dataset, batch_size=1, sampler=StaticSampler([1]))
+
+        with self.assertRaisesRegex(
+            IndexError,
+            "sampler yielded index 1 outside dataset length 1",
+        ):
+            next(iter(loader))
+
     def test_pretraining_data_loader_on_epoch_start_reseeds_without_crashing(self):
         loader = self.make_pretraining_loader(shuffle=True)
 
         loader.on_epoch_start()
 
     def test_pretraining_data_loader_length(self):
-        loader_infinite = self.make_pretraining_loader()
+        loader = self.make_pretraining_loader()
+        expected_windows = len(self.data) - self.seq_len
+        expected_batches = (
+            expected_windows + self.batch_size_llm - 1
+        ) // self.batch_size_llm
 
-        with self.assertRaises(TypeError):
-            _ = len(loader_infinite)
+        self.assertEqual(len(loader), expected_batches)
 
     def test_data_loader_batches_supervised_examples(self):
-        dataset = PairedIterableDataset(self.X, self.y, shuffle=False)
+        dataset = PairedMapDataset(self.X, self.y)
         loader = DataLoader(
             dataset,
             batch_size=4,
-            collate_fn=PairedCollator(),
+            collator=PairedCollator(),
         )
 
         batches = list(loader)
@@ -307,14 +269,12 @@ class TestDataLoader(unittest.TestCase):
         self.assertTrue(xp.array_equal(first_y, self.y[:4]))
 
     def test_causal_lm_window_loader_yields_expected_next_token_pairs(self):
+        dataset = TokenWindowMapDataset(xp.arange(20, dtype=xp.int32), window_len=5)
         loader = DataLoader(
-            dataset=TokenWindowDataset(
-                xp.arange(20, dtype=xp.int32),
-                window_len=5,
-                sampling="sequential",
-            ),
+            dataset=dataset,
             batch_size=2,
-            collate_fn=CausalLMWindowCollator(),
+            collator=CausalLMWindowCollator(),
+            sampler=SequentialSampler(dataset),
         )
 
         batch = next(iter(loader))
@@ -334,14 +294,12 @@ class TestDataLoader(unittest.TestCase):
         )
 
     def test_causal_lm_window_loader_allows_minimal_valid_stream(self):
+        dataset = TokenWindowMapDataset(xp.arange(5, dtype=xp.int32), window_len=5)
         loader = DataLoader(
-            dataset=TokenWindowDataset(
-                xp.arange(5, dtype=xp.int32),
-                window_len=5,
-                sampling="sequential",
-            ),
+            dataset=dataset,
             batch_size=1,
-            collate_fn=CausalLMWindowCollator(),
+            collator=CausalLMWindowCollator(),
+            sampler=SequentialSampler(dataset),
         )
 
         batch = next(iter(loader))
@@ -354,14 +312,12 @@ class TestDataLoader(unittest.TestCase):
         )
 
     def test_data_loader_returns_causal_lm_batch_with_window_collator(self):
+        dataset = TokenWindowMapDataset(xp.arange(20, dtype=xp.int32), window_len=5)
         loader = DataLoader(
-            dataset=TokenWindowDataset(
-                xp.arange(20, dtype=xp.int32),
-                window_len=5,
-                sampling="sequential",
-            ),
+            dataset=dataset,
             batch_size=2,
-            collate_fn=CausalLMWindowCollator(),
+            collator=CausalLMWindowCollator(),
+            sampler=SequentialSampler(dataset),
         )
 
         batch = next(iter(loader))
@@ -370,13 +326,11 @@ class TestDataLoader(unittest.TestCase):
         self.assertTrue(xp.array_equal(batch.input_ids[0], xp.array([0, 1, 2, 3])))
 
     def test_data_loader_without_collator_yields_raw_window_examples(self):
+        dataset = TokenWindowMapDataset(xp.arange(20, dtype=xp.int32), window_len=5)
         loader = DataLoader(
-            dataset=TokenWindowDataset(
-                xp.arange(20, dtype=xp.int32),
-                window_len=5,
-                sampling="sequential",
-            ),
+            dataset=dataset,
             batch_size=2,
+            sampler=SequentialSampler(dataset),
         )
 
         batch = next(iter(loader))
@@ -385,108 +339,73 @@ class TestDataLoader(unittest.TestCase):
         self.assertEqual(batch[0].offset, 0)
         self.assertEqual(batch[1].offset, 1)
 
-    def test_sft_dataloader_length(self):
-        loader = self.make_sft_loader(batch_size=1, seq_len=4, shuffle=False)
-
-        self.assertEqual(len(loader), 2)
-
-    def test_sft_dataloader_masks_prompt_targets(self):
-        loader = self.make_sft_loader(
-            chat_examples=[
-                {
-                    "messages": [
-                        {"role": "user", "content": "ABC"},
-                        {"role": "assistant", "content": "DE"},
-                    ]
-                }
+    def test_data_loader_can_use_length_grouped_sampler(self):
+        dataset = make_token_dataset(
+            [
+                xp.arange(2, dtype=xp.int32),
+                xp.arange(8, dtype=xp.int32),
+                xp.arange(3, dtype=xp.int32),
+                xp.arange(7, dtype=xp.int32),
             ],
-            batch_size=1,
-            seq_len=5,
-            shuffle=False,
+            [
+                xp.ones((2,), dtype=xp.int32),
+                xp.ones((8,), dtype=xp.int32),
+                xp.ones((3,), dtype=xp.int32),
+                xp.ones((7,), dtype=xp.int32),
+            ],
         )
 
-        batch = next(iter(loader))
-
-        self.assertIsInstance(batch, CausalLMBatch)
-        self.assertEqual(batch.input_ids.shape, (1, 5))
-        self.assertEqual(batch.labels.shape, (1, 5))
-        self.assertTrue(
-            xp.array_equal(
-                batch.labels[0],
-                xp.array(
-                    [IGNORE_INDEX, IGNORE_INDEX, 68, 69, 2],
-                    dtype=xp.int32,
+        batches = list(
+            DataLoader(
+                dataset,
+                batch_size=2,
+                sampler=TokenLengthGroupedRandomSampler(
+                    dataset,
+                    sort_buffer_size=4,
                 ),
             )
         )
+        batch_lengths = [
+            [len(example["tokens"]) for example in batch] for batch in batches
+        ]
 
-    def test_data_loader_can_use_sft_batch_and_label_primitives(self):
-        loader = self.make_sft_loader(
-            chat_examples=[
-                {
-                    "messages": [
-                        {"role": "user", "content": "ABC"},
-                        {"role": "assistant", "content": "DE"},
-                    ]
-                }
+        self.assertEqual(batch_lengths, [[2, 3], [7, 8]])
+
+    @patch("autograd.data.dataset.xp.random.permutation")
+    def test_length_grouped_sampler_shuffle_stays_on_cpu(
+        self,
+        backend_permutation,
+    ):
+        backend_permutation.side_effect = AssertionError(
+            "backend permutation should not be used"
+        )
+
+        dataset = make_token_dataset(
+            [
+                xp.arange(2, dtype=xp.int32),
+                xp.arange(8, dtype=xp.int32),
+                xp.arange(3, dtype=xp.int32),
+                xp.arange(7, dtype=xp.int32),
             ],
-            batch_size=1,
-            seq_len=5,
-            shuffle=False,
-        )
-
-        batch = next(iter(loader))
-
-        self.assertIsInstance(batch, CausalLMBatch)
-        self.assertEqual(batch.input_ids.shape, (1, 5))
-        self.assertEqual(batch.labels.shape, (1, 5))
-        self.assertTrue(
-            xp.array_equal(
-                batch.input_ids[0],
-                xp.array([116, 58, 32, 68, 69], dtype=xp.int32),
-            )
-        )
-        self.assertTrue(
-            xp.array_equal(
-                batch.labels[0],
-                xp.array(
-                    [IGNORE_INDEX, IGNORE_INDEX, 68, 69, 2],
-                    dtype=xp.int32,
-                ),
-            )
-        )
-
-    def test_sft_dataloader_left_truncates_to_keep_response_tokens(self):
-        loader = self.make_sft_loader(
-            chat_examples=[
-                {
-                    "messages": [
-                        {"role": "user", "content": "ABCD"},
-                        {"role": "assistant", "content": "EFG"},
-                    ]
-                }
+            [
+                xp.ones((2,), dtype=xp.int32),
+                xp.ones((8,), dtype=xp.int32),
+                xp.ones((3,), dtype=xp.int32),
+                xp.ones((7,), dtype=xp.int32),
             ],
-            batch_size=1,
-            seq_len=4,
-            shuffle=False,
+        )
+        sampler = TokenLengthGroupedRandomSampler(
+            dataset,
+            sort_buffer_size=4,
         )
 
-        batch = next(iter(loader))
+        sampler.on_epoch_start()
 
-        self.assertTrue(
-            xp.array_equal(
-                batch.input_ids[0], xp.array([32, 69, 70, 71], dtype=xp.int32)
-            )
-        )
-        self.assertTrue(
-            xp.array_equal(
-                batch.labels[0],
-                xp.array([69, 70, 71, 2], dtype=xp.int32),
-            )
-        )
+        self.assertIsInstance(sampler.indices, list)
+        backend_permutation.assert_not_called()
 
     @patch(
-        "autograd.data.collator.text_utils.create_padding_mask",
+        "autograd.data.collator.create_padding_mask",
         side_effect=mock_padding_mask,
     )
     def test_encoder_decoder_pretraining_loader_output(self, mock_padding):
@@ -500,11 +419,8 @@ class TestDataLoader(unittest.TestCase):
         self.assertEqual(
             batch.decoder_input_ids.shape, (self.batch_size_llm, self.seq_len)
         )
-        self.assertTrue(
-            xp.all(
-                xp.asarray(batch.decoder_input_ids[:, 0] == loader.collate_fn.sos_idx)
-            )
-        )
+        sos_idx = self.bpe.encode("<SOS>", allowed_special={"<SOS>"})[0]
+        self.assertTrue(xp.all(xp.asarray(batch.decoder_input_ids[:, 0] == sos_idx)))
         self.assertFalse(hasattr(batch, "loss_mask"))
         self.assertEqual(
             batch.src_mask.shape, (self.batch_size_llm, 1, 1, self.seq_len)

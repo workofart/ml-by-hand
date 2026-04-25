@@ -5,15 +5,17 @@ Data pipeline boundary:
 - dataset / transforms
 
 2. Batch assembly and batch-time shaping
-- collate_fn
+- collator
 
 3. Training-specific logic
 - trainer / training loop / model forward
 """
 
+from numbers import Integral
 from typing import Any, Callable, Sequence
 
-from autograd.data.dataset import IterableDataset
+from autograd.data.dataset import MapDataset
+from autograd.data.sampler import Sampler
 
 CollateFn = Callable[[Sequence[Any]], Any]
 
@@ -22,17 +24,18 @@ class DataLoader:
     """
     Generic example-batching loader.
 
-    Dataset yields examples.
+    Map-style datasets iterate in stored order unless a sampler is supplied.
     DataLoader groups examples.
     Collator creates batches.
     """
 
     def __init__(
         self,
-        dataset: IterableDataset,
+        dataset: MapDataset,
         batch_size: int,
-        collate_fn: CollateFn | None = None,
+        collator: CollateFn | None = None,
         *,
+        sampler: Sampler | None = None,
         drop_last: bool = False,
     ) -> None:
         if batch_size < 1:
@@ -40,27 +43,38 @@ class DataLoader:
 
         self.dataset = dataset
         self.batch_size = batch_size
-        self.collate_fn = collate_fn
+        self.collator = collator
+        self.sampler = sampler
         self.drop_last = drop_last
 
     def on_epoch_start(self) -> None:
         self.dataset.on_epoch_start()
+        if self.sampler is not None:
+            self.sampler.on_epoch_start()
 
     def __iter__(self):
         examples = []
         yielded_batches = 0
 
-        for example in self.dataset:
+        if self.sampler is not None:
+            dataset_len = len(self.dataset)
+            iterable = (
+                self.dataset[self._validate_sampler_index(index, dataset_len)]
+                for index in self.sampler
+            )
+        else:
+            iterable = iter(self.dataset)
+        for example in iterable:
             examples.append(example)
 
             if len(examples) == self.batch_size:
                 yielded_batches += 1
-                yield self.collate_fn(examples) if self.collate_fn else examples
+                yield self.collator(examples) if self.collator else examples
                 examples = []
 
         if examples and not self.drop_last:
             yielded_batches += 1
-            yield self.collate_fn(examples) if self.collate_fn else examples
+            yield self.collator(examples) if self.collator else examples
 
         if yielded_batches == 0:
             raise ValueError(
@@ -69,17 +83,10 @@ class DataLoader:
                 "have dropped the only partial batch."
             )
 
-        try:
-            expected_batches = len(self)
-        except TypeError:
-            return
-        if yielded_batches != expected_batches:
-            raise ValueError(
-                "DataLoader yielded a different number of batches than len(DataLoader)."
-            )
-
     def __len__(self) -> int:
-        n = len(self.dataset)
+        # A sampler can yield a subset, repeat examples, or shard data, so the
+        # number of rows seen by this loader is not always len(dataset).
+        n = len(self.sampler) if self.sampler is not None else len(self.dataset)
 
         if self.drop_last:
             batch_count = n // self.batch_size
@@ -94,3 +101,17 @@ class DataLoader:
             )
 
         return batch_count
+
+    def _validate_sampler_index(self, index: Any, dataset_len: int) -> int:
+        if not isinstance(index, Integral):
+            raise TypeError(
+                f"sampler yielded non-integer index {index!r} "
+                f"of type {type(index).__name__}"
+            )
+        index_int = int(index)
+        if index_int < 0 or index_int >= dataset_len:
+            raise IndexError(
+                f"sampler yielded index {index_int} outside dataset length "
+                f"{dataset_len}"
+            )
+        return index_int

@@ -5,7 +5,8 @@ from openml.datasets import get_dataset  # pyright: ignore[reportMissingImports]
 from autograd import functional, nn, optim
 from autograd.data.collator import PairedCollator
 from autograd.data.data_loader import DataLoader
-from autograd.data.dataset import PairedIterableDataset
+from autograd.data.dataset import PairedMapDataset
+from autograd.data.sampler import RandomSampler
 from autograd.data.utils import train_test_split
 from autograd.tools.config_schema import GenericTrainingConfig
 from autograd.tools.trainer import SimpleTrainer
@@ -260,15 +261,17 @@ if __name__ == "__main__":
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.1)
 
+    train_dataset = PairedMapDataset(X_train, y_train)
     train_data_loader = DataLoader(
-        PairedIterableDataset(X_train, y_train, shuffle=True),
+        train_dataset,
         batch_size=256,
-        collate_fn=PairedCollator(),
+        collator=PairedCollator(),
+        sampler=RandomSampler(train_dataset),
     )
     test_data_loader = DataLoader(
-        PairedIterableDataset(X_test, y_test, shuffle=False),
+        PairedMapDataset(X_test, y_test),
         batch_size=256,
-        collate_fn=PairedCollator(),
+        collator=PairedCollator(),
     )
 
     # Train ResNet CIFAR-10 model
@@ -342,15 +345,17 @@ if __name__ == "__main__":
     logger.info(f"{X.shape=}, {y.shape=}")
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.1)
+    train_dataset = PairedMapDataset(X_train, y_train)
     train_data_loader = DataLoader(
-        PairedIterableDataset(X_train, y_train, shuffle=True),
+        train_dataset,
         batch_size=256,
-        collate_fn=PairedCollator(),
+        collator=PairedCollator(),
+        sampler=RandomSampler(train_dataset),
     )
     test_data_loader = DataLoader(
-        PairedIterableDataset(X_test, y_test, shuffle=False),
+        PairedMapDataset(X_test, y_test),
         batch_size=256,
-        collate_fn=PairedCollator(),
+        collator=PairedCollator(),
     )
 
     # Train ResNet CIFAR-100 model

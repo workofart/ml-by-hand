@@ -544,14 +544,7 @@ class AbstractTrainer(ABC):
         if self.config.max_steps is not None:
             return
 
-        try:
-            batch_count = len(train_data_loader)
-        except TypeError as exc:
-            raise ValueError(
-                "Infinite training loaders require max_steps. "
-                "Set max_steps or give the dataset examples_per_epoch."
-            ) from exc
-
+        batch_count = len(train_data_loader)
         if self.global_step > 0:
             plan = TrainingPlan.for_epochs(
                 max_epochs=cast(int, self.config.max_epochs),

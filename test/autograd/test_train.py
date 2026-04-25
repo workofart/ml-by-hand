@@ -9,7 +9,8 @@ from autograd import functional, nn, optim
 from autograd.backend import xp
 from autograd.data.collator import PairedCollator
 from autograd.data.data_loader import DataLoader
-from autograd.data.dataset import PairedIterableDataset
+from autograd.data.dataset import PairedMapDataset
+from autograd.data.sampler import RandomSampler
 from autograd.tools.config_schema import GenericTrainingConfig
 from autograd.tools.metrics import accuracy, mean_squared_error
 from autograd.tools.trainer import SimpleTrainer
@@ -95,10 +96,12 @@ class TestTrain(TestCase):
                 "lr": 1e-3,
             },
         )
+        train_dataset = PairedMapDataset(X, y)
         train_data_loader = DataLoader(
-            PairedIterableDataset(X, y, shuffle=True),
+            train_dataset,
             batch_size=32,
-            collate_fn=PairedCollator(),
+            collator=PairedCollator(),
+            sampler=RandomSampler(train_dataset),
         )
         trainer = SimpleTrainer(
             model_cls=Classifier,
@@ -142,10 +145,12 @@ class TestTrain(TestCase):
         X = (X - X.mean(axis=0)) / (X.std(axis=0) + eps)
         y = (y - y.mean()) / (y.std() + eps)
 
+        train_dataset = PairedMapDataset(X, y)
         train_data_loader = DataLoader(
-            PairedIterableDataset(X, y, shuffle=True),
+            train_dataset,
             batch_size=32,
-            collate_fn=PairedCollator(),
+            collator=PairedCollator(),
+            sampler=RandomSampler(train_dataset),
         )
 
         trainer = SimpleTrainer(

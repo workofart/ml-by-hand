@@ -13,7 +13,8 @@ from autograd import functional, nn, optim
 from autograd.backend import xp
 from autograd.data.collator import CausalLMWindowCollator
 from autograd.data.data_loader import DataLoader
-from autograd.data.dataset import TokenWindowDataset
+from autograd.data.dataset import TokenWindowMapDataset
+from autograd.data.sampler import RandomSampler, SequentialSampler
 from autograd.data.types import CausalLMBatch
 from autograd.tensor import Tensor
 from autograd.text import utils as text_utils
@@ -217,27 +218,33 @@ if __name__ == "__main__":
         forward_fn=GPT1ForwardFn(),
     )
 
+    train_dataset = TokenWindowMapDataset(
+        data=xp.array(train_data, dtype=xp.int32),
+        # CausalLMWindowCollator shifts one token to build input_ids/labels,
+        # so a length-T model context needs a raw window of length T + 1.
+        window_len=trainer.model.max_seq_len + 1,
+    )
+    test_dataset = TokenWindowMapDataset(
+        data=xp.array(test_data, dtype=xp.int32),
+        # CausalLMWindowCollator shifts one token to build input_ids/labels,
+        # so a length-T model context needs a raw window of length T + 1.
+        window_len=trainer.model.max_seq_len + 1,
+    )
     train_data_loader = DataLoader(
-        dataset=TokenWindowDataset(
-            data=xp.array(train_data, dtype=xp.int32),
-            # CausalLMWindowCollator shifts one token to build input_ids/labels,
-            # so a length-T model context needs a raw window of length T + 1.
-            window_len=trainer.model.max_seq_len + 1,
-            sampling="random",
-        ),
+        dataset=train_dataset,
         batch_size=train_micro_batch_size,
-        collate_fn=CausalLMWindowCollator(),
+        collator=CausalLMWindowCollator(),
+        sampler=RandomSampler(
+            train_dataset,
+            replacement=True,
+            num_samples=len(train_dataset),
+        ),
     )
     test_data_loader = DataLoader(
-        dataset=TokenWindowDataset(
-            data=xp.array(test_data, dtype=xp.int32),
-            # CausalLMWindowCollator shifts one token to build input_ids/labels,
-            # so a length-T model context needs a raw window of length T + 1.
-            window_len=trainer.model.max_seq_len + 1,
-            sampling="sequential",
-        ),
+        dataset=test_dataset,
         batch_size=max(1, train_micro_batch_size // 2),
-        collate_fn=CausalLMWindowCollator(),
+        collator=CausalLMWindowCollator(),
+        sampler=SequentialSampler(test_dataset),
     )
 
     trainer.fit(train_data_loader, test_data_loader)

@@ -3,8 +3,9 @@ from typing import Any, Optional
 
 from autograd import functional, nn, optim
 from autograd.backend import xp
-from autograd.data.collator import Seq2SeqCollator, pack_tokens
+from autograd.data.collator import Seq2SeqCollator
 from autograd.data.data_loader import DataLoader
+from autograd.data.sampler import RandomSampler
 from autograd.data.utils import (
     build_seq2seq_dataset_from_text_pairs,
     load_parquet_rows,
@@ -665,34 +666,31 @@ if __name__ == "__main__":
     train_dataset = build_seq2seq_dataset_from_text_pairs(
         train_pairs,
         bpe,
-        shuffle=True,
         target_suffix=CONFIG.custom_bpe.split_token,
     )
     test_dataset = build_seq2seq_dataset_from_text_pairs(
         test_pairs,
         bpe,
-        shuffle=False,
         target_suffix=CONFIG.custom_bpe.split_token,
     )
 
     train_data_loader = DataLoader(
         dataset=train_dataset,
         batch_size=train_micro_batch_size,
-        collate_fn=Seq2SeqCollator(
+        collator=Seq2SeqCollator(
             max_tokens=trainer.model.max_seq_len,
             pad_idx=pad_idx,
             sos_idx=sos_idx,
-            packer=pack_tokens,
         ),
+        sampler=RandomSampler(train_dataset),
     )
     test_data_loader = DataLoader(
         dataset=test_dataset,
         batch_size=max(1, train_micro_batch_size // 2),
-        collate_fn=Seq2SeqCollator(
+        collator=Seq2SeqCollator(
             max_tokens=trainer.model.max_seq_len,
             pad_idx=pad_idx,
             sos_idx=sos_idx,
-            packer=pack_tokens,
         ),
     )
 

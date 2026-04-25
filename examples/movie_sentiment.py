@@ -5,7 +5,8 @@ from autograd import functional, nn, optim
 from autograd.backend import xp
 from autograd.data.collator import OneHotCollator
 from autograd.data.data_loader import DataLoader
-from autograd.data.dataset import PairedIterableDataset
+from autograd.data.dataset import PairedMapDataset
+from autograd.data.sampler import RandomSampler
 from autograd.data.utils import load_data, train_test_split
 from autograd.text.utils import create_vocabulary
 from autograd.tools.config_schema import GenericTrainingConfig
@@ -208,15 +209,17 @@ if __name__ == "__main__":
     data = load_data("training_data/IMDB Dataset.csv", "training_data/IMDB Dataset.csv")
     assert not isinstance(data, str)
     X_train, X_test, y_train, y_test, vocab = process_data(data)
+    train_dataset = PairedMapDataset(X_train, y_train)
     train_data_loader = DataLoader(
-        PairedIterableDataset(X_train, y_train, shuffle=True),
+        train_dataset,
         batch_size=32,
-        collate_fn=OneHotCollator(num_classes=len(vocab)),
+        collator=OneHotCollator(num_classes=len(vocab)),
+        sampler=RandomSampler(train_dataset),
     )
     test_data_loader = DataLoader(
-        PairedIterableDataset(X_test, y_test, shuffle=False),
+        PairedMapDataset(X_test, y_test),
         batch_size=32,
-        collate_fn=OneHotCollator(num_classes=len(vocab)),
+        collator=OneHotCollator(num_classes=len(vocab)),
     )
 
     # Train the RNN model.

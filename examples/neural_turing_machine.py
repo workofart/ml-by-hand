@@ -2,7 +2,8 @@ from autograd import functional, nn, optim
 from autograd.backend import xp
 from autograd.data.collator import PairedCollator
 from autograd.data.data_loader import DataLoader
-from autograd.data.dataset import PairedIterableDataset
+from autograd.data.dataset import PairedMapDataset
+from autograd.data.sampler import RandomSampler
 from autograd.tensor import Tensor
 from autograd.tools import trainer
 from autograd.tools.config_schema import GenericTrainingConfig
@@ -576,15 +577,19 @@ if __name__ == "__main__":
     X_val = to_one_hot(X_val, input_size)
 
     print("------------- Neural Turing Machine ---------------")
+    train_dataset = PairedMapDataset(X, y)
     train_data_loader = DataLoader(
-        PairedIterableDataset(X, y, shuffle=True),
+        train_dataset,
         batch_size=batch_size,
-        collate_fn=PairedCollator(),
+        collator=PairedCollator(),
+        sampler=RandomSampler(train_dataset),
     )
+    val_dataset = PairedMapDataset(X_val, y_val)
     val_data_loader = DataLoader(
-        PairedIterableDataset(X_val, y_val, shuffle=True),
+        val_dataset,
         batch_size=batch_size,
-        collate_fn=PairedCollator(),
+        collator=PairedCollator(),
+        sampler=RandomSampler(val_dataset),
     )
 
     # Create training configuration for the Neural Turing Machine.
