@@ -171,12 +171,11 @@ class TrainingPlan:
     def for_epochs(
         cls,
         max_epochs: int,
-        steps_per_epoch: int,
+        batch_count: int,
+        accumulation_steps: int,
         checkpoint_every: int,
     ) -> "TrainingPlan":
-        if steps_per_epoch <= 0:
-            raise ValueError("steps_per_epoch must be > 0 in epoch mode.")
-
+        steps_per_epoch = (batch_count + accumulation_steps - 1) // accumulation_steps
         return cls(
             by_epoch=True,
             target_step=max_epochs * steps_per_epoch,
@@ -257,9 +256,8 @@ class AbstractTrainer(ABC):
             pretrained_checkpoint_path=config.pretrained_checkpoint_path,
             checkpoint_path=kwargs.get("checkpoint_path"),
         )
-        # `global_step` counts consumed training batches / microbatches,
-        # not optimizer updates. Under gradient accumulation, multiple
-        # microbatches can contribute to one optimizer step.
+        # `global_step` counts optimizer updates. Epoch-mode configs are converted
+        # to optimizer-step targets before entering the training loop.
         self.global_step = int(self.checkpoint.get("step_count", 0))
         self.metric_rows: list[dict[str, Optional[float]]] = []
         self.best_val_loss: Optional[float] = self.checkpoint.get("best_val_loss")
@@ -278,8 +276,8 @@ class AbstractTrainer(ABC):
                 validation batches.
 
         Notes:
-            `global_step` counts consumed training batches / microbatches.
-            It does not count optimizer updates when gradient accumulation is enabled.
+            `global_step` counts optimizer updates. Epoch-mode configs are converted
+            to optimizer-step targets before entering the training loop.
         """
 
         self._validate_fit_inputs(train_data_loader)
@@ -306,7 +304,8 @@ class AbstractTrainer(ABC):
         else:
             plan = TrainingPlan.for_epochs(
                 max_epochs=cast(int, self.config.max_epochs),
-                steps_per_epoch=len(train_data_loader),
+                batch_count=len(train_data_loader),
+                accumulation_steps=accumulation_steps,
                 checkpoint_every=self.config.checkpoint_freq,
             )
 
@@ -336,17 +335,39 @@ class AbstractTrainer(ABC):
                     loss.backward()
                     state.record_loss(loss)
 
-                    self.global_step += 1
-                    should_report = plan.should_report(self.global_step)
-
                     if state.has_enough_batches(accumulation_steps):
-                        self.optimizer_step(
+                        next_step = self.global_step + 1
+                        should_report = plan.should_report(next_step)
+                        if self.optimizer_step(
                             state,
-                            # Always clip when configured, but only read back
-                            # the grad norm on steps that will report it.
+                            # Always clip when configured, but only read back the
+                            # grad norm on steps that will report it.
                             record_grad_norm=should_report,
-                        )
+                        ):
+                            self.global_step = next_step
+                            progress_bar.update(1)
 
+                            if should_report:
+                                eval_state = (
+                                    self.evaluate(val_data_loader)
+                                    if val_data_loader is not None
+                                    else None
+                                )
+                                self.report(state, plan, eval_state)
+
+                    if plan.is_done(self.global_step):
+                        break
+
+                # This is after all the batches in the data loader
+                next_step = self.global_step + 1
+                should_report = plan.should_report(next_step)
+                if self.optimizer_step(
+                    state,
+                    # Always clip when configured, but only read back the grad norm
+                    # on steps that will report it.
+                    record_grad_norm=should_report,
+                ):
+                    self.global_step = next_step
                     progress_bar.update(1)
 
                     if should_report:
@@ -357,30 +378,14 @@ class AbstractTrainer(ABC):
                         )
                         self.report(state, plan, eval_state)
 
-                    if plan.is_done(self.global_step):
-                        break
-
-                if (
-                    plan.by_epoch
-                    and plan.steps_per_epoch is not None
-                    and batches_this_pass != plan.steps_per_epoch
-                ):
-                    raise ValueError(
-                        "In epoch mode, len(train_data_loader) must match the actual "
-                        "number of batches yielded per loader pass."
-                    )
-
-                # This is after all the batches in the data loader
-                self.optimizer_step(state, record_grad_norm=False)
-
     def optimizer_step(
         self,
         state: TrainingState,
         *,
         record_grad_norm: bool = True,
-    ) -> None:
+    ) -> bool:
         if state.accumulated_batches == 0:
-            return
+            return False
 
         self.optimizer.scale_gradients(1.0 / state.accumulated_batches)
         grad_l2_norm = None
@@ -393,6 +398,7 @@ class AbstractTrainer(ABC):
             self.last_grad_l2_norm = None
         self.optimizer.zero_grad()
         state.accumulated_batches = 0
+        return True
 
     def evaluate(self, val_data_loader: DataLoader) -> TrainingState:
         val_data_loader.on_epoch_start()
@@ -539,19 +545,22 @@ class AbstractTrainer(ABC):
             return
 
         try:
-            steps_per_epoch = len(train_data_loader)
+            batch_count = len(train_data_loader)
         except TypeError as exc:
             raise ValueError(
                 "Infinite training loaders require max_steps. "
                 "Set max_steps or give the dataset examples_per_epoch."
             ) from exc
 
-        if steps_per_epoch <= 0:
-            raise ValueError("train_data_loader must yield at least one batch.")
-
         if self.global_step > 0:
+            plan = TrainingPlan.for_epochs(
+                max_epochs=cast(int, self.config.max_epochs),
+                batch_count=batch_count,
+                accumulation_steps=int(self.config.gradient_accumulation_steps),
+                checkpoint_every=self.config.checkpoint_freq,
+            )
             loaded_steps_per_epoch = self.checkpoint.get("steps_per_epoch")
-            if loaded_steps_per_epoch != steps_per_epoch:
+            if loaded_steps_per_epoch != plan.steps_per_epoch:
                 raise ValueError(
                     "Cannot resume epoch-mode checkpoint with changed steps_per_epoch."
                 )
@@ -1001,7 +1010,7 @@ class LLMTrainer(AbstractTrainer):
             EvalResult: The average validation loss and derived metrics.
         """
         state = TrainingState()
-        for batch_data in tqdm(val_data_loader, desc="Evaluation", leave=False):
+        for batch_data in tqdm(iter(val_data_loader), desc="Evaluation", leave=False):
             if (
                 self.config.max_eval_steps is not None
                 and state.eval_loss_batches >= self.config.max_eval_steps

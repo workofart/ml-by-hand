@@ -48,31 +48,49 @@ class DataLoader:
 
     def __iter__(self):
         examples = []
-        yielded_batch = False
+        yielded_batches = 0
 
         for example in self.dataset:
             examples.append(example)
 
             if len(examples) == self.batch_size:
-                yielded_batch = True
+                yielded_batches += 1
                 yield self.collate_fn(examples) if self.collate_fn else examples
                 examples = []
 
         if examples and not self.drop_last:
-            yielded_batch = True
+            yielded_batches += 1
             yield self.collate_fn(examples) if self.collate_fn else examples
 
-        if not yielded_batch:
+        if yielded_batches == 0:
             raise ValueError(
                 "DataLoader yielded no batches. The dataset may be empty, may "
                 "have yielded no examples for this pass, or drop_last=True may "
                 "have dropped the only partial batch."
             )
 
+        try:
+            expected_batches = len(self)
+        except TypeError:
+            return
+        if yielded_batches != expected_batches:
+            raise ValueError(
+                "DataLoader yielded a different number of batches than len(DataLoader)."
+            )
+
     def __len__(self) -> int:
         n = len(self.dataset)
 
         if self.drop_last:
-            return n // self.batch_size
+            batch_count = n // self.batch_size
+        else:
+            batch_count = (n + self.batch_size - 1) // self.batch_size
 
-        return (n + self.batch_size - 1) // self.batch_size
+        if batch_count < 1:
+            raise ValueError(
+                "DataLoader yielded no batches. The dataset may be empty, may "
+                "have yielded no examples for this pass, or drop_last=True may "
+                "have dropped the only partial batch."
+            )
+
+        return batch_count

@@ -72,6 +72,14 @@ class BuggyEmptyPassDataset(IterableDataset):
         return 3
 
 
+class ShortPassDataset(IterableDataset):
+    def __iter__(self):
+        return iter(range(2))
+
+    def __len__(self):
+        return 3
+
+
 class TestDataLoader(unittest.TestCase):
     def setUp(self):
         self.X = xp.arange(20).reshape(10, 2)
@@ -217,6 +225,15 @@ class TestDataLoader(unittest.TestCase):
         ):
             next(iter(loader))
 
+    def test_data_loader_rejects_empty_dataset_length(self):
+        loader = DataLoader(EmptyDataset(), batch_size=1)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "DataLoader yielded no batches",
+        ):
+            len(loader)
+
     def test_data_loader_rejects_dataset_that_yields_nothing_for_pass(self):
         loader = DataLoader(BuggyEmptyPassDataset(), batch_size=2)
 
@@ -225,6 +242,15 @@ class TestDataLoader(unittest.TestCase):
             "DataLoader yielded no batches",
         ):
             next(iter(loader))
+
+    def test_data_loader_rejects_len_iteration_batch_count_mismatch(self):
+        loader = DataLoader(ShortPassDataset(), batch_size=1)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "DataLoader yielded a different number of batches than len",
+        ):
+            list(loader)
 
     def test_data_loader_rejects_drop_last_when_only_partial_batch_exists(self):
         loader = DataLoader(
@@ -239,6 +265,20 @@ class TestDataLoader(unittest.TestCase):
             "DataLoader yielded no batches",
         ):
             next(iter(loader))
+
+    def test_data_loader_rejects_drop_last_zero_batch_length(self):
+        loader = DataLoader(
+            PairedIterableDataset(self.X[:1], self.y[:1], shuffle=False),
+            batch_size=2,
+            collate_fn=PairedCollator(),
+            drop_last=True,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "DataLoader yielded no batches",
+        ):
+            len(loader)
 
     def test_pretraining_data_loader_on_epoch_start_reseeds_without_crashing(self):
         loader = self.make_pretraining_loader(shuffle=True)

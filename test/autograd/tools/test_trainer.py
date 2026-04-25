@@ -421,7 +421,8 @@ class TestSimpleTrainer(BaseTrainerTest):
         )
         plan = TrainingPlan.for_epochs(
             max_epochs=self.config.max_epochs,
-            steps_per_epoch=len(self.train_loader),
+            batch_count=len(self.train_loader),
+            accumulation_steps=self.config.gradient_accumulation_steps,
             checkpoint_every=self.config.checkpoint_freq,
         )
         eval_state = TrainingState()
@@ -516,7 +517,7 @@ class TestSimpleTrainer(BaseTrainerTest):
 
         trainer.fit(train_loader)
 
-        self.assertEqual(update_optimizer_counts, [0, 1])
+        self.assertEqual(update_optimizer_counts, [1, 2])
 
     def test_fit_does_not_call_tensor_item_for_train_loss_each_batch(self):
         self.config.max_epochs = None
@@ -1003,7 +1004,7 @@ class TestSimpleTrainer(BaseTrainerTest):
 
         trainer.fit(self.train_loader, self.val_loader)
 
-        self.assertEqual(trainer.optimizer.step_call_count, 1)
+        self.assertEqual(trainer.optimizer.step_call_count, 2)
 
     def test_fit_restarts_epoch_lifecycle_when_step_budget_exhausts_loader(self):
         self.config.max_epochs = None
@@ -1036,8 +1037,46 @@ class TestSimpleTrainer(BaseTrainerTest):
         trainer.fit(train_loader)
 
         self.assertEqual(trainer.global_step, 3)
-        self.assertEqual(trainer.optimizer.step_call_count, 2)
-        self.assertEqual(train_loader.dataset.epoch_start_calls, 2)
+        self.assertEqual(trainer.optimizer.step_call_count, 3)
+        self.assertEqual(train_loader.dataset.epoch_start_calls, 3)
+
+    @patch("autograd.tools.trainer.save_checkpoint")
+    def test_fit_reports_after_final_partial_optimizer_step(self, mock_save_checkpoint):
+        mock_save_checkpoint.return_value = (
+            "checkpoints/default_MockModelClass_2.json",
+            "checkpoints/default_MockModelClass_2.npz",
+        )
+        config = GenericTrainingConfig(
+            max_steps=2,
+            checkpoint_freq=2,
+            model_kwargs={"hidden_size": 256},
+            optimizer_kwargs={"lr": 0.01},
+            global_batch_size=4,
+            micro_batch_size=1,
+        )
+        trainer = SimpleTrainer(
+            model_cls=MockModelClass,
+            optimizer_cls=MockOptimizerClass,
+            loss_fn=self.loss_fn,
+            config=config,
+            output_type="logits",
+        )
+        eval_observed_step_counts = []
+
+        def record_eval(_):
+            eval_observed_step_counts.append(trainer.optimizer.step_call_count)
+            eval_state = TrainingState()
+            eval_state.record_eval_loss(1.23)
+            return eval_state
+
+        trainer._evaluate = MagicMock(side_effect=record_eval)
+        train_loader = make_data_loader(self.train_data * 2 + self.val_data)
+
+        trainer.fit(train_loader, self.val_loader)
+
+        self.assertEqual(eval_observed_step_counts, [2])
+        checkpoint = mock_save_checkpoint.call_args.args[0]
+        self.assertEqual(checkpoint["step_count"], 2)
 
     def test_fit_requires_max_steps_for_unsized_infinite_train_loader(self):
         self.config.max_epochs = 1
@@ -1114,7 +1153,30 @@ class TestSimpleTrainer(BaseTrainerTest):
         trainer.fit(train_loader)
 
         self.assertEqual(trainer.global_step, 40)
-        self.assertEqual(trainer.optimizer.step_call_count, 10)
+        self.assertEqual(trainer.optimizer.step_call_count, 40)
+
+    def test_fit_max_steps_counts_optimizer_steps_with_accumulation(self):
+        config = GenericTrainingConfig(
+            max_steps=3,
+            checkpoint_freq=10,
+            model_kwargs={"hidden_size": 256},
+            optimizer_kwargs={"lr": 0.01},
+            global_batch_size=2,
+            micro_batch_size=1,
+        )
+        trainer = SimpleTrainer(
+            model_cls=MockModelClass,
+            optimizer_cls=MockOptimizerClass,
+            loss_fn=self.loss_fn,
+            config=config,
+            output_type="logits",
+        )
+        train_loader = make_data_loader(self.train_data * 3)
+
+        trainer.fit(train_loader)
+
+        self.assertEqual(trainer.global_step, 3)
+        self.assertEqual(trainer.optimizer.step_call_count, 3)
 
     def test_fit_flushes_leftover_gradients_at_epoch_end(self):
         config = GenericTrainingConfig(
@@ -1427,7 +1489,8 @@ class TestSimpleTrainer(BaseTrainerTest):
         self.trainer.global_step = len(self.train_loader)
         plan = TrainingPlan.for_epochs(
             max_epochs=self.config.max_epochs,
-            steps_per_epoch=len(self.train_loader),
+            batch_count=len(self.train_loader),
+            accumulation_steps=self.config.gradient_accumulation_steps,
             checkpoint_every=self.config.checkpoint_freq,
         )
         state = TrainingState()
@@ -1452,7 +1515,8 @@ class TestSimpleTrainer(BaseTrainerTest):
         self.trainer.global_step = len(self.train_loader)
         plan = TrainingPlan.for_epochs(
             max_epochs=self.config.max_epochs,
-            steps_per_epoch=len(self.train_loader),
+            batch_count=len(self.train_loader),
+            accumulation_steps=self.config.gradient_accumulation_steps,
             checkpoint_every=self.config.checkpoint_freq,
         )
         state = TrainingState()
@@ -1501,7 +1565,8 @@ class TestSimpleTrainer(BaseTrainerTest):
     def test_fit_plan_derives_epoch_mode_fields_from_config(self):
         plan = TrainingPlan.for_epochs(
             max_epochs=self.config.max_epochs,
-            steps_per_epoch=len(self.train_loader),
+            batch_count=len(self.train_loader),
+            accumulation_steps=self.config.gradient_accumulation_steps,
             checkpoint_every=self.config.checkpoint_freq,
         )
 
@@ -1514,6 +1579,19 @@ class TestSimpleTrainer(BaseTrainerTest):
         self.assertEqual(plan.checkpoint_every, self.config.checkpoint_freq)
         self.assertEqual(plan.steps_per_epoch, len(self.train_loader))
         self.assertEqual(plan.metrics_interval, 1)
+
+    def test_fit_plan_converts_epochs_to_optimizer_steps_with_accumulation(self):
+        plan = TrainingPlan.for_epochs(
+            max_epochs=3,
+            batch_count=5,
+            accumulation_steps=2,
+            checkpoint_every=1,
+        )
+
+        self.assertEqual(plan.steps_per_epoch, 3)
+        self.assertEqual(plan.target_step, 9)
+        self.assertEqual(plan.report_every_steps, 3)
+        self.assertEqual(plan.completed_epochs(6), 2)
 
     def test_evaluate_does_not_mutate_trainer_metrics(self):
         eval_result = self.trainer.evaluate(self.val_loader)
