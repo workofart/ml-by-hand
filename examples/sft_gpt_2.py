@@ -1,15 +1,11 @@
 import os
 
 from autograd import functional, optim
-from autograd.data.collator import (
-    CausalLMCollator,
-    build_causal_lm_inputs_and_labels,
-    greedy_pack_aligned_examples,
-    pad_aligned_right,
-    truncate_aligned_left,
-)
+from autograd.backend import xp
+from autograd.data.collator import BatchMaxLengthCausalLMCollator
 from autograd.data.data_loader import DataLoader
-from autograd.data.dataset import TokenSequenceDataset
+from autograd.data.dataset import PairedMapDataset
+from autograd.data.sampler import TokenLengthGroupedRandomSampler
 from autograd.data.sft import load_no_robots_sft, prepare_sft_token_sequences
 from autograd.text.tokenizer import BytePairEncoder
 from autograd.tools.callback import run_sampling_inference
@@ -131,50 +127,48 @@ if __name__ == "__main__":
 
     fit_train = len(train_examples)
     fit_val = len(val_examples)
-    train_examples = greedy_pack_aligned_examples(
-        train_examples,
-        fields=("tokens", "loss_mask"),
-        max_tokens=max_tokens,
-    )
-    val_examples = greedy_pack_aligned_examples(
-        val_examples,
-        fields=("tokens", "loss_mask"),
-        max_tokens=max_tokens,
-    )
     print(
         "Data length: "
         f"raw_train={len(train_token_sequences)} raw_val={len(val_token_sequences)} "
-        f"fit_train={fit_train} fit_val={fit_val} "
-        f"packed_train={len(train_examples)} packed_val={len(val_examples)}"
+        f"fit_train={fit_train} fit_val={fit_val}"
+    )
+    val_batch_size = max(1, CONFIG.micro_batch_size // 2)
+    train_dataset = PairedMapDataset(
+        [example["tokens"] for example in train_examples],
+        [example["loss_mask"] for example in train_examples],
+        input_key="tokens",
+        target_key="loss_mask",
+        dtype=xp.int32,
+    )
+    val_dataset = PairedMapDataset(
+        [example["tokens"] for example in val_examples],
+        [example["loss_mask"] for example in val_examples],
+        input_key="tokens",
+        target_key="loss_mask",
+        dtype=xp.int32,
     )
     train_data_loader = DataLoader(
-        dataset=TokenSequenceDataset(
-            token_sequences=[example["tokens"] for example in train_examples],
-            loss_masks=[example["loss_mask"] for example in train_examples],
-            shuffle=True,
-        ),
+        dataset=train_dataset,
         batch_size=CONFIG.micro_batch_size,
-        collate_fn=CausalLMCollator(
+        collator=BatchMaxLengthCausalLMCollator(
             max_tokens=max_tokens,
             pad_idx=pad_idx,
-            truncator=truncate_aligned_left,
-            padder=pad_aligned_right,
-            label_builder=build_causal_lm_inputs_and_labels,
+        ),
+        sampler=TokenLengthGroupedRandomSampler(
+            train_dataset,
+            sort_buffer_size=CONFIG.global_batch_size,
         ),
     )
     val_data_loader = DataLoader(
-        dataset=TokenSequenceDataset(
-            token_sequences=[example["tokens"] for example in val_examples],
-            loss_masks=[example["loss_mask"] for example in val_examples],
-            shuffle=False,
-        ),
-        batch_size=max(1, CONFIG.micro_batch_size // 2),
-        collate_fn=CausalLMCollator(
+        dataset=val_dataset,
+        batch_size=val_batch_size,
+        collator=BatchMaxLengthCausalLMCollator(
             max_tokens=max_tokens,
             pad_idx=pad_idx,
-            truncator=truncate_aligned_left,
-            padder=pad_aligned_right,
-            label_builder=build_causal_lm_inputs_and_labels,
+        ),
+        sampler=TokenLengthGroupedRandomSampler(
+            val_dataset,
+            sort_buffer_size=val_batch_size,
         ),
     )
 
