@@ -5,12 +5,18 @@ from unittest import TestCase
 from unittest.mock import MagicMock, patch
 
 from autograd.backend import xp
+from autograd.data.collator import FixedLengthCausalLMCollator
+from autograd.data.data_loader import DataLoader
+from autograd.data.dataset import PairedMapDataset
+from autograd.data.sampler import RandomSampler
 from autograd.data.sft import (
     load_no_robots_sft,
     load_sft,
     prepare_sft_token_sequences,
     tokenize_sft_messages,
 )
+from autograd.data.types import CausalLMBatch
+from autograd.functional import IGNORE_INDEX
 from autograd.text.tokenizer import BytePairEncoder
 from test.helpers import array_equal
 
@@ -47,6 +53,36 @@ class TestSFTData(TestCase):
             num_merges=50,
             vocab_file_path="test_sft_vocab.pkl",
             encoded_data_path="test_sft_encoded_data.npz",
+        )
+
+    def make_sft_loader(
+        self,
+        chat_examples,
+        *,
+        batch_size=1,
+        seq_len=5,
+        shuffle=False,
+    ):
+        bpe = MockBPE()
+        pad_idx = bpe.encode("<PAD>", allowed_special={"<PAD>"})[0]
+        tokenized_examples = [
+            tokenize_sft_messages(example, bpe) for example in chat_examples
+        ]
+        dataset = PairedMapDataset(
+            [example["tokens"] for example in tokenized_examples],
+            [example["loss_mask"] for example in tokenized_examples],
+            input_key="tokens",
+            target_key="loss_mask",
+            dtype=xp.int32,
+        )
+        return DataLoader(
+            dataset=dataset,
+            batch_size=batch_size,
+            collator=FixedLengthCausalLMCollator(
+                max_tokens=seq_len + 1,
+                pad_idx=pad_idx,
+            ),
+            sampler=RandomSampler(dataset) if shuffle else None,
         )
 
     def tearDown(self) -> None:
@@ -253,6 +289,124 @@ class TestSFTData(TestCase):
 
         self.assertTrue(xp.array_equal(example["tokens"], expected_tokens))
         self.assertTrue(xp.array_equal(example["loss_mask"], expected_loss_mask))
+
+    def test_sft_dataloader_length(self):
+        loader = self.make_sft_loader(
+            [
+                {
+                    "messages": [
+                        {"role": "system", "content": "ABC"},
+                        {"role": "assistant", "content": "DE"},
+                    ]
+                },
+                {
+                    "messages": [
+                        {"role": "user", "content": "Q"},
+                        {"role": "assistant", "content": "RS"},
+                    ]
+                },
+            ],
+            batch_size=1,
+            seq_len=4,
+            shuffle=False,
+        )
+
+        self.assertEqual(len(loader), 2)
+
+    def test_sft_dataloader_masks_prompt_targets(self):
+        loader = self.make_sft_loader(
+            [
+                {
+                    "messages": [
+                        {"role": "user", "content": "ABC"},
+                        {"role": "assistant", "content": "DE"},
+                    ]
+                }
+            ],
+            batch_size=1,
+            seq_len=5,
+            shuffle=False,
+        )
+
+        batch = next(iter(loader))
+
+        self.assertIsInstance(batch, CausalLMBatch)
+        self.assertEqual(batch.input_ids.shape, (1, 5))
+        self.assertEqual(batch.labels.shape, (1, 5))
+        self.assertTrue(
+            xp.array_equal(
+                batch.labels[0],
+                xp.array(
+                    [IGNORE_INDEX, IGNORE_INDEX, 68, 69, 2],
+                    dtype=xp.int32,
+                ),
+            )
+        )
+
+    def test_sft_dataloader_uses_label_primitives(self):
+        loader = self.make_sft_loader(
+            [
+                {
+                    "messages": [
+                        {"role": "user", "content": "ABC"},
+                        {"role": "assistant", "content": "DE"},
+                    ]
+                }
+            ],
+            batch_size=1,
+            seq_len=5,
+            shuffle=False,
+        )
+
+        batch = next(iter(loader))
+
+        self.assertIsInstance(batch, CausalLMBatch)
+        self.assertEqual(batch.input_ids.shape, (1, 5))
+        self.assertEqual(batch.labels.shape, (1, 5))
+        self.assertTrue(
+            xp.array_equal(
+                batch.input_ids[0],
+                xp.array([116, 58, 32, 68, 69], dtype=xp.int32),
+            )
+        )
+        self.assertTrue(
+            xp.array_equal(
+                batch.labels[0],
+                xp.array(
+                    [IGNORE_INDEX, IGNORE_INDEX, 68, 69, 2],
+                    dtype=xp.int32,
+                ),
+            )
+        )
+
+    def test_sft_dataloader_left_truncates_to_keep_response_tokens(self):
+        loader = self.make_sft_loader(
+            [
+                {
+                    "messages": [
+                        {"role": "user", "content": "ABCD"},
+                        {"role": "assistant", "content": "EFG"},
+                    ]
+                }
+            ],
+            batch_size=1,
+            seq_len=4,
+            shuffle=False,
+        )
+
+        batch = next(iter(loader))
+
+        self.assertTrue(
+            xp.array_equal(
+                batch.input_ids[0], xp.array([32, 69, 70, 71], dtype=xp.int32)
+            )
+        )
+        self.assertTrue(
+            xp.array_equal(
+                batch.labels[0],
+                xp.array([69, 70, 71, 2], dtype=xp.int32),
+            )
+        )
 
     def test_prepare_sft_token_sequences_reuses_cached_encoded_data(self):
         chat_examples = [
