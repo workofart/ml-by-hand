@@ -14,6 +14,7 @@ class TokenWindowExample:
 class CausalLMBatch:
     input_ids: Array  # [B, T], int32
     labels: Array  # [B, T], int32
+    loss_total_weight: Array  # scalar float32
 
 
 @dataclass(frozen=True)

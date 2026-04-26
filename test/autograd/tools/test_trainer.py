@@ -112,6 +112,33 @@ class ScalarWeightModel(Module):
         return x @ self._parameters["weight"]
 
 
+class ScalarLogitLM(Module):
+    def __init__(self, initial_logit=0.0, **kwargs):
+        super().__init__()
+        self.weight = Tensor(
+            xp.array([initial_logit], dtype=xp.float32), requires_grad=True
+        )
+
+    def num_parameters(self):
+        return 1
+
+    def forward(self, input_ids):
+        class_zero_mask = xp.zeros((*input_ids.shape, 2), dtype=xp.float32)
+        class_zero_mask[:, :, 0] = 1.0
+        return self._parameters["weight"] * Tensor(
+            class_zero_mask,
+            requires_grad=False,
+        )
+
+
+class ScalarLogitLMForwardFn(AbstractLLMForwardFn):
+    def train(self, model, batch_data):
+        return model(batch_data.input_ids)
+
+    def sample(self, model, batch_data):
+        return model(batch_data), None
+
+
 class MockOptimizerClass(Optimizer):
     """
     A minimal mock optimizer that tracks step calls and has a .lr property.
@@ -221,6 +248,7 @@ def test_abstract_llm_forward_fn_call_forwards_raw_mode_outputs():
     batch = CausalLMBatch(
         input_ids=xp.zeros((1, 2), dtype=xp.int32),
         labels=xp.array([[1, 2]], dtype=xp.int32),
+        loss_total_weight=xp.array(2.0, dtype=xp.float32),
     )
 
     train_out = forward_fn(None, batch, mode="train")
@@ -364,14 +392,14 @@ class TestSimpleTrainer(BaseTrainerTest):
         self.assertTrue(math.isnan(float(val_accuracy[0])))
         self.assertAlmostEqual(float(val_accuracy[1]), 0.75, places=5)
 
-    def test_training_state_to_metrics_row_includes_eval_metrics(self):
+    def test_metrics_row_derives_metrics_from_training_state_aggregates(self):
         state = TrainingState()
         state.record_loss(1.23)
         eval_state = TrainingState()
         eval_state.record_eval_loss(0.5)
         eval_state.record_eval_metric("accuracy", numerator=3, denominator=4)
 
-        row = state.to_metrics_row(eval_state=eval_state)
+        row = self.trainer._metrics_row(state, eval_state=eval_state)
 
         self.assertEqual(
             row,
@@ -394,11 +422,9 @@ class TestSimpleTrainer(BaseTrainerTest):
             accumulation_steps=self.config.gradient_accumulation_steps,
             checkpoint_every=self.config.checkpoint_freq,
         )
-        eval_state = TrainingState()
-        eval_state.record_eval_loss(1.23)
         self.trainer._maybe_save_checkpoint(
             plan=plan,
-            eval_state=eval_state,
+            val_loss=1.23,
         )
 
         mock_save_checkpoint.assert_called_once()
@@ -780,12 +806,9 @@ class TestSimpleTrainer(BaseTrainerTest):
             report_every_steps=config.report_every_steps or config.checkpoint_freq,
             checkpoint_every=config.checkpoint_freq,
         )
-        eval_state = TrainingState()
-        eval_state.record_eval_loss(0.4)
-
         trainer._maybe_save_checkpoint(
             plan=plan,
-            eval_state=eval_state,
+            val_loss=0.4,
         )
 
         checkpoint = mock_save_checkpoint.call_args.args[0]
@@ -1387,18 +1410,20 @@ class TestSimpleTrainer(BaseTrainerTest):
     def test_evaluate_uses_full_loader_when_max_eval_steps_is_none(self):
         val_loader = make_data_loader(self.val_data * 2)
 
-        avg_val_loss = self.trainer.evaluate(val_loader)
+        eval_state = self.trainer.evaluate(val_loader)
+        row = self.trainer._metrics_row(TrainingState(), eval_state=eval_state)
 
-        self.assertAlmostEqual(avg_val_loss.val_loss, 1.23, places=5)
+        self.assertAlmostEqual(row["val_loss"], 1.23, places=5)
         self.assertEqual(self.loss_fn.call_count, 2)
 
     def test_evaluate_respects_max_eval_steps_from_config(self):
         self.config.max_eval_steps = 1
         val_loader = make_data_loader(self.val_data * 2)
 
-        avg_val_loss = self.trainer.evaluate(val_loader)
+        eval_state = self.trainer.evaluate(val_loader)
+        row = self.trainer._metrics_row(TrainingState(), eval_state=eval_state)
 
-        self.assertAlmostEqual(avg_val_loss.val_loss, 1.23, places=5)
+        self.assertAlmostEqual(row["val_loss"], 1.23, places=5)
         self.assertEqual(self.loss_fn.call_count, 1)
 
     def test_evaluate_rejects_empty_validation_loader(self):
@@ -1435,7 +1460,8 @@ class TestSimpleTrainer(BaseTrainerTest):
 
         eval_result = self.trainer.evaluate(self.val_loader)
 
-        self.assertAlmostEqual(float(eval_result.val_loss), 1.23, places=5)
+        row = self.trainer._metrics_row(TrainingState(), eval_state=eval_result)
+        self.assertAlmostEqual(row["val_loss"], 1.23, places=5)
 
     def test_report_prefixes_eval_metrics_with_val(self):
         self.trainer.global_step = len(self.train_loader)
@@ -1547,9 +1573,10 @@ class TestSimpleTrainer(BaseTrainerTest):
 
     def test_evaluate_does_not_mutate_trainer_metrics(self):
         eval_result = self.trainer.evaluate(self.val_loader)
+        row = self.trainer._metrics_row(TrainingState(), eval_state=eval_result)
 
-        self.assertAlmostEqual(eval_result.val_loss, 1.23, places=5)
-        self.assertEqual(eval_result.eval_metrics["accuracy"], 1.0)
+        self.assertAlmostEqual(row["val_loss"], 1.23, places=5)
+        self.assertEqual(row["val_accuracy"], 1.0)
         self.assertEqual(self.trainer.metric_rows, [])
 
     def test_evaluate_returns_raw_eval_aggregates(self):
@@ -1577,6 +1604,7 @@ class TestLLMTrainer(BaseTrainerTest):
             CausalLMBatch(
                 input_ids=xp.zeros((2, seq_len), dtype=xp.int32),
                 labels=xp.full((2, seq_len), 2, dtype=xp.int32),
+                loss_total_weight=xp.array(2 * seq_len, dtype=xp.float32),
             )
             for _ in range(2)
         ]
@@ -1584,6 +1612,7 @@ class TestLLMTrainer(BaseTrainerTest):
             CausalLMBatch(
                 input_ids=xp.zeros((2, seq_len), dtype=xp.int32),
                 labels=xp.full((2, seq_len), 2, dtype=xp.int32),
+                loss_total_weight=xp.array(2 * seq_len, dtype=xp.float32),
             )
         ]
 
@@ -1598,6 +1627,15 @@ class TestLLMTrainer(BaseTrainerTest):
             Tensor(self.fake_pred),
             xp.zeros((2, seq_len), dtype=xp.int32),
         )
+
+        def constant_cross_entropy(_logits, labels, **kwargs):
+            loss_value = 1.23
+            if kwargs.get("reduction") == "sum":
+                total_weight = xp.sum((labels != IGNORE_INDEX).astype(xp.float32))
+                loss_value *= float(xp.to_scalar(total_weight))
+            return Tensor(loss_value)
+
+        self.loss_fn = MagicMock(side_effect=constant_cross_entropy)
 
         self.config = TransformerTrainingConfig(
             max_epochs=2,
@@ -1624,11 +1662,74 @@ class TestLLMTrainer(BaseTrainerTest):
         # 2 epochs * 2 train batches = 4 steps
         self.assertEqual(self.trainer.optimizer.step_call_count, 4)
 
+    def test_gradient_accumulation_weights_cross_entropy_by_supervised_tokens(self):
+        full_batch = [
+            CausalLMBatch(
+                input_ids=xp.zeros((2, 3), dtype=xp.int32),
+                labels=xp.array(
+                    [
+                        [0, IGNORE_INDEX, IGNORE_INDEX],
+                        [1, 1, 1],
+                    ],
+                    dtype=xp.int32,
+                ),
+                loss_total_weight=xp.array(4.0, dtype=xp.float32),
+            )
+        ]
+        micro_batches = [
+            CausalLMBatch(
+                input_ids=xp.zeros((1, 3), dtype=xp.int32),
+                labels=xp.array([[0, IGNORE_INDEX, IGNORE_INDEX]], dtype=xp.int32),
+                loss_total_weight=xp.array(1.0, dtype=xp.float32),
+            ),
+            CausalLMBatch(
+                input_ids=xp.zeros((1, 3), dtype=xp.int32),
+                labels=xp.array([[1, 1, 1]], dtype=xp.int32),
+                loss_total_weight=xp.array(3.0, dtype=xp.float32),
+            ),
+        ]
+
+        full_batch_weight = self._fit_scalar_logit_lm(
+            full_batch,
+            global_batch_size=2,
+            micro_batch_size=2,
+        )
+        accumulated_weight = self._fit_scalar_logit_lm(
+            micro_batches,
+            global_batch_size=2,
+            micro_batch_size=1,
+        )
+
+        self.assertAlmostEqual(accumulated_weight, full_batch_weight, places=6)
+
+    def _fit_scalar_logit_lm(self, train_data, *, global_batch_size, micro_batch_size):
+        trainer = LLMTrainer(
+            model_cls=ScalarLogitLM,
+            optimizer_cls=SGD,
+            loss_fn=cross_entropy,
+            forward_fn=ScalarLogitLMForwardFn(),
+            config=TransformerTrainingConfig(
+                max_epochs=1,
+                checkpoint_freq=1,
+                model_kwargs={"initial_logit": 0.0},
+                optimizer_kwargs={"lr": 1.0},
+                global_batch_size=global_batch_size,
+                micro_batch_size=micro_batch_size,
+                resume_epoch=None,
+                label_smoothing=0.0,
+                teacher_forcing=False,
+            ),
+        )
+
+        trainer.fit(make_data_loader(train_data))
+
+        return float(xp.to_scalar(trainer.model.parameters["weight"].data[0]))
+
     def test_compute_loss_returns_tensor(self):
         """Check that compute_loss returns the constant scalar Tensor."""
         batch = next(iter(self.train_data))
         loss = self.trainer._compute_loss(batch)
-        self.assertAlmostEqual(float(loss.item()), 1.23, places=5)
+        self.assertAlmostEqual(float(loss.item()), 24.6, places=5)
 
     def test_evaluate_runs_eval_callbacks_and_returns_val_loss(self):
         callback = MagicMock()
@@ -1641,10 +1742,11 @@ class TestLLMTrainer(BaseTrainerTest):
             eval_callbacks=[callback],
         )
 
-        avg_val_loss = trainer.evaluate(self.val_loader)
+        eval_state = trainer.evaluate(self.val_loader)
+        row = trainer._metrics_row(TrainingState(), eval_state=eval_state)
 
-        self.assertAlmostEqual(avg_val_loss.val_loss, 1.23, places=5)
-        self.assertEqual(avg_val_loss.eval_metrics, {})
+        self.assertAlmostEqual(row["val_loss"], 1.23, places=5)
+        self.assertNotIn("val_accuracy", row)
         callback.assert_called_once_with(
             trainer.model, trainer.forward_fn, self.val_loader, trainer.config
         )
@@ -1687,10 +1789,21 @@ class TestLLMTrainer(BaseTrainerTest):
         self.config.max_eval_steps = 1
         val_loader = make_data_loader(self.val_data * 2)
 
-        avg_val_loss = self.trainer.evaluate(val_loader)
+        eval_state = self.trainer.evaluate(val_loader)
+        row = self.trainer._metrics_row(TrainingState(), eval_state=eval_state)
 
-        self.assertAlmostEqual(avg_val_loss.val_loss, 1.23, places=5)
+        self.assertAlmostEqual(row["val_loss"], 1.23, places=5)
         self.assertEqual(self.loss_fn.call_count, 1)
+
+    def test_llm_validation_reports_unsmoothed_loss(self):
+        self.config.label_smoothing = 0.1
+        batch = next(iter(self.train_data))
+
+        self.trainer._compute_loss(batch)
+        self.trainer.evaluate(self.val_loader)
+
+        self.assertEqual(self.loss_fn.call_args_list[0].kwargs["label_smoothing"], 0.1)
+        self.assertEqual(self.loss_fn.call_args_list[1].kwargs["label_smoothing"], 0.0)
 
     def test_compute_loss_supports_prompt_masked_causal_lm_batches(self):
         bpe = MockBPE()
@@ -1727,16 +1840,25 @@ class TestLLMTrainer(BaseTrainerTest):
 
         batch = next(iter(loader))
         logits = trainer.forward_fn.train(trainer.model, batch)
-        expected_loss = cross_entropy(
+        expected_train_loss = cross_entropy(
+            logits,
+            batch.labels,
+            label_smoothing=0.0,
+            reduction="sum",
+        )
+        expected_val_loss = cross_entropy(
             logits,
             batch.labels,
             label_smoothing=0.0,
         )
 
         train_loss = trainer._compute_loss(batch)
-        val_loss = trainer.evaluate(loader)
+        eval_state = trainer.evaluate(loader)
+        row = trainer._metrics_row(TrainingState(), eval_state=eval_state)
 
         self.assertAlmostEqual(
-            float(train_loss.item()), float(expected_loss.item()), places=6
+            float(train_loss.item()), float(expected_train_loss.item()), places=6
         )
-        self.assertAlmostEqual(val_loss.val_loss, float(expected_loss.item()), places=6)
+        self.assertAlmostEqual(
+            row["val_loss"], float(expected_val_loss.item()), places=6
+        )
