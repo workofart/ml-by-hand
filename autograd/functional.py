@@ -1023,6 +1023,7 @@ class CrossEntropy(Function):
         y_true: Array,
         ignore_index: int = IGNORE_INDEX,
         label_smoothing: float = 0.0,
+        reduction: str = "mean",
     ) -> Union[Array, float]:
         r"""
         Computes the cross-entropy loss with optional ignored targets and label smoothing.
@@ -1033,6 +1034,9 @@ class CrossEntropy(Function):
             ignore_index (int, optional): Target value to ignore in the loss and gradient.
                 Defaults to -100.
             label_smoothing (float, optional): Label smoothing factor. Defaults to 0.0. Label smoothing is applied if $label\_smoothing > 0$
+            reduction (str, optional): Either ``"mean"`` or ``"sum"``. ``"mean"``
+                divides by the total non-ignored target weight; ``"sum"`` returns
+                the summed loss over non-ignored targets.
             For label smoothing, we follow the Inception paper notation.
             Here:
             - $x$ is the current training example
@@ -1161,8 +1165,15 @@ class CrossEntropy(Function):
             (1.0 - label_smoothing) * log_p_correct + label_smoothing * mean_log_p
         )
 
-        # 5) Average the loss only over non-ignored positions.
-        loss_val = xp.sum(losses * non_ignored_weights) / non_ignored_count
+        # 5) Reduce the loss over non-ignored positions.
+        loss_sum = xp.sum(losses * non_ignored_weights)
+        if reduction == "mean":
+            loss_val = loss_sum / non_ignored_count
+        elif reduction == "sum":
+            loss_val = loss_sum
+            non_ignored_count = xp.array(1.0, dtype=xp.float32)
+        else:
+            raise ValueError(f"Unsupported cross_entropy reduction: {reduction!r}")
 
         # 6) Store for backward pass:
         self.probs = probs
@@ -1468,6 +1479,7 @@ def cross_entropy(
     y_true: Union[Tensor, ArrayLike],
     ignore_index: int = IGNORE_INDEX,
     label_smoothing: float = 0.0,
+    reduction: str = "mean",
 ) -> Tensor:
     """
     Computes the cross-entropy loss for multi-class classification with logits.
@@ -1480,6 +1492,8 @@ def cross_entropy(
         ignore_index (int, optional): Target value to ignore in the loss and gradient.
             Defaults to -100.
         label_smoothing (float, optional): Label smoothing factor. Defaults to 0.0.
+        reduction (str, optional): Either ``"mean"`` or ``"sum"``. Defaults to
+            ``"mean"``.
     Returns:
         Tensor: The computed cross-entropy loss.
 
@@ -1497,6 +1511,7 @@ def cross_entropy(
         y_true,
         ignore_index=ignore_index,
         label_smoothing=label_smoothing,
+        reduction=reduction,
     )
 
 

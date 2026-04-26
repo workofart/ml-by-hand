@@ -281,6 +281,35 @@ class TestCrossEntropy(TestCase):
         torch_loss.backward()
         assert allclose(logits.grad.data, logits_torch.grad.detach().numpy(), atol=1e-6)
 
+    def test_cross_entropy_sum_reduction_matches_pytorch_with_ignored_targets(self):
+        logits = Tensor(
+            data=xp.array(
+                [[[0.1, 2.0, -1.0], [3.0, -2.0, 0.5]]],
+                dtype=xp.float32,
+            ),
+            requires_grad=True,
+        )
+        logits_torch = torch.tensor(
+            logits.data,
+            dtype=torch.float32,
+            requires_grad=True,
+        )
+        targets = xp.array([[1, functional.IGNORE_INDEX]], dtype=xp.int64)
+
+        loss = functional.cross_entropy(logits, targets, reduction="sum")
+        torch_loss = torch.nn.functional.cross_entropy(
+            logits_torch.reshape(-1, logits_torch.shape[-1]),
+            torch.tensor(targets, dtype=torch.int64).reshape(-1),
+            ignore_index=functional.IGNORE_INDEX,
+            reduction="sum",
+        )
+
+        assert allclose(loss.data, torch_loss.detach().numpy(), atol=1e-6)
+
+        loss.backward()
+        torch_loss.backward()
+        assert allclose(logits.grad.data, logits_torch.grad.detach().numpy(), atol=1e-6)
+
     def test_cross_entropy_backward_does_not_build_dense_target_distribution(self):
         logits = Tensor(
             data=xp.array([[1.5, -0.2, 0.3], [0.1, 0.4, -1.0]], dtype=xp.float32),
