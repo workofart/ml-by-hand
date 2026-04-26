@@ -416,6 +416,8 @@ def inference(
         token_str = bpe.decode([next_token])
         # Using classic print to avoid logger formatting
         print(token_str, end="", flush=True)
+        if token_str == "<|endoftext|>":
+            break
 
     print("\n--------------------------------------------------------------\n")
     final_text = bpe.decode(output_ids)
