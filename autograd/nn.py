@@ -264,7 +264,7 @@ class Module:
         state_arrays = self.states  # already arrays
         return {"parameters": param_arrays, "states": state_arrays}
 
-    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+    def load_state_dict(self, state_dict: Dict[str, Any], strict: bool = True) -> None:
         """
         Load the module's state from a state dictionary.
 
@@ -280,21 +280,89 @@ class Module:
 
         Args:
             state_dict (Dict[str, Any]): A dictionary containing the module's parameters and states.
+            strict (bool): If True, parameter/state keys must match the current module.
 
         Examples:
             >>> # Save a state dictionary and later load it into the module.
             >>> state = module.state_dict()
             >>> module.load_state_dict(state)
         """
+        # Keep the public checkpoint contract narrow: state_dict() writes grouped
+        # parameters/states, so flat parameter dicts should fail instead of
+        # silently bypassing state validation.
+        unexpected_top_keys = set(state_dict) - {"parameters", "states"}
+        if unexpected_top_keys:
+            raise ValueError(
+                f"state_dict has unexpected top-level keys: {sorted(unexpected_top_keys)}"
+            )
+        if strict and "parameters" not in state_dict and self.parameters:
+            raise ValueError(
+                "state_dict parameter key mismatch: "
+                f"missing={sorted(self.parameters)}, extra=[]"
+            )
+        if strict and "states" not in state_dict and self.states:
+            raise ValueError(
+                "state_dict state key mismatch: "
+                f"missing={sorted(self.states)}, extra=[]"
+            )
+
+        def _compatible_values(
+            *,
+            current: Dict[str, Any],
+            loaded: Dict[str, Any],
+            kind: str,
+        ) -> Dict[str, Any]:
+            def raw(value: Any) -> Any:
+                return value.data if isinstance(value, Tensor) else value
+
+            def shape_dtype(value: Any) -> Tuple[Any, Any]:
+                value = raw(value)
+                return getattr(value, "shape", None), getattr(value, "dtype", None)
+
+            # strict=False is only for warmstarting partial checkpoints. Any key
+            # that does match still has to be the same tensor contract.
+            missing = set(current) - set(loaded)
+            extra = set(loaded) - set(current)
+            if strict and (missing or extra):
+                raise ValueError(
+                    f"state_dict {kind} key mismatch: "
+                    f"missing={sorted(missing)}, extra={sorted(extra)}"
+                )
+
+            compatible = {}
+            for name in set(current) & set(loaded):
+                model_shape, model_dtype = shape_dtype(current[name])
+                ckpt_shape, ckpt_dtype = shape_dtype(loaded[name])
+                if ckpt_shape != model_shape:
+                    raise ValueError(
+                        f"{kind} {name!r} shape mismatch: "
+                        f"model={model_shape}, ckpt={ckpt_shape}"
+                    )
+                if ckpt_dtype != model_dtype:
+                    raise ValueError(
+                        f"{kind} {name!r} dtype mismatch: "
+                        f"model={model_dtype}, ckpt={ckpt_dtype}"
+                    )
+                compatible[name] = raw(loaded[name])
+            return compatible
+
         # 1. Update parameters
         if "parameters" in state_dict:
-            self._set_attr_nested(
-                "_parameters", state_dict["parameters"], is_parameter=True
+            parameters = _compatible_values(
+                current=self.parameters,
+                loaded=state_dict["parameters"],
+                kind="parameter",
             )
+            self._set_attr_nested("_parameters", parameters, is_parameter=True)
 
         # 2. Update states
         if "states" in state_dict:
-            self._set_attr_nested("_states", state_dict["states"], is_parameter=False)
+            states = _compatible_values(
+                current=self.states,
+                loaded=state_dict["states"],
+                kind="state",
+            )
+            self._set_attr_nested("_states", states, is_parameter=False)
 
     def num_parameters(self) -> int:
         """
@@ -381,13 +449,24 @@ class Module:
                 container[var_name] = Tensor(value) if is_parameter else value
             else:
                 if is_parameter:
-                    container[var_name].data = value
+                    current_value = container[var_name].data
+                    value_data = value.data if isinstance(value, Tensor) else value
+                    # Preserve Tensor object identity so existing optimizers keep
+                    # pointing at the same Parameter wrapper after a load.
+                    container[var_name].data = xp.array(
+                        value_data, dtype=current_value.dtype
+                    )
                 else:
                     current_value = container[var_name]
                     if isinstance(current_value, ARRAY_TYPE):
-                        container[var_name] = xp.array(value, dtype=current_value.dtype)
+                        value = xp.array(value, dtype=current_value.dtype)
+                        container[var_name] = value
+                        # __setattr__ registered states in both _states and the
+                        # normal attribute slot; keep both views synchronized.
+                        object.__setattr__(module_ref, var_name, value)
                     else:
                         container[var_name] = value
+                        object.__setattr__(module_ref, var_name, value)
 
 
 class ModuleList(Module):

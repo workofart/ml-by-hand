@@ -108,6 +108,123 @@ class TestModule(TestCase):
         assert allclose(self.model.states["top_level_state"], [99, 99, 99])
         assert allclose(self.model.states["submodule1.running_avg"], [10.0])
 
+    def test_load_state_dict_rejects_parameter_key_mismatch_by_default(self):
+        missing_weight = {
+            "parameters": {
+                "main_weight": xp.zeros((3, 3), dtype=xp.float32),
+            },
+            "states": deepcopy(self.model.state_dict()["states"]),
+        }
+        extra_weight = deepcopy(self.model.state_dict())
+        extra_weight["parameters"]["extra"] = xp.zeros((1,), dtype=xp.float32)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"state_dict parameter key mismatch: "
+            r"missing=\['submodule1.sub_weight'\], extra=\[\]",
+        ):
+            self.model.load_state_dict(missing_weight)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"state_dict parameter key mismatch: missing=\[\], extra=\['extra'\]",
+        ):
+            self.model.load_state_dict(extra_weight)
+
+    def test_load_state_dict_rejects_state_key_mismatch_by_default(self):
+        missing_state = deepcopy(self.model.state_dict())
+        del missing_state["states"]["submodule1.running_avg"]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"state_dict state key mismatch: "
+            r"missing=\['submodule1.running_avg'\], extra=\[\]",
+        ):
+            self.model.load_state_dict(missing_state)
+
+    def test_load_state_dict_rejects_shape_mismatch(self):
+        sd = deepcopy(self.model.state_dict())
+        sd["parameters"]["main_weight"] = xp.zeros((4, 3), dtype=xp.float32)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"parameter 'main_weight' shape mismatch: "
+            r"model=\(3, 3\), ckpt=\(4, 3\)",
+        ):
+            self.model.load_state_dict(sd)
+
+    def test_load_state_dict_non_strict_ignores_missing_and_extra_keys(self):
+        main_weight_dtype = self.model.parameters["main_weight"].data.dtype
+        sd = {
+            "parameters": {
+                "main_weight": xp.ones((3, 3), dtype=main_weight_dtype),
+                "extra": xp.zeros((1,), dtype=xp.float32),
+            },
+            "states": {},
+        }
+
+        self.model.load_state_dict(sd, strict=False)
+
+        assert allclose(self.model.parameters["main_weight"].data, 1.0)
+        assert allclose(self.model.parameters["submodule1.sub_weight"].data, 1.0)
+        assert "extra" not in self.model.parameters
+        assert allclose(self.model.states["top_level_state"], [99, 99, 99])
+
+    def test_load_state_dict_rejects_parameter_dtype_mismatch(self):
+        sd = deepcopy(self.model.state_dict())
+        sd["parameters"]["main_weight"] = xp.ones((3, 3), dtype=xp.int32)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"parameter 'main_weight' dtype mismatch",
+        ):
+            self.model.load_state_dict(sd)
+
+    def test_load_state_dict_rejects_state_dtype_mismatch(self):
+        sd = deepcopy(self.model.state_dict())
+        sd["states"]["top_level_state"] = xp.ones((3,), dtype=xp.float32)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"state 'top_level_state' dtype mismatch",
+        ):
+            self.model.load_state_dict(sd)
+
+    def test_load_state_dict_rejects_flat_parameter_dict(self):
+        flat_state_dict = deepcopy(self.model.state_dict()["parameters"])
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"state_dict has unexpected top-level keys",
+        ):
+            self.model.load_state_dict(flat_state_dict)
+
+    def test_load_state_dict_updates_state_attributes(self):
+        sd = deepcopy(self.model.state_dict())
+        sd["states"]["top_level_state"] = xp.array(
+            [7, 7, 7], dtype=self.model.states["top_level_state"].dtype
+        )
+        sd["states"]["submodule1.running_avg"] = xp.array(
+            [8.0], dtype=self.model.states["submodule1.running_avg"].dtype
+        )
+
+        self.model.load_state_dict(sd)
+
+        assert allclose(self.model.states["top_level_state"], [7, 7, 7])
+        assert allclose(self.model.top_level_state, [7, 7, 7])
+        assert allclose(self.model.states["submodule1.running_avg"], [8.0])
+        assert allclose(self.model.submodule1.running_avg, [8.0])
+
+    def test_load_state_dict_preserves_parameter_object_identity(self):
+        parameter = self.model.parameters["main_weight"]
+        sd = deepcopy(self.model.state_dict())
+        sd["parameters"]["main_weight"] = xp.ones((3, 3), dtype=parameter.data.dtype)
+
+        self.model.load_state_dict(sd)
+
+        self.assertIs(self.model.parameters["main_weight"], parameter)
+        assert allclose(parameter.data, 1.0)
+
 
 class TestLinear(TestCase):
     def test_linear(self):

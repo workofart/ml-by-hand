@@ -402,7 +402,7 @@ def inference(
 
     logger.info("Model:\n")
     # Main loop: decide input tokens based on the mode.
-    for i in range(min(num_steps, 100)):
+    for i in range(num_steps):
         current_input = groundtruth_data[: i + 1] if teacher_forcing else output_ids
         batch_data = xp.expand_dims(xp.array(current_input, dtype=xp.int32), axis=0)
         prediction = prediction_func(model=model, batch_data=batch_data, mode="sample")
@@ -416,6 +416,8 @@ def inference(
         token_str = bpe.decode([next_token])
         # Using classic print to avoid logger formatting
         print(token_str, end="", flush=True)
+        if token_str == "<|endoftext|>":
+            break
 
     print("\n--------------------------------------------------------------\n")
     final_text = bpe.decode(output_ids)

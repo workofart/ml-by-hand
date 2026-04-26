@@ -4,7 +4,7 @@ from abc import abstractmethod
 from collections import defaultdict
 from typing import Any, Callable, Dict, Optional
 
-from autograd.backend import LOW_PRECISION_FLOAT_DTYPES, eval_backend, xp
+from autograd.backend import LOW_PRECISION_FLOAT_DTYPES, Array, eval_backend, xp
 from autograd.tensor import Tensor
 
 logger = logging.getLogger(__name__)
@@ -296,11 +296,8 @@ class Optimizer:
 
         self._recursive_param_op(self.model_parameters, update_fn)
 
-    def scale_gradients(self, scale: float) -> None:
+    def scale_gradients(self, scale: Array) -> None:
         """Scale all parameter gradients in-place by ``scale``."""
-        if scale == 1.0:
-            return
-
         for param in self.model_parameters.values():
             if param.grad is not None:
                 param.grad.data *= scale

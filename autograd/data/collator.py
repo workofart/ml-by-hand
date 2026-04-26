@@ -132,6 +132,10 @@ class CausalLMWindowCollator(Collator):
         return CausalLMBatch(
             input_ids=windows[:, :-1],
             labels=windows[:, 1:],
+            loss_total_weight=xp.array(
+                len(examples) * (window_len - 1),
+                dtype=xp.float32,
+            ),
         )
 
 
@@ -218,6 +222,7 @@ class _CausalLMBaseCollator(Collator):
     ) -> CausalLMBatch:
         batch_inputs = []
         batch_labels = []
+        loss_total_weight = xp.array(0.0, dtype=xp.float32)
 
         for padded_tokens, padded_loss_mask in padded_examples:
             input_tokens, labels = self._build_inputs_and_labels(
@@ -227,10 +232,12 @@ class _CausalLMBaseCollator(Collator):
 
             batch_inputs.append(input_tokens)
             batch_labels.append(labels)
+            loss_total_weight = loss_total_weight + xp.sum(padded_loss_mask[1:] != 0)
 
         return CausalLMBatch(
             input_ids=xp.stack(batch_inputs, axis=0),
             labels=xp.stack(batch_labels, axis=0),
+            loss_total_weight=loss_total_weight,
         )
 
 

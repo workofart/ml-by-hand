@@ -65,24 +65,48 @@ def _format_log_values(
 @dataclass
 class TrainingState:
     report_loss_sum: Optional[float | Array] = None
-    report_batches: int = 0
+    report_loss_total_weight: Array = field(
+        default_factory=lambda: xp.array(0.0, dtype=xp.float32)
+    )
     accumulated_batches: int = 0
+    accumulated_loss_total_weight: Array = field(
+        default_factory=lambda: xp.array(0.0, dtype=xp.float32)
+    )
     eval_loss_sum: float = 0.0
+    eval_loss_total_weight: Array = field(
+        default_factory=lambda: xp.array(0.0, dtype=xp.float32)
+    )
     eval_loss_batches: int = 0
     eval_metric_totals: Dict[str, Dict[str, float]] = field(default_factory=dict)
 
-    def record_loss(self, loss: float | Tensor) -> None:
-        loss_data = loss.data if isinstance(loss, Tensor) else float(loss)
+    def record_loss(
+        self,
+        loss_sum: float | Tensor,
+        *,
+        total_weight: Array = xp.array(1.0, dtype=xp.float32),
+    ) -> None:
+        loss_data = loss_sum.data if isinstance(loss_sum, Tensor) else float(loss_sum)
         if self.report_loss_sum is None:
             self.report_loss_sum = loss_data
         else:
             self.report_loss_sum = self.report_loss_sum + loss_data
-        self.report_batches += 1
+        self.report_loss_total_weight = self.report_loss_total_weight + total_weight
         self.accumulated_batches += 1
+        self.accumulated_loss_total_weight = (
+            self.accumulated_loss_total_weight + total_weight
+        )
 
-    def record_eval_loss(self, loss: float | Tensor) -> None:
-        loss_value = loss.item() if isinstance(loss, Tensor) else float(loss)
+    def record_eval_loss(
+        self,
+        loss_sum: float | Tensor,
+        *,
+        total_weight: Array = xp.array(1.0, dtype=xp.float32),
+    ) -> None:
+        loss_value = (
+            loss_sum.item() if isinstance(loss_sum, Tensor) else float(loss_sum)
+        )
         self.eval_loss_sum += float(loss_value)
+        self.eval_loss_total_weight += total_weight
         self.eval_loss_batches += 1
 
     def record_eval_metric(
@@ -99,41 +123,9 @@ class TrainingState:
         totals["numerator"] += float(numerator)
         totals["denominator"] += float(denominator)
 
-    @property
-    def train_loss(self) -> float:
-        if self.report_loss_sum is None:
-            return 0.0
-        return float(xp.to_scalar(self.report_loss_sum / max(self.report_batches, 1)))
-
-    @property
-    def val_loss(self) -> float:
-        return self.eval_loss_sum / max(self.eval_loss_batches, 1)
-
-    @property
-    def eval_metrics(self) -> Mapping[str, float]:
-        return {
-            name: totals["numerator"] / totals["denominator"]
-            for name, totals in self.eval_metric_totals.items()
-            if totals["denominator"] > 0
-        }
-
-    def to_metrics_row(
-        self,
-        *,
-        eval_state: Optional["TrainingState"] = None,
-    ) -> dict[str, Optional[float]]:
-        row: dict[str, Optional[float]] = {
-            "train_loss": self.train_loss,
-            "val_loss": None if eval_state is None else eval_state.val_loss,
-        }
-        if eval_state is not None:
-            for key, value in eval_state.eval_metrics.items():
-                row[f"val_{key}"] = value
-        return row
-
     def reset_report(self) -> None:
         self.report_loss_sum = None
-        self.report_batches = 0
+        self.report_loss_total_weight = xp.array(0.0, dtype=xp.float32)
 
     def has_enough_batches(self, accumulation_steps: int):
         return self.accumulated_batches >= accumulation_steps
@@ -318,6 +310,12 @@ class AbstractTrainer(ABC):
         self.model.train()
         self.optimizer.zero_grad()
 
+        def report_current_step() -> None:
+            eval_state = (
+                self.evaluate(val_data_loader) if val_data_loader is not None else None
+            )
+            self.report(state, plan, eval_state)
+
         with tqdm(
             total=plan.target_step,
             initial=self.global_step,
@@ -326,14 +324,12 @@ class AbstractTrainer(ABC):
         ) as progress_bar:
             while not plan.is_done(self.global_step):
                 train_data_loader.on_epoch_start()
-                batches_this_pass = 0
 
                 for batch in train_data_loader:
-                    batches_this_pass += 1
-
                     loss = self._compute_loss(batch)
+                    total_weight = self._loss_total_weight(batch)
                     loss.backward()
-                    state.record_loss(loss)
+                    state.record_loss(loss, total_weight=total_weight)
 
                     if state.has_enough_batches(accumulation_steps):
                         next_step = self.global_step + 1
@@ -348,12 +344,7 @@ class AbstractTrainer(ABC):
                             progress_bar.update(1)
 
                             if should_report:
-                                eval_state = (
-                                    self.evaluate(val_data_loader)
-                                    if val_data_loader is not None
-                                    else None
-                                )
-                                self.report(state, plan, eval_state)
+                                report_current_step()
 
                     if plan.is_done(self.global_step):
                         break
@@ -371,12 +362,7 @@ class AbstractTrainer(ABC):
                     progress_bar.update(1)
 
                     if should_report:
-                        eval_state = (
-                            self.evaluate(val_data_loader)
-                            if val_data_loader is not None
-                            else None
-                        )
-                        self.report(state, plan, eval_state)
+                        report_current_step()
 
     def optimizer_step(
         self,
@@ -387,7 +373,13 @@ class AbstractTrainer(ABC):
         if state.accumulated_batches == 0:
             return False
 
-        self.optimizer.scale_gradients(1.0 / state.accumulated_batches)
+        self.optimizer.scale_gradients(
+            1.0
+            / xp.maximum(
+                state.accumulated_loss_total_weight,
+                xp.array(1.0, dtype=xp.float32),
+            )
+        )
         grad_l2_norm = None
         if self.config.max_grad_norm is not None:
             grad_l2_norm = self.optimizer.clip_grad_norm(self.config.max_grad_norm)
@@ -398,6 +390,7 @@ class AbstractTrainer(ABC):
             self.last_grad_l2_norm = None
         self.optimizer.zero_grad()
         state.accumulated_batches = 0
+        state.accumulated_loss_total_weight = xp.array(0.0, dtype=xp.float32)
         return True
 
     def evaluate(self, val_data_loader: DataLoader) -> TrainingState:
@@ -423,16 +416,19 @@ class AbstractTrainer(ABC):
             plan.completed_epochs(self.global_step) if plan.by_epoch else None
         )
         progress_value = plan.progress_value(self.global_step)
+        metrics = self._metrics_row(state, eval_state=eval_state)
         row: dict[str, Optional[float]] = {
             "epoch": completed_epochs,
             "step": float(self.global_step),
-            **state.to_metrics_row(eval_state=eval_state),
+            **metrics,
         }
         if self.last_grad_l2_norm is not None:
             row["grad_l2_norm"] = self.last_grad_l2_norm
 
+        # Checkpointing is only checked when report() runs. checkpoint_every
+        # marks which reported steps may save; non-report steps are skipped.
         if plan.should_checkpoint(self.global_step):
-            self._maybe_save_checkpoint(plan=plan, eval_state=eval_state)
+            self._maybe_save_checkpoint(plan=plan, val_loss=metrics["val_loss"])
 
         self.metric_rows.append(row)
         log_payload = _format_log_values(
@@ -450,6 +446,52 @@ class AbstractTrainer(ABC):
             self._save_metrics()
 
         state.reset_report()
+
+    def _weighted_mean(
+        self,
+        numerator: Optional[float | Array],
+        denominator: Array,
+    ) -> float:
+        if numerator is None:
+            return 0.0
+        # Reporting is the GPU/accelerator-to-CPU sync boundary: training keeps
+        # loss sums and token counts as backend scalars until logs/metrics need floats.
+        numerator_value = xp.to_scalar(numerator)
+        denominator_value = xp.to_scalar(denominator)
+        return float(numerator_value) / max(float(denominator_value), 1.0)
+
+    def _metrics_row(
+        self,
+        state: TrainingState,
+        *,
+        eval_state: Optional[TrainingState],
+    ) -> dict[str, Optional[float]]:
+        row: dict[str, Optional[float]] = {
+            "train_loss": self._weighted_mean(
+                state.report_loss_sum,
+                state.report_loss_total_weight,
+            ),
+            "val_loss": None
+            if eval_state is None
+            else self._weighted_mean(
+                eval_state.eval_loss_sum,
+                eval_state.eval_loss_total_weight,
+            ),
+        }
+        if eval_state is not None:
+            for key, totals in eval_state.eval_metric_totals.items():
+                if totals["denominator"] > 0:
+                    row[f"val_{key}"] = totals["numerator"] / totals["denominator"]
+        return row
+
+    def _loss_total_weight(self, _batch_data) -> Array:
+        """Denominator for accumulated summed losses.
+
+        For ordinary mean-reduced losses this stays at 1. LLM batches carry
+        supervised-token counts from the collator; dividing by accumulation
+        steps would weight each microbatch equally instead of each token equally.
+        """
+        return xp.array(1.0, dtype=xp.float32)
 
     @abstractmethod
     def _compute_loss(self, batch_data) -> Tensor:
@@ -482,10 +524,11 @@ class AbstractTrainer(ABC):
         self,
         *,
         plan: TrainingPlan,
-        eval_state: Optional[TrainingState],
+        val_loss: Optional[float],
     ) -> None:
-        if eval_state is not None:
-            val_loss = eval_state.val_loss
+        if val_loss is not None:
+            # With validation data, checkpoint_freq means "maybe save a new
+            # best checkpoint", not "always save every N steps."
             if self.best_val_loss is not None and val_loss >= self.best_val_loss:
                 return
             self.best_val_loss = val_loss
@@ -804,7 +847,9 @@ class SimpleTrainer(AbstractTrainer):
             batch_X, batch_y = batch_data
             y_pred = self.model(batch_X)
             loss = self.loss_fn(y_pred, batch_y)
-            state.record_eval_loss(loss)
+            state.record_eval_loss(
+                loss, total_weight=self._loss_total_weight(batch_data)
+            )
 
             if self.problem_type == "classification":
                 y_pred_proc, y_true_proc = self._post_process_classification(
@@ -932,6 +977,7 @@ class LLMTrainer(AbstractTrainer):
         >>> dummy_batch = CausalLMBatch(
         ...     input_ids=np.random.randint(0, 1000, (32, 10)),
         ...     labels=np.random.randint(0, 1000, (32, 10)),
+        ...     loss_total_weight=np.array(320, dtype=np.float32),
         ... )
         >>> train_loader = ...
         >>> val_loader = ...
@@ -985,13 +1031,15 @@ class LLMTrainer(AbstractTrainer):
 
     def _compute_loss(self, batch_data) -> Tensor:
         logits = self.forward_fn.train(self.model, batch_data)
-        # TODO: Decide whether validation should use the same label_smoothing
-        # setting as training, or intentionally report unsmoothed cross-entropy.
         return self.loss_fn(
             logits,
             batch_data.labels,
             label_smoothing=self.config.label_smoothing,
+            reduction="sum",
         )
+
+    def _loss_total_weight(self, batch_data) -> Array:
+        return batch_data.loss_total_weight
 
     def _evaluate(self, val_data_loader) -> TrainingState:
         """Evaluates the model on the validation data loader for language modeling.
@@ -1009,8 +1057,18 @@ class LLMTrainer(AbstractTrainer):
                 and state.eval_loss_batches >= self.config.max_eval_steps
             ):
                 break
-            loss = self._compute_loss(batch_data)
-            state.record_eval_loss(loss)
+            logits = self.forward_fn.train(self.model, batch_data)
+            # Report hard-label CE/NLL for validation; smoothing is a training regularizer.
+            loss = self.loss_fn(
+                logits,
+                batch_data.labels,
+                label_smoothing=0.0,
+                reduction="sum",
+            )
+            state.record_eval_loss(
+                loss,
+                total_weight=self._loss_total_weight(batch_data),
+            )
         if state.eval_loss_batches == 0:
             raise ValueError("val_data_loader yielded no batches.")
 

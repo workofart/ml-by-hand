@@ -236,6 +236,7 @@ def test_window_collator_shapes():
 
     assert batch.input_ids.shape == (2, 4)
     assert batch.labels.shape == (2, 4)
+    assert float(xp.to_scalar(batch.loss_total_weight)) == 8.0
     assert not hasattr(batch, "loss_mask")
 
 
@@ -281,6 +282,7 @@ def test_causal_lm_collator_builds_prompt_masked_batch():
         xp.to_numpy(batch.labels[0]),
         np.array([IGNORE_INDEX, IGNORE_INDEX, 68, 69, 2], dtype=np.int32),
     )
+    assert float(xp.to_scalar(batch.loss_total_weight)) == 3.0
     assert not hasattr(batch, "loss_mask")
 
 
@@ -311,6 +313,7 @@ def test_batch_max_length_causal_lm_collator_pads_to_longest_row():
         xp.to_numpy(batch.labels[0]),
         np.array([11, 12, IGNORE_INDEX, IGNORE_INDEX], dtype=np.int32),
     )
+    assert float(xp.to_scalar(batch.loss_total_weight)) == 5.0
 
 
 def test_causal_lm_collator_requires_max_tokens_at_least_two():

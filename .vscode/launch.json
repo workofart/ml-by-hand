@@ -62,6 +62,12 @@
             "module": "examples.gpt-2"
         },
         {
+            "name": "SFT GPT-2",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "examples.sft_gpt_2"
+        },
+        {
             "name": "Tokenizer",
             "type": "debugpy",
             "request": "launch",
