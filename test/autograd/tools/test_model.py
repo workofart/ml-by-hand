@@ -112,7 +112,7 @@ class TestModel(TestCase):
     def test_load_weights_only(self):
         # 1. Instantiate a new model and demonstrate weights-only loading
         new_model = MockModule(999, kwarg0="testing_kwarg0")
-        original_params = deepcopy(new_model.parameters)
+        saved_params = deepcopy(self.model.parameters)
         # Save the model including the states
         save_checkpoint(
             self.model.state_dict(),
@@ -127,12 +127,14 @@ class TestModel(TestCase):
         weights_only_data = load_checkpoint(
             json_path=self.json_path, npz_path=self.npz_path, weights_only=True
         )
-        new_model.load_state_dict(weights_only_data)
+        new_model.load_state_dict(
+            {"parameters": weights_only_data, "states": {}}, strict=False
+        )
 
         # 3. Parameters should match original
         for name, p in new_model.parameters.items():
             self.assertTrue(
-                xp.allclose(original_params[name].data, p.data),
+                xp.allclose(saved_params[name].data, p.data),
                 f"Parameter {name} did not match original in new model with weights-only load.",
             )
 

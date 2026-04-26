@@ -835,7 +835,7 @@ class TestSimpleTrainer(BaseTrainerTest):
             def load_state_dict(self, state_dict):
                 self.loaded_state_dict = state_dict
 
-        model_state_dict = {"weights": "from-pretrain"}
+        model_state_dict = {"parameters": {}, "states": {}}
         optimizer_state_dict = {"step": 123}
         mock_load_checkpoint.return_value = {
             "epoch": 9,
@@ -874,6 +874,38 @@ class TestSimpleTrainer(BaseTrainerTest):
         mock_load_checkpoint.assert_called_once_with(
             "dummy_pretrained.json", "dummy_pretrained.npz"
         )
+
+    @patch("autograd.tools.trainer.load_checkpoint")
+    def test_pretrained_checkpoint_path_rejects_shape_mismatch(
+        self, mock_load_checkpoint
+    ):
+        mock_load_checkpoint.return_value = {
+            "model_state_dict": {
+                "parameters": {
+                    "weight": xp.ones((2, 2), dtype=xp.float32),
+                },
+                "states": {},
+            },
+        }
+        config = GenericTrainingConfig(
+            max_epochs=1,
+            checkpoint_freq=1,
+            model_kwargs={"initial_weight": 0.0},
+            optimizer_kwargs={"lr": 0.01},
+            pretrained_checkpoint_path="dummy_pretrained",
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"parameter 'weight' shape mismatch: model=\(1, 1\), ckpt=\(2, 2\)",
+        ):
+            SimpleTrainer(
+                model_cls=ScalarWeightModel,
+                optimizer_cls=MockOptimizerClass,
+                loss_fn=self.loss_fn,
+                config=config,
+                output_type="logits",
+            )
 
     def test_pretrained_checkpoint_path_conflicts_with_resume_epoch(self):
         config = GenericTrainingConfig(
@@ -1784,6 +1816,40 @@ class TestLLMTrainer(BaseTrainerTest):
         self.assertIs(mock_inference.return_value, teacher_forcing_text)
         self.assertIs(mock_inference.return_value, sampled_text)
         self.assertEqual(mock_inference.call_count, 2)
+
+    @patch("autograd.tools.callback.text_utils.inference")
+    def test_sampling_inference_runs_in_eval_mode_and_restores_model_mode(
+        self, mock_inference
+    ):
+        bpe = MockBPE()
+        model = ScalarLogitLM()
+        observed_modes = []
+
+        def record_mode(**kwargs):
+            observed_modes.append(kwargs["model"]._is_training)
+            return "sampled"
+
+        mock_inference.side_effect = record_mode
+
+        for initial_training in (True, False):
+            observed_modes.clear()
+            if initial_training:
+                model.train()
+            else:
+                model.eval()
+
+            sampled_text = run_sampling_inference(
+                model=model,
+                forward_fn=PromptMaskAwareForwardFn(),
+                bpe=bpe,
+                start_tokens="ABC",
+                max_length=4,
+                top_k=5,
+            )
+
+            self.assertEqual(sampled_text, "sampled")
+            self.assertEqual(observed_modes, [False])
+            self.assertIs(model._is_training, initial_training)
 
     def test_llm_evaluate_respects_max_eval_steps_from_config(self):
         self.config.max_eval_steps = 1

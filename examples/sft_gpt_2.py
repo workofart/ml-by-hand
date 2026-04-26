@@ -79,6 +79,10 @@ if __name__ == "__main__":
 
     if CONFIG.custom_bpe:
         # Reuse the pretrained tokenizer vocabulary directly for SFT.
+        if not os.path.exists(CONFIG.custom_bpe.vocab_path):
+            raise FileNotFoundError(
+                f"Expected pretrained vocab at {CONFIG.custom_bpe.vocab_path}"
+            )
         bpe = BytePairEncoder(
             num_merges=CONFIG.custom_bpe.num_merges,
             vocab_file_path=CONFIG.custom_bpe.vocab_path,

@@ -35,12 +35,18 @@ def run_sampling_inference(
     top_k: Optional[int] = None,
 ) -> str:
     """Runs free-sampling qualitative inference with explicit context."""
-    return text_utils.inference(
-        model=model,
-        prediction_func=forward_fn,
-        bpe=bpe,
-        start_tokens=start_tokens,
-        max_length=max_length,
-        temperature=1.0,
-        top_k=top_k,
-    )
+    was_training = getattr(model, "_is_training", None)
+    model.eval()
+    try:
+        return text_utils.inference(
+            model=model,
+            prediction_func=forward_fn,
+            bpe=bpe,
+            start_tokens=start_tokens,
+            max_length=max_length,
+            temperature=1.0,
+            top_k=top_k,
+        )
+    finally:
+        if was_training:
+            model.train()
