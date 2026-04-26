@@ -1,10 +1,9 @@
 import os
 
 from autograd import functional, optim
-from autograd.backend import xp
 from autograd.data.collator import BatchMaxLengthCausalLMCollator
 from autograd.data.data_loader import DataLoader
-from autograd.data.dataset import PairedMapDataset
+from autograd.data.dataset import MapDataset
 from autograd.data.sampler import TokenLengthGroupedRandomSampler
 from autograd.data.sft import load_no_robots_sft, prepare_sft_token_sequences
 from autograd.text.tokenizer import BytePairEncoder
@@ -17,6 +16,30 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def project_path(*parts: str) -> str:
     return os.path.join(REPO_ROOT, *parts)
+
+
+def filter_fitting_examples(token_sequences, loss_masks, max_tokens: int):
+    return [
+        {"tokens": tokens, "loss_mask": loss_mask}
+        for tokens, loss_mask in zip(token_sequences, loss_masks)
+        if len(tokens) <= max_tokens
+    ]
+
+
+def build_data_loader(
+    examples,
+    *,
+    batch_size: int,
+    max_tokens: int,
+    pad_idx: int,
+    sort_buffer_size: int,
+) -> DataLoader:
+    dataset = MapDataset(examples)
+    collator = BatchMaxLengthCausalLMCollator(max_tokens=max_tokens, pad_idx=pad_idx)
+    sampler = TokenLengthGroupedRandomSampler(
+        dataset, sort_buffer_size=sort_buffer_size
+    )
+    return DataLoader(dataset, batch_size, collator, sampler=sampler)
 
 
 if __name__ == "__main__":
@@ -58,7 +81,7 @@ if __name__ == "__main__":
         pretrained_checkpoint_path=project_path("checkpoints", "wiki_GPT2_62000"),
         label_smoothing=0.1,
         teacher_forcing=False,
-        eval_start_string="What is the weather today?",
+        eval_start_string="User: What is the weather today?<|endoftext|>Assistant: ",
         custom_bpe=CustomBpeConfig(
             num_merges=12000,
             encoded_data_path=project_path(
@@ -75,23 +98,19 @@ if __name__ == "__main__":
 
     train_chat_examples = load_no_robots_sft(split="train")
     val_chat_examples = load_no_robots_sft(split="test")
-    chat_examples = train_chat_examples + val_chat_examples
-
-    if CONFIG.custom_bpe:
-        # Reuse the pretrained tokenizer vocabulary directly for SFT.
-        if not os.path.exists(CONFIG.custom_bpe.vocab_path):
-            raise FileNotFoundError(
-                f"Expected pretrained vocab at {CONFIG.custom_bpe.vocab_path}"
-            )
-        bpe = BytePairEncoder(
-            num_merges=CONFIG.custom_bpe.num_merges,
-            vocab_file_path=CONFIG.custom_bpe.vocab_path,
-            encoded_data_path=CONFIG.custom_bpe.encoded_data_path,
-        )
-    else:
+    bpe_config = CONFIG.custom_bpe
+    if bpe_config is None:
         raise ValueError(
             "Please supply a custom_bpe config. Check out CustomBpeConfig for more details."
         )
+    if not os.path.exists(bpe_config.vocab_path):
+        raise FileNotFoundError(f"Expected pretrained vocab at {bpe_config.vocab_path}")
+
+    bpe = BytePairEncoder(
+        num_merges=bpe_config.num_merges,
+        vocab_file_path=bpe_config.vocab_path,
+        encoded_data_path=bpe_config.encoded_data_path,
+    )
 
     CONFIG.model_kwargs["vocab_size"] = bpe.n_vocab
 
@@ -103,77 +122,48 @@ if __name__ == "__main__":
         forward_fn=GPT2ForwardFn(),
     )
 
-    pad_idx = bpe.encode("<PAD>", allowed_special={"<PAD>"})[0]
+    pad_idx = bpe.encode("<PAD>")[0]
     max_tokens = trainer.model.max_seq_len + 1
+    split = len(train_chat_examples)
     token_sequences, loss_masks = prepare_sft_token_sequences(
-        chat_examples,
+        train_chat_examples + val_chat_examples,
         bpe,
-        overwrite_encoded_data=CONFIG.custom_bpe.overwrite_encoded_data,
+        overwrite_encoded_data=bpe_config.overwrite_encoded_data,
         desc="Tokenizing SFT examples",
     )
-    train_token_sequences = token_sequences[: len(train_chat_examples)]
-    train_loss_masks = loss_masks[: len(train_chat_examples)]
-    val_token_sequences = token_sequences[len(train_chat_examples) :]
-    val_loss_masks = loss_masks[len(train_chat_examples) :]
 
-    train_examples = [
-        {"tokens": tokens, "loss_mask": loss_mask}
-        for tokens, loss_mask in zip(train_token_sequences, train_loss_masks)
-        if len(tokens) <= max_tokens
-    ]
-    val_examples = [
-        {"tokens": tokens, "loss_mask": loss_mask}
-        for tokens, loss_mask in zip(val_token_sequences, val_loss_masks)
-        if len(tokens) <= max_tokens
-    ]
+    train_examples = filter_fitting_examples(
+        token_sequences[:split],
+        loss_masks[:split],
+        max_tokens,
+    )
+    val_examples = filter_fitting_examples(
+        token_sequences[split:],
+        loss_masks[split:],
+        max_tokens,
+    )
     if not train_examples or not val_examples:
         raise ValueError("No SFT examples fit within the configured context window.")
 
-    fit_train = len(train_examples)
-    fit_val = len(val_examples)
     print(
         "Data length: "
-        f"raw_train={len(train_token_sequences)} raw_val={len(val_token_sequences)} "
-        f"fit_train={fit_train} fit_val={fit_val}"
+        f"raw_train={split} raw_val={len(token_sequences) - split} "
+        f"fit_train={len(train_examples)} fit_val={len(val_examples)}"
     )
     val_batch_size = max(1, CONFIG.micro_batch_size // 2)
-    train_dataset = PairedMapDataset(
-        [example["tokens"] for example in train_examples],
-        [example["loss_mask"] for example in train_examples],
-        input_key="tokens",
-        target_key="loss_mask",
-        dtype=xp.int32,
-    )
-    val_dataset = PairedMapDataset(
-        [example["tokens"] for example in val_examples],
-        [example["loss_mask"] for example in val_examples],
-        input_key="tokens",
-        target_key="loss_mask",
-        dtype=xp.int32,
-    )
-    train_data_loader = DataLoader(
-        dataset=train_dataset,
+    train_data_loader = build_data_loader(
+        train_examples,
         batch_size=CONFIG.micro_batch_size,
-        collator=BatchMaxLengthCausalLMCollator(
-            max_tokens=max_tokens,
-            pad_idx=pad_idx,
-        ),
-        sampler=TokenLengthGroupedRandomSampler(
-            train_dataset,
-            sort_buffer_size=CONFIG.global_batch_size,
-        ),
+        max_tokens=max_tokens,
+        pad_idx=pad_idx,
+        sort_buffer_size=CONFIG.global_batch_size,
     )
-    val_data_loader = DataLoader(
-        dataset=val_dataset,
+    val_data_loader = build_data_loader(
+        val_examples,
         batch_size=val_batch_size,
-        collator=BatchMaxLengthCausalLMCollator(
-            max_tokens=max_tokens,
-            pad_idx=pad_idx,
-        ),
-        sampler=TokenLengthGroupedRandomSampler(
-            val_dataset,
-            sort_buffer_size=val_batch_size,
-        ),
+        max_tokens=max_tokens,
+        pad_idx=pad_idx,
+        sort_buffer_size=val_batch_size,
     )
 
     trainer.fit(train_data_loader, val_data_loader)
