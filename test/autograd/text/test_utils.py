@@ -204,6 +204,31 @@ class TestTextUtils(TestCase):
         # Ensure prediction_func was called exactly max_length times.
         self.assertEqual(prediction_func.call_count, max_length)
 
+    @patch("autograd.text.utils.xp.sample_categorical")
+    def test_normal_inference_respects_max_length_above_100(self, mock_choice):
+        def fake_prediction(model, batch_data, mode):
+            seq_len = batch_data.shape[1]
+            dummy_obj = MagicMock()
+            dummy_obj.data = xp.zeros((1, seq_len, 10))
+            return dummy_obj
+
+        mock_choice.return_value = 1
+        prediction_func = MagicMock(side_effect=fake_prediction)
+        generated_tokens = 120
+
+        result = inference(
+            model=MagicMock(),
+            prediction_func=prediction_func,
+            bpe=self.bpe,  # type: ignore
+            start_tokens="<SOS>",
+            max_length=generated_tokens + 1,
+            temperature=1.0,
+            top_k=5,
+        )
+
+        self.assertEqual(result, self.bpe.decode([0] + [1] * generated_tokens))
+        self.assertEqual(prediction_func.call_count, generated_tokens)
+
     def test_teacher_forcing_inference(self):
         """
         In teacher forcing mode, the inference function should use argmax (temperature=0).
