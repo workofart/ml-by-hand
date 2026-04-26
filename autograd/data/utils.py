@@ -48,6 +48,9 @@ def load_data(
     if not os.path.exists(filename):
         with urlopen(url) as response:
             content = response.read()
+        parent_dir = os.path.dirname(filename)
+        if parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
         with open(filename, "wb") as f:
             f.write(content)
 

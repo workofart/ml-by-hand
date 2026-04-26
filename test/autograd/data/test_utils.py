@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -38,6 +39,20 @@ class MockBPE:
             encoded.append(2)
             start = special_index + len(special_token)
         return encoded
+
+
+class BytesResponse:
+    def __init__(self, content):
+        self.content = content
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self):
+        return self.content
 
 
 class TestDataUtils(unittest.TestCase):
@@ -105,6 +120,18 @@ class TestDataUtils(unittest.TestCase):
                 ["bad ending", "negative"],
             ],
         )
+
+    @patch("autograd.data.utils.urlopen")
+    def test_load_data_creates_parent_directory_for_download(self, mock_urlopen):
+        mock_urlopen.return_value = BytesResponse(b"downloaded text")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filename = os.path.join(tmpdir, "training_data", "sample.txt")
+
+            data = load_data("https://example.test/sample.txt", filename)
+
+        self.assertEqual(data, "downloaded text")
+        mock_urlopen.assert_called_once_with("https://example.test/sample.txt")
 
     def test_build_seq2seq_dataset_from_text_pairs_encodes_source_and_target(self):
         dataset = build_seq2seq_dataset_from_text_pairs(
