@@ -50,35 +50,37 @@ if __name__ == "__main__":
     from gpt_2 import GPT2, GPT2ForwardFn
 
     CONFIG = TransformerTrainingConfig(
-        training_run_name="sft_demo",
+        training_run_name="sft_0426",
         dataset_name="no_robots",
-        max_steps=500,
+        max_steps=900,
         max_eval_steps=10,
-        checkpoint_freq=32,
+        checkpoint_freq=300,
+        report_every_steps=20,
         global_batch_size=32,
-        micro_batch_size=4,
+        micro_batch_size=8,
         model_kwargs={
-            "num_attention_heads": 12,  # GPT-2 small uses 12
-            "hidden_size": 1536,  # GPT-2 small uses 768, must be divisible by num_attention_heads
-            "dropout_prob": 0.2,
+            "num_attention_heads": 9,  # GPT-2 small uses 12
+            "hidden_size": 576,  # GPT-2 small uses 768, must be divisible by num_attention_heads
+            "dropout_prob": 0.1,
             "max_seq_len": 1024,  # GPT-2 uses 1024
-            "num_decoder_layers": 12,  # GPT-2 uses 12
-            "activation_checkpointing": True,
+            "num_decoder_layers": 8,  # GPT-2 uses 12
+            "activation_checkpointing": False,
+            "parameter_dtype": "bfloat16",
         },
         optimizer_kwargs={
-            "lr": 1e-4,
+            "lr": 5e-5,
             "beta2": 0.99,
             "weight_decay": 0.1,
             "lr_scheduler_kwargs": {
                 "lr_scheduler_cls": optim.CosineScheduler,
-                "warmup_steps": 75,  # 15% of max_steps
-                "lr_decay_iters": 400,  # 80% of max_steps
+                "warmup_steps": 90,  # 15% of max_steps
+                "lr_decay_iters": 720,  # 80% of max_steps
             },
         },
         max_grad_norm=1.0,
         # Basename without .json/.npz. The configured model architecture below
         # must match this checkpoint; load_state_dict will fail otherwise.
-        pretrained_checkpoint_path=project_path("checkpoints", "wiki_GPT2_62000"),
+        pretrained_checkpoint_path=project_path("checkpoints", "wiki_GPT2_6000"),
         label_smoothing=0.1,
         teacher_forcing=False,
         eval_start_string="User: What is the weather today?<|endoftext|>Assistant: ",

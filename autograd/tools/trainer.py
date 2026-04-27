@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pprint import pformat
@@ -19,7 +20,7 @@ from tqdm import tqdm
 from autograd import nn, optim
 from autograd.backend import (
     Array,
-    eval,
+    materialize,
     xp,
 )
 from autograd.data.data_loader import DataLoader
@@ -78,13 +79,16 @@ class TrainingState:
     )
     eval_loss_batches: int = 0
     eval_metric_totals: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    report_started_at_s: float = field(default_factory=time.perf_counter)
 
     def record_loss(
         self,
         loss_sum: float | Tensor,
         *,
-        total_weight: Array = xp.array(1.0, dtype=xp.float32),
+        total_weight: Optional[Array] = None,
     ) -> None:
+        if total_weight is None:
+            total_weight = xp.array(1.0, dtype=xp.float32)
         loss_data = loss_sum.data if isinstance(loss_sum, Tensor) else float(loss_sum)
         if self.report_loss_sum is None:
             self.report_loss_sum = loss_data
@@ -100,8 +104,10 @@ class TrainingState:
         self,
         loss_sum: float | Tensor,
         *,
-        total_weight: Array = xp.array(1.0, dtype=xp.float32),
+        total_weight: Optional[Array] = None,
     ) -> None:
+        if total_weight is None:
+            total_weight = xp.array(1.0, dtype=xp.float32)
         loss_value = (
             loss_sum.item() if isinstance(loss_sum, Tensor) else float(loss_sum)
         )
@@ -126,6 +132,14 @@ class TrainingState:
     def reset_report(self) -> None:
         self.report_loss_sum = None
         self.report_loss_total_weight = xp.array(0.0, dtype=xp.float32)
+        self.report_started_at_s = time.perf_counter()
+
+    def report_tokens_per_second(self, *, now_s: Optional[float] = None) -> float:
+        elapsed_s = (now_s or time.perf_counter()) - self.report_started_at_s
+        if elapsed_s <= 0:
+            return 0.0
+        token_count = xp.to_scalar(self.report_loss_total_weight)
+        return float(token_count) / elapsed_s
 
     def has_enough_batches(self, accumulation_steps: int):
         return self.accumulated_batches >= accumulation_steps
@@ -135,9 +149,8 @@ class TrainingState:
 class TrainingPlan:
     by_epoch: bool
     target_step: int
-    # Note that the reporting frequency also dictates the MLX lazy-to-materialize trigger
-    # Don't set this too high, otherwise, MLX could accumulate a lot of operations and
-    # might directly reach "RuntimeError: [metal::malloc] Resource limit exceeded"
+    # Controls log/eval/checkpoint cadence. Microbatch eval boundaries are
+    # handled in the trainer loop and do not depend on reporting frequency.
     report_every_steps: int
     checkpoint_every: int
     steps_per_epoch: Optional[int] = None
@@ -345,6 +358,16 @@ class AbstractTrainer(ABC):
 
                             if should_report:
                                 report_current_step()
+                    else:
+                        # Non-step microbatch boundary.
+                        # Materialize retained loss accumulators and accumulated grads so MLX does
+                        # not keep backward graphs across microbatches.
+                        materialize(
+                            state.report_loss_sum,
+                            state.report_loss_total_weight,
+                            state.accumulated_loss_total_weight,
+                            self.optimizer.gradient_arrays(),
+                        )
 
                     if plan.is_done(self.global_step):
                         break
@@ -372,6 +395,16 @@ class AbstractTrainer(ABC):
     ) -> bool:
         if state.accumulated_batches == 0:
             return False
+
+        # Step microbatch boundary.
+        # Do not materialize gradients here; optimizer.step() will consume them and
+        # materialize parameter/state updates. But do materialize retained loss stats,
+        # because report_loss_sum is not otherwise consumed by optimizer.step().
+        materialize(
+            state.report_loss_sum,
+            state.report_loss_total_weight,
+            state.accumulated_loss_total_weight,
+        )
 
         self.optimizer.scale_gradients(
             1.0
@@ -471,6 +504,7 @@ class AbstractTrainer(ABC):
                 state.report_loss_sum,
                 state.report_loss_total_weight,
             ),
+            "tokens_per_s": state.report_tokens_per_second(),
             "val_loss": None
             if eval_state is None
             else self._weighted_mean(
@@ -580,7 +614,7 @@ class AbstractTrainer(ABC):
                 metrics_mx[key] = xp.array(values, dtype=xp.float32)
             else:
                 metrics_mx[key] = xp.array(values)
-        eval(*metrics_mx.values())
+        materialize(*metrics_mx.values())
         xp.savez_compressed(path, **metrics_mx)
 
     def _validate_fit_inputs(self, train_data_loader: DataLoader) -> None:

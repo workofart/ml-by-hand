@@ -653,6 +653,14 @@ class TestLayerNorm(TestCase):
                 output.data, torch_output.detach().numpy(), rtol=1e-4, atol=1e-4
             ), f"Output mismatch for input shape {shape}"
 
+    def test_low_precision_output_dtype_is_preserved(self):
+        dtype = getattr(xp, "bfloat16", xp.float16)
+        x = Tensor(xp.ones((2, 3, self.input_size), dtype=dtype))
+
+        output = self.layer_norm(x)
+
+        assert output.data.dtype == dtype
+
 
 class TestDropout(TestCase):
     def test_forward(self):
@@ -670,6 +678,22 @@ class TestDropout(TestCase):
         dropout.train()
         output = dropout(x)
         assert allclose(output.data, xp.array([[1, 2], [3, 4], [5, 6]]))
+
+    def test_low_precision_output_dtype_is_preserved(self):
+        dtype = getattr(xp, "bfloat16", xp.float16)
+        dropout = Dropout(p=0.25)
+        dropout.train()
+        x = Tensor(xp.ones((8, 8), dtype=dtype))
+
+        output = dropout(x)
+
+        assert output.data.dtype == dtype
+
+        drop_all = Dropout(p=1)
+        drop_all.train()
+        output = drop_all(x)
+
+        assert output.data.dtype == dtype
 
 
 class TestConv2d(TestCase):

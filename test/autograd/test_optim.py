@@ -145,6 +145,16 @@ class TestOptimizer(TestCase):
 
         self.assertAlmostEqual(grad_norm, 13.0, places=6)
 
+    def test_gradient_arrays_returns_current_gradients_by_parameter_name(self):
+        grad = xp.array([3.0, 4.0], dtype=xp.float32)
+        self.params["param1"].grad = Tensor(grad)
+        self.params["param2"].grad = None
+
+        grads = self.optimizer.gradient_arrays()
+
+        self.assertEqual(list(grads), ["param1"])
+        self.assertIs(grads["param1"], self.params["param1"].grad.data)
+
     def test_scheduler_accepts_class_object(self):
         optimizer = Optimizer(
             self.params,
@@ -314,7 +324,8 @@ class TestSGD(TestCase):
         self.params = [self.param1, self.param2]
         self.optimizer = SGD(
             model_parameters={
-                "sample_module": {"weight": self.param1, "bias": self.param2},
+                "sample_module.weight": self.param1,
+                "sample_module.bias": self.param2,
             },
             lr=0.01,
         )
@@ -370,7 +381,7 @@ class TestSGD(TestCase):
         def record_eval(params, states):
             observed.append((self.param1.data, states["timestep"]))
 
-        with patch("autograd.optim.eval_backend", side_effect=record_eval):
+        with patch("autograd.optim.materialize", side_effect=record_eval):
             self.optimizer.step()
 
         self.assertEqual(len(observed), 1)

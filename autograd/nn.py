@@ -1510,18 +1510,15 @@ class Dropout(Module):
             >>> x = Tensor(xp.ones((2, 2)))
             >>> y = dropout(x) # Approximately half of the values in y should be zero
         """
-        if self._is_training:
-            mask = xp.random.bernoulli(float(1 - self.p), shape=x.data.shape)
-            return (
-                x
-                * Tensor(mask, requires_grad=False)
-                / (
-                    1 - self.p
-                )  # we scale the output by 1/(1-p) to keep the expected output the same
-                if self.p < 1
-                else x * 0  # when p=1, drop everything by multiplying by 0
-            )
-        return x
+        if not self._is_training or self.p == 0:
+            return x
+
+        if self.p >= 1:
+            return x * 0
+
+        keep_prob = float(1 - self.p)
+        mask = xp.random.bernoulli(keep_prob, shape=x.data.shape).astype(x.data.dtype)
+        return x * Tensor(mask, requires_grad=False) / keep_prob
 
 
 class ScaledDotProductAttention(Module):

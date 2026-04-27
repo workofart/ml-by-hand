@@ -2,9 +2,9 @@ import logging
 import math
 from abc import abstractmethod
 from collections import defaultdict
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Dict, Optional
 
-from autograd.backend import LOW_PRECISION_FLOAT_DTYPES, Array, eval_backend, xp
+from autograd.backend import LOW_PRECISION_FLOAT_DTYPES, Array, materialize, xp
 from autograd.tensor import Tensor
 
 logger = logging.getLogger(__name__)
@@ -216,33 +216,6 @@ class Optimizer:
         if self.lr_scheduler is not None:
             self.lr = self.lr_scheduler(self.timestep, self.initial_lr, self.lr)
 
-    def _recursive_param_op(
-        self, params: Any, update_fn: Callable[[Any], None]
-    ) -> None:
-        """
-        Recursively apply an update function to parameters.
-
-        This method traverses nested dictionaries, lists, or tuples of parameters,
-        and applies the update function to each parameter that has a 'grad' attribute.
-
-        Args:
-            params (Any): The parameters to update; can be a dict, list, tuple, or a single parameter.
-            update_fn (Callable[[Any], None]): The function to apply to each parameter.
-        """
-        # 1) If params is a dict
-        if isinstance(params, dict):
-            for _, v in params.items():
-                self._recursive_param_op(v, update_fn)
-
-        # 2) If params is a list or tuple
-        elif isinstance(params, (list, tuple)):
-            for p in params:
-                self._recursive_param_op(p, update_fn)
-
-        # 3) If params is a single parameter with a .grad
-        elif hasattr(params, "grad"):
-            update_fn(params)
-
     def clip_grad_norm(
         self,
         max_norm: float,
@@ -291,10 +264,8 @@ class Optimizer:
         Set the gradients of all optimized tensors to zero.
         """
 
-        def update_fn(x: Any) -> None:
-            x.grad = None
-
-        self._recursive_param_op(self.model_parameters, update_fn)
+        for param in self.model_parameters.values():
+            param.grad = None
 
     def scale_gradients(self, scale: Array) -> None:
         """Scale all parameter gradients in-place by ``scale``."""
@@ -309,6 +280,14 @@ class Optimizer:
             if param.grad is not None:
                 grad_norm += (param.grad.data**2).sum()
         return float(xp.to_scalar(grad_norm**0.5))
+
+    def gradient_arrays(self) -> Dict[str, Array]:
+        """Current accumulated gradient arrays, keyed by parameter name."""
+        return {
+            name: param.grad.data
+            for name, param in self.model_parameters.items()
+            if param.grad is not None
+        }
 
     def state_dict(self) -> Dict[str, Any]:
         """
@@ -373,9 +352,6 @@ class Optimizer:
         """
         raise NotImplementedError
 
-    def _eval_backend(self) -> None:
-        eval_backend(self.model_parameters, self._states)
-
 
 class SGD(Optimizer):
     """
@@ -408,8 +384,9 @@ class SGD(Optimizer):
                 return
             param.data -= self.lr * param.grad.data
 
-        self._recursive_param_op(self.model_parameters, update_fn)
-        self._eval_backend()
+        for param in self.model_parameters.values():
+            update_fn(param)
+        materialize(self.model_parameters, self._states)
         return None
 
 
@@ -483,7 +460,7 @@ class Adam(Optimizer):
             m_old = self._states["m"][name]
             v_old = self._states["v"][name]
 
-            grad = param.grad.data  # or param.grad if it's np array
+            grad = param.grad.data
 
             # For mixed precision, keep Adam statistics in fp32 for stability.
             param_dtype = param.data.dtype
@@ -510,5 +487,5 @@ class Adam(Optimizer):
             # For mixed precision, return to the param_dtype so the following dense ops stay low precision.
             if param_dtype in LOW_PRECISION_FLOAT_DTYPES:
                 param.data = param.data.astype(param_dtype)
-        self._eval_backend()
+        materialize(self.model_parameters, self._states)
         return None
