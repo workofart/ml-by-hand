@@ -87,6 +87,26 @@ class TestTensorOps(TestTensor):
 
         assert x.data.dtype == xp.float16
 
+    def test_low_precision_python_scalar_ops_preserve_tensor_dtype(self):
+        dtype = getattr(xp, "bfloat16", xp.float16)
+        x = Tensor(xp.ones((2,), dtype=dtype), requires_grad=True)
+
+        assert (x + 1.0).data.dtype == dtype
+        assert (1.0 + x).data.dtype == dtype
+        assert (x - 1.0).data.dtype == dtype
+        assert (1.0 - x).data.dtype == dtype
+        assert (x * 0.5).data.dtype == dtype
+        assert (x / 2.0).data.dtype == dtype
+        assert (x**0.5).data.dtype == dtype
+        assert (-x).data.dtype == dtype
+
+    def test_explicit_scalar_tensor_keeps_its_dtype(self):
+        dtype = getattr(xp, "bfloat16", xp.float16)
+        x = Tensor(xp.ones((2,), dtype=dtype), requires_grad=True)
+        scale = Tensor(xp.array(0.5, dtype=xp.float32), requires_grad=False)
+
+        assert (x * scale).data.dtype == xp.float32
+
     def test_tensor_negation(self):
         assert (-self.x_scalar).data == -2.0
 

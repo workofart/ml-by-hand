@@ -16,6 +16,7 @@ from typing import (
 
 from autograd.backend import (
     ARRAY_TYPE,
+    LOW_PRECISION_FLOAT_DTYPES,
     Array,
     ArrayLike,
     get_random_state,
@@ -384,8 +385,7 @@ class Tensor:
         Returns:
             Tensor: The result of addition.
         """
-        if not isinstance(other, Tensor):
-            other = Tensor(other, requires_grad=False)
+        other = self._wrap_scalar_like_self(other)
 
         return Add.apply(self, other)
 
@@ -402,8 +402,7 @@ class Tensor:
         Returns:
             Tensor: The result of multiplication.
         """
-        if not isinstance(other, Tensor):
-            other = Tensor(other, requires_grad=False)
+        other = self._wrap_scalar_like_self(other)
 
         return Mul.apply(self, other)
 
@@ -450,8 +449,7 @@ class Tensor:
                 result = result * self
             return result
 
-        if not isinstance(other, Tensor):
-            other = Tensor(other, requires_grad=False)
+        other = self._wrap_scalar_like_self(other)
 
         return Pow.apply(self, other)
 
@@ -468,13 +466,23 @@ class Tensor:
         Returns:
             Tensor: This tensor, after in-place addition.
         """
-        if not isinstance(other, Tensor):
-            other = Tensor(other, requires_grad=False)
+        other = self._wrap_scalar_like_self(other)
 
         # Use expand for broadcasting
         broadcast_shape = xp.broadcast_shapes(self.shape, other.shape)
         expanded_other = other.expand(broadcast_shape)
         return IAdd.apply(self, expanded_other)
+
+    def _wrap_scalar_like_self(self, value: Union["Tensor", float, int]) -> "Tensor":
+        if isinstance(value, Tensor):
+            return value
+
+        # Python scalar constants should behave like constants in this tensor's
+        # dtype. Without this, bf16/fp16 activations mixed with `0`, `0.5`, etc.
+        # get promoted through Tensor(float)'s default fp32 construction.
+        if self.data.dtype in LOW_PRECISION_FLOAT_DTYPES:
+            value = xp.array(value, dtype=self.data.dtype)
+        return Tensor(value, requires_grad=False)
 
     def __getitem__(self, idx: Union[int, slice, tuple]) -> "Tensor":
         """

@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pprint import pformat
@@ -78,6 +79,7 @@ class TrainingState:
     )
     eval_loss_batches: int = 0
     eval_metric_totals: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    report_started_at_s: float = field(default_factory=time.perf_counter)
 
     def record_loss(
         self,
@@ -126,6 +128,14 @@ class TrainingState:
     def reset_report(self) -> None:
         self.report_loss_sum = None
         self.report_loss_total_weight = xp.array(0.0, dtype=xp.float32)
+        self.report_started_at_s = time.perf_counter()
+
+    def report_tokens_per_second(self, *, now_s: Optional[float] = None) -> float:
+        elapsed_s = (now_s or time.perf_counter()) - self.report_started_at_s
+        if elapsed_s <= 0:
+            return 0.0
+        token_count = xp.to_scalar(self.report_loss_total_weight)
+        return float(token_count) / elapsed_s
 
     def has_enough_batches(self, accumulation_steps: int):
         return self.accumulated_batches >= accumulation_steps
@@ -329,6 +339,12 @@ class AbstractTrainer(ABC):
                     loss = self._compute_loss(batch)
                     total_weight = self._loss_total_weight(batch)
                     loss.backward()
+                    # MLX is lazy: during accumulation, materialize each
+                    # microbatch's grads so one optimizer step does not retain
+                    # a large graph spanning all backward passes. With no
+                    # accumulation, optimizer.step() is the natural eval point.
+                    if accumulation_steps > 1:
+                        self._eval_accumulated_gradients()
                     state.record_loss(loss, total_weight=total_weight)
 
                     if state.has_enough_batches(accumulation_steps):
@@ -392,6 +408,15 @@ class AbstractTrainer(ABC):
         state.accumulated_batches = 0
         state.accumulated_loss_total_weight = xp.array(0.0, dtype=xp.float32)
         return True
+
+    def _eval_accumulated_gradients(self) -> None:
+        grads = [
+            parameter.grad.data
+            for parameter in self.model.parameters.values()
+            if parameter.grad is not None
+        ]
+        if grads:
+            eval(*grads)
 
     def evaluate(self, val_data_loader: DataLoader) -> TrainingState:
         val_data_loader.on_epoch_start()
@@ -471,6 +496,7 @@ class AbstractTrainer(ABC):
                 state.report_loss_sum,
                 state.report_loss_total_weight,
             ),
+            "tokens_per_s": state.report_tokens_per_second(),
             "val_loss": None
             if eval_state is None
             else self._weighted_mean(
