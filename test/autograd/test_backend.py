@@ -7,8 +7,8 @@ import numpy as np
 import pytest
 
 from autograd.backend import (
-    eval_backend,
     get_random_state,
+    materialize,
     set_random_state,
     xp,
 )
@@ -75,11 +75,33 @@ def test_scatter_add_accumulates_repeated_indices():
     assert np.array_equal(xp.to_numpy(out), np.array([0.0, 5.0, 0.0], dtype=np.float32))
 
 
-def test_eval_backend_accepts_nested_arrays_and_tensors():
-    tensor = Tensor(xp.asarray([1.0], dtype=xp.float32))
-    nested = {"tensor": tensor, "array": xp.asarray([2.0], dtype=xp.float32)}
+def test_materialize_collects_nested_arrays_and_tensor_data(monkeypatch):
+    import autograd.backend as backend
 
-    eval_backend(nested, [xp.asarray([3.0], dtype=xp.float32)], None)
+    arrays = [
+        np.asarray([1.0], dtype=np.float32),
+        np.asarray([2.0], dtype=np.float32),
+        np.asarray([3.0], dtype=np.float32),
+    ]
+    observed = []
+
+    monkeypatch.setattr(backend, "IS_MLX", True)
+    monkeypatch.setattr(backend, "ARRAY_TYPE", np.ndarray)
+    monkeypatch.setattr(
+        backend,
+        "xp",
+        SimpleNamespace(eval=lambda *xs: observed.extend(xs)),
+    )
+
+    nested = {
+        "tensor": SimpleNamespace(data=arrays[0]),
+        "array": arrays[1],
+        "ignored": [None, "abc", 7],
+    }
+
+    materialize(nested, (arrays[2],))
+
+    assert observed == arrays
 
 
 def test_as_strided_view_matches_explicit_windows():

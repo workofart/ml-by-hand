@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import importlib
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import numpy as _host_np
@@ -81,28 +81,45 @@ LOW_PRECISION_FLOAT_DTYPES = tuple(
 # ---------------------------------------------------------------------------
 
 
-def eval(*xs: Any) -> None:
-    if IS_MLX and xs:
-        xp.eval(*xs)
+def _collect_arrays(value: Any) -> list[Any]:
+    if isinstance(value, ARRAY_TYPE):
+        return [value]
+
+    data = getattr(value, "data", None)
+    if isinstance(data, ARRAY_TYPE):
+        return [data]
+
+    if isinstance(value, Mapping):
+        arrays = []
+        for child in value.values():
+            arrays.extend(_collect_arrays(child))
+        return arrays
+
+    if isinstance(value, (list, tuple)):
+        arrays = []
+        for child in value:
+            arrays.extend(_collect_arrays(child))
+        return arrays
+
+    return []
 
 
-def eval_backend(*values: Any) -> None:
+def materialize(*values: Any) -> None:
+    """Force pending backend work at explicit execution boundaries.
+
+    For MLX this evaluates lazy arrays. For eager backends this is a no-op.
+    Accepts arrays, Tensor wrappers, dicts, lists, tuples, and nested mixtures.
+    Python scalars / None are ignored.
     """
-    Force MLX's lazy parameter/state updates at optimizer-step boundaries.
-
-    Without this explicit boundary, update graphs can be evaluated later at
-    less predictable synchronization points such as scalar reads or checkpoints.
-    """
-    if not IS_MLX:
+    if not IS_MLX or not values:
         return
 
-    from mlx.utils import tree_map
+    arrays: list[Any] = []
+    for value in values:
+        arrays.extend(_collect_arrays(value))
 
-    def unwrap_tensor(value: Any) -> Any:
-        data = getattr(value, "data", None)
-        return data if hasattr(data, "shape") else value
-
-    eval(tree_map(unwrap_tensor, values))
+    if arrays:
+        xp.eval(*arrays)
 
 
 def _scatter_add(dst: Any, idx: Any, updates: Any):
@@ -116,7 +133,7 @@ def _scatter_add(dst: Any, idx: Any, updates: Any):
 def _to_scalar(x: Any) -> Any:
     if hasattr(x, "detach") and hasattr(x, "cpu"):
         return x.detach().cpu().item()
-    eval(x)
+    materialize(x)
     return x.item() if hasattr(x, "item") else x
 
 
@@ -139,7 +156,7 @@ def _to_numpy(x: Any):
     if hasattr(x, "detach") and hasattr(x, "cpu"):
         return x.detach().cpu().numpy()
     if IS_MLX:
-        eval(x)
+        materialize(x)
         return _host_np.asarray(x)
     if IS_CUPY:
         if hasattr(xp, "asnumpy"):

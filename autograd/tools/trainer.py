@@ -20,7 +20,7 @@ from tqdm import tqdm
 from autograd import nn, optim
 from autograd.backend import (
     Array,
-    eval,
+    materialize,
     xp,
 )
 from autograd.data.data_loader import DataLoader
@@ -85,8 +85,10 @@ class TrainingState:
         self,
         loss_sum: float | Tensor,
         *,
-        total_weight: Array = xp.array(1.0, dtype=xp.float32),
+        total_weight: Optional[Array] = None,
     ) -> None:
+        if total_weight is None:
+            total_weight = xp.array(1.0, dtype=xp.float32)
         loss_data = loss_sum.data if isinstance(loss_sum, Tensor) else float(loss_sum)
         if self.report_loss_sum is None:
             self.report_loss_sum = loss_data
@@ -102,8 +104,10 @@ class TrainingState:
         self,
         loss_sum: float | Tensor,
         *,
-        total_weight: Array = xp.array(1.0, dtype=xp.float32),
+        total_weight: Optional[Array] = None,
     ) -> None:
+        if total_weight is None:
+            total_weight = xp.array(1.0, dtype=xp.float32)
         loss_value = (
             loss_sum.item() if isinstance(loss_sum, Tensor) else float(loss_sum)
         )
@@ -145,9 +149,8 @@ class TrainingState:
 class TrainingPlan:
     by_epoch: bool
     target_step: int
-    # Note that the reporting frequency also dictates the MLX lazy-to-materialize trigger
-    # Don't set this too high, otherwise, MLX could accumulate a lot of operations and
-    # might directly reach "RuntimeError: [metal::malloc] Resource limit exceeded"
+    # Controls log/eval/checkpoint cadence. Microbatch eval boundaries are
+    # handled in the trainer loop and do not depend on reporting frequency.
     report_every_steps: int
     checkpoint_every: int
     steps_per_epoch: Optional[int] = None
@@ -339,12 +342,6 @@ class AbstractTrainer(ABC):
                     loss = self._compute_loss(batch)
                     total_weight = self._loss_total_weight(batch)
                     loss.backward()
-                    # MLX is lazy: during accumulation, materialize each
-                    # microbatch's grads so one optimizer step does not retain
-                    # a large graph spanning all backward passes. With no
-                    # accumulation, optimizer.step() is the natural eval point.
-                    if accumulation_steps > 1:
-                        self._eval_accumulated_gradients()
                     state.record_loss(loss, total_weight=total_weight)
 
                     if state.has_enough_batches(accumulation_steps):
@@ -361,6 +358,16 @@ class AbstractTrainer(ABC):
 
                             if should_report:
                                 report_current_step()
+                    else:
+                        # Non-step microbatch boundary.
+                        # Materialize retained loss accumulators and accumulated grads so MLX does
+                        # not keep backward graphs across microbatches.
+                        materialize(
+                            state.report_loss_sum,
+                            state.report_loss_total_weight,
+                            state.accumulated_loss_total_weight,
+                            self.optimizer.gradient_arrays(),
+                        )
 
                     if plan.is_done(self.global_step):
                         break
@@ -389,6 +396,16 @@ class AbstractTrainer(ABC):
         if state.accumulated_batches == 0:
             return False
 
+        # Step microbatch boundary.
+        # Do not materialize gradients here; optimizer.step() will consume them and
+        # materialize parameter/state updates. But do materialize retained loss stats,
+        # because report_loss_sum is not otherwise consumed by optimizer.step().
+        materialize(
+            state.report_loss_sum,
+            state.report_loss_total_weight,
+            state.accumulated_loss_total_weight,
+        )
+
         self.optimizer.scale_gradients(
             1.0
             / xp.maximum(
@@ -408,15 +425,6 @@ class AbstractTrainer(ABC):
         state.accumulated_batches = 0
         state.accumulated_loss_total_weight = xp.array(0.0, dtype=xp.float32)
         return True
-
-    def _eval_accumulated_gradients(self) -> None:
-        grads = [
-            parameter.grad.data
-            for parameter in self.model.parameters.values()
-            if parameter.grad is not None
-        ]
-        if grads:
-            eval(*grads)
 
     def evaluate(self, val_data_loader: DataLoader) -> TrainingState:
         val_data_loader.on_epoch_start()
@@ -606,7 +614,7 @@ class AbstractTrainer(ABC):
                 metrics_mx[key] = xp.array(values, dtype=xp.float32)
             else:
                 metrics_mx[key] = xp.array(values)
-        eval(*metrics_mx.values())
+        materialize(*metrics_mx.values())
         xp.savez_compressed(path, **metrics_mx)
 
     def _validate_fit_inputs(self, train_data_loader: DataLoader) -> None:

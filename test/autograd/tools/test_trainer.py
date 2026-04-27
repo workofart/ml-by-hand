@@ -22,6 +22,7 @@ from autograd.tools.config_schema import (
     TransformerTrainingConfig,
 )
 from autograd.tools.trainer import (
+    AbstractTrainer,
     LLMTrainer,
     SimpleTrainer,
     TrainingPlan,
@@ -394,21 +395,50 @@ class TestSimpleTrainer(BaseTrainerTest):
 
     def test_metrics_row_derives_metrics_from_training_state_aggregates(self):
         state = TrainingState()
+        state.report_started_at_s = 10.0
         state.record_loss(1.23)
         eval_state = TrainingState()
         eval_state.record_eval_loss(0.5)
         eval_state.record_eval_metric("accuracy", numerator=3, denominator=4)
 
-        row = self.trainer._metrics_row(state, eval_state=eval_state)
+        with patch("autograd.tools.trainer.time.perf_counter", return_value=11.0):
+            row = self.trainer._metrics_row(state, eval_state=eval_state)
 
         self.assertEqual(
             row,
             {
                 "train_loss": 1.23,
+                "tokens_per_s": 1.0,
                 "val_loss": 0.5,
                 "val_accuracy": 0.75,
             },
         )
+
+    def test_training_state_resets_report_timer(self):
+        state = TrainingState()
+        state.record_loss(1.0, total_weight=xp.array(4.0, dtype=xp.float32))
+        with patch("autograd.tools.trainer.time.perf_counter", return_value=12.0):
+            state.reset_report()
+
+        self.assertIsNone(state.report_loss_sum)
+        self.assertEqual(float(xp.to_scalar(state.report_loss_total_weight)), 0.0)
+        self.assertEqual(state.report_started_at_s, 12.0)
+
+    def test_training_state_default_weights_are_created_at_call_time(self):
+        self.assertIsNone(TrainingState.record_loss.__kwdefaults__["total_weight"])
+        self.assertIsNone(TrainingState.record_eval_loss.__kwdefaults__["total_weight"])
+
+        state = TrainingState()
+        state.record_loss(1.0)
+        state.record_eval_loss(2.0)
+
+        self.assertEqual(float(xp.to_scalar(state.report_loss_total_weight)), 1.0)
+        self.assertEqual(float(xp.to_scalar(state.eval_loss_total_weight)), 1.0)
+
+    def test_training_boundaries_are_direct_materialize_calls(self):
+        self.assertFalse(hasattr(TrainingState, "eval_accumulators"))
+        self.assertFalse(hasattr(AbstractTrainer, "_eval_microbatch_accumulators"))
+        self.assertFalse(hasattr(AbstractTrainer, "_eval_accumulated_gradients"))
 
     @patch("autograd.tools.trainer.save_checkpoint")
     def test_save_checkpoint_saves_first_validation_loss(self, mock_save_checkpoint):
@@ -1207,6 +1237,62 @@ class TestSimpleTrainer(BaseTrainerTest):
 
         self.assertEqual(trainer.optimizer.step_call_count, 2)
 
+    def test_fit_materializes_non_step_microbatch_state_and_gradients(self):
+        config = GenericTrainingConfig(
+            max_epochs=1,
+            checkpoint_freq=10,
+            model_kwargs={"hidden_size": 256},
+            optimizer_kwargs={"lr": 0.01},
+            global_batch_size=2,
+            micro_batch_size=1,
+        )
+        trainer = SimpleTrainer(
+            model_cls=MockModelClass,
+            optimizer_cls=MockOptimizerClass,
+            loss_fn=self.loss_fn,
+            config=config,
+            output_type="logits",
+        )
+        grad_arrays = {"weight": xp.array([1.0], dtype=xp.float32)}
+        trainer.optimizer.gradient_arrays = MagicMock(return_value=grad_arrays)
+        trainer.report = MagicMock()
+
+        with patch("autograd.tools.trainer.materialize") as mock_materialize:
+            trainer.fit(self.train_loader)
+
+        self.assertEqual(trainer.optimizer.gradient_arrays.call_count, 1)
+        self.assertEqual(mock_materialize.call_count, 2)
+        self.assertIs(mock_materialize.call_args_list[0].args[3], grad_arrays)
+        self.assertEqual(len(mock_materialize.call_args_list[1].args), 3)
+
+    def test_fit_without_accumulation_uses_only_step_boundary(self):
+        config = GenericTrainingConfig(
+            max_epochs=1,
+            checkpoint_freq=10,
+            model_kwargs={"hidden_size": 256},
+            optimizer_kwargs={"lr": 0.01},
+            global_batch_size=1,
+            micro_batch_size=1,
+        )
+        trainer = SimpleTrainer(
+            model_cls=MockModelClass,
+            optimizer_cls=MockOptimizerClass,
+            loss_fn=self.loss_fn,
+            config=config,
+            output_type="logits",
+        )
+        trainer.optimizer.gradient_arrays = MagicMock(return_value={})
+        trainer.report = MagicMock()
+
+        with patch("autograd.tools.trainer.materialize") as mock_materialize:
+            trainer.fit(self.train_loader)
+
+        trainer.optimizer.gradient_arrays.assert_not_called()
+        self.assertEqual(mock_materialize.call_count, 2)
+        self.assertTrue(
+            all(len(call.args) == 3 for call in mock_materialize.call_args_list)
+        )
+
     def test_optimizer_step_is_no_op_when_no_batches_accumulated(self):
         state = TrainingState()
         self.trainer.last_grad_l2_norm = 7.0
@@ -1518,6 +1604,7 @@ class TestSimpleTrainer(BaseTrainerTest):
 
         row = self.trainer.metric_rows[0]
         self.assertEqual(row["train_loss"], 1.23)
+        self.assertIn("tokens_per_s", row)
         self.assertEqual(row["val_loss"], 0.5)
         self.assertEqual(row["val_accuracy"], 0.75)
 

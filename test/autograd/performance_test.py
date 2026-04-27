@@ -10,7 +10,7 @@ import psutil
 
 from autograd import functional, nn, optim
 from autograd.backend import IS_CUPY, NAME, xp
-from autograd.backend import eval as backend_eval
+from autograd.backend import materialize as backend_materialize
 from autograd.data.collator import FixedLengthCausalLMCollator, PairedCollator
 from autograd.data.data_loader import DataLoader
 from autograd.data.dataset import PairedMapDataset
@@ -62,7 +62,7 @@ def synchronize_trees(*values):
     for value in values:
         arrays.extend(_flatten_sync_targets(value))
     if arrays:
-        backend_eval(*arrays)
+        backend_materialize(*arrays)
     if IS_CUPY:
         cuda = getattr(xp, "cuda", None)
         device_cls = getattr(cuda, "Device", None)
