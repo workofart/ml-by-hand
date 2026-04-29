@@ -16,6 +16,8 @@ from typing import (
     Union,
 )
 
+from tqdm import tqdm
+
 from autograd.backend import Array, ArrayLike, xp
 from autograd.tensor import Tensor
 from autograd.text.tokenizer import BytePairEncoder
@@ -68,7 +70,7 @@ def generate(
     logprobs: list[float] = []
     stop_reason = "max_new_tokens"
 
-    for _ in range(max_new_tokens):
+    for _ in tqdm(range(max_new_tokens), desc="Inference"):
         # Auto-regressive generation feeds the full prompt plus all tokens sampled
         # so far back into the model, then samples from the final position.
         batch_data = xp.expand_dims(xp.array(output_ids, dtype=xp.int32), axis=0)
