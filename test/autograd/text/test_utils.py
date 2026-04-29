@@ -7,7 +7,9 @@ from autograd.text.utils import (
     clean_and_tokenize,
     create_causal_mask,
     create_vocabulary,
-    inference,
+    generate,
+    generate_text,
+    teacher_force,
     text_to_one_hot_and_sparse,
 )
 
@@ -165,9 +167,35 @@ class TestTextUtils(TestCase):
         self.assertIn("!", tokens)
 
     @patch("autograd.text.utils.xp.sample_categorical")
-    def test_normal_inference(self, mock_choice):
+    def test_generate_returns_logprob_from_sampling_distribution(self, mock_choice):
+        def fake_prediction(model, batch_data, mode):
+            dummy_obj = MagicMock()
+            dummy_obj.data = xp.array([[[0.0, 1.0, 2.0]]], dtype=xp.float32)
+            return dummy_obj
+
+        mock_choice.return_value = 1
+
+        result = generate(
+            model=MagicMock(),
+            prediction_func=MagicMock(side_effect=fake_prediction),
+            prompt_tokens=[0],
+            max_new_tokens=1,
+            temperature=1.0,
+            top_k=2,
+            eos_token_id=9,
+        )
+
+        expected = 1.0 - xp.log(xp.exp(xp.array(1.0)) + xp.exp(xp.array(2.0)))
+        self.assertEqual(result.completion_tokens, [1])
+        self.assertAlmostEqual(
+            result.logprobs[0], float(xp.to_scalar(expected)), places=6
+        )
+        self.assertEqual(result.stop_reason, "max_new_tokens")
+
+    @patch("autograd.text.utils.xp.sample_categorical")
+    def test_generate_text(self, mock_choice):
         """
-        In normal (auto-regressive) mode, we expect the inference loop to use sampling.
+        In normal (auto-regressive) mode, we expect generate_text to use sampling.
         We patch xp.random.categorical to always return 1. Also, we simulate the prediction_func
         with a MagicMock that returns a dummy object with a proper 'data' attribute.
         """
@@ -188,12 +216,11 @@ class TestTextUtils(TestCase):
 
         # For predictability, use a small max_length.
         max_length = 3
-        result = inference(
+        result = generate_text(
             model=MagicMock(),
             prediction_func=prediction_func,
             bpe=self.bpe,  # type: ignore
             start_tokens="<SOS>",
-            groundtruth_data=None,
             max_length=max_length + 1,  # +1 for the start_token
             temperature=1.0,
             top_k=5,
@@ -207,7 +234,7 @@ class TestTextUtils(TestCase):
         self.assertEqual(prediction_func.call_count, max_length)
 
     @patch("autograd.text.utils.xp.sample_categorical")
-    def test_normal_inference_respects_max_length_above_100(self, mock_choice):
+    def test_generate_text_respects_max_length_above_100(self, mock_choice):
         def fake_prediction(model, batch_data, mode):
             seq_len = batch_data.shape[1]
             dummy_obj = MagicMock()
@@ -218,7 +245,7 @@ class TestTextUtils(TestCase):
         prediction_func = MagicMock(side_effect=fake_prediction)
         generated_tokens = 120
 
-        result = inference(
+        result = generate_text(
             model=MagicMock(),
             prediction_func=prediction_func,
             bpe=self.bpe,  # type: ignore
@@ -232,7 +259,7 @@ class TestTextUtils(TestCase):
         self.assertEqual(prediction_func.call_count, generated_tokens)
 
     @patch("autograd.text.utils.xp.sample_categorical")
-    def test_normal_inference_stops_at_endoftext(self, mock_choice):
+    def test_generate_text_stops_at_endoftext(self, mock_choice):
         def fake_prediction(model, batch_data, mode):
             seq_len = batch_data.shape[1]
             dummy_obj = MagicMock()
@@ -242,7 +269,7 @@ class TestTextUtils(TestCase):
         mock_choice.side_effect = [1, 9, 1]
         prediction_func = MagicMock(side_effect=fake_prediction)
 
-        result = inference(
+        result = generate_text(
             model=MagicMock(),
             prediction_func=prediction_func,
             bpe=self.bpe,  # type: ignore
@@ -255,9 +282,47 @@ class TestTextUtils(TestCase):
         self.assertEqual(result, self.bpe.decode([0, 1, 9]))
         self.assertEqual(prediction_func.call_count, 2)
 
-    def test_teacher_forcing_inference(self):
+    @patch("autograd.text.utils.xp.sample_categorical")
+    def test_generate_text_runs_in_eval_mode_and_restores_model_mode(self, mock_choice):
+        class FakeModel:
+            def __init__(self):
+                self._is_training = True
+
+            def eval(self):
+                self._is_training = False
+
+            def train(self):
+                self._is_training = True
+
+        observed_modes = []
+
+        def fake_prediction(model, batch_data, mode):
+            observed_modes.append(model._is_training)
+            seq_len = batch_data.shape[1]
+            dummy_obj = MagicMock()
+            dummy_obj.data = xp.zeros((1, seq_len, 10))
+            return dummy_obj
+
+        mock_choice.return_value = 9
+        model = FakeModel()
+
+        result = generate_text(
+            model=model,  # type: ignore
+            prediction_func=MagicMock(side_effect=fake_prediction),
+            bpe=self.bpe,  # type: ignore
+            start_tokens="<SOS>",
+            max_length=2,
+            temperature=1.0,
+            top_k=5,
+        )
+
+        self.assertEqual(result, self.bpe.decode([0, 9]))
+        self.assertEqual(observed_modes, [False])
+        self.assertTrue(model._is_training)
+
+    def test_teacher_force(self):
         """
-        In teacher forcing mode, the inference function should use argmax (temperature=0).
+        teacher_force should use argmax at each ground-truth prefix.
         We simulate a prediction function that returns dummy logits such that xp.argmax
         returns the next groundtruth token.
         For groundtruth [0, 1, 2, 3], we expect the output tokens to be 0 then 1, 2, and 3.
@@ -284,14 +349,12 @@ class TestTextUtils(TestCase):
         prediction_func = MagicMock(side_effect=fake_prediction_teacher)
 
         # Even if max_length is larger, teacher forcing uses groundtruth length.
-        result = inference(
+        result = teacher_force(
             model=MagicMock(),
             prediction_func=prediction_func,
             bpe=self.bpe,  # type: ignore
             groundtruth_data=groundtruth,
             max_length=10,
-            temperature=1.0,  # overridden to 0 in teacher forcing
-            top_k=5,  # overridden to 1 in teacher forcing
         )
         # The output tokens should be: [groundtruth[0], groundtruth[1], groundtruth[2], groundtruth[3]]
         expected = self.bpe.decode([0, 1, 2, 3])
@@ -299,14 +362,49 @@ class TestTextUtils(TestCase):
         # Teacher forcing should have made 3 calls (len(groundtruth) - 1)
         self.assertEqual(prediction_func.call_count, 3)
 
+    def test_teacher_force_runs_in_eval_mode_and_restores_model_mode(self):
+        class FakeModel:
+            def __init__(self):
+                self._is_training = True
+
+            def eval(self):
+                self._is_training = False
+
+            def train(self):
+                self._is_training = True
+
+        observed_modes = []
+        groundtruth = xp.array([0, 1])
+
+        def fake_prediction(model, batch_data, mode):
+            observed_modes.append(model._is_training)
+            pred_arr = xp.full((1, 1, 10), -100.0)
+            pred_arr[0, -1, 1] = 100.0
+            mock_tensor = MagicMock()
+            mock_tensor.data = pred_arr
+            return mock_tensor
+
+        model = FakeModel()
+        result = teacher_force(
+            model=model,  # type: ignore
+            prediction_func=MagicMock(side_effect=fake_prediction),
+            bpe=self.bpe,  # type: ignore
+            groundtruth_data=groundtruth,
+            max_length=2,
+        )
+
+        self.assertEqual(result, self.bpe.decode([0, 1]))
+        self.assertEqual(observed_modes, [False])
+        self.assertTrue(model._is_training)
+
     def test_teacher_forcing_single_token(self):
         """
-        If groundtruth_data contains only one token, the inference loop should not be entered.
+        If groundtruth_data contains only one token, the teacher-forcing loop should not be entered.
         The output should exactly match the decoded single token, and the prediction function should not be called.
         """
         groundtruth = xp.array([65])
         prediction_func = MagicMock()
-        result = inference(
+        result = teacher_force(
             model=MagicMock(),
             prediction_func=prediction_func,
             bpe=self.bpe,  # type: ignore

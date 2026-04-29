@@ -12,9 +12,9 @@ from autograd.data.utils import (
 )
 from autograd.tensor import Tensor
 from autograd.text.tokenizer import BytePairEncoder
-from autograd.tools.callback import (
-    run_sampling_inference,
-    run_teacher_forcing_inference,
+from autograd.text.utils import (
+    generate_text,
+    teacher_force,
 )
 from autograd.tools.config_schema import CustomBpeConfig, TransformerTrainingConfig
 from autograd.tools.trainer import LLMTrainer
@@ -572,7 +572,7 @@ if __name__ == "__main__":
       7) Instantiate an LLMTrainer with the Transformer model, optimizer, loss function, and forward function.
       8) Create DataLoader objects for training and evaluation.
       9) Train the Transformer model.
-      10) Run inference on the trained model to generate output text.
+      10) Generate output text from the trained model.
 
     No value is returned; training progress and generated outputs are logged.
     """
@@ -698,19 +698,20 @@ if __name__ == "__main__":
 
     if CONFIG.teacher_forcing:
         teacher_forcing_example = next(iter(test_dataset))
-        run_teacher_forcing_inference(
+        teacher_force(
             model=trainer.model,
-            forward_fn=TransformerForwardFn(),
+            prediction_func=TransformerForwardFn(),
             bpe=bpe,
             groundtruth_data=teacher_forcing_example["labels"],
             max_length=trainer.model.max_seq_len // 3,
         )
 
-    run_sampling_inference(
+    generate_text(
         model=trainer.model,
-        forward_fn=TransformerForwardFn(),
+        prediction_func=TransformerForwardFn(),
         bpe=bpe,
         start_tokens=CONFIG.eval_start_string,
         max_length=int(trainer.model.max_seq_len * 0.9),
+        temperature=0.8,
         top_k=CONFIG.eval_top_k,
     )
