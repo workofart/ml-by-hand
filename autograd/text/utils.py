@@ -4,6 +4,7 @@ import logging
 import os
 import re
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Callable,
@@ -23,6 +24,212 @@ if TYPE_CHECKING:
     from autograd import nn
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class GenerationResult:
+    """Token-level output from autoregressive generation."""
+
+    completion_tokens: list[int]
+    logprobs: list[float]
+    stop_reason: str
+
+
+def generate(
+    model: nn.Module,
+    prediction_func: nn.AbstractLLMForwardFn,
+    prompt_tokens: List[int],
+    max_new_tokens: int,
+    temperature: float,
+    top_k: Optional[int],
+    eos_token_id: int,
+) -> GenerationResult:
+    """Generate token ids autoregressively and record sampled-token logprobs.
+
+    This is the structured generation primitive: callers pass already-tokenized
+    prompt ids, and the function owns the forward/sample loop. It returns only
+    completion tokens, so callers can keep prompt and completion boundaries
+    exact without decoding and re-encoding text.
+
+    Args:
+        model: Language model used for the forward pass.
+        prediction_func: Forward function called with `mode="sample"`.
+        prompt_tokens: Token ids that seed generation.
+        max_new_tokens: Maximum number of completion tokens to generate.
+        temperature: Sampling temperature. Values <= 0 use argmax.
+        top_k: Optional top-k filter applied before sampling.
+        eos_token_id: Token id that stops generation when sampled.
+
+    Returns:
+        Generated completion token ids, sampled-token logprobs, and stop reason.
+    """
+    output_ids = [int(token) for token in prompt_tokens]
+    completion_tokens: list[int] = []
+    logprobs: list[float] = []
+    stop_reason = "max_new_tokens"
+
+    for _ in range(max_new_tokens):
+        # Auto-regressive generation feeds the full prompt plus all tokens sampled
+        # so far back into the model, then samples from the final position.
+        batch_data = xp.expand_dims(xp.array(output_ids, dtype=xp.int32), axis=0)
+        prediction = prediction_func(model=model, batch_data=batch_data, mode="sample")
+        if isinstance(prediction, tuple):
+            prediction = prediction[0]
+        logits = prediction.data[0, -1]
+
+        if temperature <= 0:
+            # greedy decoding: choose the highest-logit token directly.
+            token_id = int(xp.argmax(logits))
+            logprob = 0.0
+        else:
+            # Temperature rescales the distribution before sampling.
+            # Larger values flatten it; smaller values make it sharper.
+            behavior_logits = xp.array(logits, dtype=xp.float32) / temperature
+            if top_k is not None and top_k < len(behavior_logits):
+                # Top-k keeps only the k most likely tokens and masks the rest.
+                threshold = xp.sort(behavior_logits)[-top_k]
+                behavior_logits = xp.where(
+                    behavior_logits >= threshold,
+                    behavior_logits,
+                    xp.full(
+                        behavior_logits.shape,
+                        -float("inf"),
+                        dtype=behavior_logits.dtype,
+                    ),
+                )
+            token_id = int(xp.to_scalar(xp.sample_categorical(behavior_logits)))
+            # Store the logprob from the same distribution that sampled the token
+            shifted = behavior_logits - xp.max(behavior_logits)
+            log_denom = xp.log(xp.sum(xp.exp(shifted)))
+            logprob = float(xp.to_scalar(shifted[token_id] - log_denom))
+
+        output_ids.append(token_id)
+        completion_tokens.append(token_id)
+        logprobs.append(logprob)
+        if token_id == eos_token_id:
+            stop_reason = "eos"
+            break
+
+    return GenerationResult(
+        completion_tokens=completion_tokens,
+        logprobs=logprobs,
+        stop_reason=stop_reason,
+    )
+
+
+def generate_text(
+    model: nn.Module,
+    prediction_func: nn.AbstractLLMForwardFn,
+    bpe: BytePairEncoder,
+    start_tokens: Optional[str],
+    max_length: int = 50,
+    temperature: float = 1.0,
+    top_k: Optional[int] = None,
+) -> str:
+    """Generate and print text from a string prompt.
+
+    This is a convenience wrapper around `generate`: it handles tokenizer
+    encode/decode, switches the model to eval mode for generation, restores the
+    prior training mode, and streams decoded completion tokens to stdout.
+
+    Args:
+        model: Language model used for generation.
+        prediction_func: Forward function passed through to `generate`.
+        bpe: Tokenizer used to encode the prompt and decode generated tokens.
+        start_tokens: Prompt text. Defaults to "<SOS>" when omitted.
+        max_length: Maximum total token length, including prompt tokens.
+        temperature: Sampling temperature passed through to `generate`.
+        top_k: Optional top-k filter passed through to `generate`.
+
+    Returns:
+        Decoded prompt plus generated completion text.
+    """
+    was_training = getattr(model, "_is_training", None)
+    model.eval()
+    try:
+        start_tokens = start_tokens or "<SOS>"
+        output_ids = list(bpe.encode(start_tokens))
+        result = generate(
+            model=model,
+            prediction_func=prediction_func,
+            prompt_tokens=output_ids,
+            max_new_tokens=max_length - len(output_ids),
+            temperature=temperature,
+            top_k=top_k,
+            eos_token_id=bpe.encode("<|endoftext|>")[0],
+        )
+        output_ids.extend(result.completion_tokens)
+        for next_token in result.completion_tokens:
+            print(bpe.decode([next_token]), end="", flush=True)
+        print("\n--------------------------------------------------------------\n")
+        return bpe.decode(output_ids)
+    finally:
+        if was_training:
+            model.train()
+
+
+def teacher_force(
+    model: nn.Module,
+    prediction_func: nn.AbstractLLMForwardFn,
+    bpe: BytePairEncoder,
+    groundtruth_data: Array,
+    max_length: int = 50,
+) -> str:
+    """Run teacher forcing over ground-truth token ids and print predictions.
+
+    At each step the model receives the ground-truth prefix and the decoded
+    argmax prediction is appended to the returned text. This is intentionally
+    separate from `generate`, because the model input is fixed by the dataset
+    rather than by previously sampled tokens.
+
+    Args:
+        model: Language model used for the forward pass.
+        prediction_func: Forward function called with `mode="sample"`.
+        bpe: Tokenizer used to decode predicted token ids.
+        groundtruth_data: Ground-truth token ids used as model inputs.
+        max_length: Maximum number of ground-truth tokens to evaluate.
+
+    Returns:
+        Decoded text from the model's argmax predictions.
+    """
+    was_training = getattr(model, "_is_training", None)
+    model.eval()
+    try:
+        num_steps = max(0, min(max_length, len(groundtruth_data)) - 1)
+        output_ids = [int(groundtruth_data[0])]
+
+        groundtruth_tokens = [int(token) for token in groundtruth_data.tolist()]
+        groundtruth_text = "\n".join(
+            bpe.decode(groundtruth_tokens).split("<|endoftext|>")
+        )
+        logger.info(f"Teacher forcing mode on!!\nGroundtruth:\n{groundtruth_text}")
+        logger.info("Model:\n")
+
+        for i in range(num_steps):
+            # Teacher forcing feeds the ground-truth prefix at each step instead
+            # of feeding back the model's own previous predictions.
+            current_input = groundtruth_data[: i + 1]
+            batch_data = xp.expand_dims(xp.array(current_input, dtype=xp.int32), axis=0)
+            prediction = prediction_func(
+                model=model, batch_data=batch_data, mode="sample"
+            )
+            if isinstance(prediction, tuple):
+                prediction = prediction[0]
+            logits = prediction.data[0, -1]
+            # We still inspect the model's next-token prediction, but the next
+            # loop input will come from groundtruth_data, not this prediction.
+            next_token = int(xp.argmax(logits))
+            output_ids.append(next_token)
+            token_str = bpe.decode([next_token])
+            print(token_str, end="", flush=True)
+            if token_str == "<|endoftext|>":
+                break
+
+        print("\n--------------------------------------------------------------\n")
+        return bpe.decode(output_ids)
+    finally:
+        if was_training:
+            model.train()
 
 
 def create_vocabulary(
@@ -313,115 +520,6 @@ def token_batch_to_indices(
             seq.append(vocab.get(token, vocab[b"<UNK>"]))
         X.append(seq)
     return xp.array(X, dtype=xp.int32)
-
-
-def inference(
-    model: nn.Module,
-    prediction_func: nn.AbstractLLMForwardFn,
-    bpe: BytePairEncoder,
-    start_tokens: Optional[str] = None,
-    groundtruth_data: Optional[Array] = None,
-    max_length: int = 50,
-    temperature: float = 1.0,
-    top_k: Optional[int] = None,
-) -> str:
-    """
-    Perform model inference in one of two modes:
-
-    - Auto-regressive inference (normal) if `groundtruth_data` is None.
-        We will continuously feed the model's generated tokens back to the model
-        to generate the next token (i.e. next token is conditioned on all previously
-        generated tokens).
-    - Teacher forcing inference if `groundtruth_data` is provided.
-        - In teacher forcing mode, temperature is overridden to 0.0 and top_k to 1 to yield argmax behavior.
-        - Generates text by teacher forcing on `groundtruth_data`. At each time step, we feed the model the ground truth tokens up to that point, and measure or collect the predicted next token.
-
-    Args:
-        model (nn.Module): The model to run inference on.
-        prediction_func (nn.AbstractLLMForwardFn): The forward function that implements the AbstractLLMForwardFn interface.
-        bpe (BytePairEncoder): BPE tokenizer.
-        start_tokens (Optional[str]): The initial token string (e.g. "<SOS>").
-        groundtruth_data (Optional[Array]): If provided, teacher forcing mode is used.
-        max_length (int): The maximum length of tokens to run.
-        temperature (float): The amount of randomness in sampling
-            > 1.0 => more random
-            < 1.0 => less random.
-        top_k (Optional[int]): If set, only keep the top_k tokens from the distribution.
-
-    Returns:
-        str: The generated text after inference.
-
-    Examples:
-        >>> # Dummy implementations for demonstration:
-        >>> class DummyModel(nn.Module):
-        ...     def forward(self, x): return x
-        >>> class DummyLLMForward(nn.AbstractLLMForwardFn):
-        ...     def sample(self, model, batch_data): return np.array([[0,1,2]])
-        ...     def train(self, model, batch_data): return np.array([[0,1,2]])
-        >>> model = DummyModel()
-        >>> forward_fn = DummyLLMForward()
-        >>> bpe = BytePairEncoder(num_merges=10)
-        >>> # Auto-regressive mode:
-        >>> prediction_text = inference(model, forward_fn, bpe, start_tokens="<SOS>", max_length=10)
-        >>> print(prediction_text)
-    """
-
-    def sample_next_token(logits: Array, temp: float, k: Optional[int]) -> int:
-        logits = xp.array(logits, dtype=xp.float32)
-        # If temp <= 0 (teacher forcing), use argmax.
-        if temp <= 0:
-            return int(xp.argmax(logits))
-        # Otherwise, apply temperature scaling and top-k filtering.
-        scaled_logits = logits / temp
-        if k is not None and k < len(scaled_logits):
-            threshold = xp.sort(scaled_logits)[-k]
-            scaled_logits = xp.where(
-                scaled_logits >= threshold,
-                scaled_logits,
-                xp.full(scaled_logits.shape, -float("inf"), dtype=scaled_logits.dtype),
-            )
-        return int(xp.sample_categorical(scaled_logits))
-
-    # Determine mode and set up initial values.
-    teacher_forcing = groundtruth_data is not None
-    if teacher_forcing:
-        temperature, top_k = 0.0, 1
-        # We only run for as many steps as there are ground-truth tokens minus one.
-        num_steps = max(0, min(max_length, len(groundtruth_data)) - 1)
-        output_ids = [int(groundtruth_data[0])]
-
-        groundtruth_tokens = [int(token) for token in groundtruth_data.tolist()]
-        groundtruth_text = "\n".join(
-            bpe.decode(groundtruth_tokens).split("<|endoftext|>")
-        )
-        logger.info(f"Teacher forcing mode on!!\nGroundtruth:\n{groundtruth_text}")
-    else:
-        start_tokens = start_tokens or "<SOS>"
-        output_ids = list(bpe.encode(start_tokens))
-        num_steps = max_length - len(output_ids)
-
-    logger.info("Model:\n")
-    # Main loop: decide input tokens based on the mode.
-    for i in range(num_steps):
-        current_input = groundtruth_data[: i + 1] if teacher_forcing else output_ids
-        batch_data = xp.expand_dims(xp.array(current_input, dtype=xp.int32), axis=0)
-        prediction = prediction_func(model=model, batch_data=batch_data, mode="sample")
-        if isinstance(prediction, tuple):
-            prediction = prediction[0]
-        logits = prediction.data[0, -1]
-        # Sample the next token once and use it for both appending and printing.
-        next_token = sample_next_token(logits, temperature, top_k)
-        output_ids.append(next_token)
-        # Decode and print the token immediately (without newline) to simulate streaming.
-        token_str = bpe.decode([next_token])
-        # Using classic print to avoid logger formatting
-        print(token_str, end="", flush=True)
-        if token_str == "<|endoftext|>":
-            break
-
-    print("\n--------------------------------------------------------------\n")
-    final_text = bpe.decode(output_ids)
-    return final_text
 
 
 def load_wiki_simple() -> str:

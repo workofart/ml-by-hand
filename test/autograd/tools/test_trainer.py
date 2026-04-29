@@ -13,10 +13,6 @@ from autograd.functional import IGNORE_INDEX, cross_entropy
 from autograd.nn import AbstractLLMForwardFn, Module
 from autograd.optim import SGD, Optimizer
 from autograd.tensor import Tensor, is_grad_enabled
-from autograd.tools.callback import (
-    run_sampling_inference,
-    run_teacher_forcing_inference,
-)
 from autograd.tools.config_schema import (
     GenericTrainingConfig,
     TransformerTrainingConfig,
@@ -1876,67 +1872,6 @@ class TestLLMTrainer(BaseTrainerTest):
             "DataLoader yielded no batches.",
         ):
             self.trainer.evaluate(make_data_loader([]))
-
-    @patch("autograd.tools.callback.text_utils.inference")
-    def test_manual_qualitative_inference_helpers_do_not_depend_on_loader(
-        self, mock_inference
-    ):
-        bpe = MockBPE()
-        groundtruth = xp.arange(10, dtype=xp.int32)
-
-        teacher_forcing_text = run_teacher_forcing_inference(
-            model=self.trainer.model,
-            forward_fn=PromptMaskAwareForwardFn(),
-            bpe=bpe,
-            groundtruth_data=groundtruth,
-            max_length=3,
-        )
-        sampled_text = run_sampling_inference(
-            model=self.trainer.model,
-            forward_fn=PromptMaskAwareForwardFn(),
-            bpe=bpe,
-            start_tokens="ABC",
-            max_length=4,
-            top_k=5,
-        )
-
-        self.assertIs(mock_inference.return_value, teacher_forcing_text)
-        self.assertIs(mock_inference.return_value, sampled_text)
-        self.assertEqual(mock_inference.call_count, 2)
-
-    @patch("autograd.tools.callback.text_utils.inference")
-    def test_sampling_inference_runs_in_eval_mode_and_restores_model_mode(
-        self, mock_inference
-    ):
-        bpe = MockBPE()
-        model = ScalarLogitLM()
-        observed_modes = []
-
-        def record_mode(**kwargs):
-            observed_modes.append(kwargs["model"]._is_training)
-            return "sampled"
-
-        mock_inference.side_effect = record_mode
-
-        for initial_training in (True, False):
-            observed_modes.clear()
-            if initial_training:
-                model.train()
-            else:
-                model.eval()
-
-            sampled_text = run_sampling_inference(
-                model=model,
-                forward_fn=PromptMaskAwareForwardFn(),
-                bpe=bpe,
-                start_tokens="ABC",
-                max_length=4,
-                top_k=5,
-            )
-
-            self.assertEqual(sampled_text, "sampled")
-            self.assertEqual(observed_modes, [False])
-            self.assertIs(model._is_training, initial_training)
 
     def test_llm_evaluate_respects_max_eval_steps_from_config(self):
         self.config.max_eval_steps = 1

@@ -7,7 +7,7 @@ from autograd.data.dataset import MapDataset
 from autograd.data.sampler import TokenLengthGroupedRandomSampler
 from autograd.data.sft import load_no_robots_sft, prepare_sft_token_sequences
 from autograd.text.tokenizer import BytePairEncoder
-from autograd.tools.callback import run_sampling_inference
+from autograd.text.utils import generate_text
 from autograd.tools.config_schema import CustomBpeConfig, TransformerTrainingConfig
 from autograd.tools.trainer import LLMTrainer
 
@@ -50,7 +50,7 @@ if __name__ == "__main__":
     from gpt_2 import GPT2, GPT2ForwardFn
 
     CONFIG = TransformerTrainingConfig(
-        training_run_name="sft_0426",
+        training_run_name="sft_0428",
         dataset_name="no_robots",
         max_steps=900,
         max_eval_steps=10,
@@ -80,7 +80,7 @@ if __name__ == "__main__":
         max_grad_norm=1.0,
         # Basename without .json/.npz. The configured model architecture below
         # must match this checkpoint; load_state_dict will fail otherwise.
-        pretrained_checkpoint_path=project_path("checkpoints", "wiki_GPT2_6000"),
+        pretrained_checkpoint_path=project_path("checkpoints", "wiki_GPT2_18000"),
         label_smoothing=0.1,
         teacher_forcing=False,
         eval_start_string="User: What is the weather today?<|endoftext|>Assistant: ",
@@ -172,12 +172,13 @@ if __name__ == "__main__":
 
     # Inference test
     for k in range(5):
-        run_sampling_inference(
+        generate_text(
             model=trainer.model,
-            forward_fn=GPT2ForwardFn(),
+            prediction_func=GPT2ForwardFn(),
             bpe=bpe,
             start_tokens=CONFIG.eval_start_string,
             max_length=int(trainer.model.max_seq_len),
+            temperature=0.8,
             top_k=CONFIG.eval_top_k,
         )
         print("\n------------------------\n")

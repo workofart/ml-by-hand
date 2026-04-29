@@ -11,7 +11,7 @@ Welcome to the ML-By-Hand project documentation. This project is organized into 
 - **optim**: Provides optimizers (e.g., SGD, Adam) for training neural network models.
 - **functional**: This module provides differentiable activation functions (ReLU, Sigmoid, Tanh, Softmax, GELU) and loss functions (Binary Cross-Entropy, Cross-Entropy, Hinge Loss, Mean Squared Error) for an automatic differentiation framework
 - **tools**: This module provides utilities for dataset loading and general training workflows with checkpoint handling with serialization of model states and hyperparameters.
-- **text**: Contains text processing utilities, including vocabulary creation, tokenization (such as Byte Pair Encoding), one-hot encoding, padding and causal masks, batch validation, and inference functions for language models
+- **text**: Contains text processing utilities, including vocabulary creation, tokenization (such as Byte Pair Encoding), one-hot encoding, padding and causal masks, batch validation, and generation utilities for language models
 
 By the way, we leverage CuPy as the drop-in replacement for Numpy for GPU acceleration. For CPU-only machines, we just use Numpy. No code change needed. It just works out-of-the-box.
 

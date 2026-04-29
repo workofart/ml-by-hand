@@ -18,9 +18,9 @@ from autograd.data.types import CausalLMBatch
 from autograd.tensor import Tensor, checkpoint
 from autograd.text import utils as text_utils
 from autograd.text.tokenizer import BytePairEncoder
-from autograd.tools.callback import (
-    run_sampling_inference,
-    run_teacher_forcing_inference,
+from autograd.text.utils import (
+    generate_text,
+    teacher_force,
 )
 from autograd.tools.config_schema import CustomBpeConfig, TransformerTrainingConfig
 from autograd.tools.trainer import LLMTrainer
@@ -374,9 +374,9 @@ if __name__ == "__main__":
     trainer.fit(train_data_loader, test_data_loader)
 
     if CONFIG.teacher_forcing:
-        run_teacher_forcing_inference(
+        teacher_force(
             model=trainer.model,
-            forward_fn=GPT2ForwardFn(),
+            prediction_func=GPT2ForwardFn(),
             bpe=bpe,
             groundtruth_data=xp.array(
                 test_data[: trainer.model.max_seq_len // 3], dtype=xp.int32
@@ -386,12 +386,13 @@ if __name__ == "__main__":
 
     # Inference test
     for k in range(5):
-        run_sampling_inference(
+        generate_text(
             model=trainer.model,
-            forward_fn=GPT2ForwardFn(),
+            prediction_func=GPT2ForwardFn(),
             bpe=bpe,
             start_tokens=CONFIG.eval_start_string,
             max_length=int(trainer.model.max_seq_len),
+            temperature=0.8,
             top_k=CONFIG.eval_top_k,
         )
         print("\n------------------------\n")
