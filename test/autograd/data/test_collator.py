@@ -13,7 +13,7 @@ from autograd.data.collator import (
     PairedCollator,
     Seq2SeqCollator,
     create_padding_mask,
-    truncate_and_pad_tokens,
+    pad_right_1d,
 )
 from autograd.data.types import CausalLMBatch, Seq2SeqBatch, TokenWindowExample
 from autograd.functional import IGNORE_INDEX
@@ -91,16 +91,26 @@ class TestCollator(unittest.TestCase):
         assert xp.array_equal(mask[0, 0], xp.array([0, 1, 1]))
         assert xp.array_equal(mask[1, 0], xp.array([0, 0, 1]))
 
-    def test_truncate_and_pad_tokens_left_truncates_then_right_pads(self):
-        tokens = truncate_and_pad_tokens(
-            tokens=xp.array([10, 11, 12, 13, 20, 21, 22], dtype=xp.int32),
-            max_tokens=5,
-            pad_idx=0,
+    def test_pad_right_1d_pads_without_truncating(self):
+        tokens = pad_right_1d(
+            values=xp.array([10, 11, 12], dtype=xp.int32),
+            target_length=5,
+            pad_value=0,
         )
 
         self.assertTrue(
-            xp.array_equal(tokens, xp.array([12, 13, 20, 21, 22], dtype=xp.int32))
+            xp.array_equal(tokens, xp.array([10, 11, 12, 0, 0], dtype=xp.int32))
         )
+
+    def test_pad_right_1d_rejects_shorter_target_length(self):
+        with self.assertRaisesRegex(
+            ValueError, "cannot right-pad length 3 to shorter target_length 2"
+        ):
+            pad_right_1d(
+                values=xp.array([10, 11, 12], dtype=xp.int32),
+                target_length=2,
+                pad_value=0,
+            )
 
     def test_causal_lm_collator_requires_aligned_tokens_and_loss_mask(self):
         collator = make_causal_lm_collator(max_tokens=5, pad_idx=0)

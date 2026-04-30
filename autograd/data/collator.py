@@ -28,19 +28,30 @@ def create_padding_mask(
     return pad_positions.reshape(dims)
 
 
-def truncate_and_pad_tokens(tokens: Array, max_tokens: int, pad_idx: int) -> Array:
-    # Fixed-window truncation/padding for one token sequence.
-    # Left truncation assumes the tail is most valuable. Use a boundary-aware
-    # formatter when conversation or source/target boundaries matter.
-    if len(tokens) > max_tokens:
-        tokens = tokens[-max_tokens:]
-    if len(tokens) < max_tokens:
-        pad_width = max_tokens - len(tokens)
-        tokens = xp.concatenate(
-            [tokens, xp.full((pad_width,), pad_idx, dtype=xp.int32)],
-            axis=0,
+def pad_right_1d(values: Array, target_length: int, pad_value: Any) -> Array:
+    """
+    Right-pad a 1D array to `target_length`.
+
+    This never truncates. Callers that allow truncation should truncate
+    explicitly before calling this helper.
+    """
+    if len(values) > target_length:
+        raise ValueError(
+            f"cannot right-pad length {len(values)} to shorter target_length "
+            f"{target_length}"
         )
-    return tokens
+
+    if len(values) == target_length:
+        return values
+
+    pad_width = target_length - len(values)
+    return xp.concatenate(
+        [
+            values,
+            xp.full((pad_width,), pad_value, dtype=values.dtype),
+        ],
+        axis=0,
+    )
 
 
 class Collator(ABC):
@@ -180,32 +191,6 @@ class _CausalLMBaseCollator(Collator):
 
         return truncated_examples
 
-    def _pad_right(
-        self,
-        tokens: Array,
-        loss_mask: Array,
-        target_length: int,
-    ) -> Tuple[Array, Array]:
-        if len(tokens) == target_length:
-            return tokens, loss_mask
-
-        pad_width = target_length - len(tokens)
-        padded_tokens = xp.concatenate(
-            [
-                tokens,
-                xp.full((pad_width,), self.pad_idx, dtype=tokens.dtype),
-            ],
-            axis=0,
-        )
-        padded_loss_mask = xp.concatenate(
-            [
-                loss_mask,
-                xp.zeros((pad_width,), dtype=loss_mask.dtype),
-            ],
-            axis=0,
-        )
-        return padded_tokens, padded_loss_mask
-
     def _build_inputs_and_labels(
         self,
         tokens: Array,
@@ -252,10 +237,9 @@ class FixedLengthCausalLMCollator(_CausalLMBaseCollator):
     def __call__(self, examples: Sequence[dict[str, Array]]) -> CausalLMBatch:
         truncated_examples = self._truncate_examples(examples)
         padded_examples = tuple(
-            self._pad_right(
-                tokens,
-                loss_mask,
-                target_length=self.max_tokens,
+            (
+                pad_right_1d(tokens, self.max_tokens, self.pad_idx),
+                pad_right_1d(loss_mask, self.max_tokens, 0),
             )
             for tokens, loss_mask in truncated_examples
         )
@@ -277,10 +261,9 @@ class BatchMaxLengthCausalLMCollator(_CausalLMBaseCollator):
             2, max(len(tokens) for tokens, _ in truncated_examples)
         )
         padded_examples = tuple(
-            self._pad_right(
-                tokens,
-                loss_mask,
-                target_length=longest_row_length,
+            (
+                pad_right_1d(tokens, longest_row_length, self.pad_idx),
+                pad_right_1d(loss_mask, longest_row_length, 0),
             )
             for tokens, loss_mask in truncated_examples
         )
@@ -319,13 +302,18 @@ class Seq2SeqCollator(Collator):
             input_ids = xp.array(example["input_ids"], dtype=xp.int32)
             labels = xp.array(example["labels"], dtype=xp.int32)
 
-            formatted_input_ids = truncate_and_pad_tokens(
+            if len(input_ids) > self.max_tokens:
+                input_ids = input_ids[-self.max_tokens :]
+            if len(labels) > self.max_tokens:
+                labels = labels[-self.max_tokens :]
+
+            formatted_input_ids = pad_right_1d(
                 input_ids,
                 self.max_tokens,
                 self.pad_idx,
             )
 
-            decoder_targets = truncate_and_pad_tokens(
+            decoder_targets = pad_right_1d(
                 labels,
                 self.max_tokens,
                 self.pad_idx,
