@@ -7,10 +7,14 @@ import numpy as np
 
 from autograd.backend import Array, ArrayLike, xp
 from autograd.data.collator import Collator, pad_right_1d
+from autograd.data.data_loader import DataLoader
 from autograd.data.dataset import MapDataset
 from autograd.nn import Module
+from autograd.optim import Adam
+from autograd.tensor import Tensor
 from autograd.text.tokenizer import BytePairEncoder
 from autograd.text.utils import generate
+from autograd.tools.config_schema import GenericTrainingConfig
 from autograd.tools.model import load_checkpoint
 from autograd.tools.trainer import AbstractTrainer
 from examples.gpt_2 import GPT2, GPT2ForwardFn
@@ -26,13 +30,29 @@ and <answer>...</answer> tags, respectively, i.e., <think> reasoning process her
 """
 
 EOS_TOKEN = "<|endoftext|>"
-CONFIG = {
-    "max_generation_tokens": 32,
-    "temperature": 1.0,
-    "top_k": None,
+
+
+@dataclass(kw_only=True)
+class GRPOTrainingConfig(GenericTrainingConfig):
+    max_generation_tokens: int
+    temperature: float
+    top_k: Optional[int]
     # GRPO group size G: number of completions sampled for one prompt.
-    "num_generations": 2,
-}
+    num_generations: int
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.max_generation_tokens < 1:
+            raise ValueError(
+                f"max_generation_tokens must be >= 1, got {self.max_generation_tokens}"
+            )
+        if self.temperature != 1.0 or self.top_k is not None:
+            raise ValueError("GRPO rollout requires temperature=1.0 and top_k=None")
+        if self.num_generations < 1:
+            raise ValueError(
+                f"num_generations must be >= 1, got {self.num_generations}"
+            )
+
 
 # 1. Caller code owns one Task for the first loop.
 # 2. Each outer GRPO iteration refreshes rollouts for that current task.
@@ -40,7 +60,7 @@ CONFIG = {
 #    policy, caching old_logprobs for the behavior policy, and computes group-relative advantages
 # 4. Environment scores each Sample in each RolloutGroup
 #    within each RolloutGroup.
-# 5. RolloutDataset stores the already-generated RolloutGroup.
+# 5. MapDataset stores the already-generated RolloutGroup.
 # 6. DataLoader batches RolloutGroup objects and calls GRPOCollator.
 # 7. GRPOCollator emits GRPOBatch, where rows = group_size for one task.
 # 8. GRPOTrainer(AbstractTrainer)._compute_loss computes the GRPO objective.
@@ -50,7 +70,7 @@ CONFIG = {
 # Keep boundaries explicit:
 # - Environment: prompt rendering + reward design only
 # - RolloutGenerator: model sampling + old_logprobs + RolloutGroup creation + advantage calculation
-# - RolloutDataset: static container for already-generated rollout groups.
+# - MapDataset: static container for already-generated rollout groups.
 # - GRPOCollator: padding, causal shift, action masks, and GRPOBatch assembly.
 # - GRPOTrainer: GRPO loss, and inherited optimizer mechanics.
 
@@ -129,7 +149,6 @@ class GRPOBatch:
     old_logprobs: ArrayLike
     action_mask: ArrayLike
     advantages: ArrayLike
-    loss_total_weight: ArrayLike
 
 
 class GRPOCollator(Collator):
@@ -162,7 +181,6 @@ class GRPOCollator(Collator):
         batch_old_logprobs = []
         batch_action_mask = []
         batch_advantages = []
-        loss_total_weight = xp.array(0.0, dtype=xp.float32)
 
         for rollout_group in rollout_groups:
             for sample in rollout_group.samples:
@@ -180,15 +198,12 @@ class GRPOCollator(Collator):
                 batch_action_mask.append(action_mask)
                 batch_advantages.append(advantages)
 
-                loss_total_weight = loss_total_weight + xp.sum(action_mask)
-
         return GRPOBatch(
             input_ids=xp.stack(batch_input_ids, axis=0),
             labels=xp.stack(batch_labels, axis=0),
             old_logprobs=xp.stack(batch_old_logprobs, axis=0),
             action_mask=xp.stack(batch_action_mask, axis=0),
             advantages=xp.stack(batch_advantages, axis=0),
-            loss_total_weight=loss_total_weight,
         )
 
     def _build_row(
@@ -262,19 +277,6 @@ class GRPOCollator(Collator):
         )
 
 
-class RolloutDataset(MapDataset):
-    """
-    Static container for already-generated on-policy rollout groups.
-
-    Rollout refresh is intentionally outside Dataset.on_epoch_start() for now:
-    caller code should generate fresh RolloutGroups from the current policy,
-    wrap them in RolloutDataset, then build a DataLoader with GRPOCollator.
-    That keeps model/tokenizer/environment dependencies out of this dataset.
-    """
-
-    pass
-
-
 class Environment:
     """
     Owns task rendering and reward design.
@@ -345,6 +347,9 @@ class RolloutGenerator:
     samples, and return one RolloutGroup. It should not perform optimizer work.
     """
 
+    def __init__(self, config: GRPOTrainingConfig) -> None:
+        self.config = config
+
     def rollout(
         self,
         model: Module,
@@ -356,14 +361,14 @@ class RolloutGenerator:
         prompt_tokens = xp.array(tokenizer.encode(task_prompt), dtype=xp.int32)
         samples: List[Sample] = []
 
-        for _ in range(CONFIG["num_generations"]):
+        for _ in range(self.config.num_generations):
             sample = generation(
                 model,
                 prompt_tokens=prompt_tokens,
                 tokenizer=tokenizer,
-                max_generation_tokens=CONFIG["max_generation_tokens"],
-                temperature=CONFIG["temperature"],
-                top_k=CONFIG["top_k"],
+                max_generation_tokens=self.config.max_generation_tokens,
+                temperature=self.config.temperature,
+                top_k=self.config.top_k,
             )
             samples.append(sample)
 
@@ -421,7 +426,7 @@ class GRPOTrainer(AbstractTrainer):
     It should not own raw tasks, Environment, or RolloutGenerator. A higher
     level orchestration loop is responsible for:
 
-        Task -> RolloutGenerator.rollout(...) -> RolloutDataset
+        Task -> RolloutGenerator.rollout(...) -> MapDataset
         -> DataLoader(..., collator=GRPOCollator(...)) -> self.fit(...)
 
     One optimizer step consumes one or more GRPOBatch objects depending on
@@ -445,6 +450,18 @@ class GRPOTrainer(AbstractTrainer):
 
     def _evaluate(self, val_data_loader):
         pass
+
+
+def grpo_loss() -> Tensor:
+    """
+    Compute the GRPO objective from a model-facing batch.
+
+    The loss should use current-policy logprobs from `model(batch.input_ids)`,
+    cached `batch.old_logprobs` for the policy ratio, `batch.advantages` for the
+    group-relative learning signal, and `batch.action_mask` so prompt/pad tokens
+    do not contribute.
+    """
+    raise NotImplementedError()
 
 
 def generation(
@@ -509,11 +526,35 @@ def generation(
 
 
 def main():
-    CHECKPOINT_PATH = "checkpoints/sft_0428_GPT2_300"
-    ckpt = load_checkpoint(f"{CHECKPOINT_PATH}.json", f"{CHECKPOINT_PATH}.npz")
-    model = GPT2(**ckpt["model_init_kwargs"])
-    model.load_state_dict(ckpt["model_state_dict"])
-    model.eval()
+    pretrained_checkpoint_path = "checkpoints/sft_0428_GPT2_300"
+    ckpt = load_checkpoint(
+        f"{pretrained_checkpoint_path}.json",
+        f"{pretrained_checkpoint_path}.npz",
+    )
+
+    TRAIN_CONFIG = GRPOTrainingConfig(
+        max_steps=10,
+        max_eval_steps=5,
+        checkpoint_freq=10,
+        report_every_steps=5,
+        global_batch_size=32,
+        micro_batch_size=8,
+        max_grad_norm=1.0,
+        model_kwargs=ckpt["model_init_kwargs"],
+        optimizer_kwargs={"lr": 5e-5},
+        pretrained_checkpoint_path=pretrained_checkpoint_path,
+        max_generation_tokens=32,
+        temperature=1.0,
+        top_k=None,
+        num_generations=2,
+    )
+
+    trainer = GRPOTrainer(
+        model_cls=GPT2,
+        optimizer_cls=Adam,
+        loss_fn=grpo_loss,
+        config=TRAIN_CONFIG,
+    )
 
     bpe = BytePairEncoder(
         num_merges=12000,
@@ -521,15 +562,27 @@ def main():
     )
     environment = MathEnvironment()
     task = Task(task_id="1", raw_input="What is 1 + 1?", answer="2")
-    rollout_generator = RolloutGenerator()
+    rollout_generator = RolloutGenerator(TRAIN_CONFIG)
 
     rollout_group = rollout_generator.rollout(
-        model=model,
+        model=trainer.model,
         task=task,
         tokenizer=bpe,
         environment=environment,
     )
-    print(rollout_group)
+
+    ds = MapDataset([rollout_group])
+
+    data_loader = DataLoader(
+        dataset=ds,
+        batch_size=8,
+        collator=GRPOCollator(
+            max_tokens=trainer.model.max_seq_len,
+            pad_idx=bpe.encode("<|pad|>")[0],
+        ),
+    )
+
+    trainer.fit(data_loader)
 
 
 if __name__ == "__main__":
