@@ -226,6 +226,39 @@ def test_math_environment_parses_answer_tags_for_reward():
     assert environment._compute_reward(task, partial_format) == pytest.approx(0.3)
 
 
+def test_math_environment_normalizes_comma_separated_answers():
+    environment = MathEnvironment()
+    task = Task(task_id="math-1", raw_input="How much profit?", answer="22500")
+    sample = Sample(
+        completion_tokens=xp.array([20], dtype=xp.int32),
+        completion_text="<think>math</think><answer>22,500</answer>",
+        sampled_token_logprobs=xp.array([-0.1], dtype=xp.float32),
+    )
+
+    assert environment._compute_reward(task, sample) == pytest.approx(1.4)
+
+
+def test_extract_gsm8k_final_answer_from_hash_marker():
+    assert MathEnvironment.extract_gsm8k_final_answer("scratch work #### 22,500") == (
+        "22500"
+    )
+
+
+def test_gsm8k_row_to_task_uses_question_and_final_answer():
+    task = MathEnvironment.gsm8k_row_to_task(
+        3,
+        {
+            "question": "What is 1 + 1?",
+            "answer": "1 + 1 = <<1+1=2>>2 #### 2",
+        },
+    )
+
+    assert task.task_id == "gsm8k-3"
+    assert task.raw_input == "What is 1 + 1?"
+    assert task.answer == "2"
+    assert task.metadata == {"source": "openai/gsm8k"}
+
+
 def test_score_group_attaches_rewards_without_advantages():
     environment = MathEnvironment()
     task = Task(task_id="math-1", raw_input="What is 1 + 1?", answer="2")

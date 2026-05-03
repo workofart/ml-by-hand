@@ -1,7 +1,9 @@
+import json
+import os
 import re
 from abc import abstractmethod
 from dataclasses import dataclass, field
-from typing import List, Optional, Sequence
+from typing import Any, List, Optional, Sequence, cast
 
 import numpy as np
 from tqdm import tqdm
@@ -9,6 +11,7 @@ from tqdm import tqdm
 from autograd import functional
 from autograd.backend import Array, ArrayLike, xp
 from autograd.data.collator import Collator, pad_right_1d
+from autograd.data.utils import load_data, load_parquet_rows
 from autograd.nn import Module
 from autograd.optim import Adam
 from autograd.tensor import Tensor, no_grad
@@ -326,6 +329,80 @@ class MathEnvironment(Environment):
     # This regex should be consistent with the SYSTEM_PROMPT defined at the
     # top of this module
     ANSWER_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.DOTALL)
+    GSM8K_FINAL_ANSWER_RE = re.compile(r"####\s*(.+?)\s*$")
+    GSM8K_PARQUET_MANIFEST_URL = (
+        "https://datasets-server.huggingface.co/parquet?"
+        "dataset=openai%2Fgsm8k&config=main"
+    )
+
+    @staticmethod
+    def normalize_answer(answer: str) -> str:
+        return answer.strip().replace(",", "")
+
+    @classmethod
+    def extract_gsm8k_final_answer(cls, answer: str) -> str:
+        match = cls.GSM8K_FINAL_ANSWER_RE.search(answer)
+        if match is None:
+            raise ValueError("GSM8K answer must contain a final answer after '####'")
+        return cls.normalize_answer(match.group(1))
+
+    @classmethod
+    def gsm8k_row_to_task(cls, row_idx: int, row: dict[str, Any]) -> Task:
+        question = row.get("question")
+        answer = row.get("answer")
+        if not isinstance(question, str) or not isinstance(answer, str):
+            raise ValueError(
+                "GSM8K rows must contain string question and answer fields"
+            )
+        return Task(
+            task_id=f"gsm8k-{row_idx}",
+            raw_input=question,
+            answer=cls.extract_gsm8k_final_answer(answer),
+            metadata={"source": "openai/gsm8k"},
+        )
+
+    @classmethod
+    def load_gsm8k_tasks(cls, split: str, max_tasks: Optional[int]) -> list[Task]:
+        metadata_path = "training_data/gsm8k_parquet_manifest.json"
+        payload = json.loads(
+            cast(
+                str,
+                load_data(
+                    cls.GSM8K_PARQUET_MANIFEST_URL,
+                    metadata_path,
+                ),
+            )
+        )
+        parquet_files = [
+            parquet_file
+            for parquet_file in payload["parquet_files"]
+            if parquet_file["split"] == split
+        ]
+        if not parquet_files:
+            available_splits = sorted(
+                {parquet_file["split"] for parquet_file in payload["parquet_files"]}
+            )
+            raise ValueError(
+                f"GSM8K split {split!r} not found. Available splits: {available_splits}"
+            )
+
+        rows: list[dict[str, Any]] = []
+        for parquet_file in parquet_files:
+            if max_tasks is not None and len(rows) >= max_tasks:
+                break
+            remaining_rows = None if max_tasks is None else max_tasks - len(rows)
+            rows.extend(
+                load_parquet_rows(
+                    parquet_file["url"],
+                    os.path.join(
+                        "training_data",
+                        f"gsm8k_{parquet_file['split']}_{parquet_file['filename']}",
+                    ),
+                    max_rows=remaining_rows,
+                )
+            )
+
+        return [cls.gsm8k_row_to_task(row_idx, row) for row_idx, row in enumerate(rows)]
 
     def _compute_reward(self, task: Task, sample: Sample) -> float:
         reward = 0.0
@@ -342,8 +419,8 @@ class MathEnvironment(Environment):
         if match is None:
             return reward
 
-        parsed_answer = match.group(1).strip()
-        expected_answer = task.answer.strip()
+        parsed_answer = self.normalize_answer(match.group(1))
+        expected_answer = self.normalize_answer(task.answer)
         if parsed_answer == expected_answer:
             reward += 1.0
 
@@ -612,20 +689,23 @@ def main():
     )
 
     TRAIN_CONFIG = GRPOTrainingConfig(
-        max_steps=10,
+        max_steps=50,
         max_eval_steps=5,
-        checkpoint_freq=10,
+        checkpoint_freq=50,
         report_every_steps=5,
-        global_batch_size=32,
-        micro_batch_size=8,
+        # GRPO train_step currently performs one optimizer step per rollout
+        # group. num_generations is the effective GRPO group-size knob until we
+        # add GRPO gradient accumulation.
+        global_batch_size=1,
+        micro_batch_size=1,
         max_grad_norm=1.0,
         model_kwargs=ckpt["model_init_kwargs"],
         optimizer_kwargs={"lr": 5e-5},
         pretrained_checkpoint_path=pretrained_checkpoint_path,
-        max_generation_tokens=64,
+        max_generation_tokens=256,
         temperature=1.0,
         top_k=None,
-        num_generations=8,
+        num_generations=16,
     )
 
     trainer = GRPOTrainer(
@@ -640,7 +720,15 @@ def main():
         vocab_file_path="training_data/wikipedia_simpleenglish_vocab_12000.pkl",
     )
     environment = MathEnvironment()
-    task = Task(task_id="1", raw_input="What is 1 + 1?", answer="2")
+    raw_tasks = environment.load_gsm8k_tasks(split="train", max_tasks=128)
+    tasks = []
+    for task in raw_tasks:
+        prompt_len = len(bpe.encode(environment.render_task(task)))
+        if prompt_len + TRAIN_CONFIG.max_generation_tokens <= trainer.model.max_seq_len:
+            tasks.append(task)
+    if not tasks:
+        raise ValueError("No GSM8K tasks fit within the model context window")
+
     rollout_generator = RolloutGenerator(TRAIN_CONFIG)
     collator = GRPOCollator(
         max_tokens=trainer.model.max_seq_len,
@@ -655,6 +743,7 @@ def main():
     ) as progress_bar:
         while trainer.global_step < TRAIN_CONFIG.max_steps:
             step_before = trainer.global_step
+            task = tasks[trainer.global_step % len(tasks)]
             rollout_group = rollout_generator.rollout(
                 model=trainer.model,
                 task=task,
