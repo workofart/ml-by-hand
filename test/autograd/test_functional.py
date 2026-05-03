@@ -76,6 +76,62 @@ class TestActivationFunctions(TestCase):
             "Softmax backward pass did not match PyTorch."
         )
 
+    def test_log_softmax_forward(self):
+        assert allclose(
+            functional.log_softmax(self.X).data,
+            torch.nn.functional.log_softmax(torch.Tensor(self.X.data), dim=-1)
+            .detach()
+            .numpy(),
+            atol=1e-6,
+        )
+
+    def test_log_softmax_backward(self):
+        out_custom = functional.log_softmax(self.X)
+        grad_dummy = xp.array(
+            [[1.0, -0.5, 0.25], [0.3, 0.7, -1.2]],
+            dtype=xp.float32,
+        )
+        out_custom.backward(grad_dummy)
+
+        X_torch = torch.tensor(self.X.data, requires_grad=True)
+        out_ref = torch.nn.functional.log_softmax(X_torch, dim=-1)
+        out_ref.backward(torch.tensor(grad_dummy))
+
+        assert allclose(self.X.grad.data, X_torch.grad.detach().numpy(), atol=1e-6), (
+            "LogSoftmax backward pass did not match PyTorch."
+        )
+
+    def test_log_softmax_supports_explicit_dim(self):
+        logits_data = xp.array(
+            [
+                [[1.2, -0.3], [0.4, 2.1], [-1.0, 0.7]],
+                [[0.2, -0.8], [1.1, -0.5], [0.3, 0.9]],
+            ],
+            dtype=xp.float32,
+        )
+        logits = Tensor(logits_data, requires_grad=True)
+        out_custom = functional.log_softmax(logits, dim=1)
+        grad_dummy = xp.array(
+            [
+                [[0.5, -0.2], [1.0, 0.3], [-0.4, 0.8]],
+                [[-0.1, 0.7], [0.6, -1.2], [0.9, 0.4]],
+            ],
+            dtype=xp.float32,
+        )
+
+        logits_torch = torch.tensor(logits_data, requires_grad=True)
+        out_ref = torch.nn.functional.log_softmax(logits_torch, dim=1)
+
+        assert allclose(out_custom.data, out_ref.detach().numpy(), atol=1e-6)
+
+        out_custom.backward(grad_dummy)
+        out_ref.backward(torch.tensor(grad_dummy))
+        assert allclose(
+            logits.grad.data,
+            logits_torch.grad.detach().numpy(),
+            atol=1e-6,
+        )
+
     def test_tanh_forward(self):
         assert allclose(
             functional.tanh(self.X).data,
