@@ -1,24 +1,66 @@
 import numpy as np
 import pytest
+import torch
 
 from autograd.backend import xp
 from autograd.data.collator import Collator
+from autograd.tensor import Tensor
+from autograd.tools.config_schema import GenericTrainingConfig
 from examples.grpo import (
+    GRPOBatch,
     GRPOCollator,
+    GRPOTrainer,
+    GRPOTrainingConfig,
     MathEnvironment,
     RolloutGenerator,
     RolloutGroup,
     Sample,
     Task,
     generation,
+    grpo_loss,
 )
+
+
+def _grpo_training_config(**kwargs):
+    config_kwargs = {
+        "max_steps": 1,
+        "checkpoint_freq": 1,
+        "model_kwargs": {},
+        "optimizer_kwargs": {},
+        "max_generation_tokens": 32,
+        "temperature": 1.0,
+        "top_k": None,
+        "num_generations": 2,
+    }
+    config_kwargs.update(kwargs)
+    return GRPOTrainingConfig(**config_kwargs)
+
+
+def test_grpo_training_config_extends_generic_training_config_for_rollouts():
+    config = _grpo_training_config(
+        max_generation_tokens=7,
+        temperature=1.0,
+        top_k=None,
+        num_generations=3,
+    )
+
+    assert isinstance(config, GenericTrainingConfig)
+    assert config.max_generation_tokens == 7
+    assert config.temperature == 1.0
+    assert config.top_k is None
+    assert config.num_generations == 3
+
+
+def test_grpo_training_config_rejects_sampling_that_breaks_logprob_contract():
+    with pytest.raises(ValueError, match="temperature=1.0 and top_k=None"):
+        _grpo_training_config(temperature=0.8)
 
 
 def test_grpo_collator_implements_collator_interface():
     assert isinstance(GRPOCollator(max_tokens=4, pad_idx=0), Collator)
 
 
-def test_grpo_collator_aligns_actions_with_shifted_completion_labels():
+def test_grpo_collator_aligns_generated_tokens_with_shifted_completion_labels():
     prompt_tokens = xp.array([10, 11], dtype=xp.int32)
     group = RolloutGroup(
         prompt_id="prompt-1",
@@ -27,7 +69,7 @@ def test_grpo_collator_aligns_actions_with_shifted_completion_labels():
             Sample(
                 completion_tokens=xp.array([20, 21], dtype=xp.int32),
                 completion_text="",
-                old_logprobs=xp.array([-0.1, -0.2], dtype=xp.float32),
+                sampled_token_logprobs=xp.array([-0.1, -0.2], dtype=xp.float32),
                 reward=1.0,
                 advantage=0.5,
                 metadata=None,
@@ -35,7 +77,7 @@ def test_grpo_collator_aligns_actions_with_shifted_completion_labels():
             Sample(
                 completion_tokens=xp.array([30], dtype=xp.int32),
                 completion_text="",
-                old_logprobs=xp.array([-0.3], dtype=xp.float32),
+                sampled_token_logprobs=xp.array([-0.3], dtype=xp.float32),
                 reward=0.0,
                 advantage=-1.0,
                 metadata=None,
@@ -54,11 +96,11 @@ def test_grpo_collator_aligns_actions_with_shifted_completion_labels():
         np.array([[11, 20, 21, 0], [11, 30, 0, 0]], dtype=np.int32),
     )
     np.testing.assert_array_equal(
-        xp.to_numpy(batch.action_mask),
+        xp.to_numpy(batch.generated_token_mask),
         np.array([[0, 1, 1, 0], [0, 1, 0, 0]], dtype=np.int32),
     )
     np.testing.assert_allclose(
-        xp.to_numpy(batch.old_logprobs),
+        xp.to_numpy(batch.sampled_token_logprobs),
         np.array(
             [[0.0, -0.1, -0.2, 0.0], [0.0, -0.3, 0.0, 0.0]],
             dtype=np.float32,
@@ -71,15 +113,18 @@ def test_grpo_collator_aligns_actions_with_shifted_completion_labels():
             dtype=np.float32,
         ),
     )
-    assert float(xp.to_scalar(batch.loss_total_weight)) == 3.0
+    assert not hasattr(batch, "loss_total_weight")
+    assert float(xp.to_scalar(GRPOTrainer._loss_total_weight(None, batch))) == 3.0
 
 
 def test_sample_requires_completion_logprob_alignment():
-    with pytest.raises(ValueError, match="completion_tokens and old_logprobs"):
+    with pytest.raises(
+        ValueError, match="completion_tokens and sampled_token_logprobs"
+    ):
         Sample(
             completion_tokens=xp.array([20, 21], dtype=xp.int32),
             completion_text="",
-            old_logprobs=xp.array([-0.1], dtype=xp.float32),
+            sampled_token_logprobs=xp.array([-0.1], dtype=xp.float32),
             reward=1.0,
             advantage=0.5,
             metadata=None,
@@ -104,7 +149,7 @@ def test_rollout_group_requires_prompt_tokens():
                 Sample(
                     completion_tokens=xp.array([20], dtype=xp.int32),
                     completion_text="",
-                    old_logprobs=xp.array([-0.1], dtype=xp.float32),
+                    sampled_token_logprobs=xp.array([-0.1], dtype=xp.float32),
                     reward=1.0,
                     advantage=0.5,
                     metadata=None,
@@ -121,7 +166,7 @@ def test_grpo_collator_rejects_rows_longer_than_max_tokens():
             Sample(
                 completion_tokens=xp.array([20, 21], dtype=xp.int32),
                 completion_text="",
-                old_logprobs=xp.array([-0.1, -0.2], dtype=xp.float32),
+                sampled_token_logprobs=xp.array([-0.1, -0.2], dtype=xp.float32),
                 reward=1.0,
                 advantage=0.5,
                 metadata=None,
@@ -140,17 +185,17 @@ def test_math_environment_parses_answer_tags_for_reward():
     correct = Sample(
         completion_tokens=xp.array([20], dtype=xp.int32),
         completion_text="<think>1 + 1 = 2</think><answer>2</answer>",
-        old_logprobs=xp.array([-0.1], dtype=xp.float32),
+        sampled_token_logprobs=xp.array([-0.1], dtype=xp.float32),
     )
     wrong = Sample(
         completion_tokens=xp.array([21], dtype=xp.int32),
         completion_text="<answer>3</answer>",
-        old_logprobs=xp.array([-0.2], dtype=xp.float32),
+        sampled_token_logprobs=xp.array([-0.2], dtype=xp.float32),
     )
     unformatted = Sample(
         completion_tokens=xp.array([22], dtype=xp.int32),
         completion_text="2",
-        old_logprobs=xp.array([-0.3], dtype=xp.float32),
+        sampled_token_logprobs=xp.array([-0.3], dtype=xp.float32),
     )
 
     assert environment._compute_reward(task, correct) == 1.1
@@ -168,12 +213,12 @@ def test_score_group_attaches_rewards_without_advantages():
             Sample(
                 completion_tokens=xp.array([20], dtype=xp.int32),
                 completion_text="not tagged",
-                old_logprobs=xp.array([-0.1], dtype=xp.float32),
+                sampled_token_logprobs=xp.array([-0.1], dtype=xp.float32),
             ),
             Sample(
                 completion_tokens=xp.array([21], dtype=xp.int32),
                 completion_text="also not tagged",
-                old_logprobs=xp.array([-0.2], dtype=xp.float32),
+                sampled_token_logprobs=xp.array([-0.2], dtype=xp.float32),
             ),
         ],
     )
@@ -192,19 +237,19 @@ def test_rollout_generator_uses_zero_advantage_when_rewards_have_no_variance():
             Sample(
                 completion_tokens=xp.array([20], dtype=xp.int32),
                 completion_text="",
-                old_logprobs=xp.array([-0.1], dtype=xp.float32),
+                sampled_token_logprobs=xp.array([-0.1], dtype=xp.float32),
                 reward=0.0,
             ),
             Sample(
                 completion_tokens=xp.array([21], dtype=xp.int32),
                 completion_text="",
-                old_logprobs=xp.array([-0.2], dtype=xp.float32),
+                sampled_token_logprobs=xp.array([-0.2], dtype=xp.float32),
                 reward=0.0,
             ),
         ],
     )
 
-    RolloutGenerator()._compute_advantages(group)
+    RolloutGenerator(_grpo_training_config())._compute_advantages(group)
 
     assert [sample.advantage for sample in group.samples] == [0.0, 0.0]
 
@@ -226,3 +271,52 @@ def test_generation_rejects_prompt_that_fills_context_window():
             temperature=1.0,
             top_k=None,
         )
+
+
+def test_grpo_loss_matches_pytorch_reference():
+    logits_data = np.array(
+        [[[1.2, -0.4, 0.3], [0.1, 1.4, -0.7], [0.8, -0.2, 0.5]]],
+        dtype=np.float32,
+    )
+    labels = np.array([[0, 1, 2]], dtype=np.int32)
+    sampled_token_logprobs = np.array([[-100.0, 100.0, 0.0]], dtype=np.float32)
+    generated_token_mask = np.array([[1, 1, 0]], dtype=np.int32)
+    advantages = np.array([[0.7, -0.4, 0.0]], dtype=np.float32)
+
+    logits = Tensor(xp.array(logits_data), requires_grad=True)
+    batch = GRPOBatch(
+        input_ids=xp.array([[4, 5, 6]], dtype=xp.int32),
+        labels=xp.array(labels, dtype=xp.int32),
+        sampled_token_logprobs=xp.array(sampled_token_logprobs, dtype=xp.float32),
+        generated_token_mask=xp.array(generated_token_mask, dtype=xp.int32),
+        advantages=xp.array(advantages, dtype=xp.float32),
+    )
+
+    loss = grpo_loss(logits, batch)
+
+    torch_logits = torch.tensor(logits_data, requires_grad=True)
+    torch_labels = torch.tensor(labels, dtype=torch.int64)
+    torch_generated_token_mask = torch.tensor(generated_token_mask, dtype=torch.float32)
+    torch_advantages = torch.tensor(advantages)
+    torch_logprobs = torch.log_softmax(torch_logits, dim=-1)
+    torch_sampled_token_logprobs = torch_logprobs.gather(
+        dim=-1,
+        index=torch_labels.unsqueeze(-1),
+    ).squeeze(-1)
+    torch_loss = -(
+        torch_sampled_token_logprobs * torch_advantages * torch_generated_token_mask
+    ).sum()
+
+    np.testing.assert_allclose(
+        xp.to_numpy(loss.data),
+        torch_loss.detach().numpy(),
+        atol=1e-6,
+    )
+
+    loss.backward()
+    torch_loss.backward()
+    np.testing.assert_allclose(
+        xp.to_numpy(logits.grad.data),
+        torch_logits.grad.detach().numpy(),
+        atol=1e-6,
+    )

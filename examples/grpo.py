@@ -5,6 +5,7 @@ from typing import List, Optional, Sequence
 
 import numpy as np
 
+from autograd import functional
 from autograd.backend import Array, ArrayLike, xp
 from autograd.data.collator import Collator, pad_right_1d
 from autograd.data.data_loader import DataLoader
@@ -449,6 +450,14 @@ class GRPOTrainer(AbstractTrainer):
         return self.loss_fn(logits, batch)
 
     def _loss_total_weight(self, batch: GRPOBatch):
+        """
+        Currently this is token-level loss.
+        $$
+        \frac{1}{\sum_i T_i} \sum_{i=1}^G \sum_{t=1}^T \text{Advantage}_i \log \text{prob}_{i, t}
+        $$
+        Long bad outputs -> large negative influence
+        Long verbose correct outputs -> large positive influence
+        """
         return xp.sum(batch.generated_token_mask)
 
     def _evaluate(self, val_data_loader):
@@ -459,12 +468,47 @@ def grpo_loss(logits: Tensor, batch: GRPOBatch) -> Tensor:
     """
     Compute the summed simplified GRPO objective from a model-facing batch.
 
-    The loss should use current-policy logprobs from `model(batch.input_ids)`,
-    cached `batch.old_logprobs` for the policy ratio, `batch.advantages` for the
-    group-relative learning signal, and `batch.action_mask` so prompt/pad tokens
-    do not contribute.
+    `batch.advantages` and `batch.generated_token_mask` are rollout-time
+    constants. Only `logits` participates in autograd.
     """
-    raise NotImplementedError()
+    labels = xp.asarray(batch.labels, dtype=xp.int32)
+    generated_token_mask = xp.asarray(batch.generated_token_mask, dtype=xp.float32)
+    advantages = xp.asarray(batch.advantages, dtype=xp.float32)
+
+    if logits.ndim != 3:
+        raise ValueError("logits must have shape (batch, seq_len, vocab_size)")
+    if labels.shape != logits.shape[:2]:
+        raise ValueError("labels must have shape (batch, seq_len)")
+    if generated_token_mask.shape != labels.shape:
+        raise ValueError("generated_token_mask must have shape (batch, seq_len)")
+    if advantages.shape != labels.shape:
+        raise ValueError("advantages must have shape (batch, seq_len)")
+
+    logprobs = functional.log_softmax(logits, dim=-1)
+    batch_idx = xp.arange(labels.shape[0])[:, None]
+    seq_idx = xp.arange(labels.shape[1])[None, :]
+
+    r"""
+    Gather the current-policy logprob for each sampled token:
+    $$
+    \ell_{i,t}(\theta)
+    = \log \pi_\theta(\text{token}_{i,t}\mid \text{prompt},\text{token}_{i,<t})
+    $$
+
+    TODO: add KL regularization against a reference policy once this example
+    introduces a separate reference model.
+    TODO: add a clipped surrogate once sampled-token logprobs are meant to
+    represent a distinct behavior policy.
+    TODO: add the policy-gradient/policy-ratio surrogate when old/current policy
+    ownership is explicit in the training loop.
+
+    Advantage-weighted token objective:
+    $$
+    Loss(\theta) = -\sum_{i,t} mask_{i,t} \text{Advantage}_i \ell_{i,t}(\theta)
+    $$
+    """
+    sampled_token_logprobs = logprobs[batch_idx, seq_idx, labels]
+    return -(sampled_token_logprobs * advantages * generated_token_mask).sum()
 
 
 def generation(
@@ -477,7 +521,7 @@ def generation(
     top_k: Optional[int] = None,
     eos_token: str = EOS_TOKEN,
 ) -> Sample:
-    # GRPO old_logprobs must be raw-policy logprobs. With temperature=1 and no
+    # Sampled-token logprobs must be raw-policy logprobs. With temperature=1 and no
     # top-k, the current generate() sampling logprobs match raw model logprobs.
     # TODO: split sampling-logprobs from raw-policy logprobs if we add rollout
     # temperature/top-k exploration.
@@ -517,7 +561,7 @@ def generation(
     return Sample(
         completion_tokens=completion_array,
         completion_text=tokenizer.decode(result.completion_tokens),
-        old_logprobs=xp.array(result.logprobs, dtype=xp.float32),
+        sampled_token_logprobs=xp.array(result.logprobs, dtype=xp.float32),
         reward=None,
         advantage=None,
         metadata={
