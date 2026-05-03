@@ -192,6 +192,30 @@ class TestTextUtils(TestCase):
         )
         self.assertEqual(result.stop_reason, "max_new_tokens")
 
+    @patch("autograd.text.utils.tqdm")
+    @patch("autograd.text.utils.xp.sample_categorical")
+    def test_generate_can_disable_progress_bar(self, mock_choice, mock_tqdm):
+        def fake_prediction(model, batch_data, mode):
+            dummy_obj = MagicMock()
+            dummy_obj.data = xp.array([[[0.0, 1.0]]], dtype=xp.float32)
+            return dummy_obj
+
+        mock_choice.return_value = 1
+        mock_tqdm.side_effect = lambda iterable, **kwargs: iterable
+
+        generate(
+            model=MagicMock(),
+            prediction_func=MagicMock(side_effect=fake_prediction),
+            prompt_tokens=[0],
+            max_new_tokens=1,
+            temperature=1.0,
+            top_k=None,
+            eos_token_id=9,
+            show_progress=False,
+        )
+
+        self.assertTrue(mock_tqdm.call_args.kwargs["disable"])
+
     @patch("autograd.text.utils.xp.sample_categorical")
     def test_generate_text(self, mock_choice):
         """

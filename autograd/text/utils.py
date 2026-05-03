@@ -45,6 +45,7 @@ def generate(
     temperature: float,
     top_k: Optional[int],
     eos_token_id: int,
+    show_progress: bool = True,
 ) -> GenerationResult:
     """Generate token ids autoregressively and record sampled-token logprobs.
 
@@ -61,6 +62,7 @@ def generate(
         temperature: Sampling temperature. Values <= 0 use argmax.
         top_k: Optional top-k filter applied before sampling.
         eos_token_id: Token id that stops generation when sampled.
+        show_progress: Whether to show token-level inference progress.
 
     Returns:
         Generated completion token ids, sampled-token logprobs, and stop reason.
@@ -70,7 +72,7 @@ def generate(
     logprobs: list[float] = []
     stop_reason = "max_new_tokens"
 
-    for _ in tqdm(range(max_new_tokens), desc="Inference"):
+    for _ in tqdm(range(max_new_tokens), desc="Inference", disable=not show_progress):
         # Auto-regressive generation feeds the full prompt plus all tokens sampled
         # so far back into the model, then samples from the final position.
         batch_data = xp.expand_dims(xp.array(output_ids, dtype=xp.int32), axis=0)
