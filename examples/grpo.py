@@ -1,18 +1,25 @@
+import json
+import os
 import re
 from abc import abstractmethod
-from dataclasses import dataclass
-from typing import List, Optional, Sequence
+from dataclasses import dataclass, field
+from typing import Any, List, Optional, Sequence, cast
 
 import numpy as np
+from tqdm import tqdm
 
+from autograd import functional
 from autograd.backend import Array, ArrayLike, xp
 from autograd.data.collator import Collator, pad_right_1d
-from autograd.data.dataset import MapDataset
+from autograd.data.utils import load_data, load_parquet_rows
 from autograd.nn import Module
+from autograd.optim import Adam
+from autograd.tensor import Tensor, no_grad
 from autograd.text.tokenizer import BytePairEncoder
 from autograd.text.utils import generate
+from autograd.tools.config_schema import GenericTrainingConfig
 from autograd.tools.model import load_checkpoint
-from autograd.tools.trainer import AbstractTrainer
+from autograd.tools.trainer import AbstractTrainer, TrainingState
 from examples.gpt_2 import GPT2, GPT2ForwardFn
 
 # Template for DeepSeek-R1-Zero. Table 1
@@ -26,21 +33,38 @@ and <answer>...</answer> tags, respectively, i.e., <think> reasoning process her
 """
 
 EOS_TOKEN = "<|endoftext|>"
-CONFIG = {
-    "max_generation_tokens": 32,
-    "temperature": 1.0,
-    "top_k": None,
+
+
+@dataclass(kw_only=True)
+class GRPOTrainingConfig(GenericTrainingConfig):
+    max_steps: int = field()  # pyright: ignore[reportGeneralTypeIssues, reportIncompatibleVariableOverride]
+    max_generation_tokens: int
+    temperature: float
+    top_k: Optional[int]
     # GRPO group size G: number of completions sampled for one prompt.
-    "num_generations": 2,
-}
+    num_generations: int
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.max_generation_tokens < 1:
+            raise ValueError(
+                f"max_generation_tokens must be >= 1, got {self.max_generation_tokens}"
+            )
+        if self.temperature != 1.0 or self.top_k is not None:
+            raise ValueError("GRPO rollout requires temperature=1.0 and top_k=None")
+        if self.num_generations < 1:
+            raise ValueError(
+                f"num_generations must be >= 1, got {self.num_generations}"
+            )
+
 
 # 1. Caller code owns one Task for the first loop.
 # 2. Each outer GRPO iteration refreshes rollouts for that current task.
 # 3. RolloutGenerator samples group_size completions from the current
-#    policy, caching old_logprobs for the behavior policy, and computes group-relative advantages
+#    policy, caching sampled-token logprobs, and computes group-relative advantages
 # 4. Environment scores each Sample in each RolloutGroup
 #    within each RolloutGroup.
-# 5. RolloutDataset stores the already-generated RolloutGroup.
+# 5. MapDataset stores the already-generated RolloutGroup.
 # 6. DataLoader batches RolloutGroup objects and calls GRPOCollator.
 # 7. GRPOCollator emits GRPOBatch, where rows = group_size for one task.
 # 8. GRPOTrainer(AbstractTrainer)._compute_loss computes the GRPO objective.
@@ -49,9 +73,9 @@ CONFIG = {
 #
 # Keep boundaries explicit:
 # - Environment: prompt rendering + reward design only
-# - RolloutGenerator: model sampling + old_logprobs + RolloutGroup creation + advantage calculation
-# - RolloutDataset: static container for already-generated rollout groups.
-# - GRPOCollator: padding, causal shift, action masks, and GRPOBatch assembly.
+# - RolloutGenerator: model sampling + sampled-token logprobs + RolloutGroup creation + advantage calculation
+# - MapDataset: static container for already-generated rollout groups.
+# - GRPOCollator: padding, causal shift, generated-token masks, and GRPOBatch assembly.
 # - GRPOTrainer: GRPO loss, and inherited optimizer mechanics.
 
 
@@ -69,7 +93,7 @@ class Sample:
     # separate purpose: tokens feed the trainer/collator, text feeds rewards and
     # debugging without making Environment depend on a tokenizer.
     completion_text: str
-    old_logprobs: Array  # cached behavior-policy logprobs for the policy ratio
+    sampled_token_logprobs: Array
     reward: Optional[float] = None
     advantage: Optional[float] = None  # derived field
     metadata: Optional[dict] = None  # env trace, verifier result etc...
@@ -77,9 +101,9 @@ class Sample:
     def __post_init__(self) -> None:
         if len(self.completion_tokens) == 0:
             raise ValueError("completion_tokens must contain at least one token")
-        if len(self.completion_tokens) != len(self.old_logprobs):
+        if len(self.completion_tokens) != len(self.sampled_token_logprobs):
             raise ValueError(
-                "completion_tokens and old_logprobs must have the same length"
+                "completion_tokens and sampled_token_logprobs must have the same length"
             )
 
 
@@ -126,10 +150,9 @@ class RolloutGroup:
 class GRPOBatch:
     input_ids: ArrayLike
     labels: ArrayLike
-    old_logprobs: ArrayLike
-    action_mask: ArrayLike
+    sampled_token_logprobs: ArrayLike
+    generated_token_mask: ArrayLike
     advantages: ArrayLike
-    loss_total_weight: ArrayLike
 
 
 class GRPOCollator(Collator):
@@ -145,7 +168,7 @@ class GRPOCollator(Collator):
 
     Boundary decision: DataLoader calls this with RolloutGroup objects and this
     returns the trainer-facing GRPOBatch. The trainer should not need to know how
-    prompt/completion tokens are padded, shifted, or action-masked.
+    prompt/completion tokens are padded, shifted, or masked.
     """
 
     def __init__(self, max_tokens: int, pad_idx: int) -> None:
@@ -159,36 +182,32 @@ class GRPOCollator(Collator):
     def __call__(self, rollout_groups: Sequence[RolloutGroup]) -> GRPOBatch:
         batch_input_ids = []
         batch_labels = []
-        batch_old_logprobs = []
-        batch_action_mask = []
+        batch_sampled_token_logprobs = []
+        batch_generated_token_mask = []
         batch_advantages = []
-        loss_total_weight = xp.array(0.0, dtype=xp.float32)
 
         for rollout_group in rollout_groups:
             for sample in rollout_group.samples:
                 (
                     input_ids,
                     labels,
-                    old_logprobs,
-                    action_mask,
+                    sampled_token_logprobs,
+                    generated_token_mask,
                     advantages,
                 ) = self._build_row(rollout_group.prompt_tokens, sample)
 
                 batch_input_ids.append(input_ids)
                 batch_labels.append(labels)
-                batch_old_logprobs.append(old_logprobs)
-                batch_action_mask.append(action_mask)
+                batch_sampled_token_logprobs.append(sampled_token_logprobs)
+                batch_generated_token_mask.append(generated_token_mask)
                 batch_advantages.append(advantages)
-
-                loss_total_weight = loss_total_weight + xp.sum(action_mask)
 
         return GRPOBatch(
             input_ids=xp.stack(batch_input_ids, axis=0),
             labels=xp.stack(batch_labels, axis=0),
-            old_logprobs=xp.stack(batch_old_logprobs, axis=0),
-            action_mask=xp.stack(batch_action_mask, axis=0),
+            sampled_token_logprobs=xp.stack(batch_sampled_token_logprobs, axis=0),
+            generated_token_mask=xp.stack(batch_generated_token_mask, axis=0),
             advantages=xp.stack(batch_advantages, axis=0),
-            loss_total_weight=loss_total_weight,
         )
 
     def _build_row(
@@ -215,9 +234,9 @@ class GRPOCollator(Collator):
         # Before padding and causal shift, align all per-token rows on the
         # prompt+completion sequence. Example:
         # tokens       = [prompt_token_0, prompt_token_1, completion_token_0]
-        # action_mask  = [             0,              0,                  1]
-        # old_logprobs = [           0.0,            0.0,  completion_logprob_0]
-        action_mask = xp.concatenate(
+        # generated_token_mask = [             0,              0,                  1]
+        # sampled_token_logprobs = [           0.0,            0.0,  completion_logprob_0]
+        generated_token_mask = xp.concatenate(
             [
                 xp.zeros(prompt_len, dtype=xp.int32),
                 xp.ones(completion_len, dtype=xp.int32),
@@ -225,10 +244,10 @@ class GRPOCollator(Collator):
             axis=0,
         )
 
-        aligned_old_logprobs = xp.concatenate(
+        aligned_sampled_token_logprobs = xp.concatenate(
             [
                 xp.zeros(prompt_len, dtype=xp.float32),
-                sample.old_logprobs,
+                sample.sampled_token_logprobs,
             ],
             axis=0,
         )
@@ -236,14 +255,16 @@ class GRPOCollator(Collator):
         if sample.advantage is None:
             raise ValueError("sample.advantage must be set before collation")
 
-        aligned_advantages = action_mask.astype(xp.float32) * float(sample.advantage)
+        aligned_advantages = generated_token_mask.astype(xp.float32) * float(
+            sample.advantage
+        )
 
         # Fixed padding keeps this first GRPO collator simple. We can switch to
         # dynamic padding later if padding waste becomes a measured bottleneck.
         tokens = pad_right_1d(tokens, self.max_tokens, self.pad_idx)
-        action_mask = pad_right_1d(action_mask, self.max_tokens, 0)
-        aligned_old_logprobs = pad_right_1d(
-            aligned_old_logprobs,
+        generated_token_mask = pad_right_1d(generated_token_mask, self.max_tokens, 0)
+        aligned_sampled_token_logprobs = pad_right_1d(
+            aligned_sampled_token_logprobs,
             self.max_tokens,
             0.0,
         )
@@ -256,23 +277,10 @@ class GRPOCollator(Collator):
         return (
             tokens[:-1],
             tokens[1:],
-            aligned_old_logprobs[1:],
-            action_mask[1:],
+            aligned_sampled_token_logprobs[1:],
+            generated_token_mask[1:],
             aligned_advantages[1:],
         )
-
-
-class RolloutDataset(MapDataset):
-    """
-    Static container for already-generated on-policy rollout groups.
-
-    Rollout refresh is intentionally outside Dataset.on_epoch_start() for now:
-    caller code should generate fresh RolloutGroups from the current policy,
-    wrap them in RolloutDataset, then build a DataLoader with GRPOCollator.
-    That keeps model/tokenizer/environment dependencies out of this dataset.
-    """
-
-    pass
 
 
 class Environment:
@@ -321,15 +329,98 @@ class MathEnvironment(Environment):
     # This regex should be consistent with the SYSTEM_PROMPT defined at the
     # top of this module
     ANSWER_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.DOTALL)
+    GSM8K_FINAL_ANSWER_RE = re.compile(r"####\s*(.+?)\s*$")
+    GSM8K_PARQUET_MANIFEST_URL = (
+        "https://datasets-server.huggingface.co/parquet?"
+        "dataset=openai%2Fgsm8k&config=main"
+    )
+
+    @staticmethod
+    def normalize_answer(answer: str) -> str:
+        return answer.strip().replace(",", "")
+
+    @classmethod
+    def extract_gsm8k_final_answer(cls, answer: str) -> str:
+        match = cls.GSM8K_FINAL_ANSWER_RE.search(answer)
+        if match is None:
+            raise ValueError("GSM8K answer must contain a final answer after '####'")
+        return cls.normalize_answer(match.group(1))
+
+    @classmethod
+    def gsm8k_row_to_task(cls, row_idx: int, row: dict[str, Any]) -> Task:
+        question = row.get("question")
+        answer = row.get("answer")
+        if not isinstance(question, str) or not isinstance(answer, str):
+            raise ValueError(
+                "GSM8K rows must contain string question and answer fields"
+            )
+        return Task(
+            task_id=f"gsm8k-{row_idx}",
+            raw_input=question,
+            answer=cls.extract_gsm8k_final_answer(answer),
+            metadata={"source": "openai/gsm8k"},
+        )
+
+    @classmethod
+    def load_gsm8k_tasks(cls, split: str, max_tasks: Optional[int]) -> list[Task]:
+        metadata_path = "training_data/gsm8k_parquet_manifest.json"
+        payload = json.loads(
+            cast(
+                str,
+                load_data(
+                    cls.GSM8K_PARQUET_MANIFEST_URL,
+                    metadata_path,
+                ),
+            )
+        )
+        parquet_files = [
+            parquet_file
+            for parquet_file in payload["parquet_files"]
+            if parquet_file["split"] == split
+        ]
+        if not parquet_files:
+            available_splits = sorted(
+                {parquet_file["split"] for parquet_file in payload["parquet_files"]}
+            )
+            raise ValueError(
+                f"GSM8K split {split!r} not found. Available splits: {available_splits}"
+            )
+
+        rows: list[dict[str, Any]] = []
+        for parquet_file in parquet_files:
+            if max_tasks is not None and len(rows) >= max_tasks:
+                break
+            remaining_rows = None if max_tasks is None else max_tasks - len(rows)
+            rows.extend(
+                load_parquet_rows(
+                    parquet_file["url"],
+                    os.path.join(
+                        "training_data",
+                        f"gsm8k_{parquet_file['split']}_{parquet_file['filename']}",
+                    ),
+                    max_rows=remaining_rows,
+                )
+            )
+
+        return [cls.gsm8k_row_to_task(row_idx, row) for row_idx, row in enumerate(rows)]
 
     def _compute_reward(self, task: Task, sample: Sample) -> float:
+        reward = 0.0
+        if "<think>" in sample.completion_text:
+            reward += 0.1
+        if "</think>" in sample.completion_text:
+            reward += 0.1
+        if "<answer>" in sample.completion_text:
+            reward += 0.1
+        if "</answer>" in sample.completion_text:
+            reward += 0.1
+
         match = self.ANSWER_RE.search(sample.completion_text)
         if match is None:
-            return 0.0
+            return reward
 
-        reward = 0.1
-        parsed_answer = match.group(1).strip()
-        expected_answer = task.answer.strip()
+        parsed_answer = self.normalize_answer(match.group(1))
+        expected_answer = self.normalize_answer(task.answer)
         if parsed_answer == expected_answer:
             reward += 1.0
 
@@ -341,9 +432,12 @@ class RolloutGenerator:
     Samples on-policy completions from the current model.
 
     Given one Task, it should render the prompt via Environment, sample G
-    completions, cache behavior-policy old_logprobs, ask Environment to score
+    completions, cache sampled-token logprobs, ask Environment to score
     samples, and return one RolloutGroup. It should not perform optimizer work.
     """
+
+    def __init__(self, config: GRPOTrainingConfig) -> None:
+        self.config = config
 
     def rollout(
         self,
@@ -354,18 +448,15 @@ class RolloutGenerator:
     ) -> RolloutGroup:
         task_prompt: str = environment.render_task(task)
         prompt_tokens = xp.array(tokenizer.encode(task_prompt), dtype=xp.int32)
-        samples: List[Sample] = []
-
-        for _ in range(CONFIG["num_generations"]):
-            sample = generation(
-                model,
-                prompt_tokens=prompt_tokens,
-                tokenizer=tokenizer,
-                max_generation_tokens=CONFIG["max_generation_tokens"],
-                temperature=CONFIG["temperature"],
-                top_k=CONFIG["top_k"],
-            )
-            samples.append(sample)
+        samples = generation(
+            model,
+            prompt_tokens=prompt_tokens,
+            tokenizer=tokenizer,
+            num_generations=self.config.num_generations,
+            max_generation_tokens=self.config.max_generation_tokens,
+            temperature=self.config.temperature,
+            top_k=self.config.top_k,
+        )
 
         rollout_group = RolloutGroup(
             prompt_id=task.task_id,
@@ -414,18 +505,15 @@ class GRPOTrainer(AbstractTrainer):
     Trainer boundary for GRPOBatch optimization.
 
     This can subclass AbstractTrainer because rollout has already happened by
-    the time DataLoader yields a GRPOBatch. The base trainer can keep owning
-    backward(), gradient accumulation, clipping, optimizer.step(), checkpointing,
-    and reporting.
+    the time it receives a GRPOBatch. The trainer can keep owning backward(),
+    gradient scaling, clipping, optimizer.step(), and step bookkeeping.
 
     It should not own raw tasks, Environment, or RolloutGenerator. A higher
     level orchestration loop is responsible for:
 
-        Task -> RolloutGenerator.rollout(...) -> RolloutDataset
-        -> DataLoader(..., collator=GRPOCollator(...)) -> self.fit(...)
+        Task -> RolloutGenerator.rollout(...) -> GRPOCollator -> self.train_step(...)
 
-    One optimizer step consumes one or more GRPOBatch objects depending on
-    gradient accumulation. Each one-task GRPOBatch contains group_size rows.
+    Each one-task GRPOBatch contains group_size rows.
     """
 
     def _compute_loss(self, batch: GRPOBatch):
@@ -433,18 +521,98 @@ class GRPOTrainer(AbstractTrainer):
         Compute the GRPO objective from a trainer-facing batch.
 
         The loss should use current-policy logprobs from
-        `self.model(batch.input_ids)`, cached `batch.old_logprobs` for the
-        policy ratio, `batch.advantages` for the group-relative learning signal,
-        and `batch.action_mask` so prompt/pad tokens do not contribute.
+        `self.model(batch.input_ids)`, `batch.advantages` for the group-relative
+        learning signal, and `batch.generated_token_mask` so prompt/pad/forced
+        tokens do not contribute.
         """
 
-        pass
+        logits = self.model(batch.input_ids)
+        return self.loss_fn(logits, batch)
 
     def _loss_total_weight(self, batch: GRPOBatch):
-        pass
+        r"""
+        Currently this is token-level loss.
+        $$
+        \frac{1}{\sum_i T_i} \sum_{i=1}^G \sum_{t=1}^T \text{Advantage}_i \log \text{prob}_{i, t}
+        $$
+        Long bad outputs -> large negative influence
+        Long verbose correct outputs -> large positive influence
+        """
+        return xp.sum(batch.generated_token_mask)
 
     def _evaluate(self, val_data_loader):
         pass
+
+    def train_step(self, batch: GRPOBatch) -> Tensor:
+        """
+        Apply one optimizer update to one already-generated GRPO batch.
+
+        Online GRPO refreshes rollout data outside the trainer. This method keeps
+        the optimization boundary here: forward, loss, backward, gradient
+        scaling/clipping, optimizer step, and global step bookkeeping.
+
+        We might want to resort back to the normal trainer.fit() way of training later, after we decide to go off-policy with a separate generation policy and trained policy
+        """
+        self.model.train()
+        self.optimizer.zero_grad()
+
+        state = TrainingState()
+        loss = self._compute_loss(batch)
+        total_weight = self._loss_total_weight(batch)
+        loss.backward()
+        state.record_loss(loss, total_weight=total_weight)
+
+        if self.optimizer_step(state):
+            self.global_step += 1
+
+        return loss
+
+
+def grpo_loss(logits: Tensor, batch: GRPOBatch) -> Tensor:
+    """
+    Compute the summed simplified GRPO objective from a model-facing batch.
+
+    `batch.advantages` and `batch.generated_token_mask` are rollout-time
+    constants. Only `logits` participates in autograd.
+    """
+    labels = xp.asarray(batch.labels, dtype=xp.int32)
+    generated_token_mask = xp.asarray(batch.generated_token_mask, dtype=xp.float32)
+    advantages = xp.asarray(batch.advantages, dtype=xp.float32)
+
+    if logits.ndim != 3:
+        raise ValueError("logits must have shape (batch, seq_len, vocab_size)")
+    if labels.shape != logits.shape[:2]:
+        raise ValueError("labels must have shape (batch, seq_len)")
+    if generated_token_mask.shape != labels.shape:
+        raise ValueError("generated_token_mask must have shape (batch, seq_len)")
+    if advantages.shape != labels.shape:
+        raise ValueError("advantages must have shape (batch, seq_len)")
+
+    logprobs = functional.log_softmax(logits, dim=-1)
+    batch_idx = xp.arange(labels.shape[0])[:, None]
+    seq_idx = xp.arange(labels.shape[1])[None, :]
+
+    r"""
+    Gather the current-policy logprob for each sampled token:
+    $$
+    \ell_{i,t}(\theta)
+    = \log \pi_\theta(\text{token}_{i,t}\mid \text{prompt},\text{token}_{i,<t})
+    $$
+
+    TODO: add KL regularization against a reference policy once this example
+    introduces a separate reference model.
+    TODO: add a clipped surrogate once sampled-token logprobs are meant to
+    represent a distinct behavior policy.
+    TODO: add the policy-gradient/policy-ratio surrogate when old/current policy
+    ownership is explicit in the training loop.
+
+    Advantage-weighted token objective:
+    $$
+    Loss(\theta) = -\sum_{i,t} mask_{i,t} \text{Advantage}_i \ell_{i,t}(\theta)
+    $$
+    """
+    sampled_token_logprobs = logprobs[batch_idx, seq_idx, labels]
+    return -(sampled_token_logprobs * advantages * generated_token_mask).sum()
 
 
 def generation(
@@ -452,12 +620,13 @@ def generation(
     prompt_tokens: Array,
     tokenizer: BytePairEncoder,
     *,
+    num_generations: int,
     max_generation_tokens: int,
     temperature: float,
     top_k: Optional[int] = None,
     eos_token: str = EOS_TOKEN,
-) -> Sample:
-    # GRPO old_logprobs must be raw-policy logprobs. With temperature=1 and no
+) -> List[Sample]:
+    # Sampled-token logprobs must be raw-policy logprobs. With temperature=1 and no
     # top-k, the current generate() sampling logprobs match raw model logprobs.
     # TODO: split sampling-logprobs from raw-policy logprobs if we add rollout
     # temperature/top-k exploration.
@@ -478,7 +647,7 @@ def generation(
     was_training = getattr(model, "_is_training", None)
     model.eval()
     try:
-        result = generate(
+        results = generate(
             model=model,
             prediction_func=GPT2ForwardFn(),
             prompt_tokens=prompt_token_list,
@@ -486,50 +655,146 @@ def generation(
             temperature=temperature,
             top_k=top_k,
             eos_token_id=eos_token_id,
+            show_progress=False,
+            num_generations=num_generations,
         )
     finally:
         if was_training:
             model.train()
 
-    completion_array = xp.array(result.completion_tokens, dtype=xp.int32)
     # Keep sampled token ids directly. Decoding and re-encoding can change BPE
     # boundaries at the rendered-prompt/completion join.
-    return Sample(
-        completion_tokens=completion_array,
-        completion_text=tokenizer.decode(result.completion_tokens),
-        old_logprobs=xp.array(result.logprobs, dtype=xp.float32),
-        reward=None,
-        advantage=None,
-        metadata={
-            "stop_reason": result.stop_reason,
-            "temperature": temperature,
-            "top_k": top_k,
-        },
-    )
+    return [
+        Sample(
+            completion_tokens=xp.array(result.completion_tokens, dtype=xp.int32),
+            completion_text=tokenizer.decode(result.completion_tokens),
+            sampled_token_logprobs=xp.array(result.logprobs, dtype=xp.float32),
+            reward=None,
+            advantage=None,
+            metadata={
+                "stop_reason": result.stop_reason,
+                "temperature": temperature,
+                "top_k": top_k,
+            },
+        )
+        for result in results
+    ]
 
 
 def main():
-    CHECKPOINT_PATH = "checkpoints/sft_0428_GPT2_300"
-    ckpt = load_checkpoint(f"{CHECKPOINT_PATH}.json", f"{CHECKPOINT_PATH}.npz")
-    model = GPT2(**ckpt["model_init_kwargs"])
-    model.load_state_dict(ckpt["model_state_dict"])
-    model.eval()
+    pretrained_checkpoint_path = "checkpoints/sft_0428_GPT2_300"
+    ckpt = load_checkpoint(
+        f"{pretrained_checkpoint_path}.json",
+        f"{pretrained_checkpoint_path}.npz",
+    )
+
+    TRAIN_CONFIG = GRPOTrainingConfig(
+        max_steps=50,
+        max_eval_steps=5,
+        checkpoint_freq=50,
+        report_every_steps=5,
+        # GRPO train_step currently performs one optimizer step per rollout
+        # group. num_generations is the effective GRPO group-size knob until we
+        # add GRPO gradient accumulation.
+        global_batch_size=1,
+        micro_batch_size=1,
+        max_grad_norm=1.0,
+        model_kwargs=ckpt["model_init_kwargs"],
+        optimizer_kwargs={"lr": 5e-5},
+        pretrained_checkpoint_path=pretrained_checkpoint_path,
+        max_generation_tokens=256,
+        temperature=1.0,
+        top_k=None,
+        num_generations=16,
+    )
+
+    trainer = GRPOTrainer(
+        model_cls=GPT2,
+        optimizer_cls=Adam,
+        loss_fn=grpo_loss,
+        config=TRAIN_CONFIG,
+    )
 
     bpe = BytePairEncoder(
         num_merges=12000,
         vocab_file_path="training_data/wikipedia_simpleenglish_vocab_12000.pkl",
     )
     environment = MathEnvironment()
-    task = Task(task_id="1", raw_input="What is 1 + 1?", answer="2")
-    rollout_generator = RolloutGenerator()
+    raw_tasks = environment.load_gsm8k_tasks(split="train", max_tasks=128)
+    tasks = []
+    for task in raw_tasks:
+        prompt_len = len(bpe.encode(environment.render_task(task)))
+        if prompt_len + TRAIN_CONFIG.max_generation_tokens <= trainer.model.max_seq_len:
+            tasks.append(task)
+    if not tasks:
+        raise ValueError("No GSM8K tasks fit within the model context window")
 
-    rollout_group = rollout_generator.rollout(
-        model=model,
-        task=task,
-        tokenizer=bpe,
-        environment=environment,
+    rollout_generator = RolloutGenerator(TRAIN_CONFIG)
+    collator = GRPOCollator(
+        max_tokens=trainer.model.max_seq_len,
+        pad_idx=bpe.encode("<|pad|>")[0],
     )
-    print(rollout_group)
+    report_every_steps = TRAIN_CONFIG.report_every_steps or TRAIN_CONFIG.checkpoint_freq
+
+    with tqdm(
+        total=TRAIN_CONFIG.max_steps,
+        initial=trainer.global_step,
+        desc="GRPO training",
+    ) as progress_bar:
+        while trainer.global_step < TRAIN_CONFIG.max_steps:
+            step_before = trainer.global_step
+            task = tasks[trainer.global_step % len(tasks)]
+            rollout_group = rollout_generator.rollout(
+                model=trainer.model,
+                task=task,
+                tokenizer=bpe,
+                environment=environment,
+            )
+            loss = trainer.train_step(collator([rollout_group]))
+
+            rewards = []
+            for sample in rollout_group.samples:
+                if sample.reward is None:
+                    raise ValueError("sample.reward must be set before logging")
+                rewards.append(sample.reward)
+            rewards_array = np.array(rewards, dtype=np.float32)
+            progress_bar.update(trainer.global_step - step_before)
+            progress_bar.set_postfix(
+                loss=f"{float(xp.to_scalar(loss.data)):.4f}",
+                reward_mean=f"{float(rewards_array.mean()):.3f}",
+                reward_std=f"{float(rewards_array.std()):.3f}",
+            )
+
+            if trainer.global_step != step_before:
+                should_validate = trainer.global_step % report_every_steps == 0
+                if should_validate or trainer.global_step >= TRAIN_CONFIG.max_steps:
+                    with no_grad():
+                        validation_group = rollout_generator.rollout(
+                            model=trainer.model,
+                            task=task,
+                            tokenizer=bpe,
+                            environment=environment,
+                        )
+                    validation_rewards = []
+                    for sample in validation_group.samples:
+                        if sample.reward is None:
+                            raise ValueError(
+                                "validation sample reward must be set before logging"
+                            )
+                        validation_rewards.append(sample.reward)
+                    validation_rewards_array = np.array(
+                        validation_rewards,
+                        dtype=np.float32,
+                    )
+                    best_sample_idx = int(np.argmax(validation_rewards_array))
+                    best_sample = validation_group.samples[best_sample_idx]
+                    progress_bar.write(
+                        "validation "
+                        f"step={trainer.global_step} "
+                        f"reward_mean={float(validation_rewards_array.mean()):.3f} "
+                        f"reward_max={float(validation_rewards_array.max()):.3f} "
+                        f"completion={best_sample.completion_text!r}"
+                    )
 
 
 if __name__ == "__main__":

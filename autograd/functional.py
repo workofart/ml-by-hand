@@ -72,6 +72,25 @@ def softmax(x: Tensor) -> Tensor:
     return Softmax.apply(x)
 
 
+def log_softmax(x: Tensor, dim: int = -1) -> Tensor:
+    r"""
+    Applies the log-softmax function.
+
+    Args:
+        x (Tensor): The input tensor containing logits.
+        dim (int): The dimension along which logprobs are computed.
+
+    Returns:
+        Tensor: The tensor with token logprobs.
+
+    Examples:
+        >>> from autograd.tensor import Tensor
+        >>> x = Tensor(xp.array([2.0, 1.0, 0.1]))
+        >>> y = log_softmax(x) # Expected output: logprobs that exponentiate to probabilities summing to 1
+    """
+    return LogSoftmax.apply(x, dim=dim)
+
+
 def tanh(x: Tensor) -> Tensor:
     """
     Applies the hyperbolic tangent (tanh) activation function.
@@ -366,6 +385,118 @@ class Softmax(Function):
         sum_term = xp.sum(grad.data * self.probs, axis=-1, keepdims=True)
         dLdx = self.probs * (grad.data - sum_term)
         return dLdx
+
+
+class LogSoftmax(Function):
+    r"""
+    Log-softmax activation function.
+
+    The log-softmax function is defined as:
+        $$
+        \log \pi_i = x_i - \log \sum_j e^{x_j}
+        $$
+
+    Note:
+        Use `log_softmax` when logprobs are needed; it is more stable than
+        computing `log(softmax(x))`.
+    """
+
+    def forward(self, x: Array, *, dim: int = -1) -> Array:
+        r"""
+        Computes the forward pass of the log-softmax activation function.
+
+        Args:
+            x (xp.ndarray): Input array of logits.
+            dim (int): Dimension along which logprobs are computed.
+
+        Returns:
+            xp.ndarray: The logprobs.
+        """
+        r"""
+        Shift logits by their maximum along the class/token dimension:
+        $$
+        m = \max_j x_j,\qquad \text{max\_shifted\_logits}_i = x_i - m
+        $$
+        This leaves softmax probabilities unchanged because:
+        $$
+        \frac{e^{x_i}}{\sum_j e^{x_j}}
+        =
+        \frac{e^{x_i-c}}{\sum_j e^{x_j-c}}
+        $$
+        while keeping exponentials numerically bounded.
+        """
+        max_shifted_logits = x - xp.max(x, axis=dim, keepdims=True)
+
+        r"""
+        Compute the log of the sum of exponentiated max-shifted logits:
+        $$
+        \log \operatorname{softmax}(x)_i
+        = x_i - \log \sum_j e^{x_j}
+        $$
+        $$
+        = x_i - \log\left(e^m \sum_j e^{x_j-m}\right)
+        = (x_i-m) - \log \sum_j e^{x_j-m}
+        $$
+
+        Since:
+
+        $\text{max\_shifted\_logits}_i = x_i-m$
+
+        $$
+        \log \operatorname{softmax}(x)_i = \text{max\_shifted\_logits}_i - \log \sum_j e^{\text{max\_shifted\_logits}_j}
+        $$
+
+        """
+        log_sum_exp_max_shifted_logits = xp.log(
+            xp.sum(xp.exp(max_shifted_logits), axis=dim, keepdims=True)
+        )
+
+        self.dim = dim
+        r"""
+        Store probabilities for backward:
+        $$
+        p_i = \operatorname{softmax}(x)_i
+        = \exp\left(
+            \text{max\_shifted\_logits}_i
+            - \log \sum_j e^{\text{max\_shifted\_logits}_j}
+        \right)
+        $$
+        """
+        self.probs = xp.exp(max_shifted_logits - log_sum_exp_max_shifted_logits)
+        return max_shifted_logits - log_sum_exp_max_shifted_logits
+
+    def backward(self, grad: Tensor) -> Array:
+        r"""
+        Computes the backward pass of the log-softmax activation function.
+
+        Args:
+            grad (Tensor): Upstream gradient.
+
+        Returns:
+            xp.ndarray: The gradient of the loss with respect to the input logits.
+        """
+        r"""
+        For:
+        $$
+        y_i = \log \operatorname{softmax}(x)_i = x_i - \log \sum_k e^{x_k}
+        $$
+        the Jacobian is:
+        $$
+        \frac{\partial y_i}{\partial x_j}
+        = \mathbf{1}[i=j] - p_j
+        $$
+        Given upstream gradient $g_i = \frac{\partial L}{\partial y_i}$:
+        $$
+        \frac{\partial L}{\partial x_j}
+        = \sum_i g_i(\mathbf{1}[i=j] - p_j)
+        = g_j - p_j \sum_i g_i
+        $$
+        """
+        return grad.data - self.probs * xp.sum(
+            grad.data,
+            axis=self.dim,
+            keepdims=True,
+        )
 
 
 class Tanh(Function):
