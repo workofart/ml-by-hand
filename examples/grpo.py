@@ -57,7 +57,7 @@ class GRPOTrainingConfig(GenericTrainingConfig):
 # 1. Caller code owns one Task for the first loop.
 # 2. Each outer GRPO iteration refreshes rollouts for that current task.
 # 3. RolloutGenerator samples group_size completions from the current
-#    policy, caching old_logprobs for the behavior policy, and computes group-relative advantages
+#    policy, caching sampled-token logprobs, and computes group-relative advantages
 # 4. Environment scores each Sample in each RolloutGroup
 #    within each RolloutGroup.
 # 5. MapDataset stores the already-generated RolloutGroup.
@@ -69,9 +69,9 @@ class GRPOTrainingConfig(GenericTrainingConfig):
 #
 # Keep boundaries explicit:
 # - Environment: prompt rendering + reward design only
-# - RolloutGenerator: model sampling + old_logprobs + RolloutGroup creation + advantage calculation
+# - RolloutGenerator: model sampling + sampled-token logprobs + RolloutGroup creation + advantage calculation
 # - MapDataset: static container for already-generated rollout groups.
-# - GRPOCollator: padding, causal shift, action masks, and GRPOBatch assembly.
+# - GRPOCollator: padding, causal shift, generated-token masks, and GRPOBatch assembly.
 # - GRPOTrainer: GRPO loss, and inherited optimizer mechanics.
 
 
@@ -89,7 +89,7 @@ class Sample:
     # separate purpose: tokens feed the trainer/collator, text feeds rewards and
     # debugging without making Environment depend on a tokenizer.
     completion_text: str
-    old_logprobs: Array  # cached behavior-policy logprobs for the policy ratio
+    sampled_token_logprobs: Array
     reward: Optional[float] = None
     advantage: Optional[float] = None  # derived field
     metadata: Optional[dict] = None  # env trace, verifier result etc...
@@ -97,9 +97,9 @@ class Sample:
     def __post_init__(self) -> None:
         if len(self.completion_tokens) == 0:
             raise ValueError("completion_tokens must contain at least one token")
-        if len(self.completion_tokens) != len(self.old_logprobs):
+        if len(self.completion_tokens) != len(self.sampled_token_logprobs):
             raise ValueError(
-                "completion_tokens and old_logprobs must have the same length"
+                "completion_tokens and sampled_token_logprobs must have the same length"
             )
 
 
@@ -146,8 +146,8 @@ class RolloutGroup:
 class GRPOBatch:
     input_ids: ArrayLike
     labels: ArrayLike
-    old_logprobs: ArrayLike
-    action_mask: ArrayLike
+    sampled_token_logprobs: ArrayLike
+    generated_token_mask: ArrayLike
     advantages: ArrayLike
 
 
@@ -164,7 +164,7 @@ class GRPOCollator(Collator):
 
     Boundary decision: DataLoader calls this with RolloutGroup objects and this
     returns the trainer-facing GRPOBatch. The trainer should not need to know how
-    prompt/completion tokens are padded, shifted, or action-masked.
+    prompt/completion tokens are padded, shifted, or masked.
     """
 
     def __init__(self, max_tokens: int, pad_idx: int) -> None:
@@ -178,8 +178,8 @@ class GRPOCollator(Collator):
     def __call__(self, rollout_groups: Sequence[RolloutGroup]) -> GRPOBatch:
         batch_input_ids = []
         batch_labels = []
-        batch_old_logprobs = []
-        batch_action_mask = []
+        batch_sampled_token_logprobs = []
+        batch_generated_token_mask = []
         batch_advantages = []
 
         for rollout_group in rollout_groups:
@@ -187,22 +187,22 @@ class GRPOCollator(Collator):
                 (
                     input_ids,
                     labels,
-                    old_logprobs,
-                    action_mask,
+                    sampled_token_logprobs,
+                    generated_token_mask,
                     advantages,
                 ) = self._build_row(rollout_group.prompt_tokens, sample)
 
                 batch_input_ids.append(input_ids)
                 batch_labels.append(labels)
-                batch_old_logprobs.append(old_logprobs)
-                batch_action_mask.append(action_mask)
+                batch_sampled_token_logprobs.append(sampled_token_logprobs)
+                batch_generated_token_mask.append(generated_token_mask)
                 batch_advantages.append(advantages)
 
         return GRPOBatch(
             input_ids=xp.stack(batch_input_ids, axis=0),
             labels=xp.stack(batch_labels, axis=0),
-            old_logprobs=xp.stack(batch_old_logprobs, axis=0),
-            action_mask=xp.stack(batch_action_mask, axis=0),
+            sampled_token_logprobs=xp.stack(batch_sampled_token_logprobs, axis=0),
+            generated_token_mask=xp.stack(batch_generated_token_mask, axis=0),
             advantages=xp.stack(batch_advantages, axis=0),
         )
 
@@ -230,9 +230,9 @@ class GRPOCollator(Collator):
         # Before padding and causal shift, align all per-token rows on the
         # prompt+completion sequence. Example:
         # tokens       = [prompt_token_0, prompt_token_1, completion_token_0]
-        # action_mask  = [             0,              0,                  1]
-        # old_logprobs = [           0.0,            0.0,  completion_logprob_0]
-        action_mask = xp.concatenate(
+        # generated_token_mask = [             0,              0,                  1]
+        # sampled_token_logprobs = [           0.0,            0.0,  completion_logprob_0]
+        generated_token_mask = xp.concatenate(
             [
                 xp.zeros(prompt_len, dtype=xp.int32),
                 xp.ones(completion_len, dtype=xp.int32),
@@ -240,10 +240,10 @@ class GRPOCollator(Collator):
             axis=0,
         )
 
-        aligned_old_logprobs = xp.concatenate(
+        aligned_sampled_token_logprobs = xp.concatenate(
             [
                 xp.zeros(prompt_len, dtype=xp.float32),
-                sample.old_logprobs,
+                sample.sampled_token_logprobs,
             ],
             axis=0,
         )
@@ -251,14 +251,16 @@ class GRPOCollator(Collator):
         if sample.advantage is None:
             raise ValueError("sample.advantage must be set before collation")
 
-        aligned_advantages = action_mask.astype(xp.float32) * float(sample.advantage)
+        aligned_advantages = generated_token_mask.astype(xp.float32) * float(
+            sample.advantage
+        )
 
         # Fixed padding keeps this first GRPO collator simple. We can switch to
         # dynamic padding later if padding waste becomes a measured bottleneck.
         tokens = pad_right_1d(tokens, self.max_tokens, self.pad_idx)
-        action_mask = pad_right_1d(action_mask, self.max_tokens, 0)
-        aligned_old_logprobs = pad_right_1d(
-            aligned_old_logprobs,
+        generated_token_mask = pad_right_1d(generated_token_mask, self.max_tokens, 0)
+        aligned_sampled_token_logprobs = pad_right_1d(
+            aligned_sampled_token_logprobs,
             self.max_tokens,
             0.0,
         )
@@ -271,8 +273,8 @@ class GRPOCollator(Collator):
         return (
             tokens[:-1],
             tokens[1:],
-            aligned_old_logprobs[1:],
-            action_mask[1:],
+            aligned_sampled_token_logprobs[1:],
+            generated_token_mask[1:],
             aligned_advantages[1:],
         )
 
@@ -343,7 +345,7 @@ class RolloutGenerator:
     Samples on-policy completions from the current model.
 
     Given one Task, it should render the prompt via Environment, sample G
-    completions, cache behavior-policy old_logprobs, ask Environment to score
+    completions, cache sampled-token logprobs, ask Environment to score
     samples, and return one RolloutGroup. It should not perform optimizer work.
     """
 
@@ -438,23 +440,24 @@ class GRPOTrainer(AbstractTrainer):
         Compute the GRPO objective from a trainer-facing batch.
 
         The loss should use current-policy logprobs from
-        `self.model(batch.input_ids)`, cached `batch.old_logprobs` for the
-        policy ratio, `batch.advantages` for the group-relative learning signal,
-        and `batch.action_mask` so prompt/pad tokens do not contribute.
+        `self.model(batch.input_ids)`, `batch.advantages` for the group-relative
+        learning signal, and `batch.generated_token_mask` so prompt/pad/forced
+        tokens do not contribute.
         """
 
-        pass
+        logits = self.model(batch.input_ids)
+        return self.loss_fn(logits, batch)
 
     def _loss_total_weight(self, batch: GRPOBatch):
-        pass
+        return xp.sum(batch.generated_token_mask)
 
     def _evaluate(self, val_data_loader):
         pass
 
 
-def grpo_loss() -> Tensor:
+def grpo_loss(logits: Tensor, batch: GRPOBatch) -> Tensor:
     """
-    Compute the GRPO objective from a model-facing batch.
+    Compute the summed simplified GRPO objective from a model-facing batch.
 
     The loss should use current-policy logprobs from `model(batch.input_ids)`,
     cached `batch.old_logprobs` for the policy ratio, `batch.advantages` for the
