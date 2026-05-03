@@ -45,8 +45,10 @@ def generate(
     temperature: float,
     top_k: Optional[int],
     eos_token_id: int,
+    *,
     show_progress: bool = True,
-) -> GenerationResult:
+    num_generations: int,
+) -> list[GenerationResult]:
     """Generate token ids autoregressively and record sampled-token logprobs.
 
     This is the structured generation primitive: callers pass already-tokenized
@@ -63,62 +65,85 @@ def generate(
         top_k: Optional top-k filter applied before sampling.
         eos_token_id: Token id that stops generation when sampled.
         show_progress: Whether to show token-level inference progress.
+        num_generations: Number of independent completions to generate in
+            parallel for the same prompt.
 
     Returns:
-        Generated completion token ids, sampled-token logprobs, and stop reason.
+        One result per generated completion.
     """
-    output_ids = [int(token) for token in prompt_tokens]
-    completion_tokens: list[int] = []
-    logprobs: list[float] = []
-    stop_reason = "max_new_tokens"
+    if num_generations < 1:
+        raise ValueError(f"num_generations must be >= 1, got {num_generations}")
+
+    prompt_token_list = [int(token) for token in prompt_tokens]
+    output_ids = [prompt_token_list.copy() for _ in range(num_generations)]
+    completion_tokens: list[list[int]] = [[] for _ in range(num_generations)]
+    logprobs: list[list[float]] = [[] for _ in range(num_generations)]
+    stop_reasons = ["max_new_tokens" for _ in range(num_generations)]
+    active = [True for _ in range(num_generations)]
 
     for _ in tqdm(range(max_new_tokens), desc="Inference", disable=not show_progress):
+        if not any(active):
+            break
+
         # Auto-regressive generation feeds the full prompt plus all tokens sampled
         # so far back into the model, then samples from the final position.
-        batch_data = xp.expand_dims(xp.array(output_ids, dtype=xp.int32), axis=0)
+        # Shape: (num_generations, current_seq_len). Each row is one completion
+        # being advanced in parallel for this decoding step.
+        batch_data = xp.array(output_ids, dtype=xp.int32)
         prediction = prediction_func(model=model, batch_data=batch_data, mode="sample")
         if isinstance(prediction, tuple):
             prediction = prediction[0]
-        logits = prediction.data[0, -1]
+        next_token_logits = prediction.data[:, -1]
 
-        if temperature <= 0:
-            # greedy decoding: choose the highest-logit token directly.
-            token_id = int(xp.argmax(logits))
-            logprob = 0.0
-        else:
-            # Temperature rescales the distribution before sampling.
-            # Larger values flatten it; smaller values make it sharper.
-            behavior_logits = xp.array(logits, dtype=xp.float32) / temperature
-            if top_k is not None and top_k < len(behavior_logits):
-                # Top-k keeps only the k most likely tokens and masks the rest.
-                threshold = xp.sort(behavior_logits)[-top_k]
-                behavior_logits = xp.where(
-                    behavior_logits >= threshold,
-                    behavior_logits,
-                    xp.full(
-                        behavior_logits.shape,
-                        -float("inf"),
-                        dtype=behavior_logits.dtype,
-                    ),
-                )
-            token_id = int(xp.to_scalar(xp.sample_categorical(behavior_logits)))
-            # Store the logprob from the same distribution that sampled the token
-            shifted = behavior_logits - xp.max(behavior_logits)
-            log_denom = xp.log(xp.sum(xp.exp(shifted)))
-            logprob = float(xp.to_scalar(shifted[token_id] - log_denom))
+        for row_idx, is_active in enumerate(active):
+            if not is_active:
+                output_ids[row_idx].append(eos_token_id)
+                continue
 
-        output_ids.append(token_id)
-        completion_tokens.append(token_id)
-        logprobs.append(logprob)
-        if token_id == eos_token_id:
-            stop_reason = "eos"
-            break
+            logits = next_token_logits[row_idx]
+            if temperature <= 0:
+                # greedy decoding: choose the highest-logit token directly.
+                token_id = int(xp.argmax(logits))
+                logprob = 0.0
+            else:
+                # Temperature rescales the distribution before sampling.
+                # Larger values flatten it; smaller values make it sharper.
+                behavior_logits = xp.array(logits, dtype=xp.float32) / temperature
+                if top_k is not None and top_k < len(behavior_logits):
+                    # Top-k keeps only the k most likely tokens and masks the rest.
+                    threshold = xp.sort(behavior_logits)[-top_k]
+                    behavior_logits = xp.where(
+                        behavior_logits >= threshold,
+                        behavior_logits,
+                        xp.full(
+                            behavior_logits.shape,
+                            -float("inf"),
+                            dtype=behavior_logits.dtype,
+                        ),
+                    )
+                token_id = int(xp.to_scalar(xp.sample_categorical(behavior_logits)))
+                # Store the logprob from the same distribution that sampled the token
+                shifted = behavior_logits - xp.max(behavior_logits)
+                log_denom = xp.log(xp.sum(xp.exp(shifted)))
+                logprob = float(xp.to_scalar(shifted[token_id] - log_denom))
 
-    return GenerationResult(
-        completion_tokens=completion_tokens,
-        logprobs=logprobs,
-        stop_reason=stop_reason,
-    )
+            output_ids[row_idx].append(token_id)
+            completion_tokens[row_idx].append(token_id)
+            logprobs[row_idx].append(logprob)
+            if token_id == eos_token_id:
+                stop_reasons[row_idx] = "eos"
+                active[row_idx] = False
+
+    return [
+        GenerationResult(
+            completion_tokens=tokens,
+            logprobs=result_logprobs,
+            stop_reason=stop_reasons[row_idx],
+        )
+        for row_idx, (tokens, result_logprobs) in enumerate(
+            zip(completion_tokens, logprobs)
+        )
+    ]
 
 
 def generate_text(
@@ -161,7 +186,8 @@ def generate_text(
             temperature=temperature,
             top_k=top_k,
             eos_token_id=bpe.encode("<|endoftext|>")[0],
-        )
+            num_generations=1,
+        )[0]
         output_ids.extend(result.completion_tokens)
         for next_token in result.completion_tokens:
             print(bpe.decode([next_token]), end="", flush=True)

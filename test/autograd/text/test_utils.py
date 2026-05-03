@@ -183,7 +183,8 @@ class TestTextUtils(TestCase):
             temperature=1.0,
             top_k=2,
             eos_token_id=9,
-        )
+            num_generations=1,
+        )[0]
 
         expected = 1.0 - xp.log(xp.exp(xp.array(1.0)) + xp.exp(xp.array(2.0)))
         self.assertEqual(result.completion_tokens, [1])
@@ -191,6 +192,36 @@ class TestTextUtils(TestCase):
             result.logprobs[0], float(xp.to_scalar(expected)), places=6
         )
         self.assertEqual(result.stop_reason, "max_new_tokens")
+
+    @patch("autograd.text.utils.xp.sample_categorical")
+    def test_generate_batches_parallel_completions(self, mock_choice):
+        batch_shapes = []
+
+        def fake_prediction(model, batch_data, mode):
+            batch_shapes.append(tuple(batch_data.shape))
+            batch_size, seq_len = batch_data.shape
+            dummy_obj = MagicMock()
+            dummy_obj.data = xp.zeros((batch_size, seq_len, 4), dtype=xp.float32)
+            return dummy_obj
+
+        mock_choice.side_effect = [1, 2, 1, 2]
+
+        results = generate(
+            model=MagicMock(),
+            prediction_func=MagicMock(side_effect=fake_prediction),
+            prompt_tokens=[0],
+            max_new_tokens=2,
+            temperature=1.0,
+            top_k=None,
+            eos_token_id=9,
+            show_progress=False,
+            num_generations=2,
+        )
+
+        self.assertEqual(batch_shapes, [(2, 1), (2, 2)])
+        self.assertEqual(
+            [result.completion_tokens for result in results], [[1, 1], [2, 2]]
+        )
 
     @patch("autograd.text.utils.tqdm")
     @patch("autograd.text.utils.xp.sample_categorical")
@@ -212,6 +243,7 @@ class TestTextUtils(TestCase):
             top_k=None,
             eos_token_id=9,
             show_progress=False,
+            num_generations=1,
         )
 
         self.assertTrue(mock_tqdm.call_args.kwargs["disable"])
