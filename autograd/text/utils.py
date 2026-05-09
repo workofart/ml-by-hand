@@ -1,21 +1,29 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
+import shutil
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
+    Any,
     Callable,
     Dict,
+    Iterable,
+    Iterator,
     List,
     Literal,
     Optional,
+    Sequence,
     Tuple,
     Union,
 )
+from urllib.request import urlopen
 
+from pyarrow import parquet as pq  # pyright: ignore[reportMissingImports]
 from tqdm import tqdm
 
 from autograd.backend import Array, ArrayLike, xp
@@ -35,6 +43,33 @@ class GenerationResult:
     completion_tokens: list[int]
     logprobs: list[float]
     stop_reason: str
+
+
+@dataclass
+class OpenWebTextSource:
+    parquet_files: list[dict[str, Any]]
+    parquet_dir: str
+    split_token: str
+    parquet_shards_per_batch: int
+
+    def __iter__(self) -> Iterator[str]:
+        for shard_batch in _iter_batches(
+            self.parquet_files,
+            self.parquet_shards_per_batch,
+        ):
+            parquet_paths = []
+            for parquet_file in shard_batch:
+                parquet_paths.append(
+                    _ensure_openwebtext_shard(parquet_file, self.parquet_dir)
+                )
+
+            for parquet_path in parquet_paths:
+                for batch in pq.ParquetFile(parquet_path).iter_batches(
+                    columns=["text"],
+                    batch_size=2048,
+                ):
+                    for doc in batch.column("text").to_pylist():
+                        yield doc + self.split_token
 
 
 def generate(
@@ -584,3 +619,86 @@ def load_shakespeare_mini() -> str:
     assert isinstance(data, str)
     logger.info(f"{len(data)} characters in the entire dataset. Sample: \n{data[:100]}")
     return data
+
+
+def load_openwebtext(parquet_shards_per_batch: int = 1) -> OpenWebTextSource:
+    """Return a streaming OpenWebText source backed by public parquet shards."""
+    if parquet_shards_per_batch < 1:
+        raise ValueError(
+            f"parquet_shards_per_batch must be >= 1, got {parquet_shards_per_batch}"
+        )
+    parquet_manifest_url = "https://datasets-server.huggingface.co/parquet?dataset=Skylion007%2Fopenwebtext"
+
+    os.makedirs("training_data", exist_ok=True)
+    manifest_path = "training_data/openwebtext_parquet_manifest.json"
+    parquet_dir = "training_data/openwebtext_parquet"
+    os.makedirs(parquet_dir, exist_ok=True)
+
+    if not os.path.exists(manifest_path):
+        print("Downloading OpenWebText parquet manifest...")
+        _download_url(parquet_manifest_url, manifest_path)
+
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        manifest = json.load(f)
+
+    parquet_files = [
+        parquet_file
+        for parquet_file in manifest.get("parquet_files", [])
+        if parquet_file.get("split") == "train"
+    ]
+    if not parquet_files:
+        raise ValueError("OpenWebText parquet manifest has no train split files")
+
+    return OpenWebTextSource(
+        parquet_files=parquet_files,
+        parquet_dir=parquet_dir,
+        split_token="<|endoftext|>",
+        parquet_shards_per_batch=parquet_shards_per_batch,
+    )
+
+
+def _ensure_openwebtext_shard(parquet_file: dict[str, Any], parquet_dir: str) -> str:
+    filename = parquet_file["filename"]
+    parquet_path = os.path.join(parquet_dir, filename)
+    expected_size = parquet_file.get("size")
+    if (
+        os.path.exists(parquet_path)
+        and isinstance(expected_size, int)
+        and os.path.getsize(parquet_path) != expected_size
+    ):
+        os.remove(parquet_path)
+
+    if not os.path.exists(parquet_path):
+        size_mb = parquet_file.get("size", 0) / 1_000_000
+        print(f"Downloading OpenWebText shard {filename} ({size_mb:.0f} MB)...")
+        _download_url(parquet_file["url"], parquet_path)
+    return parquet_path
+
+
+def _download_url(url: str, filename: str) -> None:
+    tmp_filename = f"{filename}.tmp"
+    try:
+        with urlopen(url, timeout=60) as response:
+            parent_dir = os.path.dirname(filename)
+            if parent_dir:
+                os.makedirs(parent_dir, exist_ok=True)
+            with open(tmp_filename, "wb") as f:
+                shutil.copyfileobj(response, f)
+        os.replace(tmp_filename, filename)
+    except Exception as exc:
+        if os.path.exists(tmp_filename):
+            os.remove(tmp_filename)
+        raise RuntimeError(
+            f"Failed to download {url!r} to {filename!r}. "
+            "The dataset is public, but unauthenticated HuggingFace downloads can "
+            "still be rate-limited; retry later or keep cached parquet shards in "
+            "training_data/openwebtext_parquet."
+        ) from exc
+
+
+def _iter_batches(
+    values: Sequence[dict[str, Any]],
+    batch_size: int,
+) -> Iterable[list[dict[str, Any]]]:
+    for start in range(0, len(values), batch_size):
+        yield list(values[start : start + batch_size])

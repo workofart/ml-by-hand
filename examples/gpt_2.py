@@ -302,14 +302,53 @@ if __name__ == "__main__":
         ),
     )
 
-    CONFIG = WIKI_CONFIG
+    OPENWEBTEXT_CONFIG = TransformerTrainingConfig(
+        training_run_name="openwebtext",
+        dataset_name="openwebtext",
+        max_steps=25000,
+        max_eval_steps=20,
+        checkpoint_freq=1000,
+        report_every_steps=50,
+        global_batch_size=76,
+        micro_batch_size=19,
+        max_grad_norm=1.0,
+        model_kwargs={
+            "num_attention_heads": 9,
+            "hidden_size": 576,
+            "dropout_prob": 0.1,
+            "max_seq_len": 1024,
+            "num_decoder_layers": 8,
+            "activation_checkpointing": False,
+            "parameter_dtype": "bfloat16",
+        },
+        optimizer_kwargs={
+            "lr": 1e-3,
+            "beta2": 0.99,
+            "weight_decay": 0.1,
+            "lr_scheduler_kwargs": {
+                "lr_scheduler_cls": optim.CosineScheduler,
+                "warmup_steps": 3750,
+                "lr_decay_iters": 20000,
+            },
+        },
+        resume_epoch=None,
+        teacher_forcing=False,
+        label_smoothing=0.1,
+        eval_start_string="The",
+        custom_bpe=CustomBpeConfig(
+            num_merges=24000,
+            encoded_data_path="training_data/bpe_24000_openwebtext_encoded_data.npz",
+            vocab_path="training_data/openwebtext_vocab_24000.pkl",
+            overwrite_encoded_data=False,
+            overwrite_vocabulary_file=False,
+            split_token="<|endoftext|>",
+            parquet_shards_per_batch=32,
+        ),
+    )
+
+    CONFIG = OPENWEBTEXT_CONFIG
 
     logger = logging.getLogger(__name__)
-
-    # Load some data
-    # Note: Please supply the correct data for your model
-    # data = text_utils.load_shakespeare_mini()
-    data = text_utils.load_wiki_simple()
 
     if CONFIG.custom_bpe:
         # Create a Byte Pair Encoder and prepare data
@@ -317,11 +356,20 @@ if __name__ == "__main__":
             num_merges=CONFIG.custom_bpe.num_merges,
             vocab_file_path=CONFIG.custom_bpe.vocab_path,
             encoded_data_path=CONFIG.custom_bpe.encoded_data_path,
+            n_workers=CONFIG.custom_bpe.n_workers,
         )
+        if CONFIG.dataset_name == "openwebtext":
+            text_source = text_utils.load_openwebtext(
+                parquet_shards_per_batch=CONFIG.custom_bpe.parquet_shards_per_batch,
+            )
+        elif CONFIG.dataset_name == "wiki_simple_english":
+            text_source = [text_utils.load_wiki_simple()]
+        else:
+            text_source = [text_utils.load_shakespeare_mini()]
         encoded_data = bpe.prepare_data(
-            raw_text=data,
-            overwrite_encoded_data=CONFIG.custom_bpe.overwrite_encoded_data,
+            text_source,
             overwrite_vocabulary_file=CONFIG.custom_bpe.overwrite_vocabulary_file,
+            overwrite_encoded_data=CONFIG.custom_bpe.overwrite_encoded_data,
         )
     else:
         raise ValueError(
