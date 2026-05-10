@@ -354,17 +354,22 @@ if __name__ == "__main__":
             n_workers=CONFIG.custom_bpe.n_workers,
         )
         if CONFIG.dataset_name == "openwebtext":
-            text_source = text_utils.load_openwebtext(
-                parquet_shards_per_batch=CONFIG.custom_bpe.parquet_shards_per_batch,
+            raw_text = "".join(
+                text_utils.load_openwebtext(
+                    parquet_shards_per_batch=(
+                        CONFIG.custom_bpe.parquet_shards_per_batch
+                    ),
+                )
             )
         elif CONFIG.dataset_name == "wiki_simple_english":
-            text_source = [text_utils.load_wiki_simple()]
+            raw_text = text_utils.load_wiki_simple()
         else:
-            text_source = [text_utils.load_shakespeare_mini()]
+            raw_text = text_utils.load_shakespeare_mini()
         encoded_data = bpe.prepare_data(
-            text_source,
+            raw_text=raw_text,
             overwrite_vocabulary_file=CONFIG.custom_bpe.overwrite_vocabulary_file,
             overwrite_encoded_data=CONFIG.custom_bpe.overwrite_encoded_data,
+            split_token=CONFIG.custom_bpe.split_token,
         )
     else:
         raise ValueError(

@@ -115,6 +115,17 @@ class CustomBpeConfig:
     overwrite_encoded_data: bool
     overwrite_vocabulary_file: bool
     split_token: str
+    parquet_shards_per_batch: int = 1
+    n_workers: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        if self.parquet_shards_per_batch < 1:
+            raise ValueError(
+                "parquet_shards_per_batch must be >= 1, "
+                f"got {self.parquet_shards_per_batch}"
+            )
+        if self.n_workers is not None and self.n_workers < 1:
+            raise ValueError(f"n_workers must be >= 1, got {self.n_workers}")
 
 
 @dataclass(kw_only=True)
