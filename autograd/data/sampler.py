@@ -74,17 +74,10 @@ class RandomSampler(Sampler):
         self.dataset = dataset
         self.replacement = replacement
         self.num_samples = num_samples
-        self.indices = self._sample_indices()
+        if not replacement:
+            self.indices = self._sample_indices_no_replacement()
 
-    def _sample_indices(self) -> list[int]:
-        if self.replacement:
-            return np.random.randint(
-                0,
-                len(self.dataset),
-                size=self.num_samples,
-                dtype=np.int32,
-            ).tolist()
-
+    def _sample_indices_no_replacement(self) -> list[int]:
         indices = []
         while len(indices) < self.num_samples:
             permutation = list(range(len(self.dataset)))
@@ -92,10 +85,22 @@ class RandomSampler(Sampler):
             indices.extend(permutation[: self.num_samples - len(indices)])
         return indices
 
+    def _iter_with_replacement(self) -> Iterator[int]:
+        remaining = self.num_samples
+        n = len(self.dataset)
+        chunk_size = min(n, 1_000_000)
+        while remaining > 0:
+            batch = min(chunk_size, remaining)
+            yield from np.random.randint(0, n, size=batch).tolist()
+            remaining -= batch
+
     def on_epoch_start(self) -> None:
-        self.indices = self._sample_indices()
+        if not self.replacement:
+            self.indices = self._sample_indices_no_replacement()
 
     def __iter__(self) -> Iterator[int]:
+        if self.replacement:
+            return self._iter_with_replacement()
         return iter(self.indices)
 
     def __len__(self) -> int:

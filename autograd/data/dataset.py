@@ -1,5 +1,7 @@
 from typing import Any, Iterator, Sequence
 
+import numpy as np
+
 from autograd.backend import Array, xp
 from autograd.data.types import TokenWindowExample
 
@@ -111,7 +113,7 @@ class TokenWindowMapDataset(MapDataset):
         *,
         window_len: int,
     ) -> None:
-        self.stream = xp.array(data, dtype=xp.int32)
+        self.stream = np.asarray(data, dtype=np.int32)
         self.window_len = window_len
 
         # The edge case where len(stream) == window length, valid_window_count == 1, offset 0 is valid

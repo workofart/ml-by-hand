@@ -391,13 +391,13 @@ if __name__ == "__main__":
     )
 
     train_dataset = TokenWindowMapDataset(
-        data=xp.array(train_data, dtype=xp.int32),
+        data=train_data,
         # CausalLMWindowCollator shifts one token to build input_ids/labels,
         # so a length-T model context needs a raw window of length T + 1.
         window_len=trainer.model.max_seq_len + 1,
     )
     test_dataset = TokenWindowMapDataset(
-        data=xp.array(test_data, dtype=xp.int32),
+        data=test_data,
         # CausalLMWindowCollator shifts one token to build input_ids/labels,
         # so a length-T model context needs a raw window of length T + 1.
         window_len=trainer.model.max_seq_len + 1,
