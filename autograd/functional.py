@@ -1534,7 +1534,7 @@ class MeanSquaredLoss(Function):
 
         The gradient is given by:
         $$
-        \frac{\partial L}{\partial y_{pred}} = 2 (y_{pred} - y_{true})
+        \frac{\partial L}{\partial y_{pred}} = \frac{2}{N} (y_{pred} - y_{true})
         $$
 
         Args:
@@ -1543,7 +1543,8 @@ class MeanSquaredLoss(Function):
         Returns:
             xp.ndarray: The gradient with respect to y_pred.
         """
-        return 2 * (self.y_pred - self.y_true) * grad.data
+        n = self.y_pred.size
+        return (2 / n) * (self.y_pred - self.y_true) * grad.data
 
 
 def binary_cross_entropy(

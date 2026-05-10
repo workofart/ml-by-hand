@@ -86,9 +86,14 @@ class GPT2(nn.Module):
         # Final layernorm after all Transformer blocks
         # Section 3.2 "Model" in the paper
         self.layer_norm = nn.LayerNorm(hidden_size)
-        self.apply(
-            lambda m: self._scale_weights(m, num_decoder_layers * 2)
-        )  # there are 2 residual layers in each decoder sublayer
+        # Scale only the 2 residual output projections per block by 1/sqrt(2N) (GPT-2 paper §2.3):
+        # attention output (fc) and feedforward output (fc2). Q/K/V and fc1 are not scaled.
+        # Each residual block adds signals that accumulate with depth; scaling the output
+        # projections prevents activations from blowing up in magnitude early in training.
+        scale = float(num_decoder_layers * 2) ** 0.5
+        for sublayer in self.sublayers:
+            sublayer.multi_head_attention.fc.parameters["weight"].data /= scale
+            sublayer.feedforward.fc2.parameters["weight"].data /= scale
         if parameter_dtype is not None:
             for parameter in self.parameters.values():
                 parameter.data = parameter.data.astype(parameter_dtype)
@@ -128,16 +133,6 @@ class GPT2(nn.Module):
             output @ self.token_embedding.parameters["weight"].T
         )  # shape (batch_size, seq_len, vocab_size)
         return output
-
-    def _scale_weights(self, module: nn.Module, number_of_layers: int):
-        """
-        Scale the weights of the model by the square root of the number of layers.
-        Each residual block (decoder sublayer) in a deep stack might add up large signals,
-        especially as the stack gets deeper. This is especially true at the start of training,
-        so we want to prevent outputs from blowing up in magnitude early in training.
-        """
-        if module.__class__.__name__ == "Linear":
-            module._parameters["weight"].data /= float(number_of_layers) ** 0.5
 
 
 class DecoderSublayer(nn.Module):
@@ -331,7 +326,7 @@ if __name__ == "__main__":
                 "lr_decay_iters": 20000,
             },
         },
-        resume_epoch=None,
+        resume_epoch=7000,
         teacher_forcing=False,
         label_smoothing=0.1,
         eval_start_string="The",

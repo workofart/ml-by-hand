@@ -1122,6 +1122,22 @@ class Tensor:
     def __lt__(self, other: Union["Tensor", float, int]) -> Union[Array, bool]:
         return self.data < (other.data if isinstance(other, Tensor) else other)
 
+    def __le__(self, other: Union["Tensor", float, int]) -> Union[Array, bool]:
+        return self.data <= (other.data if isinstance(other, Tensor) else other)
+
+    def __gt__(self, other: Union["Tensor", float, int]) -> Union[Array, bool]:
+        return self.data > (other.data if isinstance(other, Tensor) else other)
+
+    def __ge__(self, other: Union["Tensor", float, int]) -> Union[Array, bool]:
+        return self.data >= (other.data if isinstance(other, Tensor) else other)
+
+    def __eq__(self, other: Union["Tensor", float, int]) -> Union[Array, bool]:
+        return self.data == (other.data if isinstance(other, Tensor) else other)
+
+    def __hash__(self) -> int:
+        # Hash is based on the id of the tensor object
+        return id(self)
+
 
 class _CheckpointFunction(Function):
     def __init__(
@@ -1190,22 +1206,6 @@ def checkpoint(
             f"checkpointed function must return a Tensor, got {type(output)!r}"
         )
     return Tensor(output.data, creator=creator, requires_grad=True)
-
-    def __le__(self, other: Union["Tensor", float, int]) -> Union[Array, bool]:
-        return self.data <= (other.data if isinstance(other, Tensor) else other)
-
-    def __gt__(self, other: Union["Tensor", float, int]) -> Union[Array, bool]:
-        return self.data > (other.data if isinstance(other, Tensor) else other)
-
-    def __ge__(self, other: Union["Tensor", float, int]) -> Union[Array, bool]:
-        return self.data >= (other.data if isinstance(other, Tensor) else other)
-
-    def __eq__(self, other: Union["Tensor", float, int]) -> Union[Array, bool]:
-        return self.data == (other.data if isinstance(other, Tensor) else other)
-
-    def __hash__(self) -> int:
-        # Hash is based on the id of the tensor object
-        return id(self)
 
 
 """
@@ -2042,11 +2042,12 @@ class Mean(Function):
             >>> m = x.mean()
             >>> # During backprop, the gradient is divided by the number of elements.
         """
-        # Use expand for gradient broadcasting
-        grad_expanded = grad.expand(
-            self.tensors[0].shape if self.keepdims else self.tensors[0].shape
-        )
-        grad_arr = grad_expanded.data
+        grad_arr = grad.data
+        # Re-insert reduced axes so broadcast_to works (mirrors Sum.backward)
+        if not self.keepdims and self.axis is not None:
+            for ax in sorted(self.axis):
+                grad_arr = xp.expand_dims(grad_arr, ax)
+        grad_arr = xp.broadcast_to(grad_arr, self.tensors[0].shape)
         # Scale gradient by number of elements
         if self.axis is not None:
             num_elements = xp.prod(
