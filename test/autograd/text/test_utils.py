@@ -1,6 +1,12 @@
+import json
+import os
 import re
+import tempfile
 from unittest import TestCase
 from unittest.mock import MagicMock, patch
+
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from autograd.backend import xp
 from autograd.text.utils import (
@@ -9,6 +15,7 @@ from autograd.text.utils import (
     create_vocabulary,
     generate,
     generate_text,
+    load_openwebtext,
     teacher_force,
     text_to_one_hot_and_sparse,
 )
@@ -25,6 +32,25 @@ class MockedBPE:
 
     def decode(self, tokens: list) -> str:
         return "".join("<|endoftext|>" if t == 9 else chr(t + 65) for t in tokens)
+
+
+class BytesResponse:
+    def __init__(self, content: bytes):
+        self.content = content
+        self.offset = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self, length: int = -1):
+        if length is None or length < 0:
+            length = len(self.content) - self.offset
+        chunk = self.content[self.offset : self.offset + length]
+        self.offset += len(chunk)
+        return chunk
 
 
 class TestTextUtils(TestCase):
@@ -58,6 +84,52 @@ class TestTextUtils(TestCase):
         self.assertIn("universe!", vocab)
         self.assertIn("<PAD>", vocab)
         self.assertIn("<UNK>", vocab)
+
+    @patch("autograd.text.utils.urlopen", create=True)
+    def test_load_openwebtext_uses_public_parquet_without_datasets(self, mock_urlopen):
+        first_shard = pa.BufferOutputStream()
+        pq.write_table(pa.Table.from_pylist([{"text": "alpha"}]), first_shard)
+        second_shard = pa.BufferOutputStream()
+        pq.write_table(pa.Table.from_pylist([{"text": "beta"}]), second_shard)
+        manifest = {
+            "parquet_files": [
+                {
+                    "split": "train",
+                    "url": "https://example.test/openwebtext/0000.parquet",
+                    "filename": "0000.parquet",
+                },
+                {
+                    "split": "train",
+                    "url": "https://example.test/openwebtext/0001.parquet",
+                    "filename": "0001.parquet",
+                },
+            ]
+        }
+        mock_urlopen.side_effect = [
+            BytesResponse(json.dumps(manifest).encode("utf-8")),
+            BytesResponse(first_shard.getvalue().to_pybytes()),
+            BytesResponse(second_shard.getvalue().to_pybytes()),
+        ]
+
+        real_import = __import__
+
+        def import_without_datasets(name, *args, **kwargs):
+            if name == "datasets":
+                raise ImportError("datasets is intentionally unavailable")
+            return real_import(name, *args, **kwargs)
+
+        cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chdir(tmpdir)
+            try:
+                with patch("builtins.__import__", side_effect=import_without_datasets):
+                    source = load_openwebtext(parquet_shards_per_batch=2)
+                    data = list(source)
+            finally:
+                os.chdir(cwd)
+
+        self.assertEqual(data, ["alpha<|endoftext|>", "beta<|endoftext|>"])
+        self.assertEqual(mock_urlopen.call_count, 3)
 
     def test_text_to_one_hot_and_sparse(self):
         texts = ["I love apples", "I love apples too"]

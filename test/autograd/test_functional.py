@@ -465,3 +465,20 @@ class TestMeanSquaredLoss(TestCase):
         mse_loss.backward()
         mse_loss_torch.backward()
         assert allclose(self.y_pred.grad.data, self.y_pred_torch.grad.detach().numpy())
+
+    def test_mean_squared_loss_backward_nonzero(self):
+        # Regression: y_pred==y_true makes grad zero regardless of /N factor, masking the bug.
+        # Use y_pred != y_true so the 1/N factor is observable.
+        y_pred = Tensor(
+            xp.array([1.0, 2.0, 3.0, 4.0], dtype=xp.float32), requires_grad=True
+        )
+        y_true = xp.array([1.5, 2.5, 2.5, 3.5], dtype=xp.float32)
+        functional.mean_squared_loss(y_pred, y_true).backward()
+
+        y_pred_torch = torch.tensor(
+            [1.0, 2.0, 3.0, 4.0], dtype=torch.float32, requires_grad=True
+        )
+        y_true_torch = torch.tensor([1.5, 2.5, 2.5, 3.5], dtype=torch.float32)
+        torch.nn.functional.mse_loss(y_pred_torch, y_true_torch).backward()
+
+        assert allclose(y_pred.grad.data, y_pred_torch.grad.detach().numpy())

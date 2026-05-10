@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from typing import Any, Sequence, Tuple
 
+import numpy as np
+
 from autograd.backend import Array, xp
 from autograd.data.types import CausalLMBatch, Seq2SeqBatch, TokenWindowExample
 from autograd.functional import IGNORE_INDEX
@@ -130,19 +132,19 @@ class OneHotCollator(Collator):
 
 class CausalLMWindowCollator(Collator):
     def __call__(self, examples: Sequence[TokenWindowExample]) -> CausalLMBatch:
-        stream = examples[0].stream
+        stream = np.asarray(examples[0].stream)
         window_len = examples[0].window_len
         if window_len < 2:
             raise ValueError("window_len must be >= 2 for causal LM shifting")
 
-        offsets = xp.array([ex.offset for ex in examples], dtype=xp.int32)
-        positions = xp.arange(window_len, dtype=xp.int32)
+        offsets = np.array([ex.offset for ex in examples], dtype=np.int64)
+        positions = np.arange(window_len, dtype=np.int32)
 
         windows = stream[offsets[:, None] + positions[None, :]]
 
         return CausalLMBatch(
-            input_ids=windows[:, :-1],
-            labels=windows[:, 1:],
+            input_ids=xp.array(windows[:, :-1]),
+            labels=xp.array(windows[:, 1:]),
             loss_total_weight=xp.array(
                 len(examples) * (window_len - 1),
                 dtype=xp.float32,

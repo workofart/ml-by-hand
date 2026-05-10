@@ -664,6 +664,19 @@ class TestTensorMean(TestTensor):
         # The gradient for each element should be 1/4 = 0.25.
         assert allclose(t.grad.data, [0.25, 0.25, 0.25, 0.25])
 
+    def test_non_square_mean_axis1_backward(self):
+        # Regression: non-square matrix with axis=1, keepdims=False previously crashed
+        # because the reduced grad shape (3,) couldn't broadcast to (3,2) without
+        # re-inserting axis 1 first. Square matrices (2,2) accidentally worked.
+        data = xp.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+        x = Tensor(data, requires_grad=True)
+        m = x.mean(axis=1)  # shape (3,2) -> (3,)
+        m.backward()
+
+        xt = torch.tensor(data, requires_grad=True)
+        xt.mean(dim=1).backward(torch.ones(3))
+        assert allclose(x.grad.data, xt.grad.numpy())
+
 
 class TestTensorMaximum(TestTensor):
     def test_maximum_basic_vector(self):

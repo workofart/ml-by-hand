@@ -86,9 +86,14 @@ class GPT2(nn.Module):
         # Final layernorm after all Transformer blocks
         # Section 3.2 "Model" in the paper
         self.layer_norm = nn.LayerNorm(hidden_size)
-        self.apply(
-            lambda m: self._scale_weights(m, num_decoder_layers * 2)
-        )  # there are 2 residual layers in each decoder sublayer
+        # Scale only the 2 residual output projections per block by 1/sqrt(2N) (GPT-2 paper §2.3):
+        # attention output (fc) and feedforward output (fc2). Q/K/V and fc1 are not scaled.
+        # Each residual block adds signals that accumulate with depth; scaling the output
+        # projections prevents activations from blowing up in magnitude early in training.
+        scale = float(num_decoder_layers * 2) ** 0.5
+        for sublayer in self.sublayers:
+            sublayer.multi_head_attention.fc.parameters["weight"].data /= scale
+            sublayer.feedforward.fc2.parameters["weight"].data /= scale
         if parameter_dtype is not None:
             for parameter in self.parameters.values():
                 parameter.data = parameter.data.astype(parameter_dtype)
@@ -128,16 +133,6 @@ class GPT2(nn.Module):
             output @ self.token_embedding.parameters["weight"].T
         )  # shape (batch_size, seq_len, vocab_size)
         return output
-
-    def _scale_weights(self, module: nn.Module, number_of_layers: int):
-        """
-        Scale the weights of the model by the square root of the number of layers.
-        Each residual block (decoder sublayer) in a deep stack might add up large signals,
-        especially as the stack gets deeper. This is especially true at the start of training,
-        so we want to prevent outputs from blowing up in magnitude early in training.
-        """
-        if module.__class__.__name__ == "Linear":
-            module._parameters["weight"].data /= float(number_of_layers) ** 0.5
 
 
 class DecoderSublayer(nn.Module):
@@ -302,14 +297,53 @@ if __name__ == "__main__":
         ),
     )
 
-    CONFIG = WIKI_CONFIG
+    OPENWEBTEXT_CONFIG = TransformerTrainingConfig(
+        training_run_name="openwebtext",
+        dataset_name="openwebtext",
+        max_steps=25000,
+        max_eval_steps=20,
+        checkpoint_freq=1000,
+        report_every_steps=50,
+        global_batch_size=76,
+        micro_batch_size=19,
+        max_grad_norm=1.0,
+        model_kwargs={
+            "num_attention_heads": 9,
+            "hidden_size": 576,
+            "dropout_prob": 0.1,
+            "max_seq_len": 1024,
+            "num_decoder_layers": 8,
+            "activation_checkpointing": False,
+            "parameter_dtype": "bfloat16",
+        },
+        optimizer_kwargs={
+            "lr": 1e-3,
+            "beta2": 0.99,
+            "weight_decay": 0.1,
+            "lr_scheduler_kwargs": {
+                "lr_scheduler_cls": optim.CosineScheduler,
+                "warmup_steps": 3750,
+                "lr_decay_iters": 20000,
+            },
+        },
+        resume_epoch=7000,
+        teacher_forcing=False,
+        label_smoothing=0.1,
+        eval_start_string="The",
+        custom_bpe=CustomBpeConfig(
+            num_merges=24000,
+            encoded_data_path="training_data/bpe_24000_openwebtext_encoded_data.npz",
+            vocab_path="training_data/openwebtext_vocab_24000.pkl",
+            overwrite_encoded_data=False,
+            overwrite_vocabulary_file=False,
+            split_token="<|endoftext|>",
+            parquet_shards_per_batch=32,
+        ),
+    )
+
+    CONFIG = OPENWEBTEXT_CONFIG
 
     logger = logging.getLogger(__name__)
-
-    # Load some data
-    # Note: Please supply the correct data for your model
-    # data = text_utils.load_shakespeare_mini()
-    data = text_utils.load_wiki_simple()
 
     if CONFIG.custom_bpe:
         # Create a Byte Pair Encoder and prepare data
@@ -317,11 +351,25 @@ if __name__ == "__main__":
             num_merges=CONFIG.custom_bpe.num_merges,
             vocab_file_path=CONFIG.custom_bpe.vocab_path,
             encoded_data_path=CONFIG.custom_bpe.encoded_data_path,
+            n_workers=CONFIG.custom_bpe.n_workers,
         )
+        if CONFIG.dataset_name == "openwebtext":
+            raw_text = "".join(
+                text_utils.load_openwebtext(
+                    parquet_shards_per_batch=(
+                        CONFIG.custom_bpe.parquet_shards_per_batch
+                    ),
+                )
+            )
+        elif CONFIG.dataset_name == "wiki_simple_english":
+            raw_text = text_utils.load_wiki_simple()
+        else:
+            raw_text = text_utils.load_shakespeare_mini()
         encoded_data = bpe.prepare_data(
-            raw_text=data,
-            overwrite_encoded_data=CONFIG.custom_bpe.overwrite_encoded_data,
+            raw_text=raw_text,
             overwrite_vocabulary_file=CONFIG.custom_bpe.overwrite_vocabulary_file,
+            overwrite_encoded_data=CONFIG.custom_bpe.overwrite_encoded_data,
+            split_token=CONFIG.custom_bpe.split_token,
         )
     else:
         raise ValueError(
@@ -343,13 +391,13 @@ if __name__ == "__main__":
     )
 
     train_dataset = TokenWindowMapDataset(
-        data=xp.array(train_data, dtype=xp.int32),
+        data=train_data,
         # CausalLMWindowCollator shifts one token to build input_ids/labels,
         # so a length-T model context needs a raw window of length T + 1.
         window_len=trainer.model.max_seq_len + 1,
     )
     test_dataset = TokenWindowMapDataset(
-        data=xp.array(test_data, dtype=xp.int32),
+        data=test_data,
         # CausalLMWindowCollator shifts one token to build input_ids/labels,
         # so a length-T model context needs a raw window of length T + 1.
         window_len=trainer.model.max_seq_len + 1,
