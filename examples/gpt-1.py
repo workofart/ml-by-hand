@@ -177,6 +177,7 @@ if __name__ == "__main__":
             vocab_path="training_data/shakespeare_vocab_0.pkl",
             overwrite_encoded_data=False,
             overwrite_vocabulary_file=False,
+            start_token="<SOS>",
             split_token="<|endoftext|>",
         ),
     )
@@ -193,10 +194,9 @@ if __name__ == "__main__":
         )
 
         encoded_data = bpe.prepare_data(
-            raw_text=data,
+            [data],
             overwrite_encoded_data=CONFIG.custom_bpe.overwrite_encoded_data,
             overwrite_vocabulary_file=CONFIG.custom_bpe.overwrite_vocabulary_file,
-            split_token=CONFIG.custom_bpe.split_token,
         )
     else:
         raise ValueError(
@@ -219,13 +219,13 @@ if __name__ == "__main__":
     )
 
     train_dataset = TokenWindowMapDataset(
-        data=xp.array(train_data, dtype=xp.int32),
+        data=train_data,
         # CausalLMWindowCollator shifts one token to build input_ids/labels,
         # so a length-T model context needs a raw window of length T + 1.
         window_len=trainer.model.max_seq_len + 1,
     )
     test_dataset = TokenWindowMapDataset(
-        data=xp.array(test_data, dtype=xp.int32),
+        data=test_data,
         # CausalLMWindowCollator shifts one token to build input_ids/labels,
         # so a length-T model context needs a raw window of length T + 1.
         window_len=trainer.model.max_seq_len + 1,

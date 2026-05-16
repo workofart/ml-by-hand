@@ -114,6 +114,7 @@ class CustomBpeConfig:
     vocab_path: str
     overwrite_encoded_data: bool
     overwrite_vocabulary_file: bool
+    start_token: str
     split_token: str
     parquet_shards_per_batch: int = 1
     n_workers: Optional[int] = None

@@ -123,13 +123,56 @@ class TestTextUtils(TestCase):
             os.chdir(tmpdir)
             try:
                 with patch("builtins.__import__", side_effect=import_without_datasets):
-                    source = load_openwebtext(parquet_shards_per_batch=2)
+                    source = load_openwebtext(
+                        parquet_shards_per_batch=2,
+                        start_token="<SOS>",
+                        split_token="<|endoftext|>",
+                    )
                     data = list(source)
             finally:
                 os.chdir(cwd)
 
-        self.assertEqual(data, ["alpha<|endoftext|>", "beta<|endoftext|>"])
+        self.assertEqual(
+            data,
+            ["<SOS>alpha<|endoftext|>", "<SOS>beta<|endoftext|>"],
+        )
         self.assertEqual(mock_urlopen.call_count, 3)
+
+    @patch("autograd.text.utils.urlopen", create=True)
+    def test_load_openwebtext_can_wrap_docs_with_start_and_split_tokens(
+        self, mock_urlopen
+    ):
+        shard = pa.BufferOutputStream()
+        pq.write_table(pa.Table.from_pylist([{"text": "alpha"}]), shard)
+        manifest = {
+            "parquet_files": [
+                {
+                    "split": "train",
+                    "url": "https://example.test/openwebtext/0000.parquet",
+                    "filename": "0000.parquet",
+                },
+            ]
+        }
+        mock_urlopen.side_effect = [
+            BytesResponse(json.dumps(manifest).encode("utf-8")),
+            BytesResponse(shard.getvalue().to_pybytes()),
+        ]
+
+        cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.chdir(tmpdir)
+            try:
+                source = load_openwebtext(
+                    parquet_shards_per_batch=1,
+                    start_token="<SOS>",
+                    split_token="<|endoftext|>",
+                )
+                data = list(source)
+            finally:
+                os.chdir(cwd)
+
+        self.assertEqual(data, ["<SOS>alpha<|endoftext|>"])
+        self.assertEqual(mock_urlopen.call_count, 2)
 
     def test_text_to_one_hot_and_sparse(self):
         texts = ["I love apples", "I love apples too"]

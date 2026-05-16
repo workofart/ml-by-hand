@@ -94,6 +94,7 @@ if __name__ == "__main__":
             ),
             overwrite_encoded_data=False,
             overwrite_vocabulary_file=False,
+            start_token="<SOS>",
             split_token="<|endoftext|>",
         ),
     )

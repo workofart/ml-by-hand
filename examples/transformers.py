@@ -614,6 +614,7 @@ if __name__ == "__main__":
             vocab_path="training_data/wikisum_seq2seq_vocab_0.pkl",
             overwrite_encoded_data=False,
             overwrite_vocabulary_file=False,
+            start_token="<SOS>",
             split_token="<|endoftext|>",
         ),
     )
@@ -641,7 +642,7 @@ if __name__ == "__main__":
             + [target_text for _, target_text in train_pairs]
         )
         bpe.train_vocabulary(
-            train_corpus,
+            [train_corpus],
             overwrite_saved_file=CONFIG.custom_bpe.overwrite_vocabulary_file,
         )
     else:
@@ -661,8 +662,8 @@ if __name__ == "__main__":
         forward_fn=TransformerForwardFn(),
     )
 
-    pad_idx = bpe.encode("<PAD>", allowed_special={"<PAD>"})[0]
-    sos_idx = bpe.encode("<SOS>", allowed_special={"<SOS>"})[0]
+    pad_idx = bpe.encode("<PAD>")[0]
+    sos_idx = bpe.encode("<SOS>")[0]
     train_dataset = build_seq2seq_dataset_from_text_pairs(
         train_pairs,
         bpe,
