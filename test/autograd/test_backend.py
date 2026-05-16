@@ -16,7 +16,9 @@ from autograd.nn import extract_windows
 from autograd.tensor import Tensor
 
 
-def _load_backend_module(monkeypatch, *, env_backend=None, fake_cupy=None):
+def _load_backend_module(
+    monkeypatch, *, env_backend=None, fake_cupy=None, fake_ml_dtypes=None
+):
     backend_path = Path(__file__).resolve().parents[2] / "autograd" / "backend.py"
     real_import_module = importlib.import_module
 
@@ -30,6 +32,8 @@ def _load_backend_module(monkeypatch, *, env_backend=None, fake_cupy=None):
             raise ModuleNotFoundError(module_name)
         if module_name == "cupy" and fake_cupy is not None:
             return fake_cupy
+        if module_name == "ml_dtypes" and fake_ml_dtypes is not None:
+            return fake_ml_dtypes
         return real_import_module(module_name, package)
 
     monkeypatch.setattr(importlib, "import_module", tracking_import)
@@ -56,6 +60,7 @@ def _fake_cupy_module(device_count: int):
         ndarray=np.ndarray,
         array=np.array,
         asarray=np.asarray,
+        float16=np.float16,
         random=random,
         cuda=SimpleNamespace(
             runtime=SimpleNamespace(getDeviceCount=lambda: device_count)
@@ -252,3 +257,16 @@ def test_cupy_override_requires_cuda_device(monkeypatch):
             env_backend="cupy",
             fake_cupy=_fake_cupy_module(device_count=0),
         )
+
+
+def test_cupy_low_precision_includes_ml_dtypes_bfloat16(monkeypatch):
+    fake_ml_dtypes = SimpleNamespace(bfloat16=np.dtype("V2"))
+
+    module = _load_backend_module(
+        monkeypatch,
+        env_backend="cupy",
+        fake_cupy=_fake_cupy_module(device_count=1),
+        fake_ml_dtypes=fake_ml_dtypes,
+    )
+
+    assert fake_ml_dtypes.bfloat16 in module.LOW_PRECISION_FLOAT_DTYPES
