@@ -67,7 +67,7 @@ class GRPOTrainingConfig(GenericTrainingConfig):
 # 5. MapDataset stores the already-generated RolloutGroup.
 # 6. DataLoader batches RolloutGroup objects and calls GRPOCollator.
 # 7. GRPOCollator emits GRPOBatch, where rows = group_size for one task.
-# 8. GRPOTrainer(AbstractTrainer)._compute_loss computes the GRPO objective.
+# 8. GRPOTrainer(AbstractTrainer)._forward_and_loss computes the GRPO objective.
 # 9. AbstractTrainer.fit owns backward(), gradient accumulation, clipping,
 #     optimizer.step(), checkpointing, and reporting.
 #
@@ -203,21 +203,24 @@ class GRPOCollator(Collator):
                 batch_advantages.append(advantages)
 
         return GRPOBatch(
-            input_ids=xp.stack(batch_input_ids, axis=0),
-            labels=xp.stack(batch_labels, axis=0),
-            sampled_token_logprobs=xp.stack(batch_sampled_token_logprobs, axis=0),
-            generated_token_mask=xp.stack(batch_generated_token_mask, axis=0),
-            advantages=xp.stack(batch_advantages, axis=0),
+            input_ids=xp.array(np.stack(batch_input_ids, axis=0)),
+            labels=xp.array(np.stack(batch_labels, axis=0)),
+            sampled_token_logprobs=xp.array(
+                np.stack(batch_sampled_token_logprobs, axis=0)
+            ),
+            generated_token_mask=xp.array(np.stack(batch_generated_token_mask, axis=0)),
+            advantages=xp.array(np.stack(batch_advantages, axis=0)),
         )
 
     def _build_row(
         self,
         prompt_tokens: Array,
         sample: Sample,
-    ) -> tuple[Array, Array, Array, Array, Array]:
-        completion_tokens = sample.completion_tokens
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        completion_tokens = np.asarray(sample.completion_tokens)
 
-        prompt_len = len(prompt_tokens)
+        prompt_np = np.asarray(prompt_tokens, dtype=np.int32)
+        prompt_len = len(prompt_np)
         completion_len = len(completion_tokens)
         row_len = prompt_len + completion_len
 
@@ -226,28 +229,25 @@ class GRPOCollator(Collator):
                 f"GRPO row length {row_len} exceeds max_tokens {self.max_tokens}"
             )
 
-        tokens = xp.concatenate(
-            [prompt_tokens, completion_tokens],
-            axis=0,
-        )
+        tokens = np.concatenate([prompt_np, completion_tokens], axis=0)
 
         # Before padding and causal shift, align all per-token rows on the
         # prompt+completion sequence. Example:
         # tokens       = [prompt_token_0, prompt_token_1, completion_token_0]
         # generated_token_mask = [             0,              0,                  1]
         # sampled_token_logprobs = [           0.0,            0.0,  completion_logprob_0]
-        generated_token_mask = xp.concatenate(
+        generated_token_mask = np.concatenate(
             [
-                xp.zeros(prompt_len, dtype=xp.int32),
-                xp.ones(completion_len, dtype=xp.int32),
+                np.zeros(prompt_len, dtype=np.int32),
+                np.ones(completion_len, dtype=np.int32),
             ],
             axis=0,
         )
 
-        aligned_sampled_token_logprobs = xp.concatenate(
+        aligned_sampled_token_logprobs = np.concatenate(
             [
-                xp.zeros(prompt_len, dtype=xp.float32),
-                sample.sampled_token_logprobs,
+                np.zeros(prompt_len, dtype=np.float32),
+                np.asarray(sample.sampled_token_logprobs, dtype=np.float32),
             ],
             axis=0,
         )
@@ -255,7 +255,7 @@ class GRPOCollator(Collator):
         if sample.advantage is None:
             raise ValueError("sample.advantage must be set before collation")
 
-        aligned_advantages = generated_token_mask.astype(xp.float32) * float(
+        aligned_advantages = generated_token_mask.astype(np.float32) * float(
             sample.advantage
         )
 
@@ -447,7 +447,7 @@ class RolloutGenerator:
         environment: Environment,
     ) -> RolloutGroup:
         task_prompt: str = environment.render_task(task)
-        prompt_tokens = xp.array(tokenizer.encode(task_prompt), dtype=xp.int32)
+        prompt_tokens = np.array(tokenizer.encode(task_prompt), dtype=np.int32)
         samples = generation(
             model,
             prompt_tokens=prompt_tokens,
@@ -516,7 +516,7 @@ class GRPOTrainer(AbstractTrainer):
     Each one-task GRPOBatch contains group_size rows.
     """
 
-    def _compute_loss(self, batch: GRPOBatch):
+    def _forward_and_loss(self, batch: GRPOBatch):
         """
         Compute the GRPO objective from a trainer-facing batch.
 
@@ -557,7 +557,7 @@ class GRPOTrainer(AbstractTrainer):
         self.optimizer.zero_grad()
 
         state = TrainingState()
-        loss = self._compute_loss(batch)
+        loss = self._forward_and_loss(batch)
         total_weight = self._loss_total_weight(batch)
         loss.backward()
         state.record_loss(loss, total_weight=total_weight)
@@ -666,9 +666,9 @@ def generation(
     # boundaries at the rendered-prompt/completion join.
     return [
         Sample(
-            completion_tokens=xp.array(result.completion_tokens, dtype=xp.int32),
+            completion_tokens=np.array(result.completion_tokens, dtype=np.int32),
             completion_text=tokenizer.decode(result.completion_tokens),
-            sampled_token_logprobs=xp.array(result.logprobs, dtype=xp.float32),
+            sampled_token_logprobs=np.array(result.logprobs, dtype=np.float32),
             reward=None,
             advantage=None,
             metadata={
@@ -732,7 +732,7 @@ def main():
     rollout_generator = RolloutGenerator(TRAIN_CONFIG)
     collator = GRPOCollator(
         max_tokens=trainer.model.max_seq_len,
-        pad_idx=bpe.encode("<|pad|>")[0],
+        pad_idx=bpe.encode("<PAD>")[0],
     )
     report_every_steps = TRAIN_CONFIG.report_every_steps or TRAIN_CONFIG.checkpoint_freq
 

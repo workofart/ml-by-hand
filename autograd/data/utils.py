@@ -1,41 +1,41 @@
 import csv
 import os
-from typing import Any, Optional, Sequence, Tuple, Union, cast
+from typing import Any, Optional, Sequence, Union, cast
 from urllib.request import urlopen
 
+import numpy as np
 from pyarrow import parquet as pq  # pyright: ignore[reportMissingImports]
 
-from autograd.backend import Array, xp
 from autograd.data.dataset import PairedMapDataset
 
 
 def train_test_split(
-    X: Array,
-    y: Array,
-    test_size: float = 0.2,
+    *arrays,
+    test_size: float = 0.1,
+    shuffle: bool = True,
     random_state: Optional[int] = None,
-) -> Tuple[Array, Array, Array, Array]:
+) -> list:
+    """Split arrays into train and test subsets.
+
+    Returns a flat list: [arr0_train, arr0_test, arr1_train, arr1_test, ...].
     """
-    Splits arrays or matrices into random train and test subsets.
-
-    Args:
-        X (Array): Feature array.
-        y (Array): Labels array.
-        test_size (float): Proportion of the dataset to include in the test split.
-        random_state (Optional[int]): Seed for the random number generator.
-
-    Returns:
-        Tuple[Array, Array, Array, Array]:
-            The training features, test features, training labels, and test labels.
-    """
-    if random_state is not None:
-        xp.random.seed(random_state)
-    indices = xp.random.permutation(X.shape[0])
-
-    num_test = int(len(indices) * test_size)
-    X_train, X_test = X[indices[num_test:]], X[indices[:num_test]]
-    y_train, y_test = y[indices[num_test:]], y[indices[:num_test]]
-    return X_train, X_test, y_train, y_test
+    if not arrays:
+        raise ValueError("need at least one array to split")
+    n = len(arrays[0])
+    split = int(n * test_size)
+    result = []
+    if shuffle:
+        idx = np.random.RandomState(random_state).permutation(n)
+        for arr in arrays:
+            arr = np.asarray(arr)
+            result.append(arr[idx[split:]])
+            result.append(arr[idx[:split]])
+    else:
+        for arr in arrays:
+            arr = np.asarray(arr)
+            result.append(arr[split:])
+            result.append(arr[:split])
+    return result
 
 
 def load_data(
@@ -87,13 +87,13 @@ def build_seq2seq_dataset_from_text_pairs(
     label_sequences = []
 
     for source_text, target_text in text_pairs:
-        source_tokens = xp.array(bpe.encode(source_text), dtype=xp.int32)
-        target_tokens = xp.array(bpe.encode(target_text), dtype=xp.int32)
+        source_tokens = np.array(bpe.encode(source_text), dtype=np.int32)
+        target_tokens = np.array(bpe.encode(target_text), dtype=np.int32)
         if target_suffix:
-            target_tokens = xp.concatenate(
+            target_tokens = np.concatenate(
                 [
                     target_tokens,
-                    xp.array(bpe.encode(target_suffix), dtype=xp.int32),
+                    np.array(bpe.encode(target_suffix), dtype=np.int32),
                 ],
                 axis=0,
             )
@@ -112,5 +112,4 @@ def build_seq2seq_dataset_from_text_pairs(
         label_sequences,
         input_key="input_ids",
         target_key="labels",
-        dtype=xp.int32,
     )

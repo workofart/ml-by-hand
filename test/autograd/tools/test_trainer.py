@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
+import numpy as np
+
 from autograd.backend import xp
 from autograd.data.collator import FixedLengthCausalLMCollator
 from autograd.data.data_loader import DataLoader
@@ -348,10 +350,10 @@ class TestSimpleTrainer(BaseTrainerTest):
         # 2 epochs * 2 train batches = 4 steps
         self.assertEqual(self.trainer.optimizer.step_call_count, 4)
 
-    def test_compute_loss_returns_tensor(self):
-        """Check that compute_loss returns the expected scalar Tensor."""
+    def test_forward_and_loss_returns_tensor(self):
+        """Check that _forward_and_loss returns the expected scalar Tensor."""
         batch = next(iter(self.train_data))
-        loss = self.trainer._compute_loss(batch)
+        loss = self.trainer._forward_and_loss(batch)
         self.assertAlmostEqual(float(loss.item()), 1.23, places=5)
 
     def test_save_metrics_persists_none_as_nan(self):
@@ -559,12 +561,12 @@ class TestSimpleTrainer(BaseTrainerTest):
         self.assertEqual(item_call_count, 0)
 
     @patch("autograd.tools.trainer.tqdm")
-    def test_fit_logs_fit_plan_before_first_compute_loss(self, mock_tqdm):
+    def test_fit_logs_fit_plan_before_first_forward_and_loss(self, mock_tqdm):
         self.config.max_epochs = None
         self.config.max_steps = 3
         self.config.checkpoint_freq = 10
         mock_tqdm.return_value = FakeTqdm()
-        self.trainer._compute_loss = MagicMock(side_effect=RuntimeError("boom"))
+        self.trainer._forward_and_loss = MagicMock(side_effect=RuntimeError("boom"))
 
         with self.assertLogs("autograd.tools.trainer", level="INFO") as captured:
             with self.assertRaisesRegex(RuntimeError, "boom"):
@@ -1840,10 +1842,10 @@ class TestLLMTrainer(BaseTrainerTest):
 
         return float(xp.to_scalar(trainer.model.parameters["weight"].data[0]))
 
-    def test_compute_loss_returns_tensor(self):
-        """Check that compute_loss returns the constant scalar Tensor."""
+    def test_forward_and_loss_returns_tensor(self):
+        """Check that _forward_and_loss returns the constant scalar Tensor."""
         batch = next(iter(self.train_data))
-        loss = self.trainer._compute_loss(batch)
+        loss = self.trainer._forward_and_loss(batch)
         self.assertAlmostEqual(float(loss.item()), 24.6, places=5)
 
     def test_evaluate_runs_eval_callbacks_and_returns_val_loss(self):
@@ -1887,13 +1889,13 @@ class TestLLMTrainer(BaseTrainerTest):
         self.config.label_smoothing = 0.1
         batch = next(iter(self.train_data))
 
-        self.trainer._compute_loss(batch)
+        self.trainer._forward_and_loss(batch)
         self.trainer.evaluate(self.val_loader)
 
         self.assertEqual(self.loss_fn.call_args_list[0].kwargs["label_smoothing"], 0.1)
         self.assertEqual(self.loss_fn.call_args_list[1].kwargs["label_smoothing"], 0.0)
 
-    def test_compute_loss_supports_prompt_masked_causal_lm_batches(self):
+    def test_forward_and_loss_supports_prompt_masked_causal_lm_batches(self):
         bpe = MockBPE()
         pad_idx = bpe.encode("<PAD>", allowed_special={"<PAD>"})[0]
         loader = DataLoader(
@@ -1902,7 +1904,7 @@ class TestLLMTrainer(BaseTrainerTest):
                 [xp.array([0, 0, 0, 0, 1, 1, 1], dtype=xp.int32)],
                 input_key="tokens",
                 target_key="loss_mask",
-                dtype=xp.int32,
+                dtype=np.int32,
             ),
             batch_size=1,
             collator=FixedLengthCausalLMCollator(
@@ -1940,7 +1942,7 @@ class TestLLMTrainer(BaseTrainerTest):
             label_smoothing=0.0,
         )
 
-        train_loss = trainer._compute_loss(batch)
+        train_loss = trainer._forward_and_loss(batch)
         eval_state = trainer.evaluate(loader)
         row = trainer._metrics_row(TrainingState(), eval_state=eval_state)
 

@@ -4,6 +4,8 @@ import logging
 import sys
 from pathlib import Path
 
+import numpy as np
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -15,6 +17,7 @@ from autograd.data.data_loader import DataLoader
 from autograd.data.dataset import TokenWindowMapDataset
 from autograd.data.sampler import RandomSampler, SequentialSampler
 from autograd.data.types import CausalLMBatch
+from autograd.data.utils import train_test_split
 from autograd.tensor import Tensor, checkpoint
 from autograd.text import utils as text_utils
 from autograd.text.tokenizer import BytePairEncoder
@@ -180,7 +183,7 @@ class DecoderSublayer(nn.Module):
         a = self.layer_norm1(x)
 
         x = x + self.multi_head_attention(a, a, a, is_causal=True)
-        if low_precision_input:
+        if low_precision_input and x.data.dtype != input_dtype:
             # Dense attention can promote through its fp32 mask path; cast the residual
             # stream back so later matmuls keep the intended low-precision activations.
             x = x.astype(input_dtype)
@@ -188,7 +191,7 @@ class DecoderSublayer(nn.Module):
         # Pre-norm before feed-forward
         b = self.layer_norm2(x)
         x = x + self.feedforward(b)
-        if low_precision_input:
+        if low_precision_input and x.data.dtype != input_dtype:
             # Linear bias/addition can also promote; preserve the block's input dtype.
             x = x.astype(input_dtype)
         return x
@@ -246,10 +249,11 @@ if __name__ == "__main__":
         # Double-check whether we want to overwrite the encoded_data and vocabulary
         custom_bpe=CustomBpeConfig(
             num_merges=3000,
-            encoded_data_path="training_data/bpe_3000_shakespeare_encoded_data.npz",
+            encoded_data_path="training_data/bpe_3000_shakespeare_bos_eos_encoded_data.npz",
             vocab_path="training_data/shakespeare_vocab_3000.pkl",
             overwrite_encoded_data=False,
             overwrite_vocabulary_file=False,
+            start_token="<SOS>",
             split_token="<|endoftext|>",
         ),
     )
@@ -261,8 +265,8 @@ if __name__ == "__main__":
         max_eval_steps=20,
         checkpoint_freq=1000,
         report_every_steps=50,
-        global_batch_size=32,
-        micro_batch_size=8,
+        global_batch_size=76,
+        micro_batch_size=19,
         max_grad_norm=1.0,
         model_kwargs={
             "num_attention_heads": 9,  # GPT-2 small uses 12
@@ -289,10 +293,11 @@ if __name__ == "__main__":
         eval_start_string="April is",
         custom_bpe=CustomBpeConfig(
             num_merges=12000,
-            encoded_data_path="training_data/bpe_12000_wiki_simple_encoded_data.npz",
+            encoded_data_path="training_data/bpe_12000_wiki_simple_bos_eos_encoded_data.npz",
             vocab_path="training_data/wikipedia_simpleenglish_vocab_12000.pkl",
             overwrite_encoded_data=False,
             overwrite_vocabulary_file=False,
+            start_token="<SOS>",
             split_token="<|endoftext|>",
         ),
     )
@@ -331,11 +336,12 @@ if __name__ == "__main__":
         label_smoothing=0.1,
         eval_start_string="The",
         custom_bpe=CustomBpeConfig(
-            num_merges=24000,
-            encoded_data_path="training_data/bpe_24000_openwebtext_encoded_data.npz",
-            vocab_path="training_data/openwebtext_vocab_24000.pkl",
+            num_merges=32768,
+            encoded_data_path="training_data/bpe_32768_openwebtext_encoded_data.npz",
+            vocab_path="training_data/openwebtext_vocab_32768.pkl",
             overwrite_encoded_data=False,
             overwrite_vocabulary_file=False,
+            start_token="<SOS>",
             split_token="<|endoftext|>",
             parquet_shards_per_batch=32,
         ),
@@ -352,33 +358,61 @@ if __name__ == "__main__":
             vocab_file_path=CONFIG.custom_bpe.vocab_path,
             encoded_data_path=CONFIG.custom_bpe.encoded_data_path,
             n_workers=CONFIG.custom_bpe.n_workers,
+            min_word_freq=5,  # this is about 99.7% coverage
         )
-        if CONFIG.dataset_name == "openwebtext":
-            raw_text = "".join(
-                text_utils.load_openwebtext(
+        encoded_npy_path = Path(bpe.mmap_path)
+        vocab_path = Path(CONFIG.custom_bpe.vocab_path)
+        use_cached_encoded_data = (
+            encoded_npy_path.exists()
+            and vocab_path.exists()
+            and not CONFIG.custom_bpe.overwrite_encoded_data
+            and not CONFIG.custom_bpe.overwrite_vocabulary_file
+        )
+        if use_cached_encoded_data:
+            logger.info(
+                "Found existing encoded data at '%s', loading it without fetching raw data.",
+                encoded_npy_path,
+            )
+            encoded_data = np.load(str(encoded_npy_path), mmap_mode="r")
+            logger.info(f"Vocabulary size: {bpe.n_vocab}")
+            logger.info(f"Encoded data length: {len(encoded_data)}")
+        else:
+            if CONFIG.dataset_name == "openwebtext":
+                text_source = text_utils.load_openwebtext(
                     parquet_shards_per_batch=(
                         CONFIG.custom_bpe.parquet_shards_per_batch
                     ),
+                    start_token=CONFIG.custom_bpe.start_token,
+                    split_token=CONFIG.custom_bpe.split_token,
                 )
+            elif CONFIG.dataset_name == "wiki_simple_english":
+                text_source = [
+                    text_utils.format_document_for_causal_lm(
+                        text_utils.load_wiki_simple(),
+                        start_token=CONFIG.custom_bpe.start_token,
+                        split_token=CONFIG.custom_bpe.split_token,
+                    )
+                ]
+            else:
+                text_source = [
+                    text_utils.format_document_for_causal_lm(
+                        text_utils.load_shakespeare_mini(),
+                        start_token=CONFIG.custom_bpe.start_token,
+                        split_token=CONFIG.custom_bpe.split_token,
+                    )
+                ]
+            encoded_data = bpe.prepare_data(
+                text_source,
+                overwrite_vocabulary_file=CONFIG.custom_bpe.overwrite_vocabulary_file,
+                overwrite_encoded_data=CONFIG.custom_bpe.overwrite_encoded_data,
             )
-        elif CONFIG.dataset_name == "wiki_simple_english":
-            raw_text = text_utils.load_wiki_simple()
-        else:
-            raw_text = text_utils.load_shakespeare_mini()
-        encoded_data = bpe.prepare_data(
-            raw_text=raw_text,
-            overwrite_vocabulary_file=CONFIG.custom_bpe.overwrite_vocabulary_file,
-            overwrite_encoded_data=CONFIG.custom_bpe.overwrite_encoded_data,
-            split_token=CONFIG.custom_bpe.split_token,
-        )
     else:
         raise ValueError(
             "Please supply a custom_bpe config. Check out CustomBpeConfig for more details."
         )
 
-    n = int(len(encoded_data) * 0.9)
-    train_data, test_data = encoded_data[:n], encoded_data[n:]
-    print(f"Data length: {len(train_data)=} {len(test_data)=}")
+    train_data, test_data = train_test_split(encoded_data, test_size=0.1, shuffle=False)
+    del encoded_data
 
     CONFIG.model_kwargs["vocab_size"] = bpe.n_vocab
 

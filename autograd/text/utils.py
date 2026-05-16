@@ -49,6 +49,7 @@ class GenerationResult:
 class OpenWebTextSource:
     parquet_files: list[dict[str, Any]]
     parquet_dir: str
+    start_token: str
     split_token: str
     parquet_shards_per_batch: int
 
@@ -69,7 +70,20 @@ class OpenWebTextSource:
                     batch_size=2048,
                 ):
                     for doc in batch.column("text").to_pylist():
-                        yield doc + self.split_token
+                        yield format_document_for_causal_lm(
+                            doc,
+                            start_token=self.start_token,
+                            split_token=self.split_token,
+                        )
+
+
+def format_document_for_causal_lm(
+    doc: str,
+    *,
+    start_token: str,
+    split_token: str,
+) -> str:
+    return f"{start_token}{doc}{split_token}"
 
 
 def generate(
@@ -621,7 +635,12 @@ def load_shakespeare_mini() -> str:
     return data
 
 
-def load_openwebtext(parquet_shards_per_batch: int = 1) -> OpenWebTextSource:
+def load_openwebtext(
+    parquet_shards_per_batch: int = 1,
+    *,
+    start_token: str,
+    split_token: str,
+) -> OpenWebTextSource:
     """Return a streaming OpenWebText source backed by public parquet shards."""
     if parquet_shards_per_batch < 1:
         raise ValueError(
@@ -652,7 +671,8 @@ def load_openwebtext(parquet_shards_per_batch: int = 1) -> OpenWebTextSource:
     return OpenWebTextSource(
         parquet_files=parquet_files,
         parquet_dir=parquet_dir,
-        split_token="<|endoftext|>",
+        start_token=start_token,
+        split_token=split_token,
         parquet_shards_per_batch=parquet_shards_per_batch,
     )
 

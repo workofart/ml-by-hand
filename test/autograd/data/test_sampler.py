@@ -15,7 +15,6 @@ def make_token_dataset(token_sequences):
         [xp.ones((len(tokens),), dtype=xp.int32) for tokens in token_sequences],
         input_key="tokens",
         target_key="loss_mask",
-        dtype=xp.int32,
     )
 
 

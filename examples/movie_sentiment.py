@@ -1,8 +1,9 @@
 import logging
 import os
 
+import numpy as np
+
 from autograd import functional, nn, optim
-from autograd.backend import xp
 from autograd.data.collator import OneHotCollator
 from autograd.data.data_loader import DataLoader
 from autograd.data.dataset import PairedMapDataset
@@ -28,7 +29,7 @@ def reviews_to_token_ids(reviews, vocabulary, max_sequence_length, pad_str="<PAD
             token_ids[idx] = vocabulary.get(word, unk_idx)
         matrix.append(token_ids)
 
-    return xp.array(matrix, dtype=xp.int32)
+    return np.array(matrix, dtype=np.int32)
 
 
 def process_data(data):
@@ -50,8 +51,8 @@ def process_data(data):
     sentiments = [row[1] for row in data]
     vocab = create_vocabulary(reviews, max_features=6000)
     features = reviews_to_token_ids(reviews, vocab, max_sequence_length=25)
-    labels = xp.array(
-        [1 if label == "positive" else 0 for label in sentiments], dtype=xp.int32
+    labels = np.array(
+        [1 if label == "positive" else 0 for label in sentiments], dtype=np.int32
     )
 
     X_train, X_test, y_train, y_test = train_test_split(features, labels, test_size=0.1)

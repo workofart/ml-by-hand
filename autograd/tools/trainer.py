@@ -220,7 +220,7 @@ class AbstractTrainer(ABC):
     """Base trainer that defines a high-level training loop.
 
     Subclasses should implement domain-specific steps such as:
-    - forward pass and loss computation in `_compute_loss`
+    - forward pass and loss computation in `_forward_and_loss`
     - evaluation logic in `_evaluate`
 
     Attributes:
@@ -339,7 +339,7 @@ class AbstractTrainer(ABC):
                 train_data_loader.on_epoch_start()
 
                 for batch in train_data_loader:
-                    loss = self._compute_loss(batch)
+                    loss = self._forward_and_loss(batch)
                     total_weight = self._loss_total_weight(batch)
                     loss.backward()
                     state.record_loss(loss, total_weight=total_weight)
@@ -528,7 +528,7 @@ class AbstractTrainer(ABC):
         return xp.array(1.0, dtype=xp.float32)
 
     @abstractmethod
-    def _compute_loss(self, batch_data) -> Tensor:
+    def _forward_and_loss(self, batch_data) -> Tensor:
         """Returns the scalar loss Tensor for a single training batch.
 
         Subclasses must implement the forward pass and loss computation here.
@@ -864,7 +864,7 @@ class SimpleTrainer(AbstractTrainer):
             else "regression"
         )
 
-    def _compute_loss(self, batch_data) -> Tensor:
+    def _forward_and_loss(self, batch_data) -> Tensor:
         batch_X, batch_y = batch_data
         y_pred = self.model(batch_X)
         return self.loss_fn(y_pred, batch_y)
@@ -1063,12 +1063,19 @@ class LLMTrainer(AbstractTrainer):
         self.forward_fn = forward_fn
         self.eval_callbacks = list(eval_callbacks or [])
 
-    def _compute_loss(self, batch_data) -> Tensor:
+    def _forward_and_loss(
+        self,
+        batch_data,
+        *,
+        label_smoothing: float | None = None,
+    ) -> Tensor:
+        if label_smoothing is None:
+            label_smoothing = self.config.label_smoothing
         logits = self.forward_fn.train(self.model, batch_data)
         return self.loss_fn(
             logits,
             batch_data.labels,
-            label_smoothing=self.config.label_smoothing,
+            label_smoothing=label_smoothing,
             reduction="sum",
         )
 
@@ -1091,14 +1098,8 @@ class LLMTrainer(AbstractTrainer):
                 and state.eval_loss_batches >= self.config.max_eval_steps
             ):
                 break
-            logits = self.forward_fn.train(self.model, batch_data)
             # Report hard-label CE/NLL for validation; smoothing is a training regularizer.
-            loss = self.loss_fn(
-                logits,
-                batch_data.labels,
-                label_smoothing=0.0,
-                reduction="sum",
-            )
+            loss = self._forward_and_loss(batch_data, label_smoothing=0.0)
             state.record_eval_loss(
                 loss,
                 total_weight=self._loss_total_weight(batch_data),

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Optional
 from unittest import TestCase
 
+import numpy as np
 import psutil
 
 from autograd import functional, nn, optim
@@ -371,7 +372,7 @@ class CIPipelinePerformanceTest(TestCase):
                 [xp.ones((seq_len + 1,), dtype=xp.int32) for _ in range(batch_size)],
                 input_key="tokens",
                 target_key="loss_mask",
-                dtype=xp.int32,
+                dtype=np.int32,
             ),
             batch_size=batch_size,
             collator=FixedLengthCausalLMCollator(

@@ -1,9 +1,37 @@
 from unittest import TestCase
 
-from autograd.tools.config_schema import TransformerTrainingConfig
+from autograd.tools.config_schema import CustomBpeConfig, TransformerTrainingConfig
 
 
 class TestTransformerTrainingConfig(TestCase):
+    def test_custom_bpe_rejects_non_positive_parquet_shards_per_batch(self):
+        with self.assertRaisesRegex(
+            ValueError, "parquet_shards_per_batch must be >= 1"
+        ):
+            CustomBpeConfig(
+                num_merges=10,
+                encoded_data_path="encoded.npz",
+                vocab_path="vocab.pkl",
+                overwrite_encoded_data=False,
+                overwrite_vocabulary_file=False,
+                start_token="<SOS>",
+                split_token="<|endoftext|>",
+                parquet_shards_per_batch=0,
+            )
+
+    def test_custom_bpe_rejects_non_positive_n_workers(self):
+        with self.assertRaisesRegex(ValueError, "n_workers must be >= 1"):
+            CustomBpeConfig(
+                num_merges=10,
+                encoded_data_path="encoded.npz",
+                vocab_path="vocab.pkl",
+                overwrite_encoded_data=False,
+                overwrite_vocabulary_file=False,
+                start_token="<SOS>",
+                split_token="<|endoftext|>",
+                n_workers=0,
+            )
+
     def test_rejects_non_positive_max_grad_norm(self):
         with self.assertRaisesRegex(ValueError, "max_grad_norm must be > 0"):
             TransformerTrainingConfig(

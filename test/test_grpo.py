@@ -459,7 +459,7 @@ def test_grpo_trainer_train_step_runs_one_optimizer_step():
             self.total_weight = xp.array(4.0, dtype=xp.float32)
             self.optimizer_step_called = False
 
-        def _compute_loss(self, batch):
+        def _forward_and_loss(self, batch):
             return self.loss
 
         def _loss_total_weight(self, batch):
