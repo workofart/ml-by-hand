@@ -17,6 +17,7 @@ dependencies = [
     "regex",
     "scikit-learn",  # for dataset
     "tqdm",
+    "urllib3>=2.7.0",  # security floor; transitive via openml/requests
 ]
 
 [tool.setuptools.packages.find]
@@ -60,7 +61,9 @@ cuda11 = [
 ]
 cuda12 = [
     "cupy-cuda12x; platform_system == 'Linux'",
+    "ml_dtypes; platform_system == 'Linux'",
 ]
 cuda13 = [
     "cupy-cuda13x; platform_system == 'Linux' and python_version >= '3.9'",
+    "ml_dtypes; platform_system == 'Linux' and python_version >= '3.9'",
 ]

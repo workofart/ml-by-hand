@@ -66,14 +66,25 @@ if IS_CUPY and xp.cuda.runtime.getDeviceCount() <= 0:
     )
 
 ARRAY_TYPE = type(xp.array(0, dtype=xp.float32)) if IS_MLX else xp.ndarray
-LOW_PRECISION_FLOAT_DTYPES = tuple(
-    dtype
-    for dtype in (
+
+
+def _low_precision_float_dtypes() -> tuple[Any, ...]:
+    dtypes = [
         getattr(xp, "float16", None),
         getattr(xp, "bfloat16", None),
-    )
-    if dtype is not None
-)
+    ]
+    if IS_CUPY:
+        try:
+            ml_dtypes = importlib.import_module("ml_dtypes")
+        except ModuleNotFoundError:
+            pass
+        else:
+            dtypes.append(getattr(ml_dtypes, "bfloat16", None))
+
+    return tuple(dict.fromkeys(dtype for dtype in dtypes if dtype is not None))
+
+
+LOW_PRECISION_FLOAT_DTYPES = _low_precision_float_dtypes()
 
 
 # ---------------------------------------------------------------------------

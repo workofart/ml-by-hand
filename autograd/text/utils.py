@@ -4,8 +4,8 @@ import json
 import logging
 import os
 import re
-import shutil
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
@@ -21,7 +21,7 @@ from typing import (
     Tuple,
     Union,
 )
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 from pyarrow import parquet as pq  # pyright: ignore[reportMissingImports]
 from tqdm import tqdm
@@ -655,7 +655,11 @@ def load_openwebtext(
 
     if not os.path.exists(manifest_path):
         print("Downloading OpenWebText parquet manifest...")
-        _download_url(parquet_manifest_url, manifest_path)
+        tmp_manifest_path = f"{manifest_path}.tmp"
+        with urlopen(parquet_manifest_url, timeout=60) as response:
+            with open(tmp_manifest_path, "wb") as f:
+                f.write(response.read())
+        os.replace(tmp_manifest_path, manifest_path)
 
     with open(manifest_path, "r", encoding="utf-8") as f:
         manifest = json.load(f)
@@ -679,31 +683,55 @@ def load_openwebtext(
 
 def _ensure_openwebtext_shard(parquet_file: dict[str, Any], parquet_dir: str) -> str:
     filename = parquet_file["filename"]
-    parquet_path = os.path.join(parquet_dir, filename)
     expected_size = parquet_file.get("size")
-    if (
-        os.path.exists(parquet_path)
-        and isinstance(expected_size, int)
-        and os.path.getsize(parquet_path) != expected_size
-    ):
+    if not isinstance(expected_size, int):
+        raise ValueError(
+            f"OpenWebText manifest entry for {filename!r} is missing an integer 'size'"
+        )
+    parquet_path = os.path.join(parquet_dir, filename)
+    if os.path.exists(parquet_path) and os.path.getsize(parquet_path) != expected_size:
         os.remove(parquet_path)
 
     if not os.path.exists(parquet_path):
-        size_mb = parquet_file.get("size", 0) / 1_000_000
-        print(f"Downloading OpenWebText shard {filename} ({size_mb:.0f} MB)...")
-        _download_url(parquet_file["url"], parquet_path)
+        print(
+            f"Downloading OpenWebText shard {filename} "
+            f"({expected_size / 1_000_000:.0f} MB)..."
+        )
+        _download_url(parquet_file["url"], parquet_path, expected_size=expected_size)
     return parquet_path
 
 
-def _download_url(url: str, filename: str) -> None:
+def _download_url(url: str, filename: str, *, expected_size: int) -> None:
+    """Download `url` to `filename` using parallel HTTP Range requests.
+
+    Assumes the server honors `Range` (HuggingFace's CDN does). Each worker
+    fetches one contiguous byte range; parts are reassembled in order.
+    """
+    parent_dir = os.path.dirname(filename)
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
+
+    workers = min(8, max(1, expected_size))
+    part_size = (expected_size + workers - 1) // workers
+
+    def download_part(start: int) -> bytes:
+        end = min(start + part_size - 1, expected_size - 1)
+        request = Request(url, headers={"Range": f"bytes={start}-{end}"})
+        with urlopen(request, timeout=60) as response:
+            data = response.read()
+        if len(data) != end - start + 1:
+            raise RuntimeError(
+                f"range {start}-{end} returned {len(data)} bytes from {url!r}"
+            )
+        return data
+
     tmp_filename = f"{filename}.tmp"
     try:
-        with urlopen(url, timeout=60) as response:
-            parent_dir = os.path.dirname(filename)
-            if parent_dir:
-                os.makedirs(parent_dir, exist_ok=True)
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            parts = executor.map(download_part, range(0, expected_size, part_size))
             with open(tmp_filename, "wb") as f:
-                shutil.copyfileobj(response, f)
+                for part in parts:
+                    f.write(part)
         os.replace(tmp_filename, filename)
     except Exception as exc:
         if os.path.exists(tmp_filename):

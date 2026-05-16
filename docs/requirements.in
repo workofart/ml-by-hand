@@ -3,3 +3,4 @@ sphinx_rtd_theme
 sphinx_autodoc_typehints
 sphinxcontrib-napoleon
 sphinx-math-dollar
+urllib3>=2.7.0  # security floor; transitive via requests
