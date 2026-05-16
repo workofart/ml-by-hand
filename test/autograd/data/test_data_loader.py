@@ -39,7 +39,6 @@ def make_token_dataset(token_sequences, loss_masks=None):
         loss_masks,
         input_key="tokens",
         target_key="loss_mask",
-        dtype=xp.int32,
     )
 
 
@@ -120,7 +119,6 @@ class TestDataLoader(unittest.TestCase):
                 targets,
                 input_key="input_ids",
                 target_key="labels",
-                dtype=xp.int32,
             )
             sampler = RandomSampler(dataset) if shuffle else None
             collator = Seq2SeqCollator(
@@ -371,15 +369,7 @@ class TestDataLoader(unittest.TestCase):
 
         self.assertEqual(batch_lengths, [[2, 3], [7, 8]])
 
-    @patch("autograd.data.dataset.xp.random.permutation")
-    def test_length_grouped_sampler_shuffle_stays_on_cpu(
-        self,
-        backend_permutation,
-    ):
-        backend_permutation.side_effect = AssertionError(
-            "backend permutation should not be used"
-        )
-
+    def test_length_grouped_sampler_shuffle_stays_on_cpu(self):
         dataset = make_token_dataset(
             [
                 xp.arange(2, dtype=xp.int32),
@@ -401,8 +391,8 @@ class TestDataLoader(unittest.TestCase):
 
         sampler.on_epoch_start()
 
+        # Sampler uses numpy (CPU) random, not the compute backend
         self.assertIsInstance(sampler.indices, list)
-        backend_permutation.assert_not_called()
 
     @patch(
         "autograd.data.collator.create_padding_mask",

@@ -68,46 +68,44 @@ class TestCollator(unittest.TestCase):
         self.bpe = MockBPE()
 
     def test_create_padding_mask_default_dims(self):
-        token_indices = xp.array(
+        token_indices = np.array(
             [
                 [1, 2, 0, 0],
                 [3, 4, 5, 0],
             ],
-            dtype=xp.int32,
+            dtype=np.int32,
         )
 
         mask = create_padding_mask(token_indices, pad_idx=0, dims=None)
 
         self.assertEqual(mask.shape, (2, 1, 1, 4))
-        assert xp.array_equal(mask[0, 0, 0], xp.array([0, 0, 1, 1]))
-        assert xp.array_equal(mask[1, 0, 0], xp.array([0, 0, 0, 1]))
+        np.testing.assert_array_equal(mask[0, 0, 0], [0, 0, 1, 1])
+        np.testing.assert_array_equal(mask[1, 0, 0], [0, 0, 0, 1])
 
     def test_create_padding_mask_custom_dims(self):
-        token_indices = xp.array([[1, 0, 0], [2, 2, 0]], dtype=xp.int32)
+        token_indices = np.array([[1, 0, 0], [2, 2, 0]], dtype=np.int32)
 
         mask = create_padding_mask(token_indices, pad_idx=0, dims=(2, 1, 3))
 
         self.assertEqual(mask.shape, (2, 1, 3))
-        assert xp.array_equal(mask[0, 0], xp.array([0, 1, 1]))
-        assert xp.array_equal(mask[1, 0], xp.array([0, 0, 1]))
+        np.testing.assert_array_equal(mask[0, 0], [0, 1, 1])
+        np.testing.assert_array_equal(mask[1, 0], [0, 0, 1])
 
     def test_pad_right_1d_pads_without_truncating(self):
         tokens = pad_right_1d(
-            values=xp.array([10, 11, 12], dtype=xp.int32),
+            values=np.array([10, 11, 12], dtype=np.int32),
             target_length=5,
             pad_value=0,
         )
 
-        self.assertTrue(
-            xp.array_equal(tokens, xp.array([10, 11, 12, 0, 0], dtype=xp.int32))
-        )
+        np.testing.assert_array_equal(tokens, [10, 11, 12, 0, 0])
 
     def test_pad_right_1d_rejects_shorter_target_length(self):
         with self.assertRaisesRegex(
             ValueError, "cannot right-pad length 3 to shorter target_length 2"
         ):
             pad_right_1d(
-                values=xp.array([10, 11, 12], dtype=xp.int32),
+                values=np.array([10, 11, 12], dtype=np.int32),
                 target_length=2,
                 pad_value=0,
             )
@@ -236,7 +234,7 @@ class TestCollator(unittest.TestCase):
 
 
 def test_window_collator_shapes():
-    data = xp.arange(20, dtype=xp.int32)
+    data = np.arange(20, dtype=np.int32)
     examples = [
         TokenWindowExample(data, offset=0, window_len=5),
         TokenWindowExample(data, offset=3, window_len=5),
@@ -251,7 +249,7 @@ def test_window_collator_shapes():
 
 
 def test_window_collator_shift():
-    data = xp.arange(10, dtype=xp.int32)
+    data = np.arange(10, dtype=np.int32)
     example = TokenWindowExample(data, offset=2, window_len=5)
 
     batch = CausalLMWindowCollator()([example])
@@ -267,7 +265,7 @@ def test_window_collator_shift():
 
 
 def test_window_collator_requires_shiftable_window():
-    example = TokenWindowExample(xp.arange(4, dtype=xp.int32), offset=0, window_len=1)
+    example = TokenWindowExample(np.arange(4, dtype=np.int32), offset=0, window_len=1)
 
     with pytest.raises(ValueError, match="window_len must be >= 2"):
         CausalLMWindowCollator()([example])

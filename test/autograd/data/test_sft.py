@@ -73,7 +73,6 @@ class TestSFTData(TestCase):
             [example["loss_mask"] for example in tokenized_examples],
             input_key="tokens",
             target_key="loss_mask",
-            dtype=xp.int32,
         )
         return DataLoader(
             dataset=dataset,

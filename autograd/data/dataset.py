@@ -1,9 +1,10 @@
-from typing import Any, Iterator, Sequence
+from typing import Any, Iterator, Sequence, Union
 
 import numpy as np
 
-from autograd.backend import Array, xp
 from autograd.data.types import TokenWindowExample
+
+NumpyDType = Union[type[np.generic], np.dtype[Any], str]
 
 
 class MapDataset:
@@ -35,7 +36,11 @@ class MapDataset:
 
 class PairedMapDataset(MapDataset):
     """
-    Iterates over in-memory paired `(X, y)` data one example at a time.
+    Lazy paired `(X, y)` dataset — indexes into the source arrays on demand.
+
+    The `inputs` and `targets` arguments can each be:
+      - An array or sequence of arrays (stored as numpy)
+      - A file path to a `.npy` file (memory-mapped, pages in on demand)
 
     Examples:
         >>> X = xp.arange(6).reshape(3, 2)
@@ -49,7 +54,6 @@ class PairedMapDataset(MapDataset):
         ...     [xp.array([3, 4])],
         ...     input_key="input_ids",
         ...     target_key="labels",
-        ...     dtype=xp.int32,
         ... )
         >>> example = next(iter(seq2seq))
         >>> example["input_ids"].tolist(), example["labels"].tolist()
@@ -59,36 +63,48 @@ class PairedMapDataset(MapDataset):
         ...     [xp.array([0, 1, 1])],
         ...     input_key="tokens",
         ...     target_key="loss_mask",
-        ...     dtype=xp.int32,
         ... )
         >>> example = next(iter(causal_lm))
         >>> example["tokens"].tolist(), example["loss_mask"].tolist()
         ([10, 11, 12], [0, 1, 1])
     """
 
+    @staticmethod
+    def _load(data: Union[Sequence[Any], str]) -> Any:
+        if isinstance(data, str):
+            return np.load(data, mmap_mode="r")
+        if isinstance(data, np.ndarray):
+            return data
+        # Ragged sequences (variable-length arrays) — keep as list
+        return list(data)
+
     def __init__(
         self,
-        inputs: Sequence[Any],
-        targets: Sequence[Any],
+        inputs: Union[Sequence[Any], str],
+        targets: Union[Sequence[Any], str],
         *,
         input_key: str = "inputs",
         target_key: str = "targets",
-        dtype: Any | None = None,
+        dtype: NumpyDType | None = None,
     ) -> None:
-        if len(inputs) != len(targets):
+        self.inputs = self._load(inputs)
+        self.targets = self._load(targets)
+        if len(self.inputs) != len(self.targets):
             raise ValueError(
                 "inputs and targets must contain the same number of examples"
             )
+        self.input_key = input_key
+        self.target_key = target_key
+        self.dtype = None if dtype is None else np.dtype(dtype)
 
-        examples = []
-        for index in range(len(inputs)):
-            input_value = inputs[index]
-            target_value = targets[index]
-            if dtype is not None:
-                input_value = xp.array(input_value, dtype=dtype)
-                target_value = xp.array(target_value, dtype=dtype)
-            examples.append({input_key: input_value, target_key: target_value})
-        super().__init__(examples)
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        return {
+            self.input_key: np.asarray(self.inputs[index], dtype=self.dtype),
+            self.target_key: np.asarray(self.targets[index], dtype=self.dtype),
+        }
+
+    def __len__(self) -> int:
+        return len(self.inputs)
 
 
 class TokenWindowMapDataset(MapDataset):
@@ -105,15 +121,22 @@ class TokenWindowMapDataset(MapDataset):
     pass, and `RandomSampler(replacement=True, num_samples=...)` for fixed-size
     random-with-replacement epochs. Calling `DataLoader.on_epoch_start()` calls
     the sampler hook, so a `RandomSampler` gives a fresh random order each epoch.
+
+    The `data` argument can be:
+      - An array (loaded into memory as before)
+      - A file path to a `.npy` file (memory-mapped, pages in on demand)
     """
 
     def __init__(
         self,
-        data: Array,
+        data: Union[np.ndarray, str],
         *,
         window_len: int,
     ) -> None:
-        self.stream = np.asarray(data, dtype=np.int32)
+        if isinstance(data, str):
+            self.stream = np.load(data, mmap_mode="r")
+        else:
+            self.stream = np.asarray(data, dtype=np.int32)
         self.window_len = window_len
 
         # The edge case where len(stream) == window length, valid_window_count == 1, offset 0 is valid

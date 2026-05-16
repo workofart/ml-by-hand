@@ -1,5 +1,6 @@
 import unittest
 
+import numpy as np
 import pytest
 
 from autograd.backend import xp
@@ -23,6 +24,20 @@ class TestDataset(unittest.TestCase):
         self.assertEqual(tuple(example.keys()), ("inputs", "targets"))
         self.assertTrue(xp.array_equal(example["inputs"], self.X[0]))
         self.assertEqual(int(example["targets"]), int(self.y[0]))
+
+    def test_paired_dataset_casts_to_numpy_dtype(self):
+        dataset = PairedMapDataset(
+            [[1, 2]],
+            [[3, 4]],
+            dtype=np.float32,
+        )
+
+        example = dataset[0]
+
+        self.assertEqual(example["inputs"].dtype, np.dtype(np.float32))
+        self.assertEqual(example["targets"].dtype, np.dtype(np.float32))
+        self.assertTrue(np.array_equal(example["inputs"], np.array([1.0, 2.0])))
+        self.assertTrue(np.array_equal(example["targets"], np.array([3.0, 4.0])))
 
     def test_map_dataset_iteration_stays_in_stored_order_after_epoch_start(self):
         dataset = PairedMapDataset(self.X, self.y)
@@ -68,7 +83,6 @@ class TestDataset(unittest.TestCase):
             [xp.array([3, 4])],
             input_key="input_ids",
             target_key="labels",
-            dtype=xp.int32,
         )
 
         example = next(iter(dataset))
@@ -86,7 +100,6 @@ class TestDataset(unittest.TestCase):
             [xp.ones((5,), dtype=xp.int32)],
             input_key="tokens",
             target_key="loss_mask",
-            dtype=xp.int32,
         )
 
         example = next(iter(dataset))
@@ -103,7 +116,6 @@ class TestDataset(unittest.TestCase):
             [xp.array([0, 0, 0, 0, 1, 1, 1], dtype=xp.int32)],
             input_key="tokens",
             target_key="loss_mask",
-            dtype=xp.int32,
         )
 
         example = next(iter(dataset))

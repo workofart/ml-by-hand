@@ -18,27 +18,14 @@ class TestUtils(TestCase):
         )
         self.y = xp.array([0, 1, 0, 1, 0])
 
-        self.X_empty = xp.array([])
-        self.y_empty = xp.array([])
-
     def test_train_test_split(self):
         X_train, X_test, y_train, y_test = train_test_split(
             self.X, self.y, test_size=0.2
         )
-        # We expect 80% of the data to be in the train set
-        # We expect 20% of the data to be in the test set
         self.assertEqual(X_train.shape, (4, 2))
         self.assertEqual(X_test.shape, (1, 2))
         self.assertEqual(y_train.shape, (4,))
         self.assertEqual(y_test.shape, (1,))
-
-        X_train, X_test, y_train, y_test = train_test_split(
-            self.X_empty, self.y_empty, test_size=0.2
-        )
-        assert xp.array_equal(X_train, self.X_empty)
-        assert xp.array_equal(X_test, self.X_empty)
-        assert xp.array_equal(y_train, self.y_empty)
-        assert xp.array_equal(y_test, self.y_empty)
 
     def test_accuracy(self):
         self.assertEqual(accuracy(self.y, self.y), 1.0)

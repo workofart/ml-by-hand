@@ -6,9 +6,10 @@ import pickle
 from multiprocessing import Pool
 from typing import Any, Sequence, cast
 
+import numpy as np
 from tqdm import tqdm
 
-from autograd.backend import Array, xp
+from autograd.backend import Array
 from autograd.data.utils import load_data, load_parquet_rows
 from autograd.text.tokenizer import BytePairEncoder
 
@@ -196,8 +197,8 @@ def tokenize_sft_messages(
         turn_separator=turn_separator,
     )
     return {
-        "tokens": xp.array(tokens, dtype=xp.int32),
-        "loss_mask": xp.array(loss_mask, dtype=xp.int32),
+        "tokens": np.array(tokens, dtype=np.int32),
+        "loss_mask": np.array(loss_mask, dtype=np.int32),
     }
 
 
@@ -287,7 +288,7 @@ def prepare_sft_token_sequences(
             "Found SFT cache at '%s'; validating metadata before loading.",
             cache_path,
         )
-        encoded_archive: Any = xp.load(cache_path)
+        encoded_archive: Any = np.load(cache_path)
         required_keys = {"tokens", "loss_mask", "example_offsets", "metadata"}
         if not required_keys.issubset(encoded_archive.keys()):
             raise ValueError(
@@ -358,19 +359,19 @@ def prepare_sft_token_sequences(
                 )
             )
 
-    flat_tokens = xp.array(flat_token_ids, dtype=xp.int32)
-    flat_loss_masks = xp.array(flat_loss_mask_ids, dtype=xp.int32)
-    offsets = xp.array(example_offsets, dtype=xp.int32)
+    flat_tokens = np.array(flat_token_ids, dtype=np.int32)
+    flat_loss_masks = np.array(flat_loss_mask_ids, dtype=np.int32)
+    offsets = np.array(example_offsets, dtype=np.int32)
 
     parent_dir = os.path.dirname(cache_path)
     if parent_dir:
         os.makedirs(parent_dir, exist_ok=True)
-    xp.savez_compressed(
+    np.savez_compressed(
         cache_path,
         tokens=flat_tokens,
         loss_mask=flat_loss_masks,
         example_offsets=offsets,
-        metadata=xp.array(
+        metadata=np.array(
             list(json.dumps(expected_metadata, sort_keys=True).encode("utf-8"))
         ),
     )

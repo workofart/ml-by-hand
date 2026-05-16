@@ -3,16 +3,16 @@ from typing import Any, Sequence, Tuple
 
 import numpy as np
 
-from autograd.backend import Array, xp
+from autograd.backend import xp
 from autograd.data.types import CausalLMBatch, Seq2SeqBatch, TokenWindowExample
 from autograd.functional import IGNORE_INDEX
 
 
 def create_padding_mask(
-    token_indices: Array,
+    token_indices: np.ndarray,
     pad_idx: int = 0,
     dims: tuple[int, ...] | None = None,
-) -> Array:
+) -> np.ndarray:
     """
     Create a float padding mask where pad-token positions are `1.0`.
 
@@ -21,16 +21,14 @@ def create_padding_mask(
     when a collator is formatting one sequence at a time and needs an explicit
     broadcast shape.
     """
-    token_indices = xp.array(token_indices)
-    pad_positions = (token_indices == pad_idx).astype(xp.float32)
+    pad_positions = (token_indices == pad_idx).astype(np.float32)
 
     if dims is None:
-        # Default shape for attention over batched token IDs.
-        return xp.expand_dims(xp.expand_dims(pad_positions, axis=1), axis=1)
+        return pad_positions[:, np.newaxis, np.newaxis, :]
     return pad_positions.reshape(dims)
 
 
-def pad_right_1d(values: Array, target_length: int, pad_value: Any) -> Array:
+def pad_right_1d(values: np.ndarray, target_length: int, pad_value: Any) -> np.ndarray:
     """
     Right-pad a 1D array to `target_length`.
 
@@ -47,10 +45,10 @@ def pad_right_1d(values: Array, target_length: int, pad_value: Any) -> Array:
         return values
 
     pad_width = target_length - len(values)
-    return xp.concatenate(
+    return np.concatenate(
         [
             values,
-            xp.full((pad_width,), pad_value, dtype=values.dtype),
+            np.full((pad_width,), pad_value, dtype=values.dtype),
         ],
         axis=0,
     )
@@ -59,6 +57,14 @@ def pad_right_1d(values: Array, target_length: int, pad_value: Any) -> Array:
 class Collator(ABC):
     """
     Abstract interface for collators that turn example lists into batches.
+
+    Contract:
+        Input:  list of examples containing numpy arrays (from a Dataset).
+        Output: a batch object containing xp arrays (ready for the compute backend).
+
+    Collators are the numpy-to-xp boundary in the data pipeline. All slicing,
+    padding, and reshaping happens in numpy; the final batch fields are converted
+    to xp arrays via xp.array() before returning.
     """
 
     @abstractmethod
@@ -74,23 +80,23 @@ class PairedCollator(Collator):
         >>> collator = PairedCollator()
         >>> batch_X, batch_y = collator(
         ...     [
-        ...         {"inputs": xp.array([1, 2]), "targets": xp.array(0)},
-        ...         {"inputs": xp.array([3, 4]), "targets": xp.array(1)},
+        ...         {"inputs": np.array([1, 2]), "targets": np.array(0)},
+        ...         {"inputs": np.array([3, 4]), "targets": np.array(1)},
         ...     ]
         ... )
         >>> batch_X.shape, batch_y.shape
         ((2, 2), (2,))
     """
 
-    def __call__(self, examples: Sequence[dict[str, Array]]) -> Tuple[Array, Array]:
-        batch_X = xp.stack(
-            [xp.array(example["inputs"]) for example in examples], axis=0
+    def __call__(self, examples: Sequence[dict[str, np.ndarray]]) -> Tuple[Any, Any]:
+        batch_X = np.stack(
+            [np.asarray(example["inputs"]) for example in examples], axis=0
         )
-        batch_y = xp.stack(
-            [xp.array(example["targets"]) for example in examples],
+        batch_y = np.stack(
+            [np.asarray(example["targets"]) for example in examples],
             axis=0,
         )
-        return batch_X, batch_y
+        return xp.array(batch_X), xp.array(batch_y)
 
 
 class OneHotCollator(Collator):
@@ -104,30 +110,29 @@ class OneHotCollator(Collator):
         >>> collator = OneHotCollator(num_classes=4)
         >>> batch_X, batch_y = collator(
         ...     [
-        ...         {"inputs": xp.array([0, 2]), "targets": xp.array(1)},
-        ...         {"inputs": xp.array([1, 3]), "targets": xp.array(0)},
+        ...         {"inputs": np.array([0, 2]), "targets": np.array(1)},
+        ...         {"inputs": np.array([1, 3]), "targets": np.array(0)},
         ...     ]
         ... )
         >>> batch_X.shape, batch_y.shape
         ((2, 2, 4), (2,))
     """
 
-    def __init__(self, num_classes: int, dtype: Array = xp.float32) -> None:
+    def __init__(self, num_classes: int) -> None:
         self.num_classes = num_classes
-        self.dtype = dtype
 
-    def __call__(self, examples: Sequence[dict[str, Array]]) -> Tuple[Array, Array]:
+    def __call__(self, examples: Sequence[dict[str, np.ndarray]]) -> Tuple[Any, Any]:
         # TODO: replace batch-time one-hot with direct token-id model inputs.
-        eye = xp.eye(self.num_classes, dtype=self.dtype)
-        batch_tokens = xp.stack(
-            [xp.array(example["inputs"], dtype=xp.int32) for example in examples],
+        eye = np.eye(self.num_classes, dtype=np.float32)
+        batch_tokens = np.stack(
+            [np.asarray(example["inputs"], dtype=np.int32) for example in examples],
             axis=0,
         )
-        batch_y = xp.stack(
-            [xp.array(example["targets"]) for example in examples],
+        batch_y = np.stack(
+            [np.asarray(example["targets"]) for example in examples],
             axis=0,
         )
-        return eye[batch_tokens], batch_y
+        return xp.array(eye[batch_tokens]), xp.array(batch_y)
 
 
 class CausalLMWindowCollator(Collator):
@@ -174,13 +179,13 @@ class _CausalLMBaseCollator(Collator):
 
     def _truncate_examples(
         self,
-        examples: Sequence[dict[str, Array]],
-    ) -> list[Tuple[Array, Array]]:
+        examples: Sequence[dict[str, np.ndarray]],
+    ) -> list[Tuple[np.ndarray, np.ndarray]]:
         truncated_examples = []
 
         for example in examples:
-            tokens = xp.array(example["tokens"], dtype=xp.int32)
-            loss_mask = xp.array(example["loss_mask"], dtype=xp.int32)
+            tokens = np.asarray(example["tokens"], dtype=np.int32)
+            loss_mask = np.asarray(example["loss_mask"], dtype=np.int32)
             if len(tokens) != len(loss_mask):
                 raise ValueError("tokens and loss_mask must have the same length")
 
@@ -188,28 +193,27 @@ class _CausalLMBaseCollator(Collator):
                 tokens = tokens[-self.max_tokens :]
                 loss_mask = loss_mask[-self.max_tokens :]
 
-            truncated_tokens, truncated_loss_mask = tokens, loss_mask
-            truncated_examples.append((truncated_tokens, truncated_loss_mask))
+            truncated_examples.append((tokens, loss_mask))
 
         return truncated_examples
 
     def _build_inputs_and_labels(
         self,
-        tokens: Array,
-        loss_mask: Array,
-    ) -> Tuple[Array, Array]:
+        tokens: np.ndarray,
+        loss_mask: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray]:
         input_ids = tokens[:-1]
-        labels = xp.array(tokens[1:], dtype=xp.int32)
-        labels[xp.array(loss_mask[1:], dtype=xp.float32) == 0] = IGNORE_INDEX
+        labels = tokens[1:].copy()
+        labels[loss_mask[1:] == 0] = IGNORE_INDEX
         return input_ids, labels
 
     def _stack_padded_examples(
         self,
-        padded_examples: Sequence[Tuple[Array, Array]],
+        padded_examples: Sequence[Tuple[np.ndarray, np.ndarray]],
     ) -> CausalLMBatch:
         batch_inputs = []
         batch_labels = []
-        loss_total_weight = xp.array(0.0, dtype=xp.float32)
+        loss_total_weight = 0
 
         for padded_tokens, padded_loss_mask in padded_examples:
             input_tokens, labels = self._build_inputs_and_labels(
@@ -219,12 +223,12 @@ class _CausalLMBaseCollator(Collator):
 
             batch_inputs.append(input_tokens)
             batch_labels.append(labels)
-            loss_total_weight = loss_total_weight + xp.sum(padded_loss_mask[1:] != 0)
+            loss_total_weight += int(np.sum(padded_loss_mask[1:] != 0))
 
         return CausalLMBatch(
-            input_ids=xp.stack(batch_inputs, axis=0),
-            labels=xp.stack(batch_labels, axis=0),
-            loss_total_weight=loss_total_weight,
+            input_ids=xp.array(np.stack(batch_inputs, axis=0)),
+            labels=xp.array(np.stack(batch_labels, axis=0)),
+            loss_total_weight=xp.array(loss_total_weight, dtype=xp.float32),
         )
 
 
@@ -236,7 +240,7 @@ class FixedLengthCausalLMCollator(_CausalLMBaseCollator):
     right-pad every row to `max_tokens`, then shift tokens into inputs/labels.
     """
 
-    def __call__(self, examples: Sequence[dict[str, Array]]) -> CausalLMBatch:
+    def __call__(self, examples: Sequence[dict[str, np.ndarray]]) -> CausalLMBatch:
         truncated_examples = self._truncate_examples(examples)
         padded_examples = tuple(
             (
@@ -257,7 +261,7 @@ class BatchMaxLengthCausalLMCollator(_CausalLMBaseCollator):
     tokens into inputs/labels.
     """
 
-    def __call__(self, examples: Sequence[dict[str, Array]]) -> CausalLMBatch:
+    def __call__(self, examples: Sequence[dict[str, np.ndarray]]) -> CausalLMBatch:
         truncated_examples = self._truncate_examples(examples)
         longest_row_length = max(
             2, max(len(tokens) for tokens, _ in truncated_examples)
@@ -293,7 +297,7 @@ class Seq2SeqCollator(Collator):
         self.pad_idx = pad_idx
         self.sos_idx = sos_idx
 
-    def __call__(self, examples: Sequence[dict[str, Array]]) -> Seq2SeqBatch:
+    def __call__(self, examples: Sequence[dict[str, np.ndarray]]) -> Seq2SeqBatch:
         batch_inputs = []
         batch_decoder_inputs = []
         batch_labels = []
@@ -301,8 +305,8 @@ class Seq2SeqCollator(Collator):
         batch_tgt_masks = []
 
         for example in examples:
-            input_ids = xp.array(example["input_ids"], dtype=xp.int32)
-            labels = xp.array(example["labels"], dtype=xp.int32)
+            input_ids = np.asarray(example["input_ids"], dtype=np.int32)
+            labels = np.asarray(example["labels"], dtype=np.int32)
 
             if len(input_ids) > self.max_tokens:
                 input_ids = input_ids[-self.max_tokens :]
@@ -320,11 +324,11 @@ class Seq2SeqCollator(Collator):
                 self.max_tokens,
                 self.pad_idx,
             )
-            masked_labels = xp.array(decoder_targets, dtype=xp.int32)
+            masked_labels = decoder_targets.copy()
             masked_labels[masked_labels == self.pad_idx] = IGNORE_INDEX
 
-            sos_token = xp.array([self.sos_idx], dtype=decoder_targets.dtype)
-            decoder_input_ids = xp.concatenate(
+            sos_token = np.array([self.sos_idx], dtype=decoder_targets.dtype)
+            decoder_input_ids = np.concatenate(
                 [sos_token, decoder_targets[:-1]],
                 axis=0,
             )
@@ -346,13 +350,10 @@ class Seq2SeqCollator(Collator):
             batch_src_masks.append(src_mask)
             batch_tgt_masks.append(tgt_mask)
 
-        input_ids = xp.stack(batch_inputs, axis=0)
-        decoder_input_ids = xp.stack(batch_decoder_inputs, axis=0)
-        labels = xp.stack(batch_labels, axis=0)
         return Seq2SeqBatch(
-            input_ids=input_ids,
-            decoder_input_ids=decoder_input_ids,
-            labels=labels,
-            src_mask=xp.stack(batch_src_masks, axis=0),
-            tgt_mask=xp.stack(batch_tgt_masks, axis=0),
+            input_ids=xp.array(np.stack(batch_inputs, axis=0)),
+            decoder_input_ids=xp.array(np.stack(batch_decoder_inputs, axis=0)),
+            labels=xp.array(np.stack(batch_labels, axis=0)),
+            src_mask=xp.array(np.stack(batch_src_masks, axis=0)),
+            tgt_mask=xp.array(np.stack(batch_tgt_masks, axis=0)),
         )
