@@ -110,6 +110,18 @@ if ! uv "${SYNC_ARGS[@]}"; then
     exit 1
 fi
 
+# 4b. Verify NCCL is present in the CuPy build. Multi-GPU DDP
+# (`python -m autograd.distributed.launch`) needs it; single-GPU and
+# non-CuPy backends don't, so we warn rather than hard-fail.
+if [[ -n "$CUPY_EXTRA" ]]; then
+    if .venv/bin/python -c "import cupy.cuda.nccl as n; assert n.available" \
+        >/dev/null 2>&1; then
+        echo "OK: NCCL is available in CuPy."
+    else
+        echo "WARNING: CuPy installed without NCCL. Single-GPU works; multi-GPU DDP will fail at init."
+    fi
+fi
+
 # 5. Install PyTorch separately for unit test validation
 echo "Installing CPU-only PyTorch for test validation..."
 uv pip install torch --index-url https://download.pytorch.org/whl/cpu

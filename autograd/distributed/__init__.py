@@ -6,7 +6,7 @@ in one file. The structure of the module reads top to bottom:
 
 1. Env-derived rank/world_size and thread-local overrides (test path).
 2. Public API: rank(), world_size(), is_distributed(), barrier().
-3. Backend protocol + lifecycle (`_make_backend` is the Phase 2 NCCL hook).
+3. Backend protocol + lifecycle (`_NCCLBackend` wraps `cupyx.distributed`).
 4. Collective operations on parameters: `allreduce_grads`,
    `broadcast_parameters`. These are the only DDP touchpoints that the
    optimizer needs.
@@ -173,20 +173,88 @@ def _process_backend_singleton() -> Backend | None:
     return _process_backend
 
 
-def _make_backend() -> Backend:
-    """Construct the process-wide backend.
+class _NCCLBackend:
+    """Real NCCL-backed collective ops for single-node multi-GPU DDP.
 
-    Wired in Phase 2 — this raises until the NCCL backend
-    (`cupyx.distributed.NCCLBackend`) is plugged in.
+    Adapts `cupyx.distributed.NCCLBackend` to the `Backend` protocol:
 
-    TODO(phase-2): replace the body with the NCCLBackend construction.
-    Once this returns a real backend, the thread-local mock plumbing
-    above (see the TODO at `_thread_local`) becomes the only remaining
-    test path and is itself slated for removal.
+    - `all_reduce`: NCCL takes separate (in_array, out_array). We allocate
+      `out_array` here and return it so callers can rebind. Allocation is
+      tiny relative to the reduction itself.
+    - `broadcast`: NCCL is in-place via `root`. We return the same buffer
+      so callers can use the result uniformly (in-place or not).
+
+    Rendezvous works like PyTorch's: rank 0 binds a TCP server on
+    `host:port`, the others connect, and they exchange the NCCL unique id.
+    The launcher (`autograd.distributed.launch`) picks the port and
+    propagates it via the `MASTER_PORT` env var.
     """
-    raise NotImplementedError(
-        "Real NCCL backend is deferred to Phase 2 (autograd.distributed.launch + "
-        "cupyx.distributed.NCCLBackend wiring)."
+
+    def __init__(self, world_size: int, rank: int, host: str, port: int) -> None:
+        # Imported here (not at module top) so the file stays importable on
+        # MLX / numpy and on CuPy boxes without NCCL. _make_backend() only
+        # runs when WORLD_SIZE > 1, which is gated by the launcher.
+        from cupyx.distributed import NCCLBackend as _CupyxNCCL
+
+        self._world_size = world_size
+        self._rank = rank
+        # Constructor blocks: rank 0 listens, others connect. All ranks
+        # must reach this line within NCCL's bootstrap timeout.
+        self._comm = _CupyxNCCL(world_size, rank, host=host, port=port)
+
+    @property
+    def world_size(self) -> int:
+        return self._world_size
+
+    @property
+    def rank(self) -> int:
+        return self._rank
+
+    def all_reduce(self, buf: Any, op: str = ReduceOp.SUM) -> Any:
+        if op != ReduceOp.SUM:
+            raise NotImplementedError(
+                f"NCCL backend currently only implements SUM; got {op!r}"
+            )
+        import cupy as cp
+
+        out = cp.empty_like(buf)
+        self._comm.all_reduce(buf, out, op="sum")
+        return out
+
+    def broadcast(self, buf: Any, from_rank: int) -> Any:
+        # NCCL broadcast mutates the buffer in place on every rank; the
+        # root's contents win. We return `buf` so the call site uses the
+        # same rebind pattern as `all_reduce`.
+        self._comm.broadcast(buf, root=from_rank)
+        return buf
+
+    def barrier(self) -> None:
+        self._comm.barrier()
+
+    def teardown(self) -> None:
+        self._comm.stop()
+
+
+def _make_backend() -> Backend:
+    """Construct the process-wide NCCL backend.
+
+    Expects the launcher to have set MASTER_ADDR + MASTER_PORT in env. The
+    error message guides the user to the launcher when those are missing —
+    invoking a script directly with WORLD_SIZE manually set is unsupported.
+    """
+    host = os.environ.get("MASTER_ADDR", "127.0.0.1")
+    port_str = os.environ.get("MASTER_PORT")
+    if not port_str:
+        raise RuntimeError(
+            "MASTER_PORT must be set when running distributed. Use the "
+            "launcher: python -m autograd.distributed.launch "
+            "--nproc-per-node=N script.py"
+        )
+    return _NCCLBackend(
+        world_size=world_size(),
+        rank=rank(),
+        host=host,
+        port=int(port_str),
     )
 
 
