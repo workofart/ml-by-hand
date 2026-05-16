@@ -130,6 +130,35 @@ def resolve_dtype(dtype: str) -> Any:
     raise RuntimeError(f"Backend {NAME!r} does not expose dtype {dtype!r}.{hint}")
 
 
+def check_bf16_capability(parameter_dtype: str | None) -> None:
+    """Hard-fail if CuPy bf16 is requested on pre-Ampere hardware."""
+    if parameter_dtype != "bfloat16" or not IS_CUPY:
+        return
+
+    device = xp.cuda.Device()
+    cc_str = device.compute_capability
+    name = (
+        device.attributes.get("Name", "<unknown>")
+        if hasattr(device, "attributes")
+        else "<unknown>"
+    )
+    try:
+        major = int(cc_str[:-1])
+        minor = int(cc_str[-1])
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"Failed to parse compute capability {cc_str!r} from cupy device."
+        ) from exc
+
+    if (major, minor) < (8, 0):
+        raise RuntimeError(
+            'parameter_dtype="bfloat16" requires CUDA compute capability >= 8.0 '
+            f"(Ampere or newer). Detected device: {name}, compute capability "
+            f"{major}.{minor}. Either run on Ampere/Hopper hardware, or change "
+            'parameter_dtype to "float32" in the training config.'
+        )
+
+
 # ---------------------------------------------------------------------------
 # Compatibility helpers used across the repo
 # ---------------------------------------------------------------------------
