@@ -76,6 +76,20 @@ class TestTokenizer(TestCase):
             self.assertEqual(encoded, [expected_id])
             self.assertEqual(self.bpe.decode(encoded), special_token)
 
+    def test_encode_reuses_cached_non_special_chunks(self):
+        text = "repeat repeat repeat repeat"
+
+        self.bpe._encoded_chunk_cache.clear()
+        first = self.bpe.encode(text)
+        # Distinct pretokenized chunks: "repeat" and " repeat".
+        cached_after_first = dict(self.bpe._encoded_chunk_cache)
+        second = self.bpe.encode(text)
+
+        self.assertEqual(first, second)
+        self.assertEqual(self.bpe.decode(second), text)
+        self.assertEqual(len(cached_after_first), 2)
+        self.assertEqual(dict(self.bpe._encoded_chunk_cache), cached_after_first)
+
     def test_load_dictionary_fallback(self):
         with open(self.bpe.vocab_file_path, "wb") as f:
             f.write(b"\x80\x03}q\x00.")  # incomplete or invalid pickle data
@@ -137,7 +151,7 @@ class TestTokenizer(TestCase):
 
             full_bpe.train_vocabulary([full_text], overwrite_saved_file=True)
             stream_bpe.train_vocabulary(iter(docs), overwrite_saved_file=True)
-            mmap_path = stream_bpe.encode_to_mmap(
+            mmap_path = stream_bpe._encode_to_mmap(
                 docs,
                 overwrite_encoded_data=True,
                 text_batch_size=2,
@@ -152,7 +166,7 @@ class TestTokenizer(TestCase):
             )
             self.assertEqual(full_bpe.encode(full_text), list(stream_encoded))
 
-    def test_encode_to_mmap_writes_direct_npy_memmap(self):
+    def test_prepare_data_writes_direct_npy_memmap(self):
         docs = ["hello<|endoftext|>", "world<|endoftext|>"]
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -163,19 +177,25 @@ class TestTokenizer(TestCase):
                 n_workers=1,
             )
             bpe.train_vocabulary(docs, overwrite_saved_file=True)
+            stale_raw_tmp = f"{bpe.mmap_path}.raw.tmp"
+            with open(stale_raw_tmp, "wb") as f:
+                f.write(b"stale temp file")
 
             with patch(
                 "autograd.text.tokenizer.np.lib.format.write_array",
-                side_effect=AssertionError("encode_to_mmap should not copy raw data"),
+                side_effect=AssertionError("prepare_data should not copy raw data"),
             ):
-                mmap_path = bpe.encode_to_mmap(docs, overwrite_encoded_data=True)
+                encoded = bpe.prepare_data(
+                    docs,
+                    overwrite_vocabulary_file=False,
+                    overwrite_encoded_data=True,
+                )
 
-            encoded = np.load(mmap_path, mmap_mode="r")
             self.assertEqual(bpe.encode("".join(docs)), list(encoded))
             self.assertFalse(os.path.exists(f"{bpe.mmap_path}.raw.tmp"))
             self.assertFalse(os.path.exists(f"{bpe.mmap_path}.tmp"))
 
-    def test_encode_to_mmap_checks_disk_space_before_writing(self):
+    def test_prepare_data_checks_disk_space_before_writing(self):
         docs = ["hello<|endoftext|>"]
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -191,10 +211,52 @@ class TestTokenizer(TestCase):
             with patch("autograd.text.tokenizer.shutil.disk_usage") as mock_disk_usage:
                 mock_disk_usage.return_value = disk_usage
                 with self.assertRaisesRegex(OSError, "Insufficient disk space"):
-                    bpe.encode_to_mmap(docs, overwrite_encoded_data=True)
+                    bpe.prepare_data(
+                        docs,
+                        overwrite_vocabulary_file=False,
+                        overwrite_encoded_data=True,
+                    )
 
             self.assertFalse(os.path.exists(bpe.mmap_path))
             self.assertFalse(os.path.exists(f"{bpe.mmap_path}.tmp"))
+
+    def test_count_encoded_tokens_uses_unordered_worker_results(self):
+        class RecordingPool:
+            calls = []
+
+            def __init__(self, _n_workers):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def imap(self, fn, batches):
+                self.calls.append("imap")
+                return map(fn, batches)
+
+            def imap_unordered(self, fn, batches):
+                self.calls.append("imap_unordered")
+                return map(fn, batches)
+
+        docs = ["aa", "bbb", "c"]
+        self.bpe.n_workers = 2
+
+        with patch("autograd.text.tokenizer.Pool", RecordingPool):
+            token_count = self.bpe._count_encoded_tokens(docs, text_batch_size=1)
+            list(
+                self.bpe._iter_encoded_batches(
+                    docs,
+                    text_batch_size=1,
+                    desc="ordered",
+                    preserve_order=True,
+                )
+            )
+
+        self.assertEqual(token_count, sum(len(self.bpe.encode(doc)) for doc in docs))
+        self.assertEqual(RecordingPool.calls, ["imap_unordered", "imap"])
 
     def test_encode_roundtrips(self):
         text = "hello world"

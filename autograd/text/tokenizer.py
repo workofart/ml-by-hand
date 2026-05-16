@@ -3,7 +3,7 @@ import logging
 import os
 import pickle
 import shutil
-from collections import Counter
+from collections import Counter, OrderedDict
 from itertools import batched
 from multiprocessing import Pool, cpu_count
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -41,6 +41,9 @@ class BytePairEncoder:
         "<|TOOL_CALL|>",
         "<|TOOL_RESULT|>",
     ]
+    ENCODE_CHUNK_CACHE_MAX_SIZE = 50_000
+    WORD_FREQ_BATCH_SIZE = 10_000
+    WORD_FREQ_LOG_INTERVAL = 500_000
 
     def __init__(
         self,
@@ -101,6 +104,12 @@ class BytePairEncoder:
         self._general_pattern = regex.compile(
             r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}++| ?\p{N}++| ?[^\s\p{L}\p{N}]++|\s++$|\s+(?!\S)|\s"""
         )
+        # Two encode-time caches with different lifetimes/types:
+        # chunk text -> encoded ids (LRU), and learned merge pair -> priority/new id.
+        self._encoded_chunk_cache: OrderedDict[str, Tuple[int, ...]] = OrderedDict()
+        self._merge_priority_cache: Optional[Dict[Tuple[int, int], Tuple[int, int]]] = (
+            None
+        )
 
     @property
     def n_vocab(self) -> int:
@@ -111,6 +120,181 @@ class BytePairEncoder:
             >>> print(bpe.n_vocab)  # Outputs the size of the vocabulary
         """
         return len(self._unicode_to_int_vocab)
+
+    def prepare_data(
+        self,
+        texts: Iterable[str],
+        overwrite_vocabulary_file: bool = False,
+        overwrite_encoded_data: bool = False,
+    ) -> np.ndarray:
+        """Trains and applies BPE on the given texts, returning encoded token IDs.
+
+        Convenience wrapper that trains the vocabulary then writes token IDs
+        to the configured memory-mapped file.
+        ``texts`` must be re-iterable (e.g. a list or an object whose
+        ``__iter__`` returns a fresh iterator each time) because the corpus
+        is traversed once for vocabulary training and once for encoding.
+
+        Args:
+            texts (Iterable[str]): Documents to train on and encode.
+            overwrite_vocabulary_file (bool): If True, re-trains and overwrites the BPE vocabulary.
+            overwrite_encoded_data (bool): If True, overwrites an existing .npy file.
+
+        Returns:
+            np.ndarray: A memory-mapped array of token IDs.
+
+        Example:
+            >>> bpe = BytePairEncoder(num_merges=50)
+            >>> encoded_array = bpe.prepare_data(["Hello world! This is a test."])
+            >>> print(encoded_array)
+            [ ...some token IDs... ]
+        """
+        self.train_vocabulary(texts, overwrite_saved_file=overwrite_vocabulary_file)
+        self._encode_to_mmap(texts, overwrite_encoded_data=overwrite_encoded_data)
+        return np.load(self.mmap_path, mmap_mode="r")
+
+    def train_vocabulary(
+        self, texts: Iterable[str], overwrite_saved_file: bool = False
+    ) -> Tuple[Dict[bytes, int], Dict[int, bytes]]:
+        """Trains the BPE vocabulary on the given text documents.
+
+        Streams text one document at a time, so the full corpus never needs to
+        be held in memory. The learned merges and vocabulary are saved to
+        vocab_file_path.
+
+        Args:
+            texts (Iterable[str]): Documents to train on (e.g. ["doc1", "doc2"]
+                or a lazy generator). Pass a single document as [raw_text].
+                A bare str is rejected to prevent silent per-character iteration.
+            overwrite_saved_file (bool): If True, re-trains and overwrites any
+                existing vocabulary file.
+
+        Returns:
+            Tuple[Dict[bytes, int], Dict[int, bytes]]:
+                A tuple containing:
+                - A dictionary mapping byte sequences or special tokens to integer IDs.
+                - A dictionary mapping integer IDs back to byte sequences.
+
+        Examples:
+            >>> bpe = BytePairEncoder(num_merges=50)
+            >>> vocab, rev_vocab = bpe.train_vocabulary(["Hello world! Hello again!"])
+            >>> print(vocab)  # Prints the vocabulary mapping
+        """
+        if isinstance(texts, str):
+            raise TypeError(
+                "train_vocabulary expects an iterable of strings, not a bare str. "
+                "Wrap a single document as [text]."
+            )
+
+        if os.path.exists(self.vocab_file_path) and not overwrite_saved_file:
+            return self._unicode_to_int_vocab, self._int_to_unicode_vocab
+
+        self._encoded_chunk_cache.clear()
+        self._merge_priority_cache = None
+
+        if not overwrite_saved_file and os.path.exists(self.word_freq_cache_path):
+            logger.info(
+                "Loading cached word frequencies from %s", self.word_freq_cache_path
+            )
+            with open(self.word_freq_cache_path, "rb") as f:
+                word_freq = pickle.load(f)
+        else:
+            word_freq = self._build_word_freq(texts)
+            logger.info("Caching word frequencies to %s", self.word_freq_cache_path)
+            with open(self.word_freq_cache_path, "wb") as f:
+                pickle.dump(word_freq, f)
+        return self._learn_vocabulary_from_word_freq(word_freq)
+
+    def encode(self, input_text: str, *, show_progress: bool = False) -> List[int]:
+        """Encodes a raw input string into a list of BPE token IDs.
+
+        The process is:
+          1) Pre-tokenize the input into chunks (words, punctuation, special tokens).
+          2) Convert each chunk to base (byte-level) token IDs.
+          3) Greedily apply the highest-priority merge until no more merges apply.
+
+        Args:
+            input_text (str): The text to encode.
+
+        Returns:
+            List[int]: The list of integer token IDs representing the encoded text.
+
+        Example:
+            >>> bpe = BytePairEncoder(num_merges=50)
+            >>> bpe.train_vocabulary(["Hello world!"])
+            >>> token_ids = bpe.encode("Hello world!")
+            >>> print(token_ids)  # Outputs a list of token IDs
+        """
+        text_chunks = self._pretokenize(input_text)
+        logger.debug("Text chunks: %s", text_chunks[:20])
+
+        if not text_chunks:
+            return []
+
+        merge_priority = self._get_merge_priority()
+        result: List[int] = []
+        for chunk in text_chunks:
+            if chunk in self.SPECIAL_TOKENS:
+                result.append(self._unicode_to_int_vocab[chunk.encode("utf-8")])
+            else:
+                cached = self._encoded_chunk_cache.get(chunk)
+                if cached is not None:
+                    self._encoded_chunk_cache.move_to_end(chunk)
+                    result.extend(cached)
+                else:
+                    # Greedily apply the earliest-learned merge until convergence.
+                    token_ids = list(chunk.encode("utf-8"))
+                    while len(token_ids) >= 2:
+                        next_pair = None
+                        next_priority = float("inf")
+                        for i in range(len(token_ids) - 1):
+                            pair = (token_ids[i], token_ids[i + 1])
+                            info = merge_priority.get(pair)
+                            if info is not None and info[0] < next_priority:
+                                next_priority = info[0]
+                                next_pair = pair
+                        if next_pair is None:
+                            break
+                        new_id = merge_priority[next_pair][1]
+                        token_ids = list(
+                            BytePairEncoder._merge_pairs(next_pair, new_id, token_ids)
+                        )
+
+                    encoded_chunk = tuple(token_ids)
+                    if (
+                        len(self._encoded_chunk_cache)
+                        >= self.ENCODE_CHUNK_CACHE_MAX_SIZE
+                    ):
+                        self._encoded_chunk_cache.popitem(last=False)
+                    self._encoded_chunk_cache[chunk] = encoded_chunk
+                    result.extend(encoded_chunk)
+
+        return result
+
+    def decode(self, encoded_tokens: List[int]) -> str:
+        """Decodes a sequence of BPE token IDs back into a string.
+
+        Args:
+            encoded_tokens (List[int]): The list of integer token IDs to decode.
+
+        Returns:
+            str: The decoded string.
+
+        Example:
+            >>> bpe = BytePairEncoder(num_merges=50)
+            >>> bpe.train_vocabulary(["Hello world!"])
+            >>> token_ids = bpe.encode("Hello world!")
+            >>> text = bpe.decode(token_ids) # Expected: "Hello world!" (or similar)
+        """
+        result_bytes = []
+        for t in encoded_tokens:
+            if not isinstance(t, int) and hasattr(t, "item"):  # handle array scalars
+                t = t.item()
+            if t in self._int_to_unicode_vocab:
+                result_bytes.append(self._int_to_unicode_vocab[t])
+            else:
+                result_bytes.append(b"<UNK>")
+        return b"".join(result_bytes).decode("utf-8", errors="replace")
 
     def _should_parallelize(
         self, *, work_items: int, min_items_per_worker: int
@@ -184,38 +368,7 @@ class BytePairEncoder:
             unicode_to_int_vocab[special_char.encode("utf-8")] = 256 + i
         return unicode_to_int_vocab
 
-    def prepare_data(
-        self,
-        texts: Iterable[str],
-        overwrite_vocabulary_file: bool = False,
-        overwrite_encoded_data: bool = False,
-    ) -> np.ndarray:
-        """Trains and applies BPE on the given texts, returning encoded token IDs.
-
-        Convenience wrapper that calls train_vocabulary then encode_to_mmap.
-        ``texts`` must be re-iterable (e.g. a list or an object whose
-        ``__iter__`` returns a fresh iterator each time) because the corpus
-        is traversed once for vocabulary training and once for encoding.
-
-        Args:
-            texts (Iterable[str]): Documents to train on and encode.
-            overwrite_vocabulary_file (bool): If True, re-trains and overwrites the BPE vocabulary.
-            overwrite_encoded_data (bool): If True, overwrites an existing .npy file.
-
-        Returns:
-            np.ndarray: A memory-mapped array of token IDs.
-
-        Example:
-            >>> bpe = BytePairEncoder(num_merges=50)
-            >>> encoded_array = bpe.prepare_data(["Hello world! This is a test."])
-            >>> print(encoded_array)
-            [ ...some token IDs... ]
-        """
-        self.train_vocabulary(texts, overwrite_saved_file=overwrite_vocabulary_file)
-        self.encode_to_mmap(texts, overwrite_encoded_data=overwrite_encoded_data)
-        return np.load(self.mmap_path, mmap_mode="r")
-
-    def encode_to_mmap(
+    def _encode_to_mmap(
         self,
         text_iter: Iterable[str],
         overwrite_encoded_data: bool = False,
@@ -246,7 +399,7 @@ class BytePairEncoder:
             return self.mmap_path
         if iter(text_iter) is text_iter:
             raise TypeError(
-                "encode_to_mmap requires a re-iterable text source because it "
+                "_encode_to_mmap requires a re-iterable text source because it "
                 "counts encoded tokens before writing the .npy memmap. Pass a "
                 "sequence or an iterable object whose __iter__ returns a fresh iterator."
             )
@@ -282,10 +435,14 @@ class BytePairEncoder:
                 shape=(token_count,),
             )
             offset = 0
+            # Writes are positional in the memmap, so batches must arrive in
+            # input order — otherwise tokens from later docs would land in
+            # earlier slots and the file would no longer match the corpus.
             for encoded_batch in self._iter_encoded_batches(
                 text_iter,
                 text_batch_size=text_batch_size,
                 desc="Encoding text to tokens",
+                preserve_order=True,
             ):
                 for encoded_text in encoded_batch:
                     end = offset + len(encoded_text)
@@ -321,6 +478,7 @@ class BytePairEncoder:
             text_iter,
             text_batch_size=text_batch_size,
             desc="Counting encoded tokens",
+            preserve_order=False,
         ):
             for encoded_text in encoded_batch:
                 token_count += len(encoded_text)
@@ -345,148 +503,58 @@ class BytePairEncoder:
                 f"but only {free_bytes} bytes are free in {disk_check_dir!r}."
             )
 
-    def train_vocabulary(
-        self, texts: Iterable[str], overwrite_saved_file: bool = False
-    ) -> Tuple[Dict[bytes, int], Dict[int, bytes]]:
-        """Trains the BPE vocabulary on the given text documents.
-
-        Streams text one document at a time, so the full corpus never needs to
-        be held in memory. The learned merges and vocabulary are saved to
-        vocab_file_path.
-
-        Args:
-            texts (Iterable[str]): Documents to train on (e.g. ["doc1", "doc2"]
-                or a lazy generator). Pass a single document as [raw_text].
-                A bare str is rejected to prevent silent per-character iteration.
-            overwrite_saved_file (bool): If True, re-trains and overwrites any
-                existing vocabulary file.
-
-        Returns:
-            Tuple[Dict[bytes, int], Dict[int, bytes]]:
-                A tuple containing:
-                - A dictionary mapping byte sequences or special tokens to integer IDs.
-                - A dictionary mapping integer IDs back to byte sequences.
-
-        Examples:
-            >>> bpe = BytePairEncoder(num_merges=50)
-            >>> vocab, rev_vocab = bpe.train_vocabulary(["Hello world! Hello again!"])
-            >>> print(vocab)  # Prints the vocabulary mapping
-        """
-        if isinstance(texts, str):
-            raise TypeError(
-                "train_vocabulary expects an iterable of strings, not a bare str. "
-                "Wrap a single document as [text]."
-            )
-
-        if os.path.exists(self.vocab_file_path) and not overwrite_saved_file:
-            return self._unicode_to_int_vocab, self._int_to_unicode_vocab
-
-        word_freq = self._load_or_build_word_freq(texts, overwrite_saved_file)
-        return self._learn_vocabulary_from_word_freq(word_freq)
-
-    def _load_or_build_word_freq(
-        self, texts: Iterable[str], overwrite: bool
-    ) -> Counter:
-        """Load cached word frequencies or build from scratch and cache."""
-        if not overwrite and os.path.exists(self.word_freq_cache_path):
-            logger.info(
-                "Loading cached word frequencies from %s", self.word_freq_cache_path
-            )
-            with open(self.word_freq_cache_path, "rb") as f:
-                return pickle.load(f)
-
-        word_freq = self._build_word_freq(texts)
-
-        logger.info("Caching word frequencies to %s", self.word_freq_cache_path)
-        with open(self.word_freq_cache_path, "wb") as f:
-            pickle.dump(word_freq, f)
-
-        return word_freq
-
     def _build_word_freq(self, texts: Iterable[str]) -> Counter:
         """Build word frequency table from documents, parallelized when possible.
 
-        Internally counts with bytes keys (cheap from .encode()), then converts
-        to tuple-of-int keys expected by the merge loop.
+        Counts pre-tokenized word forms in document batches, then converts byte
+        keys to token-id tuples used by the merge loop.
         """
-        if self.n_workers > 1:
-            special_token_ids = {
-                tok: self._unicode_to_int_vocab[tok.encode("utf-8")]
-                for tok in self.SPECIAL_TOKENS
-            }
-            raw_freq = self._build_word_freq_parallel(texts, special_token_ids)
-        else:
-            raw_freq = self._build_word_freq_serial(texts)
-
-        # Convert bytes keys to tuple-of-int keys for the merge loop.
-        # Special token entries are already tuple keys — pass them through.
-        word_freq = Counter()
-        for key, count in raw_freq.items():
-            if isinstance(key, bytes):
-                word_freq[tuple(key)] = count
-            else:
-                word_freq[key] = count
-        return word_freq
-
-    def _build_word_freq_serial(self, texts: Iterable[str]) -> Counter:
-        word_freq = Counter()
-        doc_count = 0
-        for text in texts:
-            self._update_word_freq_from_text(word_freq, text)
-            doc_count += 1
-            if doc_count % 500_000 == 0:
-                logger.info(
-                    "Processed %d documents (%d unique word forms so far)",
-                    doc_count,
-                    len(word_freq),
-                )
-        logger.info(
-            "Word frequency table complete: %d documents, %d unique word forms",
-            doc_count,
-            len(word_freq),
-        )
-        return word_freq
-
-    def _build_word_freq_parallel(
-        self, texts: Iterable[str], special_token_ids: Dict[str, int]
-    ) -> Counter:
-        batch_size = 10_000
         pattern_str = self._general_pattern.pattern
         special_tokens_set = set(self.SPECIAL_TOKENS)
+        special_token_ids = {
+            tok: self._unicode_to_int_vocab[tok.encode("utf-8")]
+            for tok in self.SPECIAL_TOKENS
+        }
 
-        word_freq = Counter()
+        args_iter = (
+            (batch, pattern_str, special_tokens_set, special_token_ids)
+            for batch in batched(texts, self.WORD_FREQ_BATCH_SIZE)
+        )
+
+        word_freq: Counter = Counter()
         doc_count = 0
-        with Pool(self.n_workers) as pool:
-            args = (
-                (batch, pattern_str, special_tokens_set, special_token_ids)
-                for batch in batched(texts, batch_size)
-            )
+        with Pool(max(1, self.n_workers)) as pool:
             for partial_wf, batch_doc_count in pool.imap_unordered(
-                BytePairEncoder._word_freq_worker, args
+                BytePairEncoder._word_freq_worker, args_iter
             ):
                 word_freq.update(partial_wf)
                 doc_count += batch_doc_count
-                if doc_count % 500_000 < batch_size:
+                if doc_count % self.WORD_FREQ_LOG_INTERVAL < self.WORD_FREQ_BATCH_SIZE:
                     logger.info(
                         "Processed %d documents (%d unique word forms so far)",
                         doc_count,
                         len(word_freq),
                     )
+
         logger.info(
             "Word frequency table complete: %d documents, %d unique word forms",
             doc_count,
             len(word_freq),
         )
-        return word_freq
+
+        return Counter(
+            {tuple(k) if isinstance(k, bytes) else k: v for k, v in word_freq.items()}
+        )
 
     @staticmethod
     def _word_freq_worker(args):
+        """Pretokenize a document batch and count word forms."""
         docs, pattern_str, special_tokens, special_token_ids = args
         general_pat = regex.compile(pattern_str)
         special_pat = regex.compile(
             "(" + "|".join(regex.escape(k) for k in special_tokens) + ")"
         )
-        wf = Counter()
+        wf: Counter = Counter()
         for doc in docs:
             for segment in special_pat.split(doc):
                 if not segment:
@@ -497,20 +565,6 @@ class BytePairEncoder:
                     for chunk in general_pat.findall(segment):
                         wf[chunk.encode("utf-8")] += 1
         return wf, len(docs)
-
-    def _update_word_freq_from_text(self, word_freq: Counter, input_text: str) -> None:
-        """Count word frequencies using bytes keys (cheap to create from .encode()).
-        The caller converts to tuple-of-int keys before the merge loop.
-        """
-        text_chunks = self._pretokenize(input_text)
-        logger.debug("Text chunks: %s", text_chunks[:10])
-
-        for chunk in text_chunks:
-            if chunk in self.SPECIAL_TOKENS:
-                special_id = self._unicode_to_int_vocab[chunk.encode("utf-8")]
-                word_freq[(special_id,)] += 1
-            else:
-                word_freq[chunk.encode("utf-8")] += 1
 
     def _learn_vocabulary_from_word_freq(
         self,
@@ -556,8 +610,8 @@ class BytePairEncoder:
             # Pop stale/exhausted entries to find the current best pair.
             # Lazy correction: if a popped entry's count is stale but still positive,
             # re-push with the corrected count instead of discarding.
-            best_pair = None
-            best_pair_count = 0
+            most_frequent_pair = None
+            most_frequent_count = 0
             while heap:
                 neg_count, candidate = heap[0]
                 actual = pair_counts.get(candidate, 0)
@@ -567,12 +621,12 @@ class BytePairEncoder:
                 if actual != -neg_count:
                     heapq.heapreplace(heap, (-actual, candidate))
                     continue
-                best_pair = candidate
-                best_pair_count = actual
+                most_frequent_pair = candidate
+                most_frequent_count = actual
                 heapq.heappop(heap)
                 break
 
-            if best_pair is None or best_pair_count < 2:
+            if most_frequent_pair is None or most_frequent_count < 2:
                 break
 
             new_id = self.new_idx
@@ -580,27 +634,27 @@ class BytePairEncoder:
 
             # Create the merged token
             merged_bytes = (
-                self._int_to_unicode_vocab[best_pair[0]]
-                + self._int_to_unicode_vocab[best_pair[1]]
+                self._int_to_unicode_vocab[most_frequent_pair[0]]
+                + self._int_to_unicode_vocab[most_frequent_pair[1]]
             )
             self._int_to_unicode_vocab[new_id] = merged_bytes
             self._unicode_to_int_vocab[merged_bytes] = new_id
 
             # Apply merge using the inverted index for fast lookup
             self._apply_merges_to_corpus_indexed(
-                best_pair,
+                most_frequent_pair,
                 new_id,
                 word_freq,
                 pair_counts,
                 pair_to_words,
                 heap,
             )
-            self.learned_merges.append((best_pair, new_id))
+            self.learned_merges.append((most_frequent_pair, new_id))
 
             if (i + 1) % 5_000 == 0:
                 logger.info(
                     f"[{i + 1}/{self.num_merges} merge] Best Pair Merged "
-                    f"({best_pair_count} occurrences). "
+                    f"({most_frequent_count} occurrences). "
                     f"Vocab size: {len(self._unicode_to_int_vocab)}"
                 )
 
@@ -622,90 +676,13 @@ class BytePairEncoder:
         """Lazily build and cache a merge priority lookup: pair -> (priority, new_id).
         Lower priority = earlier merge = applied first during greedy encoding.
         """
-        if not hasattr(self, "_merge_priority_cache"):
-            self._merge_priority_cache = {}
+        if self._merge_priority_cache is None:
+            cache: Dict[Tuple[int, int], Tuple[int, int]] = {}
             for priority, (pair, new_id) in enumerate(self.learned_merges):
-                if pair not in self._merge_priority_cache:
-                    self._merge_priority_cache[pair] = (priority, new_id)
+                if pair not in cache:
+                    cache[pair] = (priority, new_id)
+            self._merge_priority_cache = cache
         return self._merge_priority_cache
-
-    def encode(self, input_text: str, *, show_progress: bool = False) -> List[int]:
-        """Encodes a raw input string into a list of BPE token IDs.
-
-        The process is:
-          1) Pre-tokenize the input into chunks (words, punctuation, special tokens).
-          2) Convert each chunk to base (byte-level) token IDs.
-          3) Greedily apply the highest-priority merge until no more merges apply.
-
-        Args:
-            input_text (str): The text to encode.
-
-        Returns:
-            List[int]: The list of integer token IDs representing the encoded text.
-
-        Example:
-            >>> bpe = BytePairEncoder(num_merges=50)
-            >>> bpe.train_vocabulary(["Hello world!"])
-            >>> token_ids = bpe.encode("Hello world!")
-            >>> print(token_ids)  # Outputs a list of token IDs
-        """
-        text_chunks = self._pretokenize(input_text)
-        logger.debug("Text chunks: %s", text_chunks[:20])
-
-        if not text_chunks:
-            return []
-
-        merge_priority = self._get_merge_priority()
-        result: List[int] = []
-        for chunk in text_chunks:
-            if chunk in self.SPECIAL_TOKENS:
-                result.append(self._unicode_to_int_vocab[chunk.encode("utf-8")])
-            else:
-                # Base vocab maps bytes([b]) -> b (identity)
-                token_ids = list(chunk.encode("utf-8"))
-                # Greedily apply the earliest-learned merge until convergence
-                while len(token_ids) >= 2:
-                    best_idx = -1
-                    best_priority = float("inf")
-                    for i in range(len(token_ids) - 1):
-                        p_info = merge_priority.get((token_ids[i], token_ids[i + 1]))
-                        if p_info is not None and p_info[0] < best_priority:
-                            best_priority = p_info[0]
-                            best_idx = i
-                    if best_idx == -1:
-                        break
-                    new_id = merge_priority[
-                        (token_ids[best_idx], token_ids[best_idx + 1])
-                    ][1]
-                    token_ids[best_idx : best_idx + 2] = [new_id]
-                result.extend(token_ids)
-
-        return result
-
-    def decode(self, encoded_tokens: List[int]) -> str:
-        """Decodes a sequence of BPE token IDs back into a string.
-
-        Args:
-            encoded_tokens (List[int]): The list of integer token IDs to decode.
-
-        Returns:
-            str: The decoded string.
-
-        Example:
-            >>> bpe = BytePairEncoder(num_merges=50)
-            >>> bpe.train_vocabulary(["Hello world!"])
-            >>> token_ids = bpe.encode("Hello world!")
-            >>> text = bpe.decode(token_ids) # Expected: "Hello world!" (or similar)
-        """
-        result_bytes = []
-        for t in encoded_tokens:
-            if not isinstance(t, int) and hasattr(t, "item"):  # handle array scalars
-                t = t.item()
-            if t in self._int_to_unicode_vocab:
-                result_bytes.append(self._int_to_unicode_vocab[t])
-            else:
-                result_bytes.append(b"<UNK>")
-        return b"".join(result_bytes).decode("utf-8", errors="replace")
 
     def _pretokenize(self, input_text: str) -> List[str]:
         r"""Splits the input text into smaller chunks (tokens).
@@ -745,6 +722,7 @@ class BytePairEncoder:
         *,
         text_batch_size: int,
         desc: str,
+        preserve_order: bool = True,
     ) -> Iterable[list[list[int]]]:
         if text_batch_size < 1:
             raise ValueError(f"text_batch_size must be >= 1, got {text_batch_size}")
@@ -752,8 +730,13 @@ class BytePairEncoder:
         text_batches = batched(text_iter, text_batch_size)
         if self.n_workers > 1:
             with Pool(self.n_workers) as pool:
+                encoded_batches = (
+                    pool.imap(self._encode_text_batch, text_batches)
+                    if preserve_order
+                    else pool.imap_unordered(self._encode_text_batch, text_batches)
+                )
                 yield from tqdm(
-                    pool.imap(self._encode_text_batch, text_batches),
+                    encoded_batches,
                     desc=desc,
                     unit="batch",
                 )
