@@ -10,6 +10,7 @@ import pyarrow.parquet as pq
 
 from autograd.backend import xp
 from autograd.text.utils import (
+    _download_url,
     clean_and_tokenize,
     create_causal_mask,
     create_vocabulary,
@@ -53,6 +54,23 @@ class BytesResponse:
         return chunk
 
 
+def _make_urlopen_responder(routes: dict):
+    """Build a urlopen.side_effect that serves bytes per URL, honoring Range."""
+
+    def responder(req, timeout):
+        if isinstance(req, str):
+            url, byte_range = req, None
+        else:
+            url, byte_range = req.full_url, req.get_header("Range")
+        content = routes[url]
+        if byte_range is None:
+            return BytesResponse(content)
+        start, end = map(int, byte_range.removeprefix("bytes=").split("-"))
+        return BytesResponse(content[start : end + 1])
+
+    return responder
+
+
 class TestTextUtils(TestCase):
     def setUp(self) -> None:
         self.bpe = MockedBPE()
@@ -91,25 +109,33 @@ class TestTextUtils(TestCase):
         pq.write_table(pa.Table.from_pylist([{"text": "alpha"}]), first_shard)
         second_shard = pa.BufferOutputStream()
         pq.write_table(pa.Table.from_pylist([{"text": "beta"}]), second_shard)
+        first_bytes = first_shard.getvalue().to_pybytes()
+        second_bytes = second_shard.getvalue().to_pybytes()
         manifest = {
             "parquet_files": [
                 {
                     "split": "train",
                     "url": "https://example.test/openwebtext/0000.parquet",
                     "filename": "0000.parquet",
+                    "size": len(first_bytes),
                 },
                 {
                     "split": "train",
                     "url": "https://example.test/openwebtext/0001.parquet",
                     "filename": "0001.parquet",
+                    "size": len(second_bytes),
                 },
             ]
         }
-        mock_urlopen.side_effect = [
-            BytesResponse(json.dumps(manifest).encode("utf-8")),
-            BytesResponse(first_shard.getvalue().to_pybytes()),
-            BytesResponse(second_shard.getvalue().to_pybytes()),
-        ]
+        mock_urlopen.side_effect = _make_urlopen_responder(
+            {
+                "https://datasets-server.huggingface.co/parquet?dataset=Skylion007%2Fopenwebtext": json.dumps(
+                    manifest
+                ).encode("utf-8"),
+                "https://example.test/openwebtext/0000.parquet": first_bytes,
+                "https://example.test/openwebtext/0001.parquet": second_bytes,
+            }
+        )
 
         real_import = __import__
 
@@ -136,7 +162,6 @@ class TestTextUtils(TestCase):
             data,
             ["<SOS>alpha<|endoftext|>", "<SOS>beta<|endoftext|>"],
         )
-        self.assertEqual(mock_urlopen.call_count, 3)
 
     @patch("autograd.text.utils.urlopen", create=True)
     def test_load_openwebtext_can_wrap_docs_with_start_and_split_tokens(
@@ -144,19 +169,25 @@ class TestTextUtils(TestCase):
     ):
         shard = pa.BufferOutputStream()
         pq.write_table(pa.Table.from_pylist([{"text": "alpha"}]), shard)
+        shard_bytes = shard.getvalue().to_pybytes()
         manifest = {
             "parquet_files": [
                 {
                     "split": "train",
                     "url": "https://example.test/openwebtext/0000.parquet",
                     "filename": "0000.parquet",
+                    "size": len(shard_bytes),
                 },
             ]
         }
-        mock_urlopen.side_effect = [
-            BytesResponse(json.dumps(manifest).encode("utf-8")),
-            BytesResponse(shard.getvalue().to_pybytes()),
-        ]
+        mock_urlopen.side_effect = _make_urlopen_responder(
+            {
+                "https://datasets-server.huggingface.co/parquet?dataset=Skylion007%2Fopenwebtext": json.dumps(
+                    manifest
+                ).encode("utf-8"),
+                "https://example.test/openwebtext/0000.parquet": shard_bytes,
+            }
+        )
 
         cwd = os.getcwd()
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -172,7 +203,30 @@ class TestTextUtils(TestCase):
                 os.chdir(cwd)
 
         self.assertEqual(data, ["<SOS>alpha<|endoftext|>"])
-        self.assertEqual(mock_urlopen.call_count, 2)
+
+    @patch("autograd.text.utils.urlopen", create=True)
+    def test_download_url_issues_parallel_range_requests(self, mock_urlopen):
+        content = bytes(range(251)) * 100  # 25100 bytes
+
+        def fake_urlopen(request, timeout):
+            self.assertEqual(timeout, 60)
+            byte_range = request.get_header("Range")
+            self.assertIsNotNone(byte_range)
+            start, end = map(int, byte_range.removeprefix("bytes=").split("-"))
+            return BytesResponse(content[start : end + 1])
+
+        mock_urlopen.side_effect = fake_urlopen
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "blob.bin")
+            _download_url(
+                "https://example.test/blob.bin", path, expected_size=len(content)
+            )
+
+            with open(path, "rb") as f:
+                self.assertEqual(f.read(), content)
+
+        self.assertGreater(mock_urlopen.call_count, 1)
 
     def test_text_to_one_hot_and_sparse(self):
         texts = ["I love apples", "I love apples too"]
