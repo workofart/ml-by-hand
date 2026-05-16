@@ -141,6 +141,40 @@ class TestScaledDotProductAttention(TestCase):
         dense = self._run_attention("dense")
         assert allclose(dense.data, result.data, atol=1e-5, rtol=1e-5)
 
+    def test_dense_attention_preserves_low_precision_dtype_without_explicit_fp32_inputs(
+        self,
+    ):
+        dtype = getattr(xp, "bfloat16", getattr(xp, "float16", None))
+        if dtype is None:
+            self.skipTest("backend has no low-precision float dtype")
+
+        query = Tensor(xp.random.normal(shape=(1, 2, 3, 4)).astype(dtype))
+        key = Tensor(xp.random.normal(shape=(1, 2, 3, 4)).astype(dtype))
+        value = Tensor(xp.random.normal(shape=(1, 2, 3, 4)).astype(dtype))
+        attention = self._make_attention()
+
+        with self._implementation_context("dense"):
+            output = attention(query, key, value)
+
+        self.assertEqual(output.data.dtype, dtype)
+
+    def test_dense_causal_attention_preserves_low_precision_dtype_without_explicit_fp32_inputs(
+        self,
+    ):
+        dtype = getattr(xp, "bfloat16", getattr(xp, "float16", None))
+        if dtype is None:
+            self.skipTest("backend has no low-precision float dtype")
+
+        query = Tensor(xp.random.normal(shape=(1, 2, 3, 4)).astype(dtype))
+        key = Tensor(xp.random.normal(shape=(1, 2, 3, 4)).astype(dtype))
+        value = Tensor(xp.random.normal(shape=(1, 2, 3, 4)).astype(dtype))
+        attention = self._make_attention()
+
+        with self._implementation_context("dense"):
+            output = attention(query, key, value, is_causal=True)
+
+        self.assertEqual(output.data.dtype, dtype)
+
     def test_mlx_custom_falls_back_to_dense_for_reverse_causal_mask(self):
         mask = Tensor(
             create_causal_mask(

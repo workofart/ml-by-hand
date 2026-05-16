@@ -277,7 +277,10 @@ class Optimizer:
         """Scale all parameter gradients in-place by ``scale``."""
         for param in self.model_parameters.values():
             if param.grad is not None:
+                grad_dtype = param.grad.data.dtype
                 param.grad.data *= scale
+                if param.grad.data.dtype != grad_dtype:
+                    param.grad.data = param.grad.data.astype(grad_dtype)
 
     def grad_l2_norm(self) -> float:
         """Return the L2 norm of all current parameter gradients."""
