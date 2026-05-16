@@ -143,12 +143,154 @@ class TrainingState:
         self.report_loss_total_weight = xp.array(0.0, dtype=xp.float32)
         self.report_started_at_s = time.perf_counter()
 
-    def report_tokens_per_second(self, *, now_s: Optional[float] = None) -> float:
-        elapsed_s = (now_s or time.perf_counter()) - self.report_started_at_s
+    def report_tokens_per_second(
+        self,
+        total_weight: Array,
+        *,
+        now_s: Optional[float] = None,
+    ) -> float:
+        observed_now_s = time.perf_counter() if now_s is None else now_s
+        elapsed_s = observed_now_s - self.report_started_at_s
         if elapsed_s <= 0:
             return 0.0
-        token_count = xp.to_scalar(self.report_loss_total_weight)
-        return float(token_count) / elapsed_s
+        return float(xp.to_scalar(total_weight)) / elapsed_s
+
+    def report_eval_metric(
+        self,
+        *,
+        numerator: Array,
+        denominator: Array,
+    ) -> Optional[float]:
+        denominator_value = float(xp.to_scalar(denominator))
+        if denominator_value <= 0:
+            return None
+        return float(xp.to_scalar(numerator)) / denominator_value
+
+    def _weighted_mean(
+        self,
+        numerator: Optional[float | Array],
+        denominator: Array,
+    ) -> float:
+        if numerator is None:
+            return 0.0
+        numerator_value = xp.to_scalar(numerator)
+        denominator_value = xp.to_scalar(denominator)
+        return float(numerator_value) / max(float(denominator_value), 1.0)
+
+    def metrics_row(
+        self,
+        *,
+        eval_state: Optional["TrainingState"],
+        log_global_loss: bool,
+    ) -> dict[str, Optional[float]]:
+        metrics = self._agg_dist_metrics(
+            eval_state,
+            log_global_loss=log_global_loss,
+        )
+        row: dict[str, Optional[float]] = {
+            "train_loss": self._weighted_mean(
+                metrics["train_loss_sum"],
+                metrics["train_loss_total_weight"],
+            ),
+            "tokens_per_s": self.report_tokens_per_second(
+                metrics["tokens_total_weight"]
+            ),
+            "val_loss": None
+            if eval_state is None
+            else self._weighted_mean(
+                metrics["val_loss_sum"],
+                metrics["val_loss_total_weight"],
+            ),
+        }
+        if eval_state is not None:
+            for key, (numerator, denominator) in metrics["eval_metric_totals"].items():
+                metric_value = eval_state.report_eval_metric(
+                    numerator=numerator,
+                    denominator=denominator,
+                )
+                if metric_value is not None:
+                    row[f"val_{key}"] = metric_value
+        return row
+
+    def _agg_dist_metrics(
+        self,
+        eval_state: Optional["TrainingState"],
+        *,
+        log_global_loss: bool,
+    ) -> dict[str, Any]:
+        """Return report-ready additive metric totals, reduced across ranks.
+
+        `TrainingState` owns the raw counters: loss sums, token counts, and
+        eval metric numerators/denominators. In DDP, those counters are packed
+        into one vector and AllReduce-summed once, then unpacked back into the
+        same logical totals. `metrics_row` turns these totals into ratios.
+        """
+        train_loss_sum = self.report_loss_sum
+        train_loss_total_weight = self.report_loss_total_weight
+        tokens_total_weight = self.report_loss_total_weight
+        val_loss_sum = eval_state.eval_loss_sum if eval_state is not None else None
+        val_loss_total_weight = (
+            eval_state.eval_loss_total_weight if eval_state is not None else None
+        )
+        metric_keys = sorted(eval_state.eval_metric_totals) if eval_state else []
+        eval_metric_totals = {}
+        if eval_state is not None:
+            for key in metric_keys:
+                totals = eval_state.eval_metric_totals[key]
+                eval_metric_totals[key] = (
+                    xp.asarray(totals["numerator"], dtype=xp.float32),
+                    xp.asarray(totals["denominator"], dtype=xp.float32),
+                )
+
+        if is_distributed():
+            backend = get_backend()
+            values = [xp.asarray(tokens_total_weight, dtype=xp.float32)]
+            if log_global_loss:
+                values.extend(
+                    [
+                        xp.asarray(
+                            0.0 if train_loss_sum is None else train_loss_sum,
+                            dtype=xp.float32,
+                        ),
+                        xp.asarray(train_loss_total_weight, dtype=xp.float32),
+                    ]
+                )
+                if eval_state is not None:
+                    values.extend(
+                        [
+                            xp.asarray(val_loss_sum, dtype=xp.float32),
+                            xp.asarray(val_loss_total_weight, dtype=xp.float32),
+                        ]
+                    )
+            if eval_state is not None:
+                for key in metric_keys:
+                    values.extend(eval_metric_totals[key])
+            reduced = backend.all_reduce(
+                xp.stack(values),
+                op=ReduceOp.SUM,
+            )
+            tokens_total_weight = reduced[0]
+            offset = 1
+            if log_global_loss:
+                train_loss_sum = reduced[offset]
+                train_loss_total_weight = reduced[offset + 1]
+                offset += 2
+                if eval_state is not None:
+                    val_loss_sum = reduced[offset]
+                    val_loss_total_weight = reduced[offset + 1]
+                    offset += 2
+            for key in metric_keys:
+                eval_metric_totals[key] = (reduced[offset], reduced[offset + 1])
+                offset += 2
+
+        return {
+            "train_loss_sum": train_loss_sum,
+            "train_loss_total_weight": train_loss_total_weight,
+            "tokens_total_weight": tokens_total_weight,
+            "val_loss_sum": val_loss_sum,
+            "val_loss_total_weight": val_loss_total_weight,
+            "eval_metric_totals": eval_metric_totals,
+        }
 
     def has_enough_batches(self, accumulation_steps: int):
         return self.accumulated_batches >= accumulation_steps
@@ -472,7 +614,10 @@ class AbstractTrainer(ABC):
             plan.completed_epochs(self.global_step) if plan.by_epoch else None
         )
         progress_value = plan.progress_value(self.global_step)
-        metrics = self._metrics_row(state, eval_state=eval_state)
+        metrics = state.metrics_row(
+            eval_state=eval_state,
+            log_global_loss=self.config.log_global_loss,
+        )
         row: dict[str, Optional[float]] = {
             "epoch": completed_epochs,
             "step": float(self.global_step),
@@ -503,52 +648,6 @@ class AbstractTrainer(ABC):
         )
 
         state.reset_report()
-
-    def _weighted_mean(
-        self,
-        numerator: Optional[float | Array],
-        denominator: Array,
-    ) -> float:
-        if numerator is None:
-            return 0.0
-        # Reporting is the GPU/accelerator-to-CPU sync boundary: training keeps
-        # loss sums and token counts as backend scalars until logs/metrics need floats.
-        # DDP global loss must reduce numerator and denominator separately;
-        # averaging per-rank ratios is wrong for uneven batch weights.
-        if is_distributed() and self.config.log_global_loss:
-            backend = get_backend()
-            num_arr = xp.asarray(numerator, dtype=xp.float32)
-            den_arr = xp.asarray(denominator, dtype=xp.float32)
-            numerator = backend.all_reduce(num_arr, op=ReduceOp.SUM)
-            denominator = backend.all_reduce(den_arr, op=ReduceOp.SUM)
-        numerator_value = xp.to_scalar(numerator)
-        denominator_value = xp.to_scalar(denominator)
-        return float(numerator_value) / max(float(denominator_value), 1.0)
-
-    def _metrics_row(
-        self,
-        state: TrainingState,
-        *,
-        eval_state: Optional[TrainingState],
-    ) -> dict[str, Optional[float]]:
-        row: dict[str, Optional[float]] = {
-            "train_loss": self._weighted_mean(
-                state.report_loss_sum,
-                state.report_loss_total_weight,
-            ),
-            "tokens_per_s": state.report_tokens_per_second(),
-            "val_loss": None
-            if eval_state is None
-            else self._weighted_mean(
-                eval_state.eval_loss_sum,
-                eval_state.eval_loss_total_weight,
-            ),
-        }
-        if eval_state is not None:
-            for key, totals in eval_state.eval_metric_totals.items():
-                if totals["denominator"] > 0:
-                    row[f"val_{key}"] = totals["numerator"] / totals["denominator"]
-        return row
 
     def _loss_total_weight(self, _batch_data) -> Array:
         """Denominator for accumulated summed losses.
@@ -1144,6 +1243,7 @@ class LLMTrainer(AbstractTrainer):
         if state.eval_loss_batches == 0:
             raise ValueError("val_data_loader yielded no batches.")
 
-        for callback in self.eval_callbacks:
-            callback(self.model, self.forward_fn, val_data_loader, self.config)
+        if rank() == 0:
+            for callback in self.eval_callbacks:
+                callback(self.model, self.forward_fn, val_data_loader, self.config)
         return state

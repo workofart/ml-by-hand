@@ -491,3 +491,7 @@ _backend_random.randint = _sample_randint
 _backend_random.bernoulli = _sample_bernoulli
 _backend_random.permutation = _sample_permutation
 _backend_random.categorical = _sample_categorical_with_options
+
+_seed_from_env = os.environ.get("SEED")
+if _seed_from_env is not None:
+    _seed_backend_random(int(_seed_from_env))

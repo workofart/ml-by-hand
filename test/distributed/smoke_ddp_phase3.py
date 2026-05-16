@@ -9,8 +9,8 @@ Verifies on a real multi-process / multi-GPU setup that:
 
 - `broadcast_optimizer_state` copies rank-0's tensor-valued state to all
   ranks and leaves non-dict slots (e.g. integer `timestep`) untouched.
-- `_weighted_mean` with `config.log_global_loss=True` produces the true
-  global weighted mean across ranks, not the rank-local ratio.
+- `TrainingState.metrics_row` with `log_global_loss=True` produces the true global
+  weighted mean across ranks, not the rank-local ratio.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from autograd.distributed import (
     rank,
     world_size,
 )
-from autograd.tools.trainer import AbstractTrainer
+from autograd.tools.trainer import TrainingState
 
 
 def _test_broadcast_optimizer_state(r: int, ws: int) -> None:
@@ -58,22 +58,23 @@ def _test_broadcast_optimizer_state(r: int, ws: int) -> None:
     print(f"[rank {r}] broadcast_optimizer_state OK", flush=True)
 
 
-def _test_weighted_mean_global(r: int, ws: int) -> None:
+def _test_metrics_row_global_loss(r: int, ws: int) -> None:
     """Per-rank numerator/denominator → global mean of sums."""
     # Per rank: num = (r+1) * 2, den = (r+1). With ws=2: nums=[2,4] sums=6,
     # dens=[1,2] sums=3, expected_global = 2.0.
-    num = xp.asarray((r + 1) * 2.0, dtype=xp.float32)
-    den = xp.asarray(float(r + 1), dtype=xp.float32)
-
-    fake_trainer = SimpleNamespace(config=SimpleNamespace(log_global_loss=True))
-    got = AbstractTrainer._weighted_mean(fake_trainer, num, den)
+    state = TrainingState(report_started_at_s=0.0)
+    state.record_loss(
+        xp.asarray((r + 1) * 2.0, dtype=xp.float32),
+        total_weight=xp.asarray(float(r + 1), dtype=xp.float32),
+    )
+    got = state.metrics_row(eval_state=None, log_global_loss=True)["train_loss"]
 
     nums = [(i + 1) * 2.0 for i in range(ws)]
     dens = [float(i + 1) for i in range(ws)]
     expected_global = sum(nums) / sum(dens)
     np.testing.assert_allclose(got, expected_global, rtol=1e-6, atol=1e-6)
     print(
-        f"[rank {r}] _weighted_mean(log_global_loss=True) OK: "
+        f"[rank {r}] metrics_row(log_global_loss=True) OK: "
         f"got={got:.6f} expected={expected_global:.6f}",
         flush=True,
     )
@@ -93,7 +94,7 @@ def main() -> None:
     print(f"[rank {r}] backend ready: {type(backend).__name__}", flush=True)
 
     _test_broadcast_optimizer_state(r, ws)
-    _test_weighted_mean_global(r, ws)
+    _test_metrics_row_global_loss(r, ws)
 
     backend.barrier()
     print(f"[rank {r}] barrier OK; PASS", flush=True)

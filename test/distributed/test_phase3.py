@@ -7,10 +7,9 @@ Two pieces of Phase 3 plumbing get tested here against the mock backend:
   slots (e.g. the integer `timestep`) untouched. The fp32-promotion path
   used by `broadcast_parameters` for bf16 also applies here.
 
-- `_weighted_mean` with `config.log_global_loss=True` AllReduce-sums both
-  the numerator and the denominator across ranks before dividing, so the
-  reported loss is the true global weighted mean. With the flag off, it
-  stays a rank-local computation.
+- `TrainingState.metrics_row` with `log_global_loss=True` packs additive report
+  counters into one vector, AllReduce-sums that vector, then reports the
+  true global weighted mean. With the flag off, loss stays rank-local.
 """
 
 from __future__ import annotations
@@ -26,7 +25,7 @@ from autograd.distributed import (
     rank,
     world_size,
 )
-from autograd.tools.trainer import AbstractTrainer
+from autograd.tools.trainer import TrainingState
 
 from .mock import run_mock_ranks
 
@@ -107,23 +106,11 @@ def test_broadcast_optimizer_state_fp32_promotion_round_trip():
         )
 
 
-# ---- _weighted_mean global allreduce path -------------------------------
+# ---- report metric global allreduce path --------------------------------
 
 
-def _fake_trainer(*, log_global_loss: bool) -> SimpleNamespace:
-    """Build a trainer stub with just the attributes `_weighted_mean` reads.
-
-    We don't construct a real AbstractTrainer because its __init__ pulls in
-    a model + optimizer; the AllReduce branch is a small, isolated path
-    that only needs `self.config.log_global_loss`.
-    """
-    return SimpleNamespace(config=SimpleNamespace(log_global_loss=log_global_loss))
-
-
-def test_weighted_mean_local_when_flag_off():
-    """With log_global_loss=False, the helper returns rank-local mean and
-    runs no collective — verified by passing values that would diverge
-    across ranks if AllReduced."""
+def test_weighted_mean_is_local_math():
+    """The ratio helper returns rank-local means and runs no collective."""
     ws = 4
 
     def target():
@@ -131,9 +118,7 @@ def test_weighted_mean_local_when_flag_off():
         # rank returns its own ratio unchanged.
         num = xp.array(2.0 * (rank() + 1), dtype=xp.float32)
         den = xp.array(1.0, dtype=xp.float32)
-        return AbstractTrainer._weighted_mean(
-            _fake_trainer(log_global_loss=False), num, den
-        )
+        return TrainingState()._weighted_mean(num, den)
 
     results = run_mock_ranks(ws, target)
     for r, out in enumerate(results):
@@ -143,13 +128,13 @@ def test_weighted_mean_local_when_flag_off():
 @pytest.mark.skipif(
     IS_MLX,
     reason=(
-        "MLX lazy graphs aren't thread-safe: _weighted_mean's inline "
+        "MLX lazy graphs aren't thread-safe: metrics_row's inline "
         "xp.to_scalar after AllReduce evaluates a cross-thread graph "
         "and segfaults under the in-process mock. Production DDP runs "
         "one process per rank, so this is a mock-only concern."
     ),
 )
-def test_weighted_mean_global_allreduces_when_flag_on():
+def test_metrics_row_global_allreduces_loss_when_flag_on():
     """With log_global_loss=True, every rank returns the global weighted
     mean: sum(numerators) / sum(denominators), not the per-rank ratio."""
     ws = 4
@@ -158,11 +143,15 @@ def test_weighted_mean_global_allreduces_when_flag_on():
     expected_global = sum(numerators) / sum(denominators)  # 2.5
 
     def target():
-        num = xp.array(numerators[rank()], dtype=xp.float32)
-        den = xp.array(denominators[rank()], dtype=xp.float32)
-        return AbstractTrainer._weighted_mean(
-            _fake_trainer(log_global_loss=True), num, den
+        state = TrainingState(report_started_at_s=0.0)
+        state.record_loss(
+            xp.array(numerators[rank()], dtype=xp.float32),
+            total_weight=xp.array(denominators[rank()], dtype=xp.float32),
         )
+        return state.metrics_row(
+            eval_state=None,
+            log_global_loss=True,
+        )["train_loss"]
 
     results = run_mock_ranks(ws, target)
     for r, out in enumerate(results):
@@ -174,8 +163,7 @@ def test_weighted_mean_none_numerator_returns_zero():
     rank returns 0.0 without entering the collective. (When None comes
     from `state.report_loss_sum`, all ranks observe it consistently, so
     no collective desync.)"""
-    out = AbstractTrainer._weighted_mean(
-        _fake_trainer(log_global_loss=True),
+    out = TrainingState()._weighted_mean(
         None,
         xp.array(1.0, dtype=xp.float32),
     )

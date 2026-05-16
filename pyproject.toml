@@ -12,6 +12,7 @@ requires-python = ">=3.12"
 dependencies = [
     "numpy",
     "mlx; platform_system == 'Darwin'",
+    "ml_dtypes",
     "openml",  # for dataset
     "pyarrow",
     "regex",

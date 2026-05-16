@@ -73,6 +73,20 @@ def _fake_cupy_module(device_count: int):
     )
 
 
+def test_seed_env_initializes_backend_and_host_rng(monkeypatch):
+    monkeypatch.setenv("SEED", "123")
+    module = _load_backend_module(monkeypatch, env_backend="numpy")
+
+    got_backend = module.xp.random.randint(0, 1000, size=5)
+    got_host = np.random.randint(0, 1000, size=5)
+
+    np.random.seed(123)
+    expected_backend = np.random.randint(0, 1000, size=5)
+    expected_host = np.random.randint(0, 1000, size=5)
+    assert np.array_equal(got_backend, expected_backend)
+    assert np.array_equal(got_host, expected_host)
+
+
 def test_scatter_add_accumulates_repeated_indices():
     dst = xp.zeros(3, dtype=xp.float32)
     idx = [1, 1]

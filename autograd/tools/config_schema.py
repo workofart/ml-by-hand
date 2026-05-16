@@ -101,8 +101,32 @@ class GenericTrainingConfig:
                 "global_batch_size must be divisible by micro_batch_size, "
                 f"got {self.global_batch_size} and {self.micro_batch_size}"
             )
+        self._validate_distributed_batch_config()
         if self.max_grad_norm is not None and self.max_grad_norm <= 0:
             raise ValueError(f"max_grad_norm must be > 0, got {self.max_grad_norm}")
+
+    def _validate_distributed_batch_config(self) -> None:
+        from autograd.distributed import rank, world_size
+
+        ws = world_size()
+        if ws < 1:
+            raise ValueError(f"world_size must be >= 1, got {ws}")
+        current_rank = rank()
+        if not (0 <= current_rank < ws):
+            raise ValueError(
+                f"rank must be in [0, {ws}), got {current_rank}. "
+                "Check RANK/WORLD_SIZE or the distributed launcher."
+            )
+        if ws == 1:
+            return
+
+        per_step = self.micro_batch_size * ws
+        if self.global_batch_size % per_step != 0:
+            raise ValueError(
+                f"global_batch_size ({self.global_batch_size}) must be divisible by "
+                f"micro_batch_size * world_size ({self.micro_batch_size} * {ws} = "
+                f"{per_step}). Adjust the config or the --nproc-per-node value."
+            )
 
     @property
     def gradient_accumulation_steps(self) -> int:

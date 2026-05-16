@@ -1,6 +1,8 @@
 from unittest import TestCase
 
+from autograd import distributed as dist
 from autograd.tools.config_schema import CustomBpeConfig, TransformerTrainingConfig
+from test.distributed.mock import MockBackend, MockComm
 
 
 class TestTransformerTrainingConfig(TestCase):
@@ -63,3 +65,55 @@ class TestTransformerTrainingConfig(TestCase):
         )
 
         self.assertEqual(config.gradient_accumulation_steps, 8)
+
+    def test_rejects_global_batch_size_not_divisible_by_distributed_world_size(self):
+        dist._set_thread_local_rank(
+            rank_=0,
+            world_size_=3,
+            local_rank_=0,
+            backend=MockBackend(MockComm(3), 0),
+        )
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                r"global_batch_size \(144\) must be divisible by "
+                r"micro_batch_size \* world_size \(9 \* 3 = 27\)",
+            ):
+                TransformerTrainingConfig(
+                    training_run_name="test",
+                    dataset_name="dataset",
+                    max_steps=5,
+                    checkpoint_freq=5,
+                    global_batch_size=144,
+                    micro_batch_size=9,
+                    model_kwargs={},
+                    optimizer_kwargs={"lr": 1e-3},
+                    label_smoothing=0.0,
+                    teacher_forcing=False,
+                )
+        finally:
+            dist._clear_thread_local()
+
+    def test_allows_global_batch_size_divisible_by_distributed_world_size(self):
+        dist._set_thread_local_rank(
+            rank_=0,
+            world_size_=4,
+            local_rank_=0,
+            backend=MockBackend(MockComm(4), 0),
+        )
+        try:
+            config = TransformerTrainingConfig(
+                training_run_name="test",
+                dataset_name="dataset",
+                max_steps=5,
+                checkpoint_freq=5,
+                global_batch_size=144,
+                micro_batch_size=9,
+                model_kwargs={},
+                optimizer_kwargs={"lr": 1e-3},
+                label_smoothing=0.0,
+                teacher_forcing=False,
+            )
+            self.assertEqual(config.gradient_accumulation_steps, 4)
+        finally:
+            dist._clear_thread_local()
