@@ -379,7 +379,7 @@ def _sample_categorical(logits: Any):
     choice = _native_random_fns.get("choice")
     if choice is None:
         raise RuntimeError(f"categorical sampling is not available on backend {NAME}")
-    return choice(probs.shape[-1], p=probs)
+    return choice(probs.shape[-1], size=(), p=probs)
 
 
 def _sample_categorical_with_options(
