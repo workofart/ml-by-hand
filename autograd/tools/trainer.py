@@ -24,6 +24,7 @@ from autograd.backend import (
     xp,
 )
 from autograd.data.data_loader import DataLoader
+from autograd.distributed import rank
 from autograd.tensor import Tensor, no_grad
 from autograd.tools.config_schema import (
     GenericTrainingConfig,
@@ -250,6 +251,15 @@ class AbstractTrainer(ABC):
         """
         self.config = config
         self.loss_fn = loss_fn
+
+        # Centralized rank-zero log suppression: on non-rank-0, raise the
+        # autograd logger family to WARNING. Every logger.info() across
+        # this package (trainer, optim, nn, ...) then auto-quiets without
+        # scattered `if rank() == 0:` guards at each call site. Only
+        # operations that aren't logging — file writes, the tqdm bar —
+        # still need an explicit rank check at their call site.
+        if rank() != 0:
+            logging.getLogger("autograd").setLevel(logging.WARNING)
         # `resume_epoch` is only a checkpoint lookup hint here. Runtime training
         # progress comes from the loaded checkpoint metadata, especially step_count.
         self.model, self.optimizer, self.checkpoint = self._load_model_and_optimizer(
@@ -334,6 +344,7 @@ class AbstractTrainer(ABC):
             initial=self.global_step,
             desc="Training",
             leave=False,
+            disable=rank() != 0,
         ) as progress_bar:
             while not plan.is_done(self.global_step):
                 train_data_loader.on_epoch_start()
@@ -458,10 +469,14 @@ class AbstractTrainer(ABC):
         if self.last_grad_l2_norm is not None:
             row["grad_l2_norm"] = self.last_grad_l2_norm
 
-        # Checkpointing is only checked when report() runs. checkpoint_every
-        # marks which reported steps may save; non-report steps are skipped.
-        if plan.should_checkpoint(self.global_step):
-            self._maybe_save_checkpoint(plan=plan, val_loss=metrics["val_loss"])
+        # File writes are rank-0-only under DDP (after AllReduce in step(),
+        # every rank holds identical params, so rank 0 is authoritative).
+        # Logging auto-quiets on non-rank-0 via the logger level set in __init__.
+        if rank() == 0:
+            if plan.should_checkpoint(self.global_step):
+                self._maybe_save_checkpoint(plan=plan, val_loss=metrics["val_loss"])
+            if plan.should_save_metrics(self.global_step):
+                self._save_metrics()
 
         self.metric_rows.append(row)
         log_payload = _format_log_values(
@@ -474,9 +489,6 @@ class AbstractTrainer(ABC):
             progress_value,
             _pformat_log_dict(log_payload),
         )
-
-        if plan.should_save_metrics(self.global_step):
-            self._save_metrics()
 
         state.reset_report()
 
