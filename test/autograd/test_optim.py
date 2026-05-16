@@ -137,6 +137,23 @@ class TestOptimizer(TestCase):
             xp.array([1.5, 2.0], dtype=xp.float32),
         )
 
+    def test_scale_gradients_preserves_low_precision_gradient_dtype(self):
+        dtype = getattr(xp, "bfloat16", getattr(xp, "float16", None))
+        if dtype is None:
+            self.skipTest("backend has no low-precision float dtype")
+
+        param = Tensor(xp.array([1.0, -2.0], dtype=dtype))
+        param.grad = xp.array([2.0, -4.0], dtype=dtype)
+        optimizer = Optimizer({"param": param}, lr=0.01)
+
+        optimizer.scale_gradients(xp.array(0.5, dtype=xp.float32))
+
+        self.assertEqual(param.grad.data.dtype, dtype)
+        assert allclose(
+            param.grad.data.astype(xp.float32),
+            xp.array([1.0, -2.0], dtype=xp.float32),
+        )
+
     def test_grad_l2_norm_matches_expected_value(self):
         self.params["param1"].grad = Tensor(xp.array([3.0, 4.0], dtype=xp.float32))
         self.params["param2"].grad = Tensor(xp.array([12.0], dtype=xp.float32))

@@ -20,10 +20,19 @@ from tqdm import tqdm
 from autograd import nn, optim
 from autograd.backend import (
     Array,
+    check_bf16_capability,
     materialize,
     xp,
 )
 from autograd.data.data_loader import DataLoader
+from autograd.distributed import (
+    ReduceOp,
+    broadcast_optimizer_state,
+    broadcast_parameters,
+    get_backend,
+    is_distributed,
+    rank,
+)
 from autograd.tensor import Tensor, no_grad
 from autograd.tools.config_schema import (
     GenericTrainingConfig,
@@ -134,12 +143,154 @@ class TrainingState:
         self.report_loss_total_weight = xp.array(0.0, dtype=xp.float32)
         self.report_started_at_s = time.perf_counter()
 
-    def report_tokens_per_second(self, *, now_s: Optional[float] = None) -> float:
-        elapsed_s = (now_s or time.perf_counter()) - self.report_started_at_s
+    def report_tokens_per_second(
+        self,
+        total_weight: Array,
+        *,
+        now_s: Optional[float] = None,
+    ) -> float:
+        observed_now_s = time.perf_counter() if now_s is None else now_s
+        elapsed_s = observed_now_s - self.report_started_at_s
         if elapsed_s <= 0:
             return 0.0
-        token_count = xp.to_scalar(self.report_loss_total_weight)
-        return float(token_count) / elapsed_s
+        return float(xp.to_scalar(total_weight)) / elapsed_s
+
+    def report_eval_metric(
+        self,
+        *,
+        numerator: Array,
+        denominator: Array,
+    ) -> Optional[float]:
+        denominator_value = float(xp.to_scalar(denominator))
+        if denominator_value <= 0:
+            return None
+        return float(xp.to_scalar(numerator)) / denominator_value
+
+    def _weighted_mean(
+        self,
+        numerator: Optional[float | Array],
+        denominator: Array,
+    ) -> float:
+        if numerator is None:
+            return 0.0
+        numerator_value = xp.to_scalar(numerator)
+        denominator_value = xp.to_scalar(denominator)
+        return float(numerator_value) / max(float(denominator_value), 1.0)
+
+    def metrics_row(
+        self,
+        *,
+        eval_state: Optional["TrainingState"],
+        log_global_loss: bool,
+    ) -> dict[str, Optional[float]]:
+        metrics = self._agg_dist_metrics(
+            eval_state,
+            log_global_loss=log_global_loss,
+        )
+        row: dict[str, Optional[float]] = {
+            "train_loss": self._weighted_mean(
+                metrics["train_loss_sum"],
+                metrics["train_loss_total_weight"],
+            ),
+            "tokens_per_s": self.report_tokens_per_second(
+                metrics["tokens_total_weight"]
+            ),
+            "val_loss": None
+            if eval_state is None
+            else self._weighted_mean(
+                metrics["val_loss_sum"],
+                metrics["val_loss_total_weight"],
+            ),
+        }
+        if eval_state is not None:
+            for key, (numerator, denominator) in metrics["eval_metric_totals"].items():
+                metric_value = eval_state.report_eval_metric(
+                    numerator=numerator,
+                    denominator=denominator,
+                )
+                if metric_value is not None:
+                    row[f"val_{key}"] = metric_value
+        return row
+
+    def _agg_dist_metrics(
+        self,
+        eval_state: Optional["TrainingState"],
+        *,
+        log_global_loss: bool,
+    ) -> dict[str, Any]:
+        """Return report-ready additive metric totals, reduced across ranks.
+
+        `TrainingState` owns the raw counters: loss sums, token counts, and
+        eval metric numerators/denominators. In DDP, those counters are packed
+        into one vector and AllReduce-summed once, then unpacked back into the
+        same logical totals. `metrics_row` turns these totals into ratios.
+        """
+        train_loss_sum = self.report_loss_sum
+        train_loss_total_weight = self.report_loss_total_weight
+        tokens_total_weight = self.report_loss_total_weight
+        val_loss_sum = eval_state.eval_loss_sum if eval_state is not None else None
+        val_loss_total_weight = (
+            eval_state.eval_loss_total_weight if eval_state is not None else None
+        )
+        metric_keys = sorted(eval_state.eval_metric_totals) if eval_state else []
+        eval_metric_totals = {}
+        if eval_state is not None:
+            for key in metric_keys:
+                totals = eval_state.eval_metric_totals[key]
+                eval_metric_totals[key] = (
+                    xp.asarray(totals["numerator"], dtype=xp.float32),
+                    xp.asarray(totals["denominator"], dtype=xp.float32),
+                )
+
+        if is_distributed():
+            backend = get_backend()
+            values = [xp.asarray(tokens_total_weight, dtype=xp.float32)]
+            if log_global_loss:
+                values.extend(
+                    [
+                        xp.asarray(
+                            0.0 if train_loss_sum is None else train_loss_sum,
+                            dtype=xp.float32,
+                        ),
+                        xp.asarray(train_loss_total_weight, dtype=xp.float32),
+                    ]
+                )
+                if eval_state is not None:
+                    values.extend(
+                        [
+                            xp.asarray(val_loss_sum, dtype=xp.float32),
+                            xp.asarray(val_loss_total_weight, dtype=xp.float32),
+                        ]
+                    )
+            if eval_state is not None:
+                for key in metric_keys:
+                    values.extend(eval_metric_totals[key])
+            reduced = backend.all_reduce(
+                xp.stack(values),
+                op=ReduceOp.SUM,
+            )
+            tokens_total_weight = reduced[0]
+            offset = 1
+            if log_global_loss:
+                train_loss_sum = reduced[offset]
+                train_loss_total_weight = reduced[offset + 1]
+                offset += 2
+                if eval_state is not None:
+                    val_loss_sum = reduced[offset]
+                    val_loss_total_weight = reduced[offset + 1]
+                    offset += 2
+            for key in metric_keys:
+                eval_metric_totals[key] = (reduced[offset], reduced[offset + 1])
+                offset += 2
+
+        return {
+            "train_loss_sum": train_loss_sum,
+            "train_loss_total_weight": train_loss_total_weight,
+            "tokens_total_weight": tokens_total_weight,
+            "val_loss_sum": val_loss_sum,
+            "val_loss_total_weight": val_loss_total_weight,
+            "eval_metric_totals": eval_metric_totals,
+        }
 
     def has_enough_batches(self, accumulation_steps: int):
         return self.accumulated_batches >= accumulation_steps
@@ -250,6 +401,19 @@ class AbstractTrainer(ABC):
         """
         self.config = config
         self.loss_fn = loss_fn
+
+        # Centralized rank-zero log suppression: on non-rank-0, raise the
+        # autograd logger family to WARNING. Every logger.info() across
+        # this package (trainer, optim, nn, ...) then auto-quiets without
+        # scattered `if rank() == 0:` guards at each call site. Only
+        # operations that aren't logging — file writes, the tqdm bar —
+        # still need an explicit rank check at their call site.
+        if rank() != 0:
+            logging.getLogger("autograd").setLevel(logging.WARNING)
+        # bf16 hardware gate. No-op for non-bf16 dtypes and non-CuPy
+        # backends; hard-fails on pre-Ampere CuPy so a misconfigured run
+        # surfaces immediately instead of going silently slow.
+        check_bf16_capability(config.model_kwargs.get("parameter_dtype"))
         # `resume_epoch` is only a checkpoint lookup hint here. Runtime training
         # progress comes from the loaded checkpoint metadata, especially step_count.
         self.model, self.optimizer, self.checkpoint = self._load_model_and_optimizer(
@@ -334,6 +498,7 @@ class AbstractTrainer(ABC):
             initial=self.global_step,
             desc="Training",
             leave=False,
+            disable=rank() != 0,
         ) as progress_bar:
             while not plan.is_done(self.global_step):
                 train_data_loader.on_epoch_start()
@@ -449,7 +614,10 @@ class AbstractTrainer(ABC):
             plan.completed_epochs(self.global_step) if plan.by_epoch else None
         )
         progress_value = plan.progress_value(self.global_step)
-        metrics = self._metrics_row(state, eval_state=eval_state)
+        metrics = state.metrics_row(
+            eval_state=eval_state,
+            log_global_loss=self.config.log_global_loss,
+        )
         row: dict[str, Optional[float]] = {
             "epoch": completed_epochs,
             "step": float(self.global_step),
@@ -458,10 +626,14 @@ class AbstractTrainer(ABC):
         if self.last_grad_l2_norm is not None:
             row["grad_l2_norm"] = self.last_grad_l2_norm
 
-        # Checkpointing is only checked when report() runs. checkpoint_every
-        # marks which reported steps may save; non-report steps are skipped.
-        if plan.should_checkpoint(self.global_step):
-            self._maybe_save_checkpoint(plan=plan, val_loss=metrics["val_loss"])
+        # File writes are rank-0-only under DDP (after AllReduce in step(),
+        # every rank holds identical params, so rank 0 is authoritative).
+        # Logging auto-quiets on non-rank-0 via the logger level set in __init__.
+        if rank() == 0:
+            if plan.should_checkpoint(self.global_step):
+                self._maybe_save_checkpoint(plan=plan, val_loss=metrics["val_loss"])
+            if plan.should_save_metrics(self.global_step):
+                self._save_metrics()
 
         self.metric_rows.append(row)
         log_payload = _format_log_values(
@@ -475,48 +647,7 @@ class AbstractTrainer(ABC):
             _pformat_log_dict(log_payload),
         )
 
-        if plan.should_save_metrics(self.global_step):
-            self._save_metrics()
-
         state.reset_report()
-
-    def _weighted_mean(
-        self,
-        numerator: Optional[float | Array],
-        denominator: Array,
-    ) -> float:
-        if numerator is None:
-            return 0.0
-        # Reporting is the GPU/accelerator-to-CPU sync boundary: training keeps
-        # loss sums and token counts as backend scalars until logs/metrics need floats.
-        numerator_value = xp.to_scalar(numerator)
-        denominator_value = xp.to_scalar(denominator)
-        return float(numerator_value) / max(float(denominator_value), 1.0)
-
-    def _metrics_row(
-        self,
-        state: TrainingState,
-        *,
-        eval_state: Optional[TrainingState],
-    ) -> dict[str, Optional[float]]:
-        row: dict[str, Optional[float]] = {
-            "train_loss": self._weighted_mean(
-                state.report_loss_sum,
-                state.report_loss_total_weight,
-            ),
-            "tokens_per_s": state.report_tokens_per_second(),
-            "val_loss": None
-            if eval_state is None
-            else self._weighted_mean(
-                eval_state.eval_loss_sum,
-                eval_state.eval_loss_total_weight,
-            ),
-        }
-        if eval_state is not None:
-            for key, totals in eval_state.eval_metric_totals.items():
-                if totals["denominator"] > 0:
-                    row[f"val_{key}"] = totals["numerator"] / totals["denominator"]
-        return row
 
     def _loss_total_weight(self, _batch_data) -> Array:
         """Denominator for accumulated summed losses.
@@ -712,6 +843,8 @@ class AbstractTrainer(ABC):
             optimizer = optimizer_class(model.parameters, **optimizer_kwargs)
             # The configured model architecture must match the checkpoint.
             model.load_state_dict(loaded_ckpt["model_state_dict"])
+            # Keep loaded params identical across DDP ranks.
+            broadcast_parameters(model.parameters, from_rank=0)
             logger.info(
                 f"Loaded pretrained {model_class.__name__} weights from {pretrained_checkpoint_path}"
             )
@@ -766,6 +899,9 @@ class AbstractTrainer(ABC):
             # Load model/optimizer state
             model.load_state_dict(loaded_ckpt["model_state_dict"])
             optimizer.load_state_dict(loaded_ckpt["optimizer_state_dict"])
+            # Keep loaded params and optimizer moments identical across DDP ranks.
+            broadcast_parameters(model.parameters, from_rank=0)
+            broadcast_optimizer_state(optimizer, from_rank=0)
 
             logger.info(
                 f"Loaded {model_class.__name__} from epoch {loaded_ckpt.get('epoch', '?')} "
@@ -1107,6 +1243,7 @@ class LLMTrainer(AbstractTrainer):
         if state.eval_loss_batches == 0:
             raise ValueError("val_data_loader yielded no batches.")
 
-        for callback in self.eval_callbacks:
-            callback(self.model, self.forward_fn, val_data_loader, self.config)
+        if rank() == 0:
+            for callback in self.eval_callbacks:
+                callback(self.model, self.forward_fn, val_data_loader, self.config)
         return state

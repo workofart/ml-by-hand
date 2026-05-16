@@ -65,26 +65,98 @@ if IS_CUPY and xp.cuda.runtime.getDeviceCount() <= 0:
         "AUTOGRAD_BACKEND=cupy requested, but no CUDA device was detected"
     )
 
+# Pin this process to GPU `LOCAL_RANK` for DDP. The launcher
+# (`python -m autograd.distributed.launch`) sets `LOCAL_RANK=r` for the r-th
+# child; non-DDP runs see the default `0` and `.use()` is a no-op on the
+# already-default device. Must happen *before* any CuPy allocation lands —
+# `xp.array(0, …)` below would otherwise create the first allocation on
+# device 0 and route every later op there.
+if IS_CUPY:
+    xp.cuda.Device(int(os.environ.get("LOCAL_RANK", "0"))).use()
+
 ARRAY_TYPE = type(xp.array(0, dtype=xp.float32)) if IS_MLX else xp.ndarray
 
 
-def _low_precision_float_dtypes() -> tuple[Any, ...]:
-    dtypes = [
-        getattr(xp, "float16", None),
-        getattr(xp, "bfloat16", None),
-    ]
-    if IS_CUPY:
-        try:
-            ml_dtypes = importlib.import_module("ml_dtypes")
-        except ModuleNotFoundError:
-            pass
-        else:
-            dtypes.append(getattr(ml_dtypes, "bfloat16", None))
+# ---------------------------------------------------------------------------
+# Dtype contract
+# ---------------------------------------------------------------------------
+#
+# Every backend in this repo exposes the same dtype names — `xp.float16`,
+# `xp.bfloat16`, `xp.float32`, etc. Downstream code (model post-init cast
+# loops, low-precision detection, Adam's fp32 promotion path, the bf16
+# trainer gate) can then just ask `xp` for the dtype by name and never
+# branch on which backend is in use.
+#
+# MLX has bf16 natively. NumPy doesn't. CuPy 14.x doesn't expose
+# `cupy.bfloat16` at the Python level either — its bf16 storage path
+# lives entirely in `ml_dtypes`. We close that gap once, here, by
+# polyfilling `xp.bfloat16 = ml_dtypes.bfloat16` when `xp` is missing it.
+#
+# Upstream: native `cupy.bfloat16` lands in cupy 15.0.0a1+ (cupy/cupy#9494,
+# merged Feb 2026). When that ships, the `hasattr` guard makes this
+# polyfill a no-op automatically.
 
-    return tuple(dict.fromkeys(dtype for dtype in dtypes if dtype is not None))
+if not hasattr(xp, "bfloat16"):
+    try:
+        ml_dtypes = importlib.import_module("ml_dtypes")
+    except ModuleNotFoundError:
+        # `ml_dtypes` is optional. Scripts that don't ask for bf16 keep
+        # working; `resolve_dtype` below raises with an actionable hint
+        # if anyone does request it.
+        pass
+    else:
+        xp.bfloat16 = ml_dtypes.bfloat16
 
 
-LOW_PRECISION_FLOAT_DTYPES = _low_precision_float_dtypes()
+LOW_PRECISION_FLOAT_DTYPES = tuple(
+    getattr(xp, name) for name in ("float16", "bfloat16") if hasattr(xp, name)
+)
+
+
+def resolve_dtype(dtype: str) -> Any:
+    """Map a dtype-name string (e.g. "float32", "bfloat16") to the backend's
+    dtype object. Uniform across numpy / CuPy / MLX thanks to the bf16
+    polyfill above; raises with an actionable hint if the dtype is
+    unreachable on this backend.
+    """
+    resolved = getattr(xp, dtype, None)
+    if resolved is not None:
+        return resolved
+    hint = (
+        " Install `ml_dtypes` to enable bf16 on numpy/CuPy."
+        if dtype == "bfloat16"
+        else ""
+    )
+    raise RuntimeError(f"Backend {NAME!r} does not expose dtype {dtype!r}.{hint}")
+
+
+def check_bf16_capability(parameter_dtype: str | None) -> None:
+    """Hard-fail if CuPy bf16 is requested on pre-Ampere hardware."""
+    if parameter_dtype != "bfloat16" or not IS_CUPY:
+        return
+
+    device = xp.cuda.Device()
+    cc_str = device.compute_capability
+    name = (
+        device.attributes.get("Name", "<unknown>")
+        if hasattr(device, "attributes")
+        else "<unknown>"
+    )
+    try:
+        major = int(cc_str[:-1])
+        minor = int(cc_str[-1])
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"Failed to parse compute capability {cc_str!r} from cupy device."
+        ) from exc
+
+    if (major, minor) < (8, 0):
+        raise RuntimeError(
+            'parameter_dtype="bfloat16" requires CUDA compute capability >= 8.0 '
+            f"(Ampere or newer). Detected device: {name}, compute capability "
+            f"{major}.{minor}. Either run on Ampere/Hopper hardware, or change "
+            'parameter_dtype to "float32" in the training config.'
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +209,15 @@ def _scatter_add(dst: Any, idx: Any, updates: Any):
     if IS_MLX:
         return dst.at[idx].add(updates)
     out = xp.array(dst)
+    if out.dtype in LOW_PRECISION_FLOAT_DTYPES:
+        # CuPy's `xp.add.at` has no low-precision specialization: the
+        # in-place ufunc dispatch table doesn't cover bf16/fp16, so it
+        # raises TypeError on those dtypes. Same fp32-promotion pattern
+        # used in `allreduce_grads` / `broadcast_parameters` — promote
+        # both buffers, scatter in fp32, cast the result back.
+        out_fp32 = out.astype(xp.float32)
+        xp.add.at(out_fp32, idx, updates.astype(xp.float32))
+        return out_fp32.astype(out.dtype)
     xp.add.at(out, idx, updates)
     return out
 
@@ -327,7 +408,7 @@ def _sample_categorical(logits: Any):
     choice = _native_random_fns.get("choice")
     if choice is None:
         raise RuntimeError(f"categorical sampling is not available on backend {NAME}")
-    return choice(probs.shape[-1], p=probs)
+    return choice(probs.shape[-1], size=(), p=probs)
 
 
 def _sample_categorical_with_options(
@@ -410,3 +491,7 @@ _backend_random.randint = _sample_randint
 _backend_random.bernoulli = _sample_bernoulli
 _backend_random.permutation = _sample_permutation
 _backend_random.categorical = _sample_categorical_with_options
+
+_seed_from_env = os.environ.get("SEED")
+if _seed_from_env is not None:
+    _seed_backend_random(int(_seed_from_env))

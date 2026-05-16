@@ -5,6 +5,7 @@ from collections import defaultdict
 from typing import Any, Dict, Optional
 
 from autograd.backend import LOW_PRECISION_FLOAT_DTYPES, Array, materialize, xp
+from autograd.distributed import allreduce_grads, broadcast_parameters
 from autograd.tensor import Tensor
 
 logger = logging.getLogger(__name__)
@@ -169,6 +170,11 @@ class Optimizer:
         for k, v in kwargs.items():
             self._hyperparams[k] = v
 
+        # Belt-and-suspenders parameter sync at construction time so every
+        # DDP rank starts from identical weights. broadcast_parameters
+        # self-no-ops when world_size == 1, so no guard is needed here.
+        broadcast_parameters(self.model_parameters, from_rank=0)
+
     @property
     def lr(self) -> float:
         """
@@ -271,7 +277,10 @@ class Optimizer:
         """Scale all parameter gradients in-place by ``scale``."""
         for param in self.model_parameters.values():
             if param.grad is not None:
+                grad_dtype = param.grad.data.dtype
                 param.grad.data *= scale
+                if param.grad.data.dtype != grad_dtype:
+                    param.grad.data = param.grad.data.astype(grad_dtype)
 
     def grad_l2_norm(self) -> float:
         """Return the L2 norm of all current parameter gradients."""
@@ -376,6 +385,7 @@ class SGD(Optimizer):
         This method updates each parameter by subtracting the product of the learning rate
         and the parameter's gradient.
         """
+        allreduce_grads(self.model_parameters)
         self.timestep += 1
         self.update_lr()
 
@@ -444,6 +454,11 @@ class Adam(Optimizer):
         applies bias correction, performs a decoupled weight decay step if specified,
         and updates the parameters accordingly.
         """
+        # Average gradients across DDP ranks before Adam consumes them, so
+        # the optimizer state (m, v) is computed against the true global
+        # mean gradient — equivalent to a single forward+backward over the
+        # concatenated global batch. No-op when world_size == 1.
+        allreduce_grads(self.model_parameters)
         self.timestep += 1
         self.update_lr()
 

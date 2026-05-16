@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-from autograd.backend import xp
+from autograd.backend import IS_MLX, xp
 from autograd.data.collator import FixedLengthCausalLMCollator
 from autograd.data.data_loader import DataLoader
 from autograd.data.dataset import MapDataset, PairedMapDataset
@@ -26,6 +26,7 @@ from autograd.tools.trainer import (
     TrainingPlan,
     TrainingState,
 )
+from test.distributed.mock import run_mock_ranks
 
 
 def identity_collate(batch_items):
@@ -400,7 +401,10 @@ class TestSimpleTrainer(BaseTrainerTest):
         eval_state.record_eval_metric("accuracy", numerator=3, denominator=4)
 
         with patch("autograd.tools.trainer.time.perf_counter", return_value=11.0):
-            row = self.trainer._metrics_row(state, eval_state=eval_state)
+            row = state.metrics_row(
+                eval_state=eval_state,
+                log_global_loss=self.trainer.config.log_global_loss,
+            )
 
         self.assertEqual(
             row,
@@ -411,6 +415,50 @@ class TestSimpleTrainer(BaseTrainerTest):
                 "val_accuracy": 0.75,
             },
         )
+
+    @unittest.skipIf(
+        IS_MLX,
+        "MLX lazy graphs are not thread-safe under the in-process DDP mock.",
+    )
+    def test_metrics_row_reports_global_tokens_per_second_under_ddp(self):
+        from autograd.distributed import rank
+
+        def target():
+            state = TrainingState()
+            state.report_started_at_s = 10.0
+            token_count = xp.array(float(rank() + 1), dtype=xp.float32)
+            state.record_loss(1.0, total_weight=token_count)
+            with patch("autograd.tools.trainer.time.perf_counter", return_value=11.0):
+                return state.metrics_row(
+                    eval_state=None,
+                    log_global_loss=self.trainer.config.log_global_loss,
+                )["tokens_per_s"]
+
+        results = run_mock_ranks(2, target)
+        self.assertEqual(results, [3.0, 3.0])
+
+    @unittest.skipIf(
+        IS_MLX,
+        "MLX lazy graphs are not thread-safe under the in-process DDP mock.",
+    )
+    def test_metrics_row_reports_global_eval_metric_under_ddp(self):
+        from autograd.distributed import rank
+
+        def target():
+            eval_state = TrainingState()
+            eval_state.record_eval_metric(
+                "accuracy",
+                numerator=float(rank() + 1),
+                denominator=2.0,
+            )
+            row = TrainingState().metrics_row(
+                eval_state=eval_state,
+                log_global_loss=self.trainer.config.log_global_loss,
+            )
+            return row["val_accuracy"]
+
+        results = run_mock_ranks(2, target)
+        self.assertEqual(results, [0.75, 0.75])
 
     def test_training_state_resets_report_timer(self):
         state = TrainingState()
@@ -432,6 +480,19 @@ class TestSimpleTrainer(BaseTrainerTest):
 
         self.assertEqual(float(xp.to_scalar(state.report_loss_total_weight)), 1.0)
         self.assertEqual(float(xp.to_scalar(state.eval_loss_total_weight)), 1.0)
+
+    def test_training_state_tokens_per_second_honors_explicit_zero_time(self):
+        state = TrainingState()
+        state.report_started_at_s = -2.0
+        state.record_loss(1.0, total_weight=xp.array(4.0, dtype=xp.float32))
+
+        self.assertEqual(
+            state.report_tokens_per_second(
+                xp.array(4.0, dtype=xp.float32),
+                now_s=0.0,
+            ),
+            2.0,
+        )
 
     def test_training_boundaries_are_direct_materialize_calls(self):
         self.assertFalse(hasattr(TrainingState, "eval_accumulators"))
@@ -1527,7 +1588,10 @@ class TestSimpleTrainer(BaseTrainerTest):
         val_loader = make_data_loader(self.val_data * 2)
 
         eval_state = self.trainer.evaluate(val_loader)
-        row = self.trainer._metrics_row(TrainingState(), eval_state=eval_state)
+        row = TrainingState().metrics_row(
+            eval_state=eval_state,
+            log_global_loss=self.trainer.config.log_global_loss,
+        )
 
         self.assertAlmostEqual(row["val_loss"], 1.23, places=5)
         self.assertEqual(self.loss_fn.call_count, 2)
@@ -1537,7 +1601,10 @@ class TestSimpleTrainer(BaseTrainerTest):
         val_loader = make_data_loader(self.val_data * 2)
 
         eval_state = self.trainer.evaluate(val_loader)
-        row = self.trainer._metrics_row(TrainingState(), eval_state=eval_state)
+        row = TrainingState().metrics_row(
+            eval_state=eval_state,
+            log_global_loss=self.trainer.config.log_global_loss,
+        )
 
         self.assertAlmostEqual(row["val_loss"], 1.23, places=5)
         self.assertEqual(self.loss_fn.call_count, 1)
@@ -1576,7 +1643,10 @@ class TestSimpleTrainer(BaseTrainerTest):
 
         eval_result = self.trainer.evaluate(self.val_loader)
 
-        row = self.trainer._metrics_row(TrainingState(), eval_state=eval_result)
+        row = TrainingState().metrics_row(
+            eval_state=eval_result,
+            log_global_loss=self.trainer.config.log_global_loss,
+        )
         self.assertAlmostEqual(row["val_loss"], 1.23, places=5)
 
     def test_report_prefixes_eval_metrics_with_val(self):
@@ -1690,7 +1760,10 @@ class TestSimpleTrainer(BaseTrainerTest):
 
     def test_evaluate_does_not_mutate_trainer_metrics(self):
         eval_result = self.trainer.evaluate(self.val_loader)
-        row = self.trainer._metrics_row(TrainingState(), eval_state=eval_result)
+        row = TrainingState().metrics_row(
+            eval_state=eval_result,
+            log_global_loss=self.trainer.config.log_global_loss,
+        )
 
         self.assertAlmostEqual(row["val_loss"], 1.23, places=5)
         self.assertEqual(row["val_accuracy"], 1.0)
@@ -1860,13 +1933,36 @@ class TestLLMTrainer(BaseTrainerTest):
         )
 
         eval_state = trainer.evaluate(self.val_loader)
-        row = trainer._metrics_row(TrainingState(), eval_state=eval_state)
+        row = TrainingState().metrics_row(
+            eval_state=eval_state,
+            log_global_loss=trainer.config.log_global_loss,
+        )
 
         self.assertAlmostEqual(row["val_loss"], 1.23, places=5)
         self.assertNotIn("val_accuracy", row)
         callback.assert_called_once_with(
             trainer.model, trainer.forward_fn, self.val_loader, trainer.config
         )
+
+    @unittest.skipIf(
+        IS_MLX,
+        "MLX lazy graphs are not thread-safe under the in-process DDP mock.",
+    )
+    def test_evaluate_runs_eval_callbacks_only_on_rank_zero_under_ddp(self):
+        def target():
+            callback = MagicMock()
+            trainer = LLMTrainer(
+                model_cls=MockModelClass,
+                optimizer_cls=MockOptimizerClass,
+                loss_fn=self.loss_fn,
+                forward_fn=self.forward_fn,
+                config=self.config,
+                eval_callbacks=[callback],
+            )
+            trainer.evaluate(self.val_loader)
+            return callback.call_count
+
+        self.assertEqual(run_mock_ranks(2, target), [1, 0])
 
     def test_llm_evaluate_rejects_empty_val_loader(self):
         with self.assertRaisesRegex(
@@ -1880,7 +1976,10 @@ class TestLLMTrainer(BaseTrainerTest):
         val_loader = make_data_loader(self.val_data * 2)
 
         eval_state = self.trainer.evaluate(val_loader)
-        row = self.trainer._metrics_row(TrainingState(), eval_state=eval_state)
+        row = TrainingState().metrics_row(
+            eval_state=eval_state,
+            log_global_loss=self.trainer.config.log_global_loss,
+        )
 
         self.assertAlmostEqual(row["val_loss"], 1.23, places=5)
         self.assertEqual(self.loss_fn.call_count, 1)
@@ -1944,7 +2043,10 @@ class TestLLMTrainer(BaseTrainerTest):
 
         train_loss = trainer._forward_and_loss(batch)
         eval_state = trainer.evaluate(loader)
-        row = trainer._metrics_row(TrainingState(), eval_state=eval_state)
+        row = TrainingState().metrics_row(
+            eval_state=eval_state,
+            log_global_loss=trainer.config.log_global_loss,
+        )
 
         self.assertAlmostEqual(
             float(train_loss.item()), float(expected_train_loss.item()), places=6

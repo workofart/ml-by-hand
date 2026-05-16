@@ -1613,20 +1613,23 @@ class ScaledDotProductAttention(Module):
         # Dense remains the contract fallback for structural causality and for
         # everything outside the supported explicit causal self-attention slice.
 
-        attention_size = Tensor(key.shape[-1])
+        attention_scale = Tensor(
+            xp.asarray(key.shape[-1] ** -0.5, dtype=key.data.dtype),
+            requires_grad=False,
+        )
 
         # scaled dot product
         # (batch_size, num_heads, sequence_len, sequence_len)
-        att_score = (query @ key.transpose(2, 3)) / attention_size.sqrt()
+        att_score = (query @ key.transpose(2, 3)) * attention_scale
 
         # Non-MLX Causal Mask
         if mask is None and is_causal:
             seq_q = int(query.shape[-2])
             seq_k = int(key.shape[-2])
             mask = Tensor(
-                xp.triu(xp.ones((seq_q, seq_k), dtype=xp.float32), k=1).reshape(
-                    1, 1, seq_q, seq_k
-                ),
+                xp.triu(
+                    xp.ones((seq_q, seq_k), dtype=att_score.data.dtype), k=1
+                ).reshape(1, 1, seq_q, seq_k),
                 requires_grad=False,
             )
 

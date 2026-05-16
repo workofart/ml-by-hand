@@ -1437,8 +1437,28 @@ class Matmul(Function):
         # Save references so backward() can know which Tensors to differentiate
         self.x_shape = x.shape
         self.y_shape = y.shape
+        out_dtype = (
+            x.dtype
+            if x.dtype == y.dtype and x.dtype in LOW_PRECISION_FLOAT_DTYPES
+            else None
+        )
+        if x.ndim > 2 and y.ndim == 2:
+            # A common neural-net projection applies the same 2D weight matrix
+            # to every leading batch position:
+            #   x:      (batch, time, hidden)
+            #   y:      (hidden, vocab)
+            #   output: (batch, time, vocab)
+            # This is equivalent to:
+            #   (batch * time, hidden) @ (hidden, vocab)
+            # then reshaping back to (batch, time, vocab).
+            x_shape = x.shape
+            x_2d = x.reshape(-1, x_shape[-1])
+            out_2d = xp.matmul(x_2d, y)
+            out = out_2d.reshape(*x_shape[:-1], y.shape[-1])
+            return out.astype(out_dtype) if out_dtype is not None else out
+
         out = xp.matmul(x, y)
-        return out
+        return out.astype(out_dtype) if out_dtype is not None else out
 
     def backward(self, grad: "Tensor") -> Tuple[Optional[Array], Optional[Array]]:
         r"""Compute the gradient for the matrix multiplication operation.
@@ -1509,7 +1529,17 @@ class Matmul(Function):
             # Transpose y on the last two dims (y^T)
             # xp.swapaxes(y, -1, -2) is effectively y^T for each batch.
             y_t = xp.swapaxes(y.data, -1, -2)
-            grad_x = xp.matmul(grad.data, y_t)
+            if grad.data.ndim > 2 and y_t.ndim == 2:
+                # Same shape rewrite as forward:
+                #   grad: (batch, time, vocab)
+                #   y.T:  (vocab, hidden)
+                #   dx:   (batch, time, hidden)
+                grad_shape = grad.data.shape
+                grad_2d = grad.data.reshape(-1, grad_shape[-1])
+                grad_x_2d = xp.matmul(grad_2d, y_t)
+                grad_x = grad_x_2d.reshape(*grad_shape[:-1], y_t.shape[-1])
+            else:
+                grad_x = xp.matmul(grad.data, y_t)
             # shape of grad_x should match x.data.shape
 
         if y.requires_grad:

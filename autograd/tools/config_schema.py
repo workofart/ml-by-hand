@@ -54,6 +54,12 @@ class GenericTrainingConfig:
     micro_batch_size: int = 1
     # Optional trainer-level gradient clipping threshold.
     max_grad_norm: Optional[float] = None
+    # When True under DDP, the trainer AllReduce-sums the loss numerator and
+    # token-count denominator across all ranks before dividing, so logged
+    # losses are the true global weighted mean. Default off because the
+    # extra two AllReduces per report are wasted work on a single rank, and
+    # rank-0's local loss is usually a faithful enough sanity signal.
+    log_global_loss: bool = False
 
     def __post_init__(self) -> None:
         if self.max_epochs is None and self.max_steps is None:
@@ -95,12 +101,58 @@ class GenericTrainingConfig:
                 "global_batch_size must be divisible by micro_batch_size, "
                 f"got {self.global_batch_size} and {self.micro_batch_size}"
             )
+        self._validate_distributed_batch_config()
         if self.max_grad_norm is not None and self.max_grad_norm <= 0:
             raise ValueError(f"max_grad_norm must be > 0, got {self.max_grad_norm}")
 
+    def _validate_distributed_batch_config(self) -> None:
+        from autograd.distributed import rank, world_size
+
+        ws = world_size()
+        if ws < 1:
+            raise ValueError(f"world_size must be >= 1, got {ws}")
+        current_rank = rank()
+        if not (0 <= current_rank < ws):
+            raise ValueError(
+                f"rank must be in [0, {ws}), got {current_rank}. "
+                "Check RANK/WORLD_SIZE or the distributed launcher."
+            )
+        if ws == 1:
+            return
+
+        per_step = self.micro_batch_size * ws
+        if self.global_batch_size % per_step != 0:
+            raise ValueError(
+                f"global_batch_size ({self.global_batch_size}) must be divisible by "
+                f"micro_batch_size * world_size ({self.micro_batch_size} * {ws} = "
+                f"{per_step}). Adjust the config or the --nproc-per-node value."
+            )
+
     @property
     def gradient_accumulation_steps(self) -> int:
-        return self.global_batch_size // self.micro_batch_size
+        """Per-rank accumulation steps for one optimizer update.
+
+        `global_batch_size` is the *true* global batch (summed across all
+        ranks). On a single rank this reduces to the familiar
+        ``global // micro``. With N ranks each contributing a microbatch
+        per accumulation tick, the per-rank tick count is
+        ``global // (micro * world_size)``.
+
+        Fails fast if the resulting division isn't integral — the config
+        is wrong for the launched world size and we'd silently drop or
+        double-count examples otherwise.
+        """
+        from autograd.distributed import world_size
+
+        ws = world_size()
+        per_step = self.micro_batch_size * ws
+        if self.global_batch_size % per_step != 0:
+            raise ValueError(
+                f"global_batch_size ({self.global_batch_size}) must be divisible by "
+                f"micro_batch_size * world_size ({self.micro_batch_size} * {ws} = "
+                f"{per_step}). Adjust the config or the --nproc-per-node value."
+            )
+        return self.global_batch_size // per_step
 
 
 @dataclass

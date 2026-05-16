@@ -437,6 +437,46 @@ class TestTensorOps(TestTensor):
         assert allclose(x.grad.data, x_torch.grad.numpy(), rtol=1e-4, atol=1e-5)
         assert allclose(w.grad.data, w_torch.grad.numpy(), rtol=1e-4, atol=1e-5)
 
+    def test_batched_input_2d_weight_matmul_uses_2d_matmul_contract(self):
+        batch_size, seq_len, hidden_size, vocab_size = 2, 3, 4, 5
+        x = Tensor(
+            xp.random.normal(shape=(batch_size, seq_len, hidden_size)).astype(
+                xp.float32
+            ),
+            requires_grad=True,
+        )
+        w = Tensor(
+            xp.random.normal(shape=(hidden_size, vocab_size)).astype(xp.float32),
+            requires_grad=True,
+        )
+
+        matmul_calls = []
+        original_matmul = xp.matmul
+
+        def recording_matmul(lhs, rhs):
+            matmul_calls.append((lhs.shape, rhs.shape))
+            return original_matmul(lhs, rhs)
+
+        with patch("autograd.tensor.xp.matmul", side_effect=recording_matmul):
+            z = x @ w
+            z.backward(xp.ones_like(z.data))
+
+        assert z.shape == (batch_size, seq_len, vocab_size)
+        assert matmul_calls == [
+            ((batch_size * seq_len, hidden_size), (hidden_size, vocab_size)),
+            ((batch_size * seq_len, vocab_size), (vocab_size, hidden_size)),
+            ((hidden_size, batch_size * seq_len), (batch_size * seq_len, vocab_size)),
+        ]
+
+        x_torch = torch.tensor(x.data, requires_grad=True)
+        w_torch = torch.tensor(w.data, requires_grad=True)
+        z_torch = x_torch @ w_torch
+        z_torch.backward(torch.ones_like(z_torch))
+
+        assert allclose(z.data, z_torch.detach().numpy(), rtol=1e-4, atol=1e-5)
+        assert allclose(x.grad.data, x_torch.grad.numpy(), rtol=1e-4, atol=1e-5)
+        assert allclose(w.grad.data, w_torch.grad.numpy(), rtol=1e-4, atol=1e-5)
+
     def test_batch_multiplication(self):
         """Test element-wise multiplication with batched tensors"""
         result = self.batch_tensor1 * self.batch_tensor2
