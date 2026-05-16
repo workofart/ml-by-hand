@@ -63,7 +63,11 @@ def _fake_cupy_module(device_count: int):
         float16=np.float16,
         random=random,
         cuda=SimpleNamespace(
-            runtime=SimpleNamespace(getDeviceCount=lambda: device_count)
+            runtime=SimpleNamespace(getDeviceCount=lambda: device_count),
+            # autograd/backend.py calls `xp.cuda.Device(LOCAL_RANK).use()`
+            # at import for DDP device pinning; the fake needs a no-op
+            # stand-in or the import-time pin raises.
+            Device=lambda _idx: SimpleNamespace(use=lambda: None),
         ),
         asnumpy=np.asarray,
     )
@@ -78,6 +82,46 @@ def test_scatter_add_accumulates_repeated_indices():
 
     assert np.array_equal(xp.to_numpy(dst), np.array([0.0, 0.0, 0.0], dtype=np.float32))
     assert np.array_equal(xp.to_numpy(out), np.array([0.0, 5.0, 0.0], dtype=np.float32))
+
+
+def test_scatter_add_accumulates_cupy_bfloat16_via_float32(monkeypatch):
+    import autograd.backend as backend
+
+    class FakeArray:
+        def __init__(self, values, dtype):
+            self.values = np.asarray(values, dtype=np.float32)
+            self.dtype = dtype
+
+        def astype(self, dtype):
+            return FakeArray(self.values, dtype)
+
+    class FakeAdd:
+        @staticmethod
+        def at(out, idx, updates):
+            if out.dtype == "bfloat16":
+                raise TypeError("cupy.add.at does not support bfloat16")
+            np.add.at(out.values, idx, updates.values)
+
+    class FakeXP:
+        float32 = "float32"
+        add = FakeAdd()
+
+        @staticmethod
+        def array(value):
+            return FakeArray(value.values.copy(), value.dtype)
+
+    monkeypatch.setattr(backend, "IS_MLX", False)
+    monkeypatch.setattr(backend, "IS_CUPY", True)
+    monkeypatch.setattr(backend, "LOW_PRECISION_FLOAT_DTYPES", ("bfloat16",))
+    monkeypatch.setattr(backend, "xp", FakeXP())
+
+    dst = FakeArray([0.0, 0.0, 0.0], "bfloat16")
+    updates = FakeArray([2.0, 3.0], "bfloat16")
+
+    out = backend._scatter_add(dst, [1, 1], updates)
+
+    assert out.dtype == "bfloat16"
+    assert np.array_equal(out.values, np.array([0.0, 5.0, 0.0], dtype=np.float32))
 
 
 def test_materialize_collects_nested_arrays_and_tensor_data(monkeypatch):
@@ -164,6 +208,36 @@ def test_random_bernoulli_returns_binary_mask():
     values = set(np.unique(xp.to_numpy(out)).tolist())
 
     assert values.issubset({0, 1, False, True})
+
+
+def test_sample_categorical_passes_scalar_size_to_choice(monkeypatch):
+    import autograd.backend as backend
+
+    observed = {}
+
+    def fake_choice(a, size=None, replace=True, p=None):
+        observed["a"] = a
+        observed["size"] = size
+        observed["replace"] = replace
+        observed["p"] = p
+        return np.asarray(1)
+
+    fake_xp = SimpleNamespace(
+        exp=np.exp,
+        max=np.max,
+        sum=np.sum,
+    )
+    monkeypatch.setattr(backend, "xp", fake_xp)
+    monkeypatch.setitem(backend._native_random_fns, "categorical", None)
+    monkeypatch.setitem(backend._native_random_fns, "choice", fake_choice)
+
+    out = backend._sample_categorical(np.asarray([0.0, 1.0, 2.0]))
+
+    assert int(out) == 1
+    assert observed["a"] == 3
+    assert observed["size"] == ()
+    assert observed["replace"] is True
+    assert np.isclose(observed["p"].sum(), 1.0)
 
 
 def test_active_backend_random_state_round_trip_replays_sample():

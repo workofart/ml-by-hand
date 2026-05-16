@@ -225,6 +225,11 @@ class _NCCLBackend:
         # NCCL broadcast mutates the buffer in place on every rank; the
         # root's contents win. We return `buf` so the call site uses the
         # same rebind pattern as `all_reduce`.
+        #
+        # Callers must hand us a dtype cupyx's NCCL wrapper recognises
+        # (fp16/fp32/fp64 + int variants). bf16 in particular is rejected
+        # here — see `broadcast_parameters` for the workaround and the
+        # cupyx-dtype-gap explanation.
         self._comm.broadcast(buf, root=from_rank)
         return buf
 
@@ -360,6 +365,12 @@ def broadcast_parameters(
     init, but platform-level non-determinism can drift them apart. One
     broadcast at startup eliminates that risk for a negligible one-time cost.
 
+    Low-precision (bf16) params are promoted to fp32 before the broadcast
+    and cast back afterwards. The reason is *not* numerical — broadcast is
+    a byte copy and bf16 round-trips losslessly — it's a cupyx plumbing
+    gap. See the inline comment at the promotion site for the upstream
+    issue trail.
+
     No-op when `world_size == 1`.
     """
     if not is_distributed():
@@ -367,19 +378,62 @@ def broadcast_parameters(
 
     backend = get_backend()
     for param in parameters.values():
-        param.data = backend.broadcast(param.data, from_rank=from_rank)
+        data = param.data
+        if data.dtype in LOW_PRECISION_FLOAT_DTYPES:
+            # Why promote bf16 → fp32 before broadcast?
+            #
+            # cupyx.distributed wraps NCCL via a small dtype-char table
+            # at `cupyx.distributed._nccl_comm._nccl_dtypes` that maps
+            # numpy char codes → NCCL type IDs. As of cupy 14.0.1 (the
+            # latest stable, Feb 2026) that table has 'e' (numpy float16
+            # → NCCL_FLOAT16) but not 'E' — the char code used by
+            # `ml_dtypes.bfloat16`, which is cupy's bf16 storage path
+            # until native `cupy.bfloat16` lands at the Python level.
+            # Hand cupyx a bf16 array and it raises:
+            #     TypeError: Unknown dtype bfloat16 for NCCL
+            #
+            # Upstream tracking (as of this writing):
+            #   * cupy/cupy#7527 — bf16 umbrella issue (closed Feb 2026)
+            #   * cupy/cupy#9494 — implementation PR (merged Feb 2026,
+            #     targets v15.0.0a1+); ships internal bf16 type handling
+            #     built on ml_dtypes, but does NOT expose `cupy.bfloat16`
+            #     and does NOT update cupyx.distributed
+            #   * cupy/cupy#9630 — open follow-ups for cupyx bf16 gaps;
+            #     `cupyx.distributed` is NOT on the list
+            #   * Searching `is:pr nccl bfloat16` in cupy/cupy returns
+            #     zero PRs (open or closed) — no scheduled upstream fix
+            #
+            # So we work around it locally. fp32 promotion is the natural
+            # fix because it mirrors the same promotion that already
+            # happens in `allreduce_grads` above — there for *numerical
+            # correctness* (bf16 accumulation loses mantissa bits as
+            # world_size grows); here it's *plumbing only* (broadcast
+            # is bit-exact regardless of dtype). One mental model, two
+            # motivations.
+            #
+            # Cost: this doubles the per-param broadcast volume (2 B → 4 B)
+            # at startup. For a 128M-param model that's a one-time
+            # 256 MB → 512 MB transfer over NCCL — negligible vs the
+            # multi-hour training run that follows.
+            d32 = data.astype(xp.float32)
+            d32 = backend.broadcast(d32, from_rank=from_rank)
+            param.data = d32.astype(data.dtype)
+        else:
+            param.data = backend.broadcast(data, from_rank=from_rank)
 
 
 # --- bf16 hardware gate ------------------------------------------------------
 #
-# bf16 on CuPy requires CUDA compute capability >= 8.0 (Ampere). Lower-cc
-# devices either don't expose `cupy.bfloat16` or fall back to software bf16
-# emulation with surprise-slow kernels. We hard-fail with an actionable
-# message instead.
+# bf16 on CuPy requires CUDA compute capability >= 8.0 (Ampere). Pre-Ampere
+# silicon either has no bf16 path at all or falls back to software emulation
+# with surprise-slow kernels — silently slow training is worse than a hard
+# fail at startup. We do not separately gate dtype *availability* here:
+# `autograd.backend.resolve_dtype("bfloat16")` already raises a clear error
+# when neither `cupy.bfloat16` nor `ml_dtypes.bfloat16` is reachable.
 
 
-def check_bf16_capability(parameter_dtype: str) -> None:
-    """Hard-fail if `parameter_dtype == 'bfloat16'` on incompatible hardware.
+def check_bf16_capability(parameter_dtype: str | None) -> None:
+    """Hard-fail if `parameter_dtype == 'bfloat16'` on pre-Ampere hardware.
 
     Runs unconditionally on CuPy (single-GPU and DDP). MLX has its own bf16
     path; numpy has no bf16 dtype. For non-CuPy backends, this is a no-op.
@@ -393,13 +447,6 @@ def check_bf16_capability(parameter_dtype: str) -> None:
 
     if not IS_CUPY:
         return
-
-    if not hasattr(xp, "bfloat16"):
-        raise RuntimeError(
-            'parameter_dtype="bfloat16" requires cupy.bfloat16, but the '
-            "installed CuPy version does not expose it. Upgrade CuPy or "
-            'change parameter_dtype to "float32" in the training config.'
-        )
 
     device = xp.cuda.Device()
     cc_str = device.compute_capability

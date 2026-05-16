@@ -24,7 +24,7 @@ from autograd.backend import (
     xp,
 )
 from autograd.data.data_loader import DataLoader
-from autograd.distributed import rank
+from autograd.distributed import check_bf16_capability, rank
 from autograd.tensor import Tensor, no_grad
 from autograd.tools.config_schema import (
     GenericTrainingConfig,
@@ -260,6 +260,10 @@ class AbstractTrainer(ABC):
         # still need an explicit rank check at their call site.
         if rank() != 0:
             logging.getLogger("autograd").setLevel(logging.WARNING)
+        # bf16 hardware gate. No-op for non-bf16 dtypes and non-CuPy
+        # backends; hard-fails on pre-Ampere CuPy so a misconfigured run
+        # surfaces immediately instead of going silently slow.
+        check_bf16_capability(config.model_kwargs.get("parameter_dtype"))
         # `resume_epoch` is only a checkpoint lookup hint here. Runtime training
         # progress comes from the loaded checkpoint metadata, especially step_count.
         self.model, self.optimizer, self.checkpoint = self._load_model_and_optimizer(
