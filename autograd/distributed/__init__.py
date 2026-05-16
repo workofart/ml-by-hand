@@ -8,9 +8,10 @@ in one file. The structure of the module reads top to bottom:
 2. Public API: rank(), world_size(), is_distributed(), barrier().
 3. Backend protocol + lifecycle (`_NCCLBackend` wraps `cupyx.distributed`).
 4. Collective operations on parameters: `allreduce_grads`,
-   `broadcast_parameters`. These are the only DDP touchpoints that the
-   optimizer needs.
-5. bf16 hardware gate (`check_bf16_capability`).
+   `broadcast_parameters`, `broadcast_optimizer_state`. The first two are
+   the only DDP touchpoints the optimizer's own code needs; the third is
+   called by the trainer after a checkpoint resume to sync loaded optimizer
+   state from rank 0.
 
 When `WORLD_SIZE` is absent or `1`, `is_distributed()` returns False and
 every DDP code path no-ops, so the single-node training path is
@@ -226,10 +227,7 @@ class _NCCLBackend:
         # root's contents win. We return `buf` so the call site uses the
         # same rebind pattern as `all_reduce`.
         #
-        # Callers must hand us a dtype cupyx's NCCL wrapper recognises
-        # (fp16/fp32/fp64 + int variants). bf16 in particular is rejected
-        # here — see `broadcast_parameters` for the workaround and the
-        # cupyx-dtype-gap explanation.
+        # Callers must hand cupyx a dtype its NCCL wrapper recognizes.
         self._comm.broadcast(buf, root=from_rank)
         return buf
 
@@ -353,6 +351,25 @@ def allreduce_grads(parameters: Mapping[str, Tensor]) -> None:
             param.grad.data = summed / n_ranks
 
 
+def _broadcast_array(
+    arr: Any,
+    *,
+    backend: Backend,
+    from_rank: int,
+) -> Any:
+    """Broadcast an array, promoting low-precision floats for NCCL support.
+
+    cupyx.distributed rejects ml_dtypes bf16 arrays
+    (`TypeError: Unknown dtype bfloat16 for NCCL`), so low-precision arrays
+    are broadcast as fp32 and cast back.
+    """
+    if arr.dtype in LOW_PRECISION_FLOAT_DTYPES:
+        a32 = arr.astype(xp.float32)
+        a32 = backend.broadcast(a32, from_rank=from_rank)
+        return a32.astype(arr.dtype)
+    return backend.broadcast(arr, from_rank=from_rank)
+
+
 def broadcast_parameters(
     parameters: Mapping[str, Tensor],
     *,
@@ -360,16 +377,8 @@ def broadcast_parameters(
 ) -> None:
     """Broadcast every parameter buffer from `from_rank` to all ranks.
 
-    Belt-and-suspenders for the determinism story: even with a shared SEED
-    every rank already constructs identical params under deterministic
-    init, but platform-level non-determinism can drift them apart. One
-    broadcast at startup eliminates that risk for a negligible one-time cost.
-
-    Low-precision (bf16) params are promoted to fp32 before the broadcast
-    and cast back afterwards. The reason is *not* numerical — broadcast is
-    a byte copy and bf16 round-trips losslessly — it's a cupyx plumbing
-    gap. See the inline comment at the promotion site for the upstream
-    issue trail.
+    Keeps all ranks' parameter tensors equal at startup and after checkpoint
+    loads.
 
     No-op when `world_size == 1`.
     """
@@ -378,95 +387,27 @@ def broadcast_parameters(
 
     backend = get_backend()
     for param in parameters.values():
-        data = param.data
-        if data.dtype in LOW_PRECISION_FLOAT_DTYPES:
-            # Why promote bf16 → fp32 before broadcast?
-            #
-            # cupyx.distributed wraps NCCL via a small dtype-char table
-            # at `cupyx.distributed._nccl_comm._nccl_dtypes` that maps
-            # numpy char codes → NCCL type IDs. As of cupy 14.0.1 (the
-            # latest stable, Feb 2026) that table has 'e' (numpy float16
-            # → NCCL_FLOAT16) but not 'E' — the char code used by
-            # `ml_dtypes.bfloat16`, which is cupy's bf16 storage path
-            # until native `cupy.bfloat16` lands at the Python level.
-            # Hand cupyx a bf16 array and it raises:
-            #     TypeError: Unknown dtype bfloat16 for NCCL
-            #
-            # Upstream tracking (as of this writing):
-            #   * cupy/cupy#7527 — bf16 umbrella issue (closed Feb 2026)
-            #   * cupy/cupy#9494 — implementation PR (merged Feb 2026,
-            #     targets v15.0.0a1+); ships internal bf16 type handling
-            #     built on ml_dtypes, but does NOT expose `cupy.bfloat16`
-            #     and does NOT update cupyx.distributed
-            #   * cupy/cupy#9630 — open follow-ups for cupyx bf16 gaps;
-            #     `cupyx.distributed` is NOT on the list
-            #   * Searching `is:pr nccl bfloat16` in cupy/cupy returns
-            #     zero PRs (open or closed) — no scheduled upstream fix
-            #
-            # So we work around it locally. fp32 promotion is the natural
-            # fix because it mirrors the same promotion that already
-            # happens in `allreduce_grads` above — there for *numerical
-            # correctness* (bf16 accumulation loses mantissa bits as
-            # world_size grows); here it's *plumbing only* (broadcast
-            # is bit-exact regardless of dtype). One mental model, two
-            # motivations.
-            #
-            # Cost: this doubles the per-param broadcast volume (2 B → 4 B)
-            # at startup. For a 128M-param model that's a one-time
-            # 256 MB → 512 MB transfer over NCCL — negligible vs the
-            # multi-hour training run that follows.
-            d32 = data.astype(xp.float32)
-            d32 = backend.broadcast(d32, from_rank=from_rank)
-            param.data = d32.astype(data.dtype)
-        else:
-            param.data = backend.broadcast(data, from_rank=from_rank)
+        param.data = _broadcast_array(param.data, backend=backend, from_rank=from_rank)
 
 
-# --- bf16 hardware gate ------------------------------------------------------
-#
-# bf16 on CuPy requires CUDA compute capability >= 8.0 (Ampere). Pre-Ampere
-# silicon either has no bf16 path at all or falls back to software emulation
-# with surprise-slow kernels — silently slow training is worse than a hard
-# fail at startup. We do not separately gate dtype *availability* here:
-# `autograd.backend.resolve_dtype("bfloat16")` already raises a clear error
-# when neither `cupy.bfloat16` nor `ml_dtypes.bfloat16` is reachable.
+def broadcast_optimizer_state(
+    optimizer: Any,
+    *,
+    from_rank: int = 0,
+) -> None:
+    """Broadcast tensor-valued optimizer state from `from_rank`.
 
-
-def check_bf16_capability(parameter_dtype: str | None) -> None:
-    """Hard-fail if `parameter_dtype == 'bfloat16'` on pre-Ampere hardware.
-
-    Runs unconditionally on CuPy (single-GPU and DDP). MLX has its own bf16
-    path; numpy has no bf16 dtype. For non-CuPy backends, this is a no-op.
+    Used after checkpoint resume to make rank 0 authoritative for Adam
+    momenta too. Non-dict/scalar slots such as `timestep` are left alone.
     """
-    if parameter_dtype != "bfloat16":
+    if not is_distributed():
         return
 
-    # Look these up at call time (not import time) so test monkey-patches
-    # of `autograd.backend.{IS_CUPY,xp}` take effect.
-    from autograd.backend import IS_CUPY, xp
-
-    if not IS_CUPY:
-        return
-
-    device = xp.cuda.Device()
-    cc_str = device.compute_capability
-    name = (
-        device.attributes.get("Name", "<unknown>")
-        if hasattr(device, "attributes")
-        else "<unknown>"
-    )
-    try:
-        major = int(cc_str[:-1])
-        minor = int(cc_str[-1])
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError(
-            f"Failed to parse compute capability {cc_str!r} from cupy device."
-        ) from exc
-
-    if (major, minor) < (8, 0):
-        raise RuntimeError(
-            'parameter_dtype="bfloat16" requires CUDA compute capability >= 8.0 '
-            f"(Ampere or newer). Detected device: {name}, compute capability "
-            f"{major}.{minor}. Either run on Ampere/Hopper hardware, or change "
-            'parameter_dtype to "float32" in the training config.'
-        )
+    backend = get_backend()
+    for value in optimizer._states.values():
+        if not isinstance(value, dict):
+            continue
+        for name, arr in value.items():
+            if not hasattr(arr, "dtype"):
+                continue
+            value[name] = _broadcast_array(arr, backend=backend, from_rank=from_rank)

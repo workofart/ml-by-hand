@@ -20,11 +20,16 @@ from tqdm import tqdm
 from autograd import nn, optim
 from autograd.backend import (
     Array,
+    check_bf16_capability,
     materialize,
     xp,
 )
 from autograd.data.data_loader import DataLoader
-from autograd.distributed import check_bf16_capability, rank
+from autograd.distributed import (
+    broadcast_optimizer_state,
+    broadcast_parameters,
+    rank,
+)
 from autograd.tensor import Tensor, no_grad
 from autograd.tools.config_schema import (
     GenericTrainingConfig,
@@ -728,6 +733,8 @@ class AbstractTrainer(ABC):
             optimizer = optimizer_class(model.parameters, **optimizer_kwargs)
             # The configured model architecture must match the checkpoint.
             model.load_state_dict(loaded_ckpt["model_state_dict"])
+            # Keep loaded params identical across DDP ranks.
+            broadcast_parameters(model.parameters, from_rank=0)
             logger.info(
                 f"Loaded pretrained {model_class.__name__} weights from {pretrained_checkpoint_path}"
             )
@@ -782,6 +789,9 @@ class AbstractTrainer(ABC):
             # Load model/optimizer state
             model.load_state_dict(loaded_ckpt["model_state_dict"])
             optimizer.load_state_dict(loaded_ckpt["optimizer_state_dict"])
+            # Keep loaded params and optimizer moments identical across DDP ranks.
+            broadcast_parameters(model.parameters, from_rank=0)
+            broadcast_optimizer_state(optimizer, from_rank=0)
 
             logger.info(
                 f"Loaded {model_class.__name__} from epoch {loaded_ckpt.get('epoch', '?')} "
