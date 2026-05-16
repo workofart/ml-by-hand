@@ -17,6 +17,7 @@ dependencies = [
     "regex",
     "scikit-learn",  # for dataset
     "tqdm",
+    "urllib3>=2.7.0",  # security floor; transitive via openml/requests
 ]
 
 [tool.setuptools.packages.find]
