@@ -54,6 +54,12 @@ class GenericTrainingConfig:
     micro_batch_size: int = 1
     # Optional trainer-level gradient clipping threshold.
     max_grad_norm: Optional[float] = None
+    # When True under DDP, the trainer AllReduce-sums the loss numerator and
+    # token-count denominator across all ranks before dividing, so logged
+    # losses are the true global weighted mean. Default off because the
+    # extra two AllReduces per report are wasted work on a single rank, and
+    # rank-0's local loss is usually a faithful enough sanity signal.
+    log_global_loss: bool = False
 
     def __post_init__(self) -> None:
         if self.max_epochs is None and self.max_steps is None:

@@ -51,6 +51,14 @@ def _snapshot(buf: Any) -> Any:
     re-constructed via `xp.array(buf)`. We use this in MockComm so the
     rendezvous keeps a stable snapshot even if the caller mutates `buf`
     after publishing it (e.g. AllReduce writing the result back in-place).
+
+    Caveat: MLX lazy graphs aren't safe to evaluate across threads. If a
+    caller forces materialization (e.g. `xp.to_scalar`) on a freshly-
+    AllReduced MLX array inside a rank-thread, the cross-thread `xp.eval`
+    can segfault. Callers that scalarize results inline (e.g. trainer
+    loss reporting) should either run those tests on numpy or skip them
+    on MLX. Production DDP runs one process per rank so this is a
+    mock-only concern.
     """
     if hasattr(buf, "copy"):
         return buf.copy()

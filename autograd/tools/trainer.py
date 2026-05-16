@@ -26,8 +26,11 @@ from autograd.backend import (
 )
 from autograd.data.data_loader import DataLoader
 from autograd.distributed import (
+    ReduceOp,
     broadcast_optimizer_state,
     broadcast_parameters,
+    get_backend,
+    is_distributed,
     rank,
 )
 from autograd.tensor import Tensor, no_grad
@@ -510,6 +513,14 @@ class AbstractTrainer(ABC):
             return 0.0
         # Reporting is the GPU/accelerator-to-CPU sync boundary: training keeps
         # loss sums and token counts as backend scalars until logs/metrics need floats.
+        # DDP global loss must reduce numerator and denominator separately;
+        # averaging per-rank ratios is wrong for uneven batch weights.
+        if is_distributed() and self.config.log_global_loss:
+            backend = get_backend()
+            num_arr = xp.asarray(numerator, dtype=xp.float32)
+            den_arr = xp.asarray(denominator, dtype=xp.float32)
+            numerator = backend.all_reduce(num_arr, op=ReduceOp.SUM)
+            denominator = backend.all_reduce(den_arr, op=ReduceOp.SUM)
         numerator_value = xp.to_scalar(numerator)
         denominator_value = xp.to_scalar(denominator)
         return float(numerator_value) / max(float(denominator_value), 1.0)

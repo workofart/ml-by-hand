@@ -1,4 +1,4 @@
-"""bf16 hardware gate (autograd.distributed.check_bf16_capability).
+"""bf16 hardware gate (autograd.backend.check_bf16_capability).
 
 The gate runs unconditionally on CuPy startup. Tests:
 
@@ -24,31 +24,28 @@ from contextlib import contextmanager
 
 import pytest
 
-import autograd.distributed as comm_mod
+import autograd.backend as backend_mod
 
 
 def test_noop_on_non_bf16_dtype():
     """fp32 / float16 / other dtypes (including None) don't trigger the gate."""
-    comm_mod.check_bf16_capability(None)
-    comm_mod.check_bf16_capability("float32")
-    comm_mod.check_bf16_capability("float16")
-    comm_mod.check_bf16_capability("int8")
+    backend_mod.check_bf16_capability(None)
+    backend_mod.check_bf16_capability("float32")
+    backend_mod.check_bf16_capability("float16")
+    backend_mod.check_bf16_capability("int8")
 
 
 def test_noop_on_non_cupy_backends(monkeypatch):
     """MLX/numpy backends skip the gate (each has its own bf16 path)."""
-    import autograd.backend as backend_mod
-
     monkeypatch.setattr(backend_mod, "IS_CUPY", False)
     # Should not raise.
-    comm_mod.check_bf16_capability("bfloat16")
+    backend_mod.check_bf16_capability("bfloat16")
 
 
 @contextmanager
 def _fake_cupy_device(*, compute_capability: str, name: str = "FakeGPU"):
     """Install a stand-in `xp` + `IS_CUPY=True` so check_bf16_capability
     exercises its CuPy path against an in-memory fake device."""
-    import autograd.backend as backend_mod
 
     class _FakeDevice:
         def __init__(self) -> None:
@@ -71,13 +68,13 @@ def _fake_cupy_device(*, compute_capability: str, name: str = "FakeGPU"):
 def test_passes_on_ampere():
     """Compute capability 8.0 is the supported floor — should not raise."""
     with _fake_cupy_device(compute_capability="80"):
-        comm_mod.check_bf16_capability("bfloat16")
+        backend_mod.check_bf16_capability("bfloat16")
 
 
 def test_passes_on_hopper():
     """Compute capability 9.0 should pass."""
     with _fake_cupy_device(compute_capability="90"):
-        comm_mod.check_bf16_capability("bfloat16")
+        backend_mod.check_bf16_capability("bfloat16")
 
 
 def test_hard_fails_on_pre_ampere():
@@ -85,7 +82,7 @@ def test_hard_fails_on_pre_ampere():
     with a message naming the dtype, the cc threshold, and the device."""
     with _fake_cupy_device(compute_capability="75", name="Turing-T4"):
         with pytest.raises(RuntimeError) as exc_info:
-            comm_mod.check_bf16_capability("bfloat16")
+            backend_mod.check_bf16_capability("bfloat16")
 
     msg = str(exc_info.value)
     assert "bfloat16" in msg
