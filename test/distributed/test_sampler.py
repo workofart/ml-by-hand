@@ -110,6 +110,27 @@ def test_sequential_deterministic_across_calls():
     assert list(s1) == list(s2)
 
 
+def test_sequential_does_not_materialize_indices(monkeypatch):
+    """Huge sequential samplers must derive strided per-rank indices
+    analytically instead of materializing `list(iter(sampler))`. On a
+    billion-element eval dataset the eager path is ~25 GB of Python ints
+    and ~40 s of pure CPU work at every eval start, stalling DDP."""
+    dataset = _ListDataset(10_000_000_000)
+    base = SequentialSampler(dataset)
+
+    def fail_iter(_self):
+        raise AssertionError("eager iteration of wrapped SequentialSampler")
+
+    monkeypatch.setattr(SequentialSampler, "__iter__", fail_iter)
+
+    adapter = DistributedSamplerAdapter(base, rank=0, world_size=2)
+    assert len(adapter) == 5_000_000_000
+
+    # First few yielded indices: the per-rank strided range 0, 2, 4, ...
+    it = iter(adapter)
+    assert [next(it) for _ in range(3)] == [0, 2, 4]
+
+
 # ---- with-replacement -----------------------------------------------------
 
 
@@ -120,6 +141,25 @@ def test_with_replacement_per_rank_length():
     base = RandomSampler(dataset, replacement=True, num_samples=n)
     adapter = DistributedSamplerAdapter(base, rank=0, world_size=world_size)
     assert len(adapter) == n // world_size
+
+
+def test_with_replacement_does_not_materialize_indices_at_construction(monkeypatch):
+    """Huge replacement samplers must stay lazy until iteration starts."""
+    dataset = _ListDataset(10_000)
+    base = RandomSampler(dataset, replacement=True, num_samples=10_000_000_000)
+
+    class FailOnDraw:
+        def integers(self, *args, **kwargs):
+            raise AssertionError("eager random index draw")
+
+    monkeypatch.setattr(
+        "autograd.data.sampler.np.random.default_rng",
+        lambda _seed: FailOnDraw(),
+    )
+
+    adapter = DistributedSamplerAdapter(base, rank=0, world_size=2)
+
+    assert len(adapter) == 5_000_000_000
 
 
 def test_with_replacement_independent_streams():
