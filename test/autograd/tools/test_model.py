@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import zipfile
 from copy import deepcopy
 from unittest import TestCase
 
@@ -177,6 +178,22 @@ class TestModel(TestCase):
                 os.remove(path)
         if os.path.isdir(checkpoint_dir):
             os.rmdir(checkpoint_dir)
+
+    def test_save_checkpoint_writes_uncompressed_npz_members(self):
+        save_checkpoint(
+            self.model.state_dict(),
+            checkpoint_dir=self.checkpoint_dir,
+            checkpoint_name=self.checkpoint_name,
+        )
+
+        with zipfile.ZipFile(self.npz_path) as archive:
+            self.assertTrue(archive.infolist())
+            self.assertTrue(
+                all(
+                    info.compress_type == zipfile.ZIP_STORED
+                    for info in archive.infolist()
+                )
+            )
 
     def test_load_checkpoint_accepts_legacy_np_ndarray_metadata(self):
         save_checkpoint(

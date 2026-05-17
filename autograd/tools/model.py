@@ -139,8 +139,10 @@ def save_checkpoint(
     with open(json_path, "w") as f:
         json.dump(meta, f, indent=2)
 
-    # Save arrays to NPZ
-    xp.savez_compressed(npz_path, **arrays_dict)
+    # Save arrays without ZIP compression. GPT-sized checkpoints are mostly
+    # dense weights/state, so compression burns CPU on the training path while
+    # saving little disk.
+    xp.savez(npz_path, **arrays_dict)
     return json_path, npz_path
 
 
