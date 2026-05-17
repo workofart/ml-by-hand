@@ -223,3 +223,40 @@ class TestModel(TestCase):
         loaded = load_checkpoint(json_path=self.json_path, npz_path=self.npz_path)
 
         self.assertIs(loaded["lr_scheduler_cls"], CosineScheduler)
+
+    def test_save_persists_dtype_in_sidecar(self):
+        # The JSON sidecar must carry the original dtype for every array
+        # so loading is exact, not inferred from raw bytes.
+        save_checkpoint(
+            {"parameters": {"w": Tensor(xp.ones((3,), dtype=xp.float32))}},
+            checkpoint_dir=self.checkpoint_dir,
+            checkpoint_name=self.checkpoint_name,
+        )
+
+        with open(self.json_path, "r", encoding="utf-8") as handle:
+            meta = json.load(handle)
+        weight_meta = meta["items"]["parameters"]["items"]["w"]
+        self.assertEqual(weight_meta["_type"], "tensor")
+        self.assertEqual(weight_meta["dtype"], "float32")
+
+    def test_load_restores_bf16_from_void_npz(self):
+        # numpy's .npy format can't store ml_dtypes.bfloat16 natively, so on
+        # cupy/numpy backends a saved bf16 array round-trips as opaque |V2
+        # void. The persisted dtype in JSON lets the load path reinterpret
+        # those bytes as bf16 with no implicit assumptions.
+        bf16 = getattr(xp, "bfloat16", None)
+        if bf16 is None:
+            self.skipTest("backend does not expose bfloat16")
+
+        original = xp.array([1.0, 2.0, 0.5, -1.5], dtype=bf16)
+        save_checkpoint(
+            {"parameters": {"w": Tensor(original)}},
+            checkpoint_dir=self.checkpoint_dir,
+            checkpoint_name=self.checkpoint_name,
+        )
+
+        loaded = load_checkpoint(json_path=self.json_path, npz_path=self.npz_path)
+        restored = loaded["parameters"]["w"].data
+
+        self.assertEqual(restored.dtype, bf16)
+        self.assertTrue(xp.all(restored == original))
