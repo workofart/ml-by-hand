@@ -4,8 +4,6 @@ import logging
 import sys
 from pathlib import Path
 
-import numpy as np
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -380,10 +378,10 @@ if __name__ == "__main__":
             n_workers=CONFIG.custom_bpe.n_workers,
             min_word_freq=5,  # this is about 99.7% coverage
         )
-        encoded_npy_path = Path(bpe.mmap_path)
+        encoded_path = Path(bpe.mmap_path)
         vocab_path = Path(CONFIG.custom_bpe.vocab_path)
         use_cached_encoded_data = (
-            encoded_npy_path.exists()
+            encoded_path.exists()
             and vocab_path.exists()
             and not CONFIG.custom_bpe.overwrite_encoded_data
             and not CONFIG.custom_bpe.overwrite_vocabulary_file
@@ -391,9 +389,9 @@ if __name__ == "__main__":
         if use_cached_encoded_data:
             logger.info(
                 "Found existing encoded data at '%s', loading it without fetching raw data.",
-                encoded_npy_path,
+                encoded_path,
             )
-            encoded_data = np.load(str(encoded_npy_path), mmap_mode="r")
+            encoded_data = BytePairEncoder.load_encoded(str(encoded_path))
             logger.info(f"Vocabulary size: {bpe.n_vocab}")
             logger.info(f"Encoded data length: {len(encoded_data)}")
         else:

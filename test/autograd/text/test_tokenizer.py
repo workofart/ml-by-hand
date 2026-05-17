@@ -1,10 +1,6 @@
 import os
-import shutil
 import tempfile
 from unittest import TestCase
-from unittest.mock import patch
-
-import numpy as np
 
 from autograd.text.tokenizer import BytePairEncoder
 from test.helpers import array_equal
@@ -90,14 +86,14 @@ class TestTokenizer(TestCase):
         self.assertEqual(len(cached_after_first), 2)
         self.assertEqual(dict(self.bpe._encoded_chunk_cache), cached_after_first)
 
-    def test_load_dictionary_fallback(self):
+    def test_load_dictionary_raises_on_corrupt_file(self):
         with open(self.bpe.vocab_file_path, "wb") as f:
             f.write(b"\x80\x03}q\x00.")  # incomplete or invalid pickle data
-        # Now re-initialize the BytePairEncoder; it should catch the error and rebuild
-        bpe_new = BytePairEncoder(
-            num_merges=50, vocab_file_path=self.bpe.vocab_file_path
-        )
-        self.assertGreater(len(bpe_new._unicode_to_int_vocab), 0)
+        # Construction must refuse to silently rebuild: silently overwriting
+        # learned merges would lose user data. The caller is forced to delete
+        # the file (or change the path) before retrying.
+        with self.assertRaisesRegex(RuntimeError, "Failed to load vocabulary"):
+            BytePairEncoder(num_merges=50, vocab_file_path=self.bpe.vocab_file_path)
 
     def test_train_vocabulary_skip_if_loaded_and_no_overwrite(self):
         # First train
@@ -139,13 +135,13 @@ class TestTokenizer(TestCase):
             full_bpe = BytePairEncoder(
                 num_merges=20,
                 vocab_file_path=os.path.join(tmpdir, "full_vocab.pkl"),
-                encoded_data_path=os.path.join(tmpdir, "full_encoded.npy"),
+                encoded_data_path=os.path.join(tmpdir, "full_encoded.bin"),
                 n_workers=1,
             )
             stream_bpe = BytePairEncoder(
                 num_merges=20,
                 vocab_file_path=os.path.join(tmpdir, "stream_vocab.pkl"),
-                encoded_data_path=os.path.join(tmpdir, "stream_encoded.npy"),
+                encoded_data_path=os.path.join(tmpdir, "stream_encoded.bin"),
                 n_workers=1,
             )
 
@@ -157,7 +153,7 @@ class TestTokenizer(TestCase):
                 text_batch_size=2,
             )
 
-            stream_encoded = np.load(mmap_path, mmap_mode="r")
+            stream_encoded = BytePairEncoder.load_encoded(mmap_path)
 
             self.assertEqual(full_bpe.learned_merges, stream_bpe.learned_merges)
             self.assertEqual(
@@ -166,7 +162,7 @@ class TestTokenizer(TestCase):
             )
             self.assertEqual(full_bpe.encode(full_text), list(stream_encoded))
 
-    def test_prepare_data_writes_direct_npy_memmap(self):
+    def test_prepare_data_cleans_up_tmp_file(self):
         docs = ["hello<|endoftext|>", "world<|endoftext|>"]
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -177,26 +173,28 @@ class TestTokenizer(TestCase):
                 n_workers=1,
             )
             bpe.train_vocabulary(docs, overwrite_saved_file=True)
-            stale_raw_tmp = f"{bpe.mmap_path}.raw.tmp"
-            with open(stale_raw_tmp, "wb") as f:
-                f.write(b"stale temp file")
 
-            with patch(
-                "autograd.text.tokenizer.np.lib.format.write_array",
-                side_effect=AssertionError("prepare_data should not copy raw data"),
-            ):
-                encoded = bpe.prepare_data(
-                    docs,
-                    overwrite_vocabulary_file=False,
-                    overwrite_encoded_data=True,
-                )
+            encoded = bpe.prepare_data(
+                docs,
+                overwrite_vocabulary_file=False,
+                overwrite_encoded_data=True,
+            )
 
             self.assertEqual(bpe.encode("".join(docs)), list(encoded))
-            self.assertFalse(os.path.exists(f"{bpe.mmap_path}.raw.tmp"))
             self.assertFalse(os.path.exists(f"{bpe.mmap_path}.tmp"))
 
-    def test_prepare_data_checks_disk_space_before_writing(self):
-        docs = ["hello<|endoftext|>"]
+    def test_encode_to_mmap_consumes_text_iter_once(self):
+        docs = ["hello<|endoftext|>", "world<|endoftext|>"]
+
+        class OneShotDocs:
+            def __init__(self):
+                self.iterations = 0
+
+            def __iter__(self):
+                self.iterations += 1
+                if self.iterations > 1:
+                    raise AssertionError("text iterator was consumed more than once")
+                yield from docs
 
         with tempfile.TemporaryDirectory() as tmpdir:
             bpe = BytePairEncoder(
@@ -206,57 +204,43 @@ class TestTokenizer(TestCase):
                 n_workers=1,
             )
             bpe.train_vocabulary(docs, overwrite_saved_file=True)
-            disk_usage = shutil._ntuple_diskusage(total=10, used=9, free=1)
+            text_source = OneShotDocs()
 
-            with patch("autograd.text.tokenizer.shutil.disk_usage") as mock_disk_usage:
-                mock_disk_usage.return_value = disk_usage
-                with self.assertRaisesRegex(OSError, "Insufficient disk space"):
-                    bpe.prepare_data(
-                        docs,
-                        overwrite_vocabulary_file=False,
-                        overwrite_encoded_data=True,
-                    )
-
-            self.assertFalse(os.path.exists(bpe.mmap_path))
-            self.assertFalse(os.path.exists(f"{bpe.mmap_path}.tmp"))
-
-    def test_count_encoded_tokens_uses_unordered_worker_results(self):
-        class RecordingPool:
-            calls = []
-
-            def __init__(self, _n_workers):
-                pass
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_args):
-                return None
-
-            def imap(self, fn, batches):
-                self.calls.append("imap")
-                return map(fn, batches)
-
-            def imap_unordered(self, fn, batches):
-                self.calls.append("imap_unordered")
-                return map(fn, batches)
-
-        docs = ["aa", "bbb", "c"]
-        self.bpe.n_workers = 2
-
-        with patch("autograd.text.tokenizer.Pool", RecordingPool):
-            token_count = self.bpe._count_encoded_tokens(docs, text_batch_size=1)
-            list(
-                self.bpe._iter_encoded_batches(
-                    docs,
-                    text_batch_size=1,
-                    desc="ordered",
-                    preserve_order=True,
-                )
+            mmap_path = bpe._encode_to_mmap(
+                text_source,
+                overwrite_encoded_data=True,
+                text_batch_size=1,
             )
+            encoded = BytePairEncoder.load_encoded(mmap_path)
 
-        self.assertEqual(token_count, sum(len(self.bpe.encode(doc)) for doc in docs))
-        self.assertEqual(RecordingPool.calls, ["imap_unordered", "imap"])
+            self.assertEqual(text_source.iterations, 1)
+            self.assertEqual(bpe.encode("".join(docs)), list(encoded))
+
+    def test_parallel_encode_to_mmap_preserves_token_order(self):
+        docs = [
+            "first document<|endoftext|>",
+            "second document<|endoftext|>",
+            "third document<|endoftext|>",
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bpe = BytePairEncoder(
+                num_merges=10,
+                vocab_file_path=os.path.join(tmpdir, "vocab.pkl"),
+                encoded_data_path=os.path.join(tmpdir, "encoded.npz"),
+                n_workers=2,
+            )
+            bpe.train_vocabulary(docs, overwrite_saved_file=True)
+
+            mmap_path = bpe._encode_to_mmap(
+                docs,
+                overwrite_encoded_data=True,
+                text_batch_size=1,
+            )
+            encoded = BytePairEncoder.load_encoded(mmap_path)
+
+            self.assertEqual(bpe.encode("".join(docs)), list(encoded))
+            self.assertEqual(bpe.decode(encoded.tolist()), "".join(docs))
 
     def test_encode_roundtrips(self):
         text = "hello world"

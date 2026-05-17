@@ -2,7 +2,6 @@ import heapq
 import logging
 import os
 import pickle
-import shutil
 from collections import Counter, OrderedDict
 from itertools import batched
 from multiprocessing import Pool, cpu_count
@@ -45,6 +44,11 @@ class BytePairEncoder:
     WORD_FREQ_BATCH_SIZE = 10_000
     WORD_FREQ_LOG_INTERVAL = 500_000
 
+    # Worker-side handle for the encode Pool. Set by ``_init_encode_worker``
+    # in each spawned worker process so subsequent ``imap`` calls can reach
+    # the BPE without re-pickling ``self`` per batch.
+    _WORKER_BPE: Optional["BytePairEncoder"] = None
+
     def __init__(
         self,
         num_merges: int = 500,
@@ -58,7 +62,7 @@ class BytePairEncoder:
         Args:
             num_merges (int): Number of BPE merges to learn during training.
             vocab_file_path (str): Path to store or load the pickled vocabulary.
-            encoded_data_path (str): Path to store or load the encoded data as an NPZ file.
+            encoded_data_path (str): Path to store or load the encoded data. The extension is replaced with ``.bin`` (the stored file is a raw little-endian int32 stream); see :meth:`load_encoded`.
             n_workers (Optional[int]): Number of processes for parallel operations. If None,
                 defaults to the number of CPU cores minus one.
             min_word_freq (int): Minimum frequency for a word form to be included in
@@ -74,7 +78,9 @@ class BytePairEncoder:
         self.min_word_freq = min_word_freq
         self.vocab_file_path = vocab_file_path
         self.encoded_data_path = encoded_data_path
-        self.mmap_path = os.path.splitext(encoded_data_path)[0] + ".npy"
+        # We store the encoded corpus as a raw little-endian int32 stream.
+        # No header — the count is recovered at load time from the file size.
+        self.mmap_path = os.path.splitext(encoded_data_path)[0] + ".bin"
         base, ext = os.path.splitext(vocab_file_path)
         self.word_freq_cache_path = base + ".word_freq" + ext
 
@@ -93,7 +99,7 @@ class BytePairEncoder:
 
         # Parallelism
         if n_workers is None:
-            self.n_workers = max(1, cpu_count() - 1)
+            self.n_workers = min(32, max(1, cpu_count() - 1))
         else:
             self.n_workers = n_workers
 
@@ -130,15 +136,16 @@ class BytePairEncoder:
         """Trains and applies BPE on the given texts, returning encoded token IDs.
 
         Convenience wrapper that trains the vocabulary then writes token IDs
-        to the configured memory-mapped file.
-        ``texts`` must be re-iterable (e.g. a list or an object whose
-        ``__iter__`` returns a fresh iterator each time) because the corpus
-        is traversed once for vocabulary training and once for encoding.
+        to the configured memory-mapped file. ``texts`` is consumed twice
+        when both passes run — once to build word frequencies during training,
+        once to encode — so it must be re-iterable (e.g. a list or an object
+        whose ``__iter__`` returns a fresh iterator each time). A bare
+        generator will be exhausted before encoding starts.
 
         Args:
             texts (Iterable[str]): Documents to train on and encode.
             overwrite_vocabulary_file (bool): If True, re-trains and overwrites the BPE vocabulary.
-            overwrite_encoded_data (bool): If True, overwrites an existing .npy file.
+            overwrite_encoded_data (bool): If True, overwrites an existing encoded file.
 
         Returns:
             np.ndarray: A memory-mapped array of token IDs.
@@ -151,7 +158,7 @@ class BytePairEncoder:
         """
         self.train_vocabulary(texts, overwrite_saved_file=overwrite_vocabulary_file)
         self._encode_to_mmap(texts, overwrite_encoded_data=overwrite_encoded_data)
-        return np.load(self.mmap_path, mmap_mode="r")
+        return self.load_encoded(self.mmap_path)
 
     def train_vocabulary(
         self, texts: Iterable[str], overwrite_saved_file: bool = False
@@ -205,7 +212,7 @@ class BytePairEncoder:
                 pickle.dump(word_freq, f)
         return self._learn_vocabulary_from_word_freq(word_freq)
 
-    def encode(self, input_text: str, *, show_progress: bool = False) -> List[int]:
+    def encode(self, input_text: str) -> List[int]:
         """Encodes a raw input string into a list of BPE token IDs.
 
         The process is:
@@ -276,6 +283,8 @@ class BytePairEncoder:
 
         Args:
             encoded_tokens (List[int]): The list of integer token IDs to decode.
+                Numpy arrays must be converted with ``.tolist()`` first; this
+                keeps the dict lookup on the hot path free of scalar coercion.
 
         Returns:
             str: The decoded string.
@@ -288,29 +297,20 @@ class BytePairEncoder:
         """
         result_bytes = []
         for t in encoded_tokens:
-            if not isinstance(t, int) and hasattr(t, "item"):  # handle array scalars
-                t = t.item()
             if t in self._int_to_unicode_vocab:
                 result_bytes.append(self._int_to_unicode_vocab[t])
             else:
                 result_bytes.append(b"<UNK>")
         return b"".join(result_bytes).decode("utf-8", errors="replace")
 
-    def _should_parallelize(
-        self, *, work_items: int, min_items_per_worker: int
-    ) -> bool:
-        # On small workloads, Pool startup/pickling dominates the actual work,
-        # especially on macOS where multiprocessing uses `spawn`. Only fan out
-        # when each worker has enough items to amortize that fixed overhead.
-        return (
-            self.n_workers > 1 and work_items >= self.n_workers * min_items_per_worker
-        )
-
     def _load_dictionary(self) -> None:
         """Loads the dictionary (vocab + merges) from disk if it exists.
 
-        If the vocabulary file does not exist or fails to load, creates a new base
-        dictionary (all single-byte chars plus special tokens).
+        If the file does not exist, creates a fresh base dictionary (all
+        single-byte chars plus special tokens). If the file exists but fails
+        to load, raises RuntimeError — silently rebuilding would discard the
+        learned merges the caller asked us to load. Delete the file (or point
+        ``vocab_file_path`` elsewhere) to force a clean retrain.
 
         Examples:
             >>> bpe = BytePairEncoder(num_merges=50, vocab_file_path="nonexistent.pkl")
@@ -327,7 +327,6 @@ class BytePairEncoder:
             self.learned_merges = []
             return
 
-        # If the file exists, attempt to load; fallback to new dictionary if there's an error.
         try:
             with open(self.vocab_file_path, "rb") as f:
                 logger.info("Loading the vocabulary from disk.")
@@ -338,15 +337,11 @@ class BytePairEncoder:
                     self.learned_merges,
                 ) = data
         except (pickle.UnpicklingError, EOFError, ValueError) as e:
-            logger.warning(
-                f"Failed to load the vocabulary from {self.vocab_file_path}. "
-                f"Reason: {e}. Creating new dictionary."
-            )
-            self._unicode_to_int_vocab = self._construct_unicode_to_int_vocab()
-            self._int_to_unicode_vocab = {
-                v: k for k, v in self._unicode_to_int_vocab.items()
-            }
-            self.learned_merges = []
+            raise RuntimeError(
+                f"Failed to load vocabulary from {self.vocab_file_path}: {e}. "
+                "Delete the file (or pass a different vocab_file_path) "
+                "to retrain from scratch."
+            ) from e
 
     def _construct_unicode_to_int_vocab(self) -> Dict[bytes, int]:
         """Constructs a base vocabulary for all single-byte values plus special tokens.
@@ -375,133 +370,112 @@ class BytePairEncoder:
         *,
         text_batch_size: int = 256,
     ) -> str:
-        """Encodes streamed text to a .npy memmap file without holding all tokens in memory.
+        """Encodes streamed text to a raw int32 binary file.
 
-        Encodes the corpus once to count tokens, checks that the output
-        filesystem has enough free space, then encodes again directly into a
-        temporary .npy memmap before atomically replacing the final file.
-        ``text_iter`` must be re-iterable so both passes see the same corpus.
+        Writes each encoded batch's tokens directly with ``ndarray.tofile``,
+        then atomically renames the temporary file to ``self.mmap_path``.
+        The file has no header — readers recover the token count from the
+        file size via :meth:`load_encoded`.
 
         Args:
             text_iter (Iterable[str]): Documents to encode (e.g. a list of strings or
                 a lazy generator). The vocabulary must already be trained.
-            overwrite_encoded_data (bool): If True, overwrites an existing .npy file.
+            overwrite_encoded_data (bool): If True, overwrites an existing file.
             text_batch_size (int): Number of documents to encode per batch.
 
         Returns:
-            str: The path to the .npy memmap file.
+            str: The path to the encoded binary file.
         """
+        if text_batch_size < 1:
+            raise ValueError(f"text_batch_size must be >= 1, got {text_batch_size}")
+
         if os.path.exists(self.mmap_path) and not overwrite_encoded_data:
             logger.info(
                 f"Found existing memory-mapped encoded data at '{self.mmap_path}', "
                 "reusing it instead of re-encoding."
             )
             return self.mmap_path
-        if iter(text_iter) is text_iter:
-            raise TypeError(
-                "_encode_to_mmap requires a re-iterable text source because it "
-                "counts encoded tokens before writing the .npy memmap. Pass a "
-                "sequence or an iterable object whose __iter__ returns a fresh iterator."
-            )
-
         parent_dir = os.path.dirname(self.mmap_path)
         if parent_dir:
             os.makedirs(parent_dir, exist_ok=True)
-        disk_check_dir = parent_dir or "."
 
         int32_dtype = np.dtype("<i4")
-        tmp_npy_path = f"{self.mmap_path}.tmp"
-        stale_raw_path = f"{self.mmap_path}.raw.tmp"
+        tmp_path = f"{self.mmap_path}.tmp"
 
         try:
-            for stale_path in (tmp_npy_path, stale_raw_path):
-                if os.path.exists(stale_path):
-                    os.remove(stale_path)
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
-            token_count = self._count_encoded_tokens(
-                text_iter,
-                text_batch_size=text_batch_size,
-            )
-            self._check_encoded_mmap_disk_space(
-                disk_check_dir=disk_check_dir,
-                token_count=token_count,
-                dtype=int32_dtype,
-            )
+            with open(tmp_path, "wb") as out_file:
+                text_batches = batched(text_iter, text_batch_size)
+                if self.n_workers > 1:
+                    # Pool initializer pickles `self` once per worker process;
+                    # imap then only ships text batches across the boundary
+                    # instead of re-pickling the BPE state per batch.
+                    with Pool(
+                        self.n_workers,
+                        initializer=BytePairEncoder._init_encode_worker,
+                        initargs=(self,),
+                    ) as pool:
+                        encoded_batches = pool.imap(
+                            BytePairEncoder._encode_text_batch_array_worker,
+                            text_batches,
+                        )
+                        for flat_batch in tqdm(
+                            encoded_batches,
+                            desc="Encoding text to tokens",
+                            unit="batch",
+                        ):
+                            flat_batch.tofile(out_file)
+                else:
+                    for text_batch in tqdm(
+                        text_batches,
+                        desc="Encoding text to tokens",
+                        unit="batch",
+                    ):
+                        flat_batch = np.fromiter(
+                            (
+                                token
+                                for text in text_batch
+                                for token in self.encode(text)
+                            ),
+                            dtype=int32_dtype,
+                        )
+                        flat_batch.tofile(out_file)
 
-            encoded_mmap = np.lib.format.open_memmap(
-                tmp_npy_path,
-                mode="w+",
-                dtype=int32_dtype,
-                shape=(token_count,),
-            )
-            offset = 0
-            # Writes are positional in the memmap, so batches must arrive in
-            # input order — otherwise tokens from later docs would land in
-            # earlier slots and the file would no longer match the corpus.
-            for encoded_batch in self._iter_encoded_batches(
-                text_iter,
-                text_batch_size=text_batch_size,
-                desc="Encoding text to tokens",
-                preserve_order=True,
-            ):
-                for encoded_text in encoded_batch:
-                    end = offset + len(encoded_text)
-                    encoded_mmap[offset:end] = np.asarray(
-                        encoded_text,
-                        dtype=int32_dtype,
-                    )
-                    offset = end
-            if offset != token_count:
-                raise RuntimeError(
-                    "Encoded token count changed between counting and writing: "
-                    f"counted {token_count}, wrote {offset}. "
-                    "Use a deterministic re-iterable text source."
-                )
-            encoded_mmap.flush()
-            del encoded_mmap
-
-            os.replace(tmp_npy_path, self.mmap_path)
+            os.replace(tmp_path, self.mmap_path)
         finally:
-            if os.path.exists(tmp_npy_path):
-                os.remove(tmp_npy_path)
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
         return self.mmap_path
 
-    def _count_encoded_tokens(
-        self,
-        text_iter: Iterable[str],
-        *,
-        text_batch_size: int,
-    ) -> int:
-        token_count = 0
-        for encoded_batch in self._iter_encoded_batches(
-            text_iter,
-            text_batch_size=text_batch_size,
-            desc="Counting encoded tokens",
-            preserve_order=False,
-        ):
-            for encoded_text in encoded_batch:
-                token_count += len(encoded_text)
-        return token_count
+    @staticmethod
+    def load_encoded(path: str) -> np.ndarray:
+        """Memory-maps a raw int32 token stream written by ``_encode_to_mmap``.
 
-    def _check_encoded_mmap_disk_space(
-        self,
-        *,
-        disk_check_dir: str,
-        token_count: int,
-        dtype: np.dtype,
-    ) -> None:
-        header_allowance_bytes = 1024 * 1024
-        required_bytes = (token_count * dtype.itemsize) + header_allowance_bytes
-        required_with_buffer = int(required_bytes * 1.2)
-        free_bytes = shutil.disk_usage(disk_check_dir).free
-        if free_bytes < required_with_buffer:
-            raise OSError(
-                "Insufficient disk space to encode token data: "
-                f"need at least {required_with_buffer} bytes "
-                f"({required_bytes} bytes plus 20% buffer), "
-                f"but only {free_bytes} bytes are free in {disk_check_dir!r}."
-            )
+        The file has no header, so the token count is the file size divided
+        by ``int32.itemsize`` (4 bytes per token).
+        """
+        int32_dtype = np.dtype("<i4")
+        token_count = os.path.getsize(path) // int32_dtype.itemsize
+        return np.memmap(path, dtype=int32_dtype, mode="r", shape=(token_count,))
+
+    @staticmethod
+    def _init_encode_worker(bpe: "BytePairEncoder") -> None:
+        # Pool ``initializer`` hook: runs once per spawned worker process so
+        # the heavy BPE state is pickled only at startup, not per batch.
+        BytePairEncoder._WORKER_BPE = bpe
+
+    @staticmethod
+    def _encode_text_batch_array_worker(text_batch: Sequence[str]) -> np.ndarray:
+        bpe = BytePairEncoder._WORKER_BPE
+        if bpe is None:
+            raise RuntimeError("Tokenizer worker was not initialized")
+        return np.fromiter(
+            (token for text in text_batch for token in bpe.encode(text)),
+            dtype=np.dtype("<i4"),
+        )
 
     def _build_word_freq(self, texts: Iterable[str]) -> Counter:
         """Build word frequency table from documents, parallelized when possible.
@@ -715,37 +689,6 @@ class BytePairEncoder:
                 final_chunks.extend(self._general_pattern.findall(segment))
 
         return [tok for tok in final_chunks if tok]
-
-    def _iter_encoded_batches(
-        self,
-        text_iter: Iterable[str],
-        *,
-        text_batch_size: int,
-        desc: str,
-        preserve_order: bool = True,
-    ) -> Iterable[list[list[int]]]:
-        if text_batch_size < 1:
-            raise ValueError(f"text_batch_size must be >= 1, got {text_batch_size}")
-
-        text_batches = batched(text_iter, text_batch_size)
-        if self.n_workers > 1:
-            with Pool(self.n_workers) as pool:
-                encoded_batches = (
-                    pool.imap(self._encode_text_batch, text_batches)
-                    if preserve_order
-                    else pool.imap_unordered(self._encode_text_batch, text_batches)
-                )
-                yield from tqdm(
-                    encoded_batches,
-                    desc=desc,
-                    unit="batch",
-                )
-        else:
-            for text_batch in tqdm(text_batches, desc=desc, unit="batch"):
-                yield self._encode_text_batch(text_batch)
-
-    def _encode_text_batch(self, text_batch: Sequence[str]) -> list[list[int]]:
-        return [self.encode(text) for text in text_batch]
 
     def _apply_merges_to_corpus_indexed(
         self,
