@@ -264,6 +264,40 @@ def test_window_collator_shift():
     )
 
 
+def test_window_collator_preserves_unsorted_sampler_order():
+    data = np.arange(20, dtype=np.int32)
+    examples = [
+        TokenWindowExample(data, offset=8, window_len=5),
+        TokenWindowExample(data, offset=1, window_len=5),
+        TokenWindowExample(data, offset=12, window_len=5),
+    ]
+
+    batch = CausalLMWindowCollator()(examples)
+
+    np.testing.assert_array_equal(
+        xp.to_numpy(batch.input_ids),
+        np.array(
+            [
+                [8, 9, 10, 11],
+                [1, 2, 3, 4],
+                [12, 13, 14, 15],
+            ],
+            dtype=np.int32,
+        ),
+    )
+    np.testing.assert_array_equal(
+        xp.to_numpy(batch.labels),
+        np.array(
+            [
+                [9, 10, 11, 12],
+                [2, 3, 4, 5],
+                [13, 14, 15, 16],
+            ],
+            dtype=np.int32,
+        ),
+    )
+
+
 def test_window_collator_requires_shiftable_window():
     example = TokenWindowExample(np.arange(4, dtype=np.int32), offset=0, window_len=1)
 

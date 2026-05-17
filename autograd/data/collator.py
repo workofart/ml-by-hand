@@ -145,7 +145,15 @@ class CausalLMWindowCollator(Collator):
         offsets = np.array([ex.offset for ex in examples], dtype=np.int64)
         positions = np.arange(window_len, dtype=np.int32)
 
-        windows = stream[offsets[:, None] + positions[None, :]]
+        if len(offsets) > 1 and np.any(offsets[1:] < offsets[:-1]):
+            # Ascending mmap reads are much faster than random page walks; restore
+            # row order so callers see the sampler's original batch order.
+            order = np.argsort(offsets)
+            inverse_order = np.empty_like(order)
+            inverse_order[order] = np.arange(len(order))
+            windows = stream[offsets[order, None] + positions[None, :]][inverse_order]
+        else:
+            windows = stream[offsets[:, None] + positions[None, :]]
 
         return CausalLMBatch(
             input_ids=xp.array(windows[:, :-1]),
