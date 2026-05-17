@@ -1964,6 +1964,81 @@ class TestLLMTrainer(BaseTrainerTest):
 
         self.assertEqual(run_mock_ranks(2, target), [1, 0])
 
+    @unittest.skipIf(
+        IS_MLX,
+        "MLX lazy graphs are not thread-safe under the in-process DDP mock.",
+    )
+    def test_evaluate_skips_eval_loop_on_rank_zero_when_callbacks_present(self):
+        """Under DDP with eval_callbacks, rank 0 skips the eval batch loop
+        so the slow single-rank text generation overlaps with other ranks'
+        eval batches instead of serializing them at the all_reduce barrier.
+
+        Other ranks contribute the full eval signal; rank 0 contributes
+        zero-loss/zero-weight to the all_reduce, which is mathematically
+        neutral (sum/weight stays the rank-N>0 aggregate)."""
+
+        def target():
+            callback = MagicMock()
+            # Per-thread mocks so call counts cleanly attribute to each rank.
+            forward_fn = MagicMock()
+            forward_fn.train.return_value = Tensor(self.fake_pred)
+            forward_fn.return_value = (
+                Tensor(self.fake_pred),
+                xp.zeros((2, 10), dtype=xp.int32),
+            )
+            loss_fn = MagicMock(return_value=Tensor(1.23))
+
+            trainer = LLMTrainer(
+                model_cls=MockModelClass,
+                optimizer_cls=MockOptimizerClass,
+                loss_fn=loss_fn,
+                forward_fn=forward_fn,
+                config=self.config,
+                eval_callbacks=[callback],
+            )
+            trainer.evaluate(self.val_loader)
+            return loss_fn.call_count, callback.call_count
+
+        per_rank = run_mock_ranks(2, target)
+        # Rank 0: no eval batches processed; callback ran once.
+        self.assertEqual(per_rank[0], (0, 1))
+        # Rank 1: ran the eval loop; no callbacks.
+        rank_one_loss_calls, rank_one_callback_calls = per_rank[1]
+        self.assertGreaterEqual(rank_one_loss_calls, 1)
+        self.assertEqual(rank_one_callback_calls, 0)
+
+    @unittest.skipIf(
+        IS_MLX,
+        "MLX lazy graphs are not thread-safe under the in-process DDP mock.",
+    )
+    def test_evaluate_runs_full_eval_loop_on_rank_zero_when_no_callbacks(self):
+        """Without callbacks, rank 0 has no parallel work to overlap, so
+        the optimization MUST NOT skip its eval loop — otherwise eval
+        contribution is silently halved with no benefit."""
+
+        def target():
+            forward_fn = MagicMock()
+            forward_fn.train.return_value = Tensor(self.fake_pred)
+            forward_fn.return_value = (
+                Tensor(self.fake_pred),
+                xp.zeros((2, 10), dtype=xp.int32),
+            )
+            loss_fn = MagicMock(return_value=Tensor(1.23))
+            trainer = LLMTrainer(
+                model_cls=MockModelClass,
+                optimizer_cls=MockOptimizerClass,
+                loss_fn=loss_fn,
+                forward_fn=forward_fn,
+                config=self.config,
+            )
+            trainer.evaluate(self.val_loader)
+            return loss_fn.call_count
+
+        per_rank = run_mock_ranks(2, target)
+        # Both ranks must run the eval loop at least once.
+        for rank_calls in per_rank:
+            self.assertGreaterEqual(rank_calls, 1)
+
     def test_llm_evaluate_rejects_empty_val_loader(self):
         with self.assertRaisesRegex(
             ValueError,
