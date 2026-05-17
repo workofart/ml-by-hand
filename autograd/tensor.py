@@ -1478,10 +1478,14 @@ class Matmul(Function):
             x_2d = x.reshape(-1, x_shape[-1])
             out_2d = xp.matmul(x_2d, y)
             out = out_2d.reshape(*x_shape[:-1], y.shape[-1])
-            return out.astype(out_dtype) if out_dtype is not None else out
+            if out_dtype is not None and out.dtype != out_dtype:
+                return out.astype(out_dtype)
+            return out
 
         out = xp.matmul(x, y)
-        return out.astype(out_dtype) if out_dtype is not None else out
+        if out_dtype is not None and out.dtype != out_dtype:
+            return out.astype(out_dtype)
+        return out
 
     def backward(self, grad: "Tensor") -> Tuple[Optional[Array], Optional[Array]]:
         r"""Compute the gradient for the matrix multiplication operation.

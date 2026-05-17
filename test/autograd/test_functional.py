@@ -1,10 +1,10 @@
-from unittest import TestCase
+from unittest import TestCase, skipUnless
 from unittest.mock import patch
 
 import torch  # for test comparisons
 
 from autograd import functional
-from autograd.backend import xp
+from autograd.backend import IS_CUPY, resolve_dtype, xp
 from autograd.tensor import Tensor
 from test.helpers import allclose
 
@@ -54,6 +54,215 @@ class TestActivationFunctions(TestCase):
             "ReLU backward pass did not match PyTorch."
         )
 
+    def test_linear_relu_matches_composed_relu(self):
+        x_data = xp.array(
+            [
+                [[0.2, -0.4, 0.5], [1.0, -0.3, 0.7]],
+                [[-0.6, 0.8, 0.1], [0.4, 0.9, -0.2]],
+            ],
+            dtype=xp.float32,
+        )
+        weight_data = xp.array(
+            [[0.3, -0.5, 0.2, 0.7], [-0.4, 0.6, 0.1, -0.2], [0.8, 0.2, -0.3, 0.5]],
+            dtype=xp.float32,
+        )
+        bias_data = xp.array([0.1, -0.2, 0.05, -0.15], dtype=xp.float32)
+        upstream = xp.array(
+            [
+                [[0.5, -0.1, 0.3, 0.7], [0.2, 0.4, -0.6, 0.1]],
+                [[-0.3, 0.8, 0.2, -0.5], [0.9, -0.4, 0.6, 0.3]],
+            ],
+            dtype=xp.float32,
+        )
+
+        x = Tensor(xp.array(x_data), requires_grad=True)
+        weight = Tensor(xp.array(weight_data), requires_grad=True)
+        bias = Tensor(xp.array(bias_data), requires_grad=True)
+        composed = functional.relu(x @ weight + bias)
+        composed.backward(upstream)
+
+        x_fast = Tensor(xp.array(x_data), requires_grad=True)
+        weight_fast = Tensor(xp.array(weight_data), requires_grad=True)
+        bias_fast = Tensor(xp.array(bias_data), requires_grad=True)
+        fused = functional.linear_relu(x_fast, weight_fast, bias_fast)
+        fused.backward(upstream)
+
+        assert allclose(fused.data, composed.data, atol=1e-6)
+        assert allclose(x_fast.grad.data, x.grad.data, atol=1e-6)
+        assert allclose(weight_fast.grad.data, weight.grad.data, atol=1e-6)
+        assert allclose(bias_fast.grad.data, bias.grad.data, atol=1e-6)
+
+    def test_linear_matches_composed_matmul_add(self):
+        x_data = xp.array(
+            [
+                [[0.2, -0.4, 0.5], [1.0, -0.3, 0.7]],
+                [[-0.6, 0.8, 0.1], [0.4, 0.9, -0.2]],
+            ],
+            dtype=xp.float32,
+        )
+        weight_data = xp.array(
+            [[0.3, -0.5, 0.2, 0.7], [-0.4, 0.6, 0.1, -0.2], [0.8, 0.2, -0.3, 0.5]],
+            dtype=xp.float32,
+        )
+        bias_data = xp.array([0.1, -0.2, 0.05, -0.15], dtype=xp.float32)
+        upstream = xp.array(
+            [
+                [[0.5, -0.1, 0.3, 0.7], [0.2, 0.4, -0.6, 0.1]],
+                [[-0.3, 0.8, 0.2, -0.5], [0.9, -0.4, 0.6, 0.3]],
+            ],
+            dtype=xp.float32,
+        )
+
+        x = Tensor(xp.array(x_data), requires_grad=True)
+        weight = Tensor(xp.array(weight_data), requires_grad=True)
+        bias = Tensor(xp.array(bias_data), requires_grad=True)
+        composed = x @ weight + bias
+        composed.backward(upstream)
+
+        x_fast = Tensor(xp.array(x_data), requires_grad=True)
+        weight_fast = Tensor(xp.array(weight_data), requires_grad=True)
+        bias_fast = Tensor(xp.array(bias_data), requires_grad=True)
+        fused = functional.linear(x_fast, weight_fast, bias_fast)
+        fused.backward(upstream)
+
+        assert allclose(fused.data, composed.data, atol=1e-6)
+        assert allclose(x_fast.grad.data, x.grad.data, atol=1e-6)
+        assert allclose(weight_fast.grad.data, weight.grad.data, atol=1e-6)
+        assert allclose(bias_fast.grad.data, bias.grad.data, atol=1e-6)
+
+    def test_linear_backward_unbroadcasts_downstream_gradient(self):
+        x_data = xp.array([[0.2, -0.4, 0.5], [1.0, -0.3, 0.7]], dtype=xp.float32)
+        weight_data = xp.array([[0.3], [-0.4], [0.8]], dtype=xp.float32)
+        bias_data = xp.array([0.1], dtype=xp.float32)
+        target = Tensor(xp.array([0.25, -0.5], dtype=xp.float32), requires_grad=False)
+
+        x = Tensor(xp.array(x_data), requires_grad=True)
+        weight = Tensor(xp.array(weight_data), requires_grad=True)
+        bias = Tensor(xp.array(bias_data), requires_grad=True)
+        composed_loss = ((x @ weight + bias) - target).mean()
+        composed_loss.backward()
+
+        x_fast = Tensor(xp.array(x_data), requires_grad=True)
+        weight_fast = Tensor(xp.array(weight_data), requires_grad=True)
+        bias_fast = Tensor(xp.array(bias_data), requires_grad=True)
+        fused_loss = (functional.linear(x_fast, weight_fast, bias_fast) - target).mean()
+        fused_loss.backward()
+
+        assert allclose(fused_loss.data, composed_loss.data, atol=1e-6)
+        assert allclose(x_fast.grad.data, x.grad.data, atol=1e-6)
+        assert allclose(weight_fast.grad.data, weight.grad.data, atol=1e-6)
+        assert allclose(bias_fast.grad.data, bias.grad.data, atol=1e-6)
+
+    @skipUnless(IS_CUPY, "CuPy bf16 ReLU fast path requires the CuPy backend")
+    def test_cupy_relu_backward_bfloat16_matches_mask(self):
+        dtype = resolve_dtype("bfloat16")
+        x_data = xp.array([[-2.0, 0.0, 3.0], [4.0, -5.0, 6.0]], dtype=dtype)
+        grad_data = xp.array([[0.5, 1.5, -2.0], [3.0, -4.0, 2.5]], dtype=dtype)
+
+        x = Tensor(x_data.copy(), requires_grad=True)
+        out = functional.relu(x)
+        out.backward(grad_data)
+
+        expected = xp.where(x_data > 0, grad_data, xp.array(0, dtype=dtype))
+        assert x.grad.data.dtype == dtype
+        assert allclose(x.grad.data, expected, atol=0, rtol=0)
+
+    @skipUnless(IS_CUPY, "CuPy bf16 linear_relu fast path requires the CuPy backend")
+    def test_cupy_linear_relu_bfloat16_matches_composed_relu(self):
+        dtype = resolve_dtype("bfloat16")
+        x_data = xp.array(
+            [
+                [[0.25, -0.5, 0.75], [1.0, -0.25, 0.5]],
+                [[-0.75, 0.5, 0.125], [0.25, 0.75, -0.375]],
+            ],
+            dtype=dtype,
+        )
+        weight_data = xp.array(
+            [
+                [0.25, -0.5, 0.125, 0.75],
+                [-0.375, 0.625, 0.25, -0.125],
+                [0.875, 0.25, -0.5, 0.375],
+            ],
+            dtype=dtype,
+        )
+        bias_data = xp.array([0.125, -0.25, 0.0625, -0.125], dtype=dtype)
+        upstream = xp.array(
+            [
+                [[0.5, -0.125, 0.25, 0.75], [0.25, 0.375, -0.5, 0.125]],
+                [[-0.25, 0.75, 0.125, -0.5], [0.875, -0.375, 0.5, 0.25]],
+            ],
+            dtype=dtype,
+        )
+
+        x = Tensor(xp.array(x_data), requires_grad=True)
+        weight = Tensor(xp.array(weight_data), requires_grad=True)
+        bias = Tensor(xp.array(bias_data), requires_grad=True)
+        composed = functional.relu(x @ weight + bias)
+        composed.backward(upstream)
+
+        x_fast = Tensor(xp.array(x_data), requires_grad=True)
+        weight_fast = Tensor(xp.array(weight_data), requires_grad=True)
+        bias_fast = Tensor(xp.array(bias_data), requires_grad=True)
+        fused = functional.linear_relu(x_fast, weight_fast, bias_fast)
+        fused.backward(upstream)
+
+        assert fused.data.dtype == dtype
+        assert x_fast.grad.data.dtype == dtype
+        assert weight_fast.grad.data.dtype == dtype
+        assert bias_fast.grad.data.dtype == dtype
+        assert allclose(fused.data, composed.data, atol=0, rtol=0)
+        assert allclose(x_fast.grad.data, x.grad.data, atol=0, rtol=0)
+        assert allclose(weight_fast.grad.data, weight.grad.data, atol=0, rtol=0)
+        assert allclose(bias_fast.grad.data, bias.grad.data, atol=0, rtol=0)
+
+    @skipUnless(IS_CUPY, "CuPy bf16 linear fast path requires the CuPy backend")
+    def test_cupy_linear_bfloat16_matches_composed_matmul_add(self):
+        dtype = resolve_dtype("bfloat16")
+        x_data = xp.array(
+            [
+                [[0.25, -0.5, 0.75], [1.0, -0.25, 0.5]],
+                [[-0.75, 0.5, 0.125], [0.25, 0.75, -0.375]],
+            ],
+            dtype=dtype,
+        )
+        weight_data = xp.array(
+            [
+                [0.25, -0.5, 0.125, 0.75],
+                [-0.375, 0.625, 0.25, -0.125],
+                [0.875, 0.25, -0.5, 0.375],
+            ],
+            dtype=dtype,
+        )
+        bias_data = xp.array([0.125, -0.25, 0.0625, -0.125], dtype=dtype)
+        upstream = xp.array(
+            [
+                [[0.5, -0.125, 0.25, 0.75], [0.25, 0.375, -0.5, 0.125]],
+                [[-0.25, 0.75, 0.125, -0.5], [0.875, -0.375, 0.5, 0.25]],
+            ],
+            dtype=dtype,
+        )
+
+        x = Tensor(xp.array(x_data), requires_grad=True)
+        weight = Tensor(xp.array(weight_data), requires_grad=True)
+        bias = Tensor(xp.array(bias_data), requires_grad=True)
+        composed = x @ weight + bias
+        composed.backward(upstream)
+
+        x_fast = Tensor(xp.array(x_data), requires_grad=True)
+        weight_fast = Tensor(xp.array(weight_data), requires_grad=True)
+        bias_fast = Tensor(xp.array(bias_data), requires_grad=True)
+        fused = functional.linear(x_fast, weight_fast, bias_fast)
+        fused.backward(upstream)
+
+        assert fused.data.dtype == dtype
+        assert x_fast.grad.data.dtype == dtype
+        assert weight_fast.grad.data.dtype == dtype
+        assert bias_fast.grad.data.dtype == dtype
+        assert allclose(fused.data, composed.data, atol=0, rtol=0)
+        assert allclose(x_fast.grad.data, x.grad.data, atol=0, rtol=0)
+        assert allclose(weight_fast.grad.data, weight.grad.data, atol=0, rtol=0)
+        assert allclose(bias_fast.grad.data, bias.grad.data, atol=0, rtol=0)
+
     def test_softmax_forward(self):
         assert allclose(
             functional.softmax(self.X).data,
@@ -74,6 +283,61 @@ class TestActivationFunctions(TestCase):
 
         assert allclose(self.X.grad.data, X_torch.grad.detach().numpy(), atol=1e-6), (
             "Softmax backward pass did not match PyTorch."
+        )
+
+    def test_causal_softmax_matches_masked_softmax(self):
+        logits_data = xp.array(
+            [
+                [
+                    [1.0, 2.0, -1.0, 0.5],
+                    [0.2, -0.3, 1.2, 0.7],
+                    [1.5, -0.1, 0.4, 2.0],
+                    [-0.2, 0.8, 1.1, -0.5],
+                ],
+                [
+                    [0.0, -1.0, 0.3, 2.1],
+                    [1.3, -0.7, 0.6, 0.9],
+                    [-0.9, 1.4, 0.1, -0.4],
+                    [0.5, 0.2, -1.5, 1.0],
+                ],
+            ],
+            dtype=xp.float32,
+        )
+        upstream = xp.array(
+            [
+                [
+                    [0.4, -0.1, 0.7, 1.0],
+                    [-0.3, 0.5, 0.8, -0.2],
+                    [1.2, -0.4, 0.3, 0.6],
+                    [0.1, 0.9, -0.7, 0.2],
+                ],
+                [
+                    [-0.6, 0.2, 1.1, -0.3],
+                    [0.7, -0.5, 0.4, 0.8],
+                    [-0.2, 0.6, -0.9, 1.0],
+                    [0.3, -0.8, 0.5, 0.4],
+                ],
+            ],
+            dtype=xp.float32,
+        )
+        mask = xp.triu(xp.ones((4, 4), dtype=xp.float32), k=1).reshape(1, 4, 4)
+
+        causal_logits = Tensor(logits_data, requires_grad=True)
+        masked_logits = Tensor(xp.array(logits_data), requires_grad=True)
+
+        causal = functional.causal_softmax(causal_logits)
+        masked = functional.softmax(masked_logits + Tensor(mask * -1e9))
+
+        causal.backward(upstream)
+        masked.backward(upstream)
+
+        assert allclose(causal.data, masked.data, atol=1e-6, rtol=1e-6)
+        assert allclose(causal_logits.grad.data, masked_logits.grad.data, atol=1e-6)
+        assert allclose(causal.data * mask, xp.zeros_like(causal.data), atol=1e-6)
+        assert allclose(
+            causal_logits.grad.data * mask,
+            xp.zeros_like(causal_logits.grad.data),
+            atol=1e-6,
         )
 
     def test_log_softmax_forward(self):
@@ -384,6 +648,101 @@ class TestCrossEntropy(TestCase):
 
         assert logits.grad is not None
         assert logits.grad.shape == logits.shape
+
+    @skipUnless(IS_CUPY, "CuPy fast path requires the CuPy backend")
+    def test_cupy_cross_entropy_fast_path_handles_ignored_targets_and_reductions(self):
+        logits_data = xp.array(
+            [
+                [0.4, -1.1, 2.0, 0.7],
+                [-0.2, 1.3, 0.5, -0.8],
+                [1.5, 0.1, -0.4, 0.3],
+                [0.9, -0.6, 0.2, 1.1],
+            ],
+            dtype=xp.float32,
+        )
+        targets = xp.array([2, functional.IGNORE_INDEX, 0, 3], dtype=xp.int64)
+
+        shifted = logits_data - xp.max(logits_data, axis=1, keepdims=True)
+        exp_shifted = xp.exp(shifted)
+        probs = exp_shifted / xp.sum(exp_shifted, axis=1, keepdims=True)
+        weights = (targets != functional.IGNORE_INDEX).astype(xp.float32)
+        safe_targets = xp.where(weights > 0, targets, 0)
+        row_losses = (
+            -(
+                shifted[xp.arange(targets.shape[0]), safe_targets]
+                - xp.log(xp.sum(exp_shifted, axis=1))
+            )
+            * weights
+        )
+
+        for reduction in ("mean", "sum"):
+            logits = Tensor(xp.array(logits_data), requires_grad=True)
+            loss = functional.cross_entropy(logits, targets, reduction=reduction)
+            loss.backward()
+
+            if reduction == "mean":
+                expected_loss = xp.sum(row_losses) / xp.sum(weights)
+                scale = 1.0 / xp.sum(weights)
+            else:
+                expected_loss = xp.sum(row_losses)
+                scale = 1.0
+            expected_grad = probs.copy()
+            expected_grad[xp.arange(targets.shape[0]), safe_targets] -= 1.0
+            expected_grad *= weights.reshape(-1, 1) * scale
+
+            assert allclose(loss.data, expected_loss, atol=1e-6)
+            assert allclose(logits.grad.data, expected_grad, atol=1e-6)
+            assert allclose(
+                logits.grad.data[targets == functional.IGNORE_INDEX],
+                xp.zeros_like(logits.grad.data[targets == functional.IGNORE_INDEX]),
+                atol=1e-6,
+            )
+
+    @skipUnless(IS_CUPY, "CuPy bf16 fast path requires the CuPy backend")
+    def test_cupy_cross_entropy_fast_path_reads_bfloat16_logits(self):
+        dtype = resolve_dtype("bfloat16")
+        logits_data = xp.array(
+            [
+                [0.4, -1.1, 2.0, 0.7],
+                [-0.2, 1.3, 0.5, -0.8],
+                [1.5, 0.1, -0.4, 0.3],
+            ],
+            dtype=dtype,
+        )
+        targets = xp.array([2, functional.IGNORE_INDEX, 0], dtype=xp.int64)
+
+        logits = Tensor(logits_data.copy(), requires_grad=True)
+        with (
+            patch.object(
+                functional,
+                "_cupy_cross_entropy_forward",
+                side_effect=AssertionError("bf16 CE path should not save probs"),
+            ),
+            patch.object(
+                functional,
+                "_cupy_cross_entropy_backward",
+                side_effect=AssertionError("bf16 CE path should rematerialize probs"),
+            ),
+        ):
+            loss = functional.cross_entropy(logits, targets, reduction="sum")
+            loss.backward()
+
+        reference_logits = Tensor(logits_data.astype(xp.float32), requires_grad=True)
+        reference_loss = functional.cross_entropy(
+            reference_logits,
+            targets,
+            reduction="sum",
+        )
+        reference_loss.backward()
+
+        assert allclose(loss.data, reference_loss.data, atol=1e-6)
+        assert logits.grad.data.dtype == dtype
+        assert allclose(
+            logits.grad.data.astype(xp.float32),
+            reference_logits.grad.data,
+            atol=4e-3,
+            rtol=4e-3,
+        )
 
 
 class TestHingeLoss(TestCase):

@@ -15,7 +15,11 @@ from typing import (
 from autograd.backend import ARRAY_TYPE, LOW_PRECISION_FLOAT_DTYPES, NAME, ArrayLike, xp
 
 from .functional import (
+    causal_softmax,
+    layer_norm_affine,
+    linear,
     relu,
+    scaled_dot_product_attention_cudnn,
     scaled_dot_product_attention_mlx_custom,
     sigmoid,
     softmax,
@@ -618,8 +622,7 @@ class Linear(Module):
             self._parameters["weight"].data.shape,
         )
 
-        # this is just a linear transformation (dot matrix multiplication)
-        return x @ self._parameters["weight"] + self._parameters["bias"]
+        return linear(x, self._parameters["weight"], self._parameters["bias"])
 
 
 class Conv2d(Module):
@@ -1334,26 +1337,53 @@ class LayerNorm(Module):
         # For mixed precision, keep LayerNorm statistics in fp32 for stability.
         input_dtype = x.data.dtype
         low_precision_input = input_dtype in LOW_PRECISION_FLOAT_DTYPES
-        stats_x = x.astype(xp.float32) if low_precision_input else x
+        can_use_cupy_bf16_fused = (
+            NAME == "cupy"
+            and low_precision_input
+            and hasattr(xp, "bfloat16")
+            and input_dtype == xp.bfloat16
+            and self._parameters["gain"].data.dtype == xp.bfloat16
+            and self._parameters["bias"].data.dtype == xp.bfloat16
+        )
+        cupy_fused_input = x if can_use_cupy_bf16_fused else None
+        stats_x = (
+            x
+            if cupy_fused_input is not None or not low_precision_input
+            else x.astype(xp.float32)
+        )
+        fused_input = cupy_fused_input if cupy_fused_input is not None else stats_x
 
-        # Equation 4 in section 3.1 in the paper
-        mean = stats_x.mean(
-            axis=-1, keepdims=True
-        )  # (batch_size, seq_len, 1), across "input_size" dimension
-        var = ((stats_x - mean) ** 2).mean(
-            axis=-1, keepdims=True
-        )  # (batch_size, seq_len, 1), across "input_size" dimension
-        x_norm = (stats_x - mean) / (
-            var + self.epsilon
-        ).sqrt()  # (batch_size, seq_len, input_size)
+        if (
+            NAME == "cupy"
+            and fused_input.data.flags.c_contiguous
+            and self._parameters["gain"].data.flags.c_contiguous
+            and self._parameters["bias"].data.flags.c_contiguous
+        ):
+            output = layer_norm_affine(
+                fused_input,
+                self._parameters["gain"],
+                self._parameters["bias"],
+                epsilon=self.epsilon,
+            )
+        else:
+            # Equation 4 in section 3.1 in the paper
+            mean = stats_x.mean(
+                axis=-1, keepdims=True
+            )  # (batch_size, seq_len, 1), across "input_size" dimension
+            var = ((stats_x - mean) ** 2).mean(
+                axis=-1, keepdims=True
+            )  # (batch_size, seq_len, 1), across "input_size" dimension
+            x_norm = (stats_x - mean) / (
+                var + self.epsilon
+            ).sqrt()  # (batch_size, seq_len, input_size)
 
-        # scale and shift
-        output = x_norm * self._parameters["gain"].expand(
-            x_norm.shape
-        ) + self._parameters["bias"].expand(x_norm.shape)
+            # scale and shift
+            output = x_norm * self._parameters["gain"].expand(
+                x_norm.shape
+            ) + self._parameters["bias"].expand(x_norm.shape)
 
         # For mixed precision, return to the activation dtype so the following dense ops stay low precision.
-        if low_precision_input:
+        if low_precision_input and output.data.dtype != input_dtype:
             output = output.astype(input_dtype)
         return output
 
@@ -1612,35 +1642,45 @@ class ScaledDotProductAttention(Module):
                     pass
         # Dense remains the contract fallback for structural causality and for
         # everything outside the supported explicit causal self-attention slice.
+        if NAME == "cupy" and mask is None and is_causal and self.dropout.p == 0.0:
+            try:
+                return scaled_dot_product_attention_cudnn(query, key, value)
+            except (RuntimeError, ValueError, ModuleNotFoundError):
+                pass
+
+        input_dtype = query.data.dtype
+        low_precision_input = (
+            input_dtype in LOW_PRECISION_FLOAT_DTYPES
+            and key.data.dtype == input_dtype
+            and value.data.dtype == input_dtype
+        )
+        if low_precision_input:
+            query = query.astype(xp.float32)
+            key = key.astype(xp.float32)
 
         attention_scale = Tensor(
             xp.asarray(key.shape[-1] ** -0.5, dtype=key.data.dtype),
             requires_grad=False,
         )
 
-        # scaled dot product
-        # (batch_size, num_heads, sequence_len, sequence_len)
-        att_score = (query @ key.transpose(2, 3)) * attention_scale
+        # Scale Q before the matmul so the scale op touches [B,H,T,D] instead
+        # of the much larger [B,H,T,T] score tensor.
+        att_score = (query * attention_scale) @ key.transpose(2, 3)
 
-        # Non-MLX Causal Mask
         if mask is None and is_causal:
-            seq_q = int(query.shape[-2])
-            seq_k = int(key.shape[-2])
-            mask = Tensor(
-                xp.triu(
-                    xp.ones((seq_q, seq_k), dtype=att_score.data.dtype), k=1
-                ).reshape(1, 1, seq_q, seq_k),
-                requires_grad=False,
-            )
-
-        # mask (optional)
-        if mask is not None:
-            if not isinstance(mask, Tensor):
-                mask = Tensor(mask, requires_grad=False)
-            # broadcast across heads
-            att_score = att_score + (mask * -1e9)
-        att_score = self.dropout(softmax(att_score))
-        return att_score @ value
+            att_score = self.dropout(causal_softmax(att_score))
+        else:
+            # mask (optional)
+            if mask is not None:
+                if not isinstance(mask, Tensor):
+                    mask = Tensor(mask, requires_grad=False)
+                # broadcast across heads
+                att_score = att_score + (mask * -1e9)
+            att_score = self.dropout(softmax(att_score))
+        output = att_score @ value
+        if low_precision_input and output.data.dtype != input_dtype:
+            output = output.astype(input_dtype)
+        return output
 
 
 class MultiHeadAttention(Module):

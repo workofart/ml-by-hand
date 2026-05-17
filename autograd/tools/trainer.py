@@ -17,7 +17,7 @@ from typing import (
 
 from tqdm import tqdm
 
-from autograd import nn, optim
+from autograd import functional, nn, optim
 from autograd.backend import (
     Array,
     check_bf16_capability,
@@ -1207,6 +1207,14 @@ class LLMTrainer(AbstractTrainer):
     ) -> Tensor:
         if label_smoothing is None:
             label_smoothing = self.config.label_smoothing
+        fused_model_and_loss = getattr(self.model, "fused_model_and_loss", None)
+        if self.loss_fn is functional.cross_entropy and callable(fused_model_and_loss):
+            return cast(Callable[..., Tensor], fused_model_and_loss)(
+                batch_data.input_ids,
+                batch_data.labels,
+                label_smoothing=label_smoothing,
+                reduction="sum",
+            )
         logits = self.forward_fn.train(self.model, batch_data)
         return self.loss_fn(
             logits,

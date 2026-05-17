@@ -2,13 +2,92 @@ import logging
 import math
 from abc import abstractmethod
 from collections import defaultdict
+from functools import lru_cache
 from typing import Any, Dict, Optional
 
-from autograd.backend import LOW_PRECISION_FLOAT_DTYPES, Array, materialize, xp
+from autograd.backend import IS_CUPY, LOW_PRECISION_FLOAT_DTYPES, Array, materialize, xp
 from autograd.distributed import allreduce_grads, broadcast_parameters
 from autograd.tensor import Tensor
 
 logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=1)
+def _cupy_adamw_bf16_kernels() -> tuple[Any, Any]:
+    module = xp.RawModule(
+        code=r"""
+        #include <cuda_bf16.h>
+
+        extern "C" __global__ void adamw_bf16_grad_bf16(
+            __nv_bfloat16* param,
+            const __nv_bfloat16* grad,
+            float* m,
+            float* v,
+            const long long size,
+            const float lr,
+            const float beta1,
+            const float beta2,
+            const float one_minus_beta1,
+            const float one_minus_beta2,
+            const float bias_correction1,
+            const float bias_correction2,
+            const float epsilon,
+            const float weight_decay
+        ) {
+            long long idx = blockIdx.x * blockDim.x + threadIdx.x;
+            long long stride = blockDim.x * gridDim.x;
+            for (; idx < size; idx += stride) {
+                float g = __bfloat162float(grad[idx]);
+                float new_m = beta1 * m[idx] + one_minus_beta1 * g;
+                float new_v = beta2 * v[idx] + one_minus_beta2 * g * g;
+                m[idx] = new_m;
+                v[idx] = new_v;
+                float p = __bfloat162float(param[idx]);
+                p = p - lr * weight_decay * p;
+                p = p - lr * (new_m / bias_correction1) /
+                    (sqrtf(new_v / bias_correction2) + epsilon);
+                param[idx] = __float2bfloat16(p);
+            }
+        }
+
+        extern "C" __global__ void adamw_bf16_grad_float(
+            __nv_bfloat16* param,
+            const float* grad,
+            float* m,
+            float* v,
+            const long long size,
+            const float lr,
+            const float beta1,
+            const float beta2,
+            const float one_minus_beta1,
+            const float one_minus_beta2,
+            const float bias_correction1,
+            const float bias_correction2,
+            const float epsilon,
+            const float weight_decay
+        ) {
+            long long idx = blockIdx.x * blockDim.x + threadIdx.x;
+            long long stride = blockDim.x * gridDim.x;
+            for (; idx < size; idx += stride) {
+                float g = grad[idx];
+                float new_m = beta1 * m[idx] + one_minus_beta1 * g;
+                float new_v = beta2 * v[idx] + one_minus_beta2 * g * g;
+                m[idx] = new_m;
+                v[idx] = new_v;
+                float p = __bfloat162float(param[idx]);
+                p = p - lr * weight_decay * p;
+                p = p - lr * (new_m / bias_correction1) /
+                    (sqrtf(new_v / bias_correction2) + epsilon);
+                param[idx] = __float2bfloat16(p);
+            }
+        }
+        """,
+        options=("--std=c++11",),
+    )
+    return (
+        module.get_function("adamw_bf16_grad_bf16"),
+        module.get_function("adamw_bf16_grad_float"),
+    )
 
 
 class LRScheduler:
@@ -460,6 +539,69 @@ class Adam(Optimizer):
             if param.data.dtype in LOW_PRECISION_FLOAT_DTYPES:
                 self._states["master"][name] = param.data.astype(xp.float32)
 
+    def _cupy_bf16_step_param(
+        self,
+        name: str,
+        param: Tensor,
+        grad: Array,
+        *,
+        beta1: float,
+        beta2: float,
+        epsilon: float,
+        weight_decay: float,
+    ) -> bool:
+        if (
+            not IS_CUPY
+            or not hasattr(xp, "bfloat16")
+            or param.data.dtype != xp.bfloat16
+            or grad.dtype not in (xp.bfloat16, xp.float32)
+            or not param.data.flags.c_contiguous
+            or not grad.flags.c_contiguous
+        ):
+            return False
+
+        m_old = self._states["m"][name]
+        v_old = self._states["v"][name]
+        if not isinstance(m_old, xp.ndarray):
+            m_old = xp.zeros(param.data.shape, dtype=xp.float32)
+        if not isinstance(v_old, xp.ndarray):
+            v_old = xp.zeros(param.data.shape, dtype=xp.float32)
+        if (
+            m_old.dtype != xp.float32
+            or v_old.dtype != xp.float32
+            or m_old.shape != param.data.shape
+            or v_old.shape != param.data.shape
+        ):
+            return False
+
+        self._states["m"][name] = m_old
+        self._states["v"][name] = v_old
+        grad_bf16_kernel, grad_float_kernel = _cupy_adamw_bf16_kernels()
+        kernel = grad_bf16_kernel if grad.dtype == xp.bfloat16 else grad_float_kernel
+        threads = 256
+        blocks = min((int(param.data.size) + threads - 1) // threads, 1024)
+        kernel(
+            (blocks,),
+            (threads,),
+            (
+                param.data,
+                grad,
+                m_old,
+                v_old,
+                xp.int64(param.data.size),
+                xp.float32(self.lr),
+                xp.float32(beta1),
+                xp.float32(beta2),
+                xp.float32(1.0 - beta1),
+                xp.float32(1.0 - beta2),
+                xp.float32(1.0 - beta1**self.timestep),
+                xp.float32(1.0 - beta2**self.timestep),
+                xp.float32(epsilon),
+                xp.float32(weight_decay),
+            ),
+        )
+        return True
+
     def step(self) -> None:
         """
         Perform a single optimization step using the Adam algorithm.
@@ -493,6 +635,17 @@ class Adam(Optimizer):
 
             # For mixed precision, keep Adam statistics in fp32 for stability.
             param_dtype = param.data.dtype
+            if self._cupy_bf16_step_param(
+                name,
+                param,
+                grad,
+                beta1=beta1,
+                beta2=beta2,
+                epsilon=epsilon,
+                weight_decay=weight_decay,
+            ):
+                continue
+
             if grad.dtype in LOW_PRECISION_FLOAT_DTYPES:
                 grad = grad.astype(xp.float32)
             new_m = beta1 * m_old + (1 - beta1) * grad  # update first order momentum

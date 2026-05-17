@@ -1,4 +1,5 @@
 from copy import deepcopy
+from unittest.mock import patch
 
 import examples.gpt_2 as gpt2_module
 from autograd import functional, nn
@@ -130,6 +131,87 @@ def test_gpt2_activation_checkpointing_matches_baseline_without_dropout():
     )
 
     _compare_training_runs(baseline, checkpointed)
+
+
+def test_gpt2_bfloat16_forward_avoids_bfloat16_batched_attention_matmul():
+    dtype = getattr(xp, "bfloat16", None)
+    if dtype is None:
+        return
+
+    xp.random.seed(23)
+    model = GPT2(
+        vocab_size=32,
+        hidden_size=16,
+        num_attention_heads=4,
+        max_seq_len=8,
+        dropout_prob=0.0,
+        num_decoder_layers=1,
+        parameter_dtype="bfloat16",
+    )
+    input_ids, _ = _build_tokens(batch_size=2, seq_len=8, vocab_size=32)
+    original_matmul = xp.matmul
+
+    def fail_like_cupy_bfloat16_attention(lhs, rhs):
+        if lhs.ndim > 2 and rhs.ndim > 2 and lhs.dtype == dtype and rhs.dtype == dtype:
+            raise TypeError("data type 'E' not understood")
+        return original_matmul(lhs, rhs)
+
+    with patch(
+        "autograd.tensor.xp.matmul", side_effect=fail_like_cupy_bfloat16_attention
+    ):
+        logits = model(Tensor(input_ids, requires_grad=False))
+
+    assert logits.shape == (2, 8, 32)
+
+
+def test_gpt2_fused_model_and_loss_matches_logits_cross_entropy():
+    xp.random.seed(43)
+    input_ids, labels = _build_tokens(batch_size=2, seq_len=8, vocab_size=32)
+    xp.random.seed(47)
+    baseline_model = GPT2(
+        vocab_size=32,
+        hidden_size=16,
+        num_attention_heads=4,
+        max_seq_len=8,
+        dropout_prob=0.0,
+        num_decoder_layers=2,
+    )
+    state_dict = deepcopy(baseline_model.state_dict())
+
+    logits_model = GPT2(
+        vocab_size=32,
+        hidden_size=16,
+        num_attention_heads=4,
+        max_seq_len=8,
+        dropout_prob=0.0,
+        num_decoder_layers=2,
+    )
+    logits_model.load_state_dict(deepcopy(state_dict))
+    logits_model.train()
+    logits = logits_model(Tensor(input_ids, requires_grad=False))
+    logits_loss = functional.cross_entropy(logits, labels, reduction="sum")
+    logits_loss.backward()
+
+    fused_model = GPT2(
+        vocab_size=32,
+        hidden_size=16,
+        num_attention_heads=4,
+        max_seq_len=8,
+        dropout_prob=0.0,
+        num_decoder_layers=2,
+    )
+    fused_model.load_state_dict(deepcopy(state_dict))
+    fused_model.train()
+    fused_loss = fused_model.fused_model_and_loss(input_ids, labels, reduction="sum")
+    fused_loss.backward()
+
+    assert array_equal(logits_loss.data, fused_loss.data)
+    assert logits_model.parameters.keys() == fused_model.parameters.keys()
+    for name in logits_model.parameters:
+        assert array_equal(
+            logits_model.parameters[name].grad.data,
+            fused_model.parameters[name].grad.data,
+        ), f"gradient mismatch for {name}"
 
 
 def test_gpt2_activation_checkpointing_matches_baseline_with_dropout():

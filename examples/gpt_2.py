@@ -140,6 +140,22 @@ class GPT2(nn.Module):
         )  # shape (batch_size, seq_len, vocab_size)
         return output
 
+    def fused_model_and_loss(
+        self,
+        input_ids: Array,
+        labels: Array,
+        *,
+        label_smoothing: float = 0.0,
+        reduction: str = "sum",
+    ) -> Tensor:
+        logits = self(input_ids)
+        return functional.cross_entropy_private_logits(
+            logits,
+            labels,
+            label_smoothing=label_smoothing,
+            reduction=reduction,
+        )
+
 
 class DecoderSublayer(nn.Module):
     """
