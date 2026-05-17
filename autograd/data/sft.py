@@ -328,10 +328,11 @@ def prepare_sft_token_sequences(
         flat_loss_mask_ids.extend(loss_mask)
         example_offsets.append(len(flat_token_ids))
 
-    if bpe._should_parallelize(
-        work_items=len(chat_examples),
-        min_items_per_worker=64,
-    ):
+    # On small workloads, Pool startup/pickling dominates the actual work,
+    # especially on macOS where multiprocessing uses `spawn`. Only fan out
+    # when each worker has enough items to amortize that fixed overhead.
+    min_items_per_worker = 64
+    if bpe.n_workers > 1 and len(chat_examples) >= bpe.n_workers * min_items_per_worker:
         with Pool(
             bpe.n_workers,
             initializer=_init_sft_tokenizer_worker,

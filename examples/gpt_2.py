@@ -4,20 +4,23 @@ import logging
 import sys
 from pathlib import Path
 
-import numpy as np
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from autograd import functional, nn, optim
-from autograd.backend import LOW_PRECISION_FLOAT_DTYPES, Array, xp
+from autograd.backend import LOW_PRECISION_FLOAT_DTYPES, Array, resolve_dtype, xp
 from autograd.data.collator import CausalLMWindowCollator
 from autograd.data.data_loader import DataLoader
 from autograd.data.dataset import TokenWindowMapDataset
-from autograd.data.sampler import RandomSampler, SequentialSampler
+from autograd.data.sampler import (
+    DistributedSamplerAdapter,
+    RandomSampler,
+    SequentialSampler,
+)
 from autograd.data.types import CausalLMBatch
 from autograd.data.utils import train_test_split
+from autograd.distributed import is_distributed, rank, world_size
 from autograd.tensor import Tensor, checkpoint
 from autograd.text import utils as text_utils
 from autograd.text.tokenizer import BytePairEncoder
@@ -62,7 +65,7 @@ class GPT2(nn.Module):
     ) -> None:
         super().__init__(**kwargs)
         if isinstance(parameter_dtype, str):
-            parameter_dtype = getattr(xp, parameter_dtype)
+            parameter_dtype = resolve_dtype(parameter_dtype)
         self.hidden_size = hidden_size
         self.max_seq_len = max_seq_len
         self.activation_checkpointing = activation_checkpointing
@@ -218,7 +221,7 @@ if __name__ == "__main__":
         max_eval_steps=50,
         checkpoint_freq=4,
         global_batch_size=train_global_batch_size,
-        micro_batch_size=train_global_batch_size,
+        micro_batch_size=train_global_batch_size // 4,
         max_grad_norm=1.0,
         model_kwargs={
             "num_attention_heads": 6,  # GPT-2 small uses 12
@@ -302,46 +305,61 @@ if __name__ == "__main__":
         ),
     )
 
+    GPT2_TOKENIZER_VOCAB_SIZE = 50_257
+    GPT2_PADDED_VOCAB_SIZE = 50_304
+    GPT2_CUSTOM_BPE_NUM_MERGES = (
+        GPT2_TOKENIZER_VOCAB_SIZE - 256 - len(BytePairEncoder.SPECIAL_TOKENS)
+    )
     OPENWEBTEXT_CONFIG = TransformerTrainingConfig(
-        training_run_name="openwebtext",
+        training_run_name="openwebtext_gpt2_124m_baseline",
         dataset_name="openwebtext",
-        max_steps=25000,
-        max_eval_steps=20,
-        checkpoint_freq=1000,
-        report_every_steps=50,
-        global_batch_size=76,
-        micro_batch_size=19,
+        max_steps=5000,
+        max_eval_steps=200,
+        checkpoint_freq=200,
+        report_every_steps=100,
+        global_batch_size=480,
+        micro_batch_size=120,
         max_grad_norm=1.0,
         model_kwargs={
-            "num_attention_heads": 9,
-            "hidden_size": 576,
-            "dropout_prob": 0.1,
+            "num_attention_heads": 12,
+            "hidden_size": 768,
+            "vocab_size": GPT2_PADDED_VOCAB_SIZE,
+            # Match nanoGPT's OpenWebText GPT-2 reproduction: pretraining uses
+            # no dropout, and the loss config below uses plain next-token CE.
+            "dropout_prob": 0.0,
             "max_seq_len": 1024,
-            "num_decoder_layers": 8,
+            "num_decoder_layers": 12,
             "activation_checkpointing": False,
             "parameter_dtype": "bfloat16",
         },
         optimizer_kwargs={
-            "lr": 1e-3,
-            "beta2": 0.99,
+            "lr": 6e-4,
+            "beta2": 0.95,
             "weight_decay": 0.1,
             "lr_scheduler_kwargs": {
                 "lr_scheduler_cls": optim.CosineScheduler,
-                "warmup_steps": 3750,
-                "lr_decay_iters": 20000,
+                "warmup_steps": 750,
+                "lr_decay_iters": 5000,
             },
         },
-        resume_epoch=7000,
+        resume_epoch=None,
         teacher_forcing=False,
-        label_smoothing=0.1,
+        label_smoothing=0.0,
         eval_start_string="The",
         custom_bpe=CustomBpeConfig(
-            num_merges=32768,
-            encoded_data_path="training_data/bpe_32768_openwebtext_encoded_data.npz",
-            vocab_path="training_data/openwebtext_vocab_32768.pkl",
+            # Matches GPT-2's 50,257-token cardinality with this repo's custom
+            # BPE. Exact GPT-2 tokenizer parity requires GPT-2's merge ranks.
+            num_merges=GPT2_CUSTOM_BPE_NUM_MERGES,
+            encoded_data_path=(
+                f"training_data/bpe_{GPT2_CUSTOM_BPE_NUM_MERGES}_"
+                "openwebtext_encoded_data.npz"
+            ),
+            vocab_path=(
+                f"training_data/openwebtext_vocab_{GPT2_CUSTOM_BPE_NUM_MERGES}.pkl"
+            ),
             overwrite_encoded_data=False,
             overwrite_vocabulary_file=False,
-            start_token="<SOS>",
+            start_token="",
             split_token="<|endoftext|>",
             parquet_shards_per_batch=32,
         ),
@@ -360,10 +378,10 @@ if __name__ == "__main__":
             n_workers=CONFIG.custom_bpe.n_workers,
             min_word_freq=5,  # this is about 99.7% coverage
         )
-        encoded_npy_path = Path(bpe.mmap_path)
+        encoded_path = Path(bpe.mmap_path)
         vocab_path = Path(CONFIG.custom_bpe.vocab_path)
         use_cached_encoded_data = (
-            encoded_npy_path.exists()
+            encoded_path.exists()
             and vocab_path.exists()
             and not CONFIG.custom_bpe.overwrite_encoded_data
             and not CONFIG.custom_bpe.overwrite_vocabulary_file
@@ -371,9 +389,9 @@ if __name__ == "__main__":
         if use_cached_encoded_data:
             logger.info(
                 "Found existing encoded data at '%s', loading it without fetching raw data.",
-                encoded_npy_path,
+                encoded_path,
             )
-            encoded_data = np.load(str(encoded_npy_path), mmap_mode="r")
+            encoded_data = BytePairEncoder.load_encoded(str(encoded_path))
             logger.info(f"Vocabulary size: {bpe.n_vocab}")
             logger.info(f"Encoded data length: {len(encoded_data)}")
         else:
@@ -414,7 +432,21 @@ if __name__ == "__main__":
     train_data, test_data = train_test_split(encoded_data, test_size=0.1, shuffle=False)
     del encoded_data
 
-    CONFIG.model_kwargs["vocab_size"] = bpe.n_vocab
+    def generate_eval_samples(
+        model,
+        _forward_fn,
+        _val_data_loader,
+        config: TransformerTrainingConfig,
+    ) -> None:
+        generate_text(
+            model=model,
+            prediction_func=GPT2ForwardFn(),
+            bpe=bpe,
+            start_tokens=config.eval_start_string,
+            max_length=min(256, int(model.max_seq_len)),
+            temperature=0.8,
+            top_k=config.eval_top_k,
+        )
 
     trainer = LLMTrainer(
         model_cls=GPT2,
@@ -422,6 +454,7 @@ if __name__ == "__main__":
         loss_fn=functional.cross_entropy,
         config=CONFIG,
         forward_fn=GPT2ForwardFn(),
+        eval_callbacks=[generate_eval_samples],
     )
 
     train_dataset = TokenWindowMapDataset(
@@ -436,21 +469,31 @@ if __name__ == "__main__":
         # so a length-T model context needs a raw window of length T + 1.
         window_len=trainer.model.max_seq_len + 1,
     )
+    train_sampler = RandomSampler(
+        train_dataset,
+        replacement=True,
+        num_samples=len(train_dataset),
+    )
+    test_sampler = SequentialSampler(test_dataset)
+    if is_distributed():
+        train_sampler = DistributedSamplerAdapter(
+            train_sampler, rank=rank(), world_size=world_size()
+        )
+        test_sampler = DistributedSamplerAdapter(
+            test_sampler, rank=rank(), world_size=world_size()
+        )
+
     train_data_loader = DataLoader(
         dataset=train_dataset,
         batch_size=CONFIG.micro_batch_size,
         collator=CausalLMWindowCollator(),
-        sampler=RandomSampler(
-            train_dataset,
-            replacement=True,
-            num_samples=len(train_dataset),
-        ),
+        sampler=train_sampler,
     )
     test_data_loader = DataLoader(
         dataset=test_dataset,
         batch_size=max(1, CONFIG.micro_batch_size // 2),
         collator=CausalLMWindowCollator(),
-        sampler=SequentialSampler(test_dataset),
+        sampler=test_sampler,
     )
 
     trainer.fit(train_data_loader, test_data_loader)

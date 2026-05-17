@@ -1228,20 +1228,32 @@ class LLMTrainer(AbstractTrainer):
             EvalResult: The average validation loss and derived metrics.
         """
         state = TrainingState()
-        for batch_data in tqdm(iter(val_data_loader), desc="Evaluation", leave=False):
-            if (
-                self.config.max_eval_steps is not None
-                and state.eval_loss_batches >= self.config.max_eval_steps
+        # In DDP, eval_callbacks (e.g. autoregressive text generation) only
+        # run on rank 0 and can take much longer than the eval loop itself.
+        # Rank 0 skips its share of the eval batches so the callback overlaps
+        # with the other ranks' eval work, instead of serializing them at the
+        # all_reduce barrier in `report()`. Rank 0 then contributes
+        # (sum=0, weight=0) to the metrics all_reduce, which is mathematically
+        # the rank-N>0 aggregate — no bias, just fewer total eval samples.
+        skip_eval_loop = is_distributed() and rank() == 0 and bool(self.eval_callbacks)
+
+        if not skip_eval_loop:
+            for batch_data in tqdm(
+                iter(val_data_loader), desc="Evaluation", leave=False
             ):
-                break
-            # Report hard-label CE/NLL for validation; smoothing is a training regularizer.
-            loss = self._forward_and_loss(batch_data, label_smoothing=0.0)
-            state.record_eval_loss(
-                loss,
-                total_weight=self._loss_total_weight(batch_data),
-            )
-        if state.eval_loss_batches == 0:
-            raise ValueError("val_data_loader yielded no batches.")
+                if (
+                    self.config.max_eval_steps is not None
+                    and state.eval_loss_batches >= self.config.max_eval_steps
+                ):
+                    break
+                # Hard-label CE/NLL for validation; smoothing is a training regularizer.
+                loss = self._forward_and_loss(batch_data, label_smoothing=0.0)
+                state.record_eval_loss(
+                    loss,
+                    total_weight=self._loss_total_weight(batch_data),
+                )
+            if state.eval_loss_batches == 0:
+                raise ValueError("val_data_loader yielded no batches.")
 
         if rank() == 0:
             for callback in self.eval_callbacks:

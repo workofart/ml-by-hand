@@ -168,6 +168,7 @@ class DistributedSamplerAdapter(Sampler):
         self._seed = int(seed)
         self._epoch = 0
         self._with_replacement = bool(getattr(sampler, "replacement", False))
+        self._is_sequential = isinstance(sampler, SequentialSampler)
 
         global_samples = len(sampler)
         if self._with_replacement:
@@ -176,9 +177,6 @@ class DistributedSamplerAdapter(Sampler):
             self._per_rank_samples = (global_samples + world_size - 1) // world_size
 
         self._indices: list[int] = []
-        self._refresh_indices()
-
-    def _refresh_indices(self) -> None:
         if self._with_replacement:
             dataset = getattr(self._sampler, "dataset", None)
             if dataset is None:
@@ -187,15 +185,19 @@ class DistributedSamplerAdapter(Sampler):
                     "for with-replacement sampling so it can sample from "
                     "the full index range."
                 )
-            n = len(dataset)
-            # Mix (seed, epoch, rank) into a single 64-bit seed. Naive
-            # tuple hashing in some RNGs only uses the first element,
-            # which would correlate streams across ranks.
-            h = 0
-            for s in (self._seed, self._epoch, self._rank):
-                h = (h * 1_000_003 + int(s)) & 0xFFFF_FFFF_FFFF_FFFF
-            rng = np.random.default_rng(h)
-            self._indices = rng.integers(0, n, size=self._per_rank_samples).tolist()
+            self._replacement_population = len(dataset)
+        else:
+            self._refresh_indices()
+
+    def _refresh_indices(self) -> None:
+        if self._with_replacement:
+            return
+
+        # SequentialSampler yields range(n) deterministically. Materializing
+        # `list(iter(sampler))` for a billion-element eval set is ~25 GB of
+        # Python ints and ~40 s of CPU, stalling DDP at every eval start.
+        # The per-rank strided indices are derivable from range objects.
+        if self._is_sequential:
             return
 
         # Without-replacement: materialize global order, pad to multiple
@@ -209,6 +211,23 @@ class DistributedSamplerAdapter(Sampler):
             full = full[:target]
         self._indices = full[self._rank :: self._world_size]
 
+    def _iter_sequential_strided(self) -> Iterator[int]:
+        """Lazy per-rank strided indices for a SequentialSampler.
+
+        Virtual padded global order is ``[0..n-1] + [0..deficit-1]`` where
+        ``deficit = target - n`` (at most ``world_size - 1``). The rank's
+        view is positions ``[rank, target)`` stride ``world_size``; the
+        base part stays inside ``[0, n)`` and the optional wrap part picks
+        the few padded indices that fall on this rank.
+        """
+        n = len(self._sampler)
+        target = self._per_rank_samples * self._world_size
+        yield from range(self._rank, min(n, target), self._world_size)
+        if target > n:
+            deficit = target - n
+            wrap_start = (self._rank - n) % self._world_size
+            yield from range(wrap_start, deficit, self._world_size)
+
     def on_epoch_start(self) -> None:
         self._epoch += 1
         # Forward to the wrapped sampler so its internal RNG advances
@@ -216,11 +235,33 @@ class DistributedSamplerAdapter(Sampler):
         self._sampler.on_epoch_start()
         self._refresh_indices()
 
+    def _iter_with_replacement(self) -> Iterator[int]:
+        # Mix (seed, epoch, rank) into a single 64-bit seed. Naive
+        # tuple hashing in some RNGs only uses the first element,
+        # which would correlate streams across ranks.
+        h = 0
+        for s in (self._seed, self._epoch, self._rank):
+            h = (h * 1_000_003 + int(s)) & 0xFFFF_FFFF_FFFF_FFFF
+        rng = np.random.default_rng(h)
+
+        remaining = self._per_rank_samples
+        chunk_size = min(self._replacement_population, 1_000_000)
+        while remaining > 0:
+            batch = min(chunk_size, remaining)
+            yield from rng.integers(
+                0, self._replacement_population, size=batch
+            ).tolist()
+            remaining -= batch
+
     def __iter__(self) -> Iterator[int]:
+        if self._with_replacement:
+            return self._iter_with_replacement()
+        if self._is_sequential:
+            return self._iter_sequential_strided()
         return iter(self._indices)
 
     def __len__(self) -> int:
-        return len(self._indices)
+        return self._per_rank_samples
 
 
 class TokenLengthGroupedRandomSampler(Sampler):
