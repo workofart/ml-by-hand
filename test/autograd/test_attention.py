@@ -175,6 +175,38 @@ class TestScaledDotProductAttention(TestCase):
 
         self.assertEqual(output.data.dtype, dtype)
 
+    def test_dense_attention_avoids_bfloat16_batched_score_matmul(self):
+        dtype = getattr(xp, "bfloat16", None)
+        if dtype is None:
+            self.skipTest("backend has no bfloat16 dtype")
+
+        query = Tensor(xp.random.normal(shape=(1, 2, 3, 4)).astype(dtype))
+        key = Tensor(xp.random.normal(shape=(1, 2, 3, 4)).astype(dtype))
+        value = Tensor(xp.random.normal(shape=(1, 2, 3, 4)).astype(dtype))
+        attention = self._make_attention()
+        original_matmul = xp.matmul
+
+        def fail_like_cupy_bfloat16_attention(lhs, rhs):
+            if (
+                lhs.ndim > 2
+                and rhs.ndim > 2
+                and lhs.dtype == dtype
+                and rhs.dtype == dtype
+            ):
+                raise TypeError("data type 'E' not understood")
+            return original_matmul(lhs, rhs)
+
+        with (
+            self._implementation_context("dense"),
+            patch(
+                "autograd.tensor.xp.matmul",
+                side_effect=fail_like_cupy_bfloat16_attention,
+            ),
+        ):
+            output = attention(query, key, value, is_causal=True)
+
+        self.assertEqual(output.data.dtype, dtype)
+
     def test_mlx_custom_falls_back_to_dense_for_reverse_causal_mask(self):
         mask = Tensor(
             create_causal_mask(

@@ -3,7 +3,7 @@ from unittest import TestCase
 
 import torch  # for comparison
 
-from autograd.backend import xp
+from autograd.backend import IS_CUPY, resolve_dtype, xp
 from autograd.nn import (
     BatchNorm,
     Conv2d,
@@ -21,6 +21,10 @@ from test.helpers import allclose
 
 xp.random.seed(1337)
 torch.manual_seed(1337)
+
+
+def torch_input(array):
+    return xp.asnumpy(array) if IS_CUPY else array
 
 
 class MockMainModule(Module):
@@ -544,10 +548,12 @@ class TestLayerNorm(TestCase):
         # Copy parameters to PyTorch layer
         with torch.no_grad():
             self.torch_layer_norm.weight.data = torch.tensor(
-                self.layer_norm._parameters["gain"].data, dtype=torch.float32
+                torch_input(self.layer_norm._parameters["gain"].data),
+                dtype=torch.float32,
             )
             self.torch_layer_norm.bias.data = torch.tensor(
-                self.layer_norm._parameters["bias"].data, dtype=torch.float32
+                torch_input(self.layer_norm._parameters["bias"].data),
+                dtype=torch.float32,
             )
 
         # Create test data
@@ -557,7 +563,7 @@ class TestLayerNorm(TestCase):
             shape=(self.batch_size, self.seq_length, self.input_size)
         )
         self.x = Tensor(self.x_data)
-        self.x_torch = torch.tensor(self.x_data, dtype=torch.float32)
+        self.x_torch = torch.tensor(torch_input(self.x_data), dtype=torch.float32)
         self.x_torch.requires_grad = True
 
     def test_initialization(self):
@@ -614,6 +620,57 @@ class TestLayerNorm(TestCase):
             rtol=1e-4,
             atol=1e-4,
         ), "Bias gradients don't match"
+
+    def test_cupy_fused_bfloat16_matches_unfused_formula(self):
+        if not IS_CUPY:
+            self.skipTest("CuPy-only fused LayerNorm regression")
+
+        dtype = resolve_dtype("bfloat16")
+        x_data = xp.random.normal(size=(2, 3, 8)).astype(dtype)
+        gain_data = xp.random.normal(size=(8,)).astype(dtype)
+        bias_data = xp.random.normal(size=(8,)).astype(dtype)
+        upstream = Tensor(
+            xp.random.normal(size=(2, 3, 8)).astype(dtype), requires_grad=False
+        )
+
+        fused = LayerNorm(8, epsilon=self.epsilon)
+        reference = LayerNorm(8, epsilon=self.epsilon)
+        fused._parameters["gain"].data = gain_data.copy()
+        fused._parameters["bias"].data = bias_data.copy()
+        reference._parameters["gain"].data = gain_data.copy()
+        reference._parameters["bias"].data = bias_data.copy()
+
+        x_fused = Tensor(x_data.copy())
+        fused_out = fused(x_fused)
+        fused_out.backward(upstream)
+
+        x_reference = Tensor(x_data.copy())
+        stats_x = x_reference.astype(xp.float32)
+        mean = stats_x.mean(axis=-1, keepdims=True)
+        var = ((stats_x - mean) ** 2).mean(axis=-1, keepdims=True)
+        x_norm = (stats_x - mean) / (var + self.epsilon).sqrt()
+        reference_out = x_norm * reference._parameters["gain"].expand(
+            x_norm.shape
+        ) + reference._parameters["bias"].expand(x_norm.shape)
+        reference_out = reference_out.astype(dtype)
+        reference_out.backward(upstream)
+
+        assert allclose(fused_out.data, reference_out.data, rtol=1e-2, atol=1e-2)
+        assert fused_out.data.dtype == dtype
+        assert x_fused.grad.data.dtype == dtype
+        assert allclose(x_fused.grad.data, x_reference.grad.data, rtol=1e-2, atol=1e-2)
+        assert allclose(
+            fused._parameters["gain"].grad.data,
+            reference._parameters["gain"].grad.data,
+            rtol=1e-2,
+            atol=1e-2,
+        )
+        assert allclose(
+            fused._parameters["bias"].grad.data,
+            reference._parameters["bias"].grad.data,
+            rtol=1e-2,
+            atol=1e-2,
+        )
 
     def test_simple_input(self):
         # Test with a simple input where we can manually verify the results

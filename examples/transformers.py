@@ -514,7 +514,11 @@ class FeedForward(nn.Module):
         Returns:
             Tensor: Output tensor after applying ReLU, dropout, and a second linear transformation.
         """
-        x = functional.relu(self.fc1(x))
+        x = functional.linear_relu(
+            x,
+            self.fc1.parameters["weight"],
+            self.fc1.parameters["bias"],
+        )
         x = self.fc2(self.dropout(x))
         return x
 

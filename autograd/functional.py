@@ -6,6 +6,7 @@ from functools import lru_cache
 from typing import Any, Optional, Tuple, Union
 
 from autograd.backend import (
+    IS_CUPY,
     LOW_PRECISION_FLOAT_DTYPES,
     Array,
     ArrayLike,
@@ -33,6 +34,14 @@ def relu(x: Tensor) -> Tensor:
         >>> y = relu(x) # Expected output: [0, 0, 2]
     """
     return Relu.apply(x)
+
+
+def linear_relu(x: Tensor, weight: Tensor, bias: Tensor) -> Tensor:
+    return LinearRelu.apply(x, weight, bias)
+
+
+def linear(x: Tensor, weight: Tensor, bias: Tensor) -> Tensor:
+    return LinearAffine.apply(x, weight, bias)
 
 
 def sigmoid(x: Tensor) -> Tensor:
@@ -70,6 +79,1361 @@ def softmax(x: Tensor) -> Tensor:
         >>> y = softmax(x) # Expected output: probabilities that sum to 1
     """
     return Softmax.apply(x)
+
+
+def causal_softmax(x: Tensor) -> Tensor:
+    return CausalSoftmax.apply(x)
+
+
+def layer_norm_affine(
+    x: Tensor,
+    gain: Tensor,
+    bias: Tensor,
+    *,
+    epsilon: float,
+) -> Tensor:
+    return LayerNormAffine.apply(x, gain, bias, epsilon=epsilon)
+
+
+def _cupy_row_grid(rows: int) -> Tuple[int, int]:
+    grid_x = min(rows, 1024)
+    return grid_x, (rows + grid_x - 1) // grid_x
+
+
+@lru_cache(maxsize=1)
+def _cupy_relu_kernels() -> Any:
+    module = xp.RawModule(
+        code=r"""
+        #include <cuda_bf16.h>
+
+        extern "C" __global__ void relu_backward_bf16(
+            const __nv_bfloat16* grad,
+            const __nv_bfloat16* x,
+            __nv_bfloat16* out,
+            const long long size
+        ) {
+            long long idx = blockIdx.x * blockDim.x + threadIdx.x;
+            long long stride = blockDim.x * gridDim.x;
+            for (; idx < size; idx += stride) {
+                out[idx] = __bfloat162float(x[idx]) > 0.0f ? grad[idx] : __float2bfloat16(0.0f);
+            }
+        }
+        """,
+        options=("--std=c++11",),
+    )
+    return module.get_function("relu_backward_bf16")
+
+
+def _cupy_relu_backward(grad: Array, x: Array) -> Optional[Array]:
+    if (
+        not IS_CUPY
+        or not hasattr(xp, "bfloat16")
+        or grad.dtype != xp.bfloat16
+        or x.dtype != xp.bfloat16
+        or grad.shape != x.shape
+        or not grad.flags.c_contiguous
+        or not x.flags.c_contiguous
+    ):
+        return None
+
+    out = xp.empty_like(grad)
+    threads = 256
+    blocks = min((int(grad.size) + threads - 1) // threads, 1024)
+    kernel = _cupy_relu_kernels()
+    kernel((blocks,), (threads,), (grad, x, out, int(grad.size)))
+    return out
+
+
+@lru_cache(maxsize=1)
+def _cupy_linear_relu_kernels() -> Tuple[Any, Any, Any]:
+    module = xp.RawModule(
+        code=r"""
+        #include <cuda_bf16.h>
+
+        extern "C" __global__ void linear_bias_bf16(
+            __nv_bfloat16* y,
+            const __nv_bfloat16* bias,
+            const long long size,
+            const int cols
+        ) {
+            long long idx = blockIdx.x * blockDim.x + threadIdx.x;
+            long long stride = blockDim.x * gridDim.x;
+            for (; idx < size; idx += stride) {
+                float value = __bfloat162float(y[idx]) + __bfloat162float(bias[idx % cols]);
+                y[idx] = __float2bfloat16(value);
+            }
+        }
+
+        extern "C" __global__ void linear_relu_bias_bf16(
+            __nv_bfloat16* y,
+            const __nv_bfloat16* bias,
+            const long long size,
+            const int cols
+        ) {
+            long long idx = blockIdx.x * blockDim.x + threadIdx.x;
+            long long stride = blockDim.x * gridDim.x;
+            for (; idx < size; idx += stride) {
+                float value = __bfloat162float(y[idx]) + __bfloat162float(bias[idx % cols]);
+                y[idx] = __float2bfloat16(value > 0.0f ? value : 0.0f);
+            }
+        }
+
+        extern "C" __global__ void linear_relu_backward_bf16(
+            const __nv_bfloat16* grad,
+            const __nv_bfloat16* out,
+            __nv_bfloat16* grad_act,
+            const long long size
+        ) {
+            long long idx = blockIdx.x * blockDim.x + threadIdx.x;
+            long long stride = blockDim.x * gridDim.x;
+            for (; idx < size; idx += stride) {
+                grad_act[idx] = __bfloat162float(out[idx]) > 0.0f
+                    ? grad[idx]
+                    : __float2bfloat16(0.0f);
+            }
+        }
+        """,
+        options=("--std=c++11",),
+    )
+    return (
+        module.get_function("linear_bias_bf16"),
+        module.get_function("linear_relu_bias_bf16"),
+        module.get_function("linear_relu_backward_bf16"),
+    )
+
+
+def _cupy_linear_bias_forward(
+    out: Array,
+    bias: Array,
+    *,
+    rows: int,
+    cols: int,
+) -> bool:
+    if (
+        not IS_CUPY
+        or not hasattr(xp, "bfloat16")
+        or out.dtype != xp.bfloat16
+        or bias.dtype != xp.bfloat16
+        or bias.shape != (cols,)
+        or not out.flags.c_contiguous
+    ):
+        return False
+
+    forward_kernel, _, _ = _cupy_linear_relu_kernels()
+    threads = 256
+    blocks = min((rows * cols + threads - 1) // threads, 1024)
+    forward_kernel((blocks,), (threads,), (out, bias, int(rows * cols), int(cols)))
+    return True
+
+
+def _cupy_linear_relu_forward(
+    out: Array,
+    bias: Array,
+    *,
+    rows: int,
+    cols: int,
+) -> bool:
+    if (
+        not IS_CUPY
+        or not hasattr(xp, "bfloat16")
+        or out.dtype != xp.bfloat16
+        or bias.dtype != xp.bfloat16
+        or bias.shape != (cols,)
+        or not out.flags.c_contiguous
+    ):
+        return False
+
+    _, forward_kernel, _ = _cupy_linear_relu_kernels()
+    threads = 256
+    blocks = min((rows * cols + threads - 1) // threads, 1024)
+    forward_kernel((blocks,), (threads,), (out, bias, int(rows * cols), int(cols)))
+    return True
+
+
+def _cupy_linear_relu_backward(grad: Array, out: Array) -> Optional[Array]:
+    if (
+        not IS_CUPY
+        or not hasattr(xp, "bfloat16")
+        or grad.dtype != xp.bfloat16
+        or out.dtype != xp.bfloat16
+        or grad.shape != out.shape
+        or not grad.flags.c_contiguous
+        or not out.flags.c_contiguous
+    ):
+        return None
+
+    grad_act = xp.empty_like(grad)
+    _, _, backward_kernel = _cupy_linear_relu_kernels()
+    threads = 256
+    blocks = min((int(grad.size) + threads - 1) // threads, 1024)
+    backward_kernel((blocks,), (threads,), (grad, out, grad_act, int(grad.size)))
+    return grad_act
+
+
+@lru_cache(maxsize=1)
+def _cupy_layer_norm_kernels() -> Tuple[Any, Any, Any, Any, Any, Any, Any, Any]:
+    module = xp.RawModule(
+        code=r"""
+        #include <cuda_bf16.h>
+
+        extern "C" __global__ void layer_norm_forward_row(
+            const float* x,
+            const float* gain,
+            const float* bias,
+            float* y,
+            float* x_hat,
+            float* rstd,
+            const int rows,
+            const int cols,
+            const float epsilon
+        ) {
+            extern __shared__ float smem[];
+            int row = blockIdx.x + blockIdx.y * gridDim.x;
+            int tid = threadIdx.x;
+            if (row >= rows) return;
+
+            const float* xr = x + ((long long)row) * cols;
+            float* yr = y + ((long long)row) * cols;
+            float* hr = x_hat + ((long long)row) * cols;
+
+            float sum_val = 0.0f;
+            for (int col = tid; col < cols; col += blockDim.x) {
+                sum_val += xr[col];
+            }
+            smem[tid] = sum_val;
+            __syncthreads();
+            for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    smem[tid] += smem[tid + stride];
+                }
+                __syncthreads();
+            }
+
+            float mean = smem[0] / cols;
+            __syncthreads();
+            float var_sum = 0.0f;
+            for (int col = tid; col < cols; col += blockDim.x) {
+                float centered = xr[col] - mean;
+                var_sum += centered * centered;
+            }
+            smem[tid] = var_sum;
+            __syncthreads();
+            for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    smem[tid] += smem[tid + stride];
+                }
+                __syncthreads();
+            }
+
+            float inv = rsqrtf(smem[0] / cols + epsilon);
+            if (tid == 0) {
+                rstd[row] = inv;
+            }
+            for (int col = tid; col < cols; col += blockDim.x) {
+                float h = (xr[col] - mean) * inv;
+                hr[col] = h;
+                yr[col] = h * gain[col] + bias[col];
+            }
+        }
+
+        extern "C" __global__ void layer_norm_forward_bf16_row(
+            const __nv_bfloat16* x,
+            const __nv_bfloat16* gain,
+            const __nv_bfloat16* bias,
+            __nv_bfloat16* y,
+            float* x_hat,
+            float* rstd,
+            const int rows,
+            const int cols,
+            const float epsilon
+        ) {
+            extern __shared__ float smem[];
+            int row = blockIdx.x + blockIdx.y * gridDim.x;
+            int tid = threadIdx.x;
+            if (row >= rows) return;
+
+            const __nv_bfloat16* xr = x + ((long long)row) * cols;
+            __nv_bfloat16* yr = y + ((long long)row) * cols;
+            float* hr = x_hat + ((long long)row) * cols;
+
+            float sum_val = 0.0f;
+            for (int col = tid; col < cols; col += blockDim.x) {
+                sum_val += __bfloat162float(xr[col]);
+            }
+            smem[tid] = sum_val;
+            __syncthreads();
+            for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    smem[tid] += smem[tid + stride];
+                }
+                __syncthreads();
+            }
+
+            float mean = smem[0] / cols;
+            __syncthreads();
+            float var_sum = 0.0f;
+            for (int col = tid; col < cols; col += blockDim.x) {
+                float centered = __bfloat162float(xr[col]) - mean;
+                var_sum += centered * centered;
+            }
+            smem[tid] = var_sum;
+            __syncthreads();
+            for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    smem[tid] += smem[tid + stride];
+                }
+                __syncthreads();
+            }
+
+            float inv = rsqrtf(smem[0] / cols + epsilon);
+            if (tid == 0) {
+                rstd[row] = inv;
+            }
+            for (int col = tid; col < cols; col += blockDim.x) {
+                float h = (__bfloat162float(xr[col]) - mean) * inv;
+                hr[col] = h;
+                float out = h * __bfloat162float(gain[col]) + __bfloat162float(bias[col]);
+                yr[col] = __float2bfloat16(out);
+            }
+        }
+
+        extern "C" __global__ void layer_norm_backward_x_row(
+            const float* grad,
+            const float* x_hat,
+            const float* rstd,
+            const float* gain,
+            float* dx,
+            const int rows,
+            const int cols
+        ) {
+            extern __shared__ float smem[];
+            float* sum1_s = smem;
+            float* sum2_s = smem + blockDim.x;
+            int row = blockIdx.x + blockIdx.y * gridDim.x;
+            int tid = threadIdx.x;
+            if (row >= rows) return;
+
+            const float* gr = grad + ((long long)row) * cols;
+            const float* hr = x_hat + ((long long)row) * cols;
+            float* dxr = dx + ((long long)row) * cols;
+
+            float sum1 = 0.0f;
+            float sum2 = 0.0f;
+            for (int col = tid; col < cols; col += blockDim.x) {
+                float dx_hat = gr[col] * gain[col];
+                sum1 += dx_hat;
+                sum2 += dx_hat * hr[col];
+            }
+            sum1_s[tid] = sum1;
+            sum2_s[tid] = sum2;
+            __syncthreads();
+            for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    sum1_s[tid] += sum1_s[tid + stride];
+                    sum2_s[tid] += sum2_s[tid + stride];
+                }
+                __syncthreads();
+            }
+
+            float inv = rstd[row];
+            float row_sum1 = sum1_s[0];
+            float row_sum2 = sum2_s[0];
+            float scale = inv / cols;
+            for (int col = tid; col < cols; col += blockDim.x) {
+                float dx_hat = gr[col] * gain[col];
+                dxr[col] = scale * (cols * dx_hat - row_sum1 - hr[col] * row_sum2);
+            }
+        }
+
+        extern "C" __global__ void layer_norm_backward_x_bf16_row(
+            const __nv_bfloat16* grad,
+            const float* x_hat,
+            const float* rstd,
+            const __nv_bfloat16* gain,
+            __nv_bfloat16* dx,
+            const int rows,
+            const int cols
+        ) {
+            extern __shared__ float smem[];
+            float* sum1_s = smem;
+            float* sum2_s = smem + blockDim.x;
+            int row = blockIdx.x + blockIdx.y * gridDim.x;
+            int tid = threadIdx.x;
+            if (row >= rows) return;
+
+            const __nv_bfloat16* gr = grad + ((long long)row) * cols;
+            const float* hr = x_hat + ((long long)row) * cols;
+            __nv_bfloat16* dxr = dx + ((long long)row) * cols;
+
+            float sum1 = 0.0f;
+            float sum2 = 0.0f;
+            for (int col = tid; col < cols; col += blockDim.x) {
+                float dx_hat = __bfloat162float(gr[col]) * __bfloat162float(gain[col]);
+                sum1 += dx_hat;
+                sum2 += dx_hat * hr[col];
+            }
+            sum1_s[tid] = sum1;
+            sum2_s[tid] = sum2;
+            __syncthreads();
+            for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    sum1_s[tid] += sum1_s[tid + stride];
+                    sum2_s[tid] += sum2_s[tid + stride];
+                }
+                __syncthreads();
+            }
+
+            float inv = rstd[row];
+            float row_sum1 = sum1_s[0];
+            float row_sum2 = sum2_s[0];
+            float scale = inv / cols;
+            for (int col = tid; col < cols; col += blockDim.x) {
+                float dx_hat = __bfloat162float(gr[col]) * __bfloat162float(gain[col]);
+                float out = scale * (cols * dx_hat - row_sum1 - hr[col] * row_sum2);
+                dxr[col] = __float2bfloat16(out);
+            }
+        }
+
+        extern "C" __global__ void layer_norm_backward_param_col(
+            const float* grad,
+            const float* x_hat,
+            float* d_gain,
+            float* d_bias,
+            const int rows,
+            const int cols
+        ) {
+            extern __shared__ float smem[];
+            float* gain_s = smem;
+            float* bias_s = smem + blockDim.x;
+            int col = blockIdx.x;
+            int tid = threadIdx.x;
+            if (col >= cols) return;
+
+            float gain_sum = 0.0f;
+            float bias_sum = 0.0f;
+            for (int row = tid; row < rows; row += blockDim.x) {
+                long long idx = ((long long)row) * cols + col;
+                float g = grad[idx];
+                gain_sum += g * x_hat[idx];
+                bias_sum += g;
+            }
+            gain_s[tid] = gain_sum;
+            bias_s[tid] = bias_sum;
+            __syncthreads();
+            for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    gain_s[tid] += gain_s[tid + stride];
+                    bias_s[tid] += bias_s[tid + stride];
+                }
+                __syncthreads();
+            }
+            if (tid == 0) {
+                d_gain[col] = gain_s[0];
+                d_bias[col] = bias_s[0];
+            }
+        }
+
+        extern "C" __global__ void layer_norm_backward_param_bf16_col(
+            const __nv_bfloat16* grad,
+            const float* x_hat,
+            float* d_gain,
+            float* d_bias,
+            const int rows,
+            const int cols
+        ) {
+            extern __shared__ float smem[];
+            float* gain_s = smem;
+            float* bias_s = smem + blockDim.x;
+            int col = blockIdx.x;
+            int tid = threadIdx.x;
+            if (col >= cols) return;
+
+            float gain_sum = 0.0f;
+            float bias_sum = 0.0f;
+            for (int row = tid; row < rows; row += blockDim.x) {
+                long long idx = ((long long)row) * cols + col;
+                float g = __bfloat162float(grad[idx]);
+                gain_sum += g * x_hat[idx];
+                bias_sum += g;
+            }
+            gain_s[tid] = gain_sum;
+            bias_s[tid] = bias_sum;
+            __syncthreads();
+            for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    gain_s[tid] += gain_s[tid + stride];
+                    bias_s[tid] += bias_s[tid + stride];
+                }
+                __syncthreads();
+            }
+            if (tid == 0) {
+                d_gain[col] = gain_s[0];
+                d_bias[col] = bias_s[0];
+            }
+        }
+
+        // Coalesced first-stage reduction for bf16 LayerNorm parameter grads.
+        // Each block reduces a 256-row tile for 8 adjacent columns. That keeps
+        // reads coalesced across columns, unlike the one-column strided kernel.
+        extern "C" __global__ void layer_norm_backward_param_bf16_partial_8col(
+            const __nv_bfloat16* grad,
+            const float* x_hat,
+            float* partial_gain,
+            float* partial_bias,
+            const int rows,
+            const int cols,
+            const int tiles
+        ) {
+            __shared__ float gain_s[256];
+            __shared__ float bias_s[256];
+            int tid = threadIdx.x;
+            int lane_col = tid & 7;
+            int lane_row = tid >> 3;
+            int col = blockIdx.x * 8 + lane_col;
+            int tile = blockIdx.y;
+            int row_start = tile * 256;
+            int row_end = min(row_start + 256, rows);
+
+            float gain_sum = 0.0f;
+            float bias_sum = 0.0f;
+            if (col < cols) {
+                for (int row = row_start + lane_row; row < row_end; row += 32) {
+                    long long idx = ((long long)row) * cols + col;
+                    float g = __bfloat162float(grad[idx]);
+                    gain_sum += g * x_hat[idx];
+                    bias_sum += g;
+                }
+            }
+            gain_s[tid] = gain_sum;
+            bias_s[tid] = bias_sum;
+            __syncthreads();
+            for (int offset = 16; offset > 0; offset >>= 1) {
+                if (lane_row < offset) {
+                    int other = ((lane_row + offset) << 3) + lane_col;
+                    gain_s[tid] += gain_s[other];
+                    bias_s[tid] += bias_s[other];
+                }
+                __syncthreads();
+            }
+            if (lane_row == 0 && col < cols) {
+                long long out_idx = ((long long)tile) * cols + col;
+                partial_gain[out_idx] = gain_s[tid];
+                partial_bias[out_idx] = bias_s[tid];
+            }
+        }
+
+        extern "C" __global__ void layer_norm_backward_param_bf16_finalize(
+            const float* partial_gain,
+            const float* partial_bias,
+            float* d_gain,
+            float* d_bias,
+            const int cols,
+            const int tiles
+        ) {
+            extern __shared__ float smem[];
+            float* gain_s = smem;
+            float* bias_s = smem + blockDim.x;
+            int col = blockIdx.x;
+            int tid = threadIdx.x;
+            float gain_sum = 0.0f;
+            float bias_sum = 0.0f;
+            for (int tile = tid; tile < tiles; tile += blockDim.x) {
+                long long idx = ((long long)tile) * cols + col;
+                gain_sum += partial_gain[idx];
+                bias_sum += partial_bias[idx];
+            }
+            gain_s[tid] = gain_sum;
+            bias_s[tid] = bias_sum;
+            __syncthreads();
+            for (int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+                if (tid < offset) {
+                    gain_s[tid] += gain_s[tid + offset];
+                    bias_s[tid] += bias_s[tid + offset];
+                }
+                __syncthreads();
+            }
+            if (tid == 0) {
+                d_gain[col] = gain_s[0];
+                d_bias[col] = bias_s[0];
+            }
+        }
+        """,
+        options=("--std=c++11",),
+    )
+    return (
+        module.get_function("layer_norm_forward_row"),
+        module.get_function("layer_norm_backward_x_row"),
+        module.get_function("layer_norm_backward_param_col"),
+        module.get_function("layer_norm_forward_bf16_row"),
+        module.get_function("layer_norm_backward_x_bf16_row"),
+        module.get_function("layer_norm_backward_param_bf16_col"),
+        module.get_function("layer_norm_backward_param_bf16_partial_8col"),
+        module.get_function("layer_norm_backward_param_bf16_finalize"),
+    )
+
+
+@lru_cache(maxsize=1)
+def _cupy_softmax_row_kernels() -> Tuple[Any, Any]:
+    module = xp.RawModule(
+        code=r"""
+        extern "C" __global__ void softmax_forward_row(
+            const float* x,
+            float* y,
+            const int rows,
+            const int cols
+        ) {
+            extern __shared__ float smem[];
+            int row = blockIdx.x + blockIdx.y * gridDim.x;
+            int tid = threadIdx.x;
+            if (row >= rows) return;
+
+            const float* xr = x + ((long long)row) * cols;
+            float* yr = y + ((long long)row) * cols;
+
+            float max_val = -3.4028234663852886e38F;
+            for (int col = tid; col < cols; col += blockDim.x) {
+                max_val = fmaxf(max_val, xr[col]);
+            }
+            smem[tid] = max_val;
+            __syncthreads();
+            for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    smem[tid] = fmaxf(smem[tid], smem[tid + stride]);
+                }
+                __syncthreads();
+            }
+
+            max_val = smem[0];
+            __syncthreads();
+            float sum_val = 0.0f;
+            for (int col = tid; col < cols; col += blockDim.x) {
+                sum_val += expf(xr[col] - max_val);
+            }
+            smem[tid] = sum_val;
+            __syncthreads();
+            for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    smem[tid] += smem[tid + stride];
+                }
+                __syncthreads();
+            }
+
+            float denom = smem[0];
+            for (int col = tid; col < cols; col += blockDim.x) {
+                yr[col] = expf(xr[col] - max_val) / denom;
+            }
+        }
+
+        extern "C" __global__ void softmax_backward_row(
+            const float* probs,
+            const float* grad,
+            float* out,
+            const int rows,
+            const int cols
+        ) {
+            extern __shared__ float smem[];
+            int row = blockIdx.x + blockIdx.y * gridDim.x;
+            int tid = threadIdx.x;
+            if (row >= rows) return;
+
+            const float* pr = probs + ((long long)row) * cols;
+            const float* gr = grad + ((long long)row) * cols;
+            float* orow = out + ((long long)row) * cols;
+
+            float sum_term = 0.0f;
+            for (int col = tid; col < cols; col += blockDim.x) {
+                sum_term += pr[col] * gr[col];
+            }
+            smem[tid] = sum_term;
+            __syncthreads();
+            for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    smem[tid] += smem[tid + stride];
+                }
+                __syncthreads();
+            }
+
+            sum_term = smem[0];
+            for (int col = tid; col < cols; col += blockDim.x) {
+                orow[col] = pr[col] * (gr[col] - sum_term);
+            }
+        }
+        """,
+        options=("--std=c++11",),
+    )
+    return (
+        module.get_function("softmax_forward_row"),
+        module.get_function("softmax_backward_row"),
+    )
+
+
+def _is_cupy_float32_contiguous(x: Array) -> bool:
+    return bool(IS_CUPY and x.dtype == xp.float32 and x.flags.c_contiguous)
+
+
+def _cupy_softmax_forward(x: Array) -> Optional[Array]:
+    if not _is_cupy_float32_contiguous(x) or x.ndim < 1 or x.shape[-1] < 1:
+        return None
+
+    cols = int(x.shape[-1])
+    rows = int(x.size // cols)
+    out = xp.empty_like(x)
+    threads = 256
+    forward_kernel, _ = _cupy_softmax_row_kernels()
+    forward_kernel(
+        _cupy_row_grid(rows),
+        (threads,),
+        (x, out, rows, cols),
+        shared_mem=threads * 4,
+    )
+    return out
+
+
+def _cupy_softmax_backward(probs: Array, grad: Array) -> Optional[Array]:
+    if (
+        not _is_cupy_float32_contiguous(probs)
+        or not _is_cupy_float32_contiguous(grad)
+        or probs.shape != grad.shape
+        or probs.ndim < 1
+        or probs.shape[-1] < 1
+    ):
+        return None
+
+    cols = int(probs.shape[-1])
+    rows = int(probs.size // cols)
+    out = xp.empty_like(probs)
+    threads = 256
+    _, backward_kernel = _cupy_softmax_row_kernels()
+    backward_kernel(
+        _cupy_row_grid(rows),
+        (threads,),
+        (probs, grad, out, rows, cols),
+        shared_mem=threads * 4,
+    )
+    return out
+
+
+@lru_cache(maxsize=1)
+def _cupy_causal_softmax_row_kernels() -> Tuple[Any, Any]:
+    module = xp.RawModule(
+        code=r"""
+        extern "C" __global__ void causal_softmax_forward_row(
+            const float* x,
+            float* y,
+            const int rows,
+            const int seq_q,
+            const int cols
+        ) {
+            extern __shared__ float smem[];
+            int row = blockIdx.x + blockIdx.y * gridDim.x;
+            int tid = threadIdx.x;
+            if (row >= rows) return;
+
+            int query_pos = row % seq_q;
+            int visible_cols = query_pos + 1;
+            if (visible_cols > cols) visible_cols = cols;
+
+            const float* xr = x + ((long long)row) * cols;
+            float* yr = y + ((long long)row) * cols;
+
+            float max_val = -3.4028234663852886e38F;
+            for (int col = tid; col < visible_cols; col += blockDim.x) {
+                max_val = fmaxf(max_val, xr[col]);
+            }
+            smem[tid] = max_val;
+            __syncthreads();
+            for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    smem[tid] = fmaxf(smem[tid], smem[tid + stride]);
+                }
+                __syncthreads();
+            }
+
+            max_val = smem[0];
+            __syncthreads();
+            float sum_val = 0.0f;
+            for (int col = tid; col < visible_cols; col += blockDim.x) {
+                sum_val += expf(xr[col] - max_val);
+            }
+            smem[tid] = sum_val;
+            __syncthreads();
+            for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    smem[tid] += smem[tid + stride];
+                }
+                __syncthreads();
+            }
+
+            float denom = smem[0];
+            for (int col = tid; col < cols; col += blockDim.x) {
+                yr[col] = col < visible_cols ? expf(xr[col] - max_val) / denom : 0.0f;
+            }
+        }
+
+        extern "C" __global__ void causal_softmax_backward_row(
+            const float* probs,
+            const float* grad,
+            float* out,
+            const int rows,
+            const int seq_q,
+            const int cols
+        ) {
+            extern __shared__ float smem[];
+            int row = blockIdx.x + blockIdx.y * gridDim.x;
+            int tid = threadIdx.x;
+            if (row >= rows) return;
+
+            int query_pos = row % seq_q;
+            int visible_cols = query_pos + 1;
+            if (visible_cols > cols) visible_cols = cols;
+
+            const float* pr = probs + ((long long)row) * cols;
+            const float* gr = grad + ((long long)row) * cols;
+            float* orow = out + ((long long)row) * cols;
+
+            float sum_term = 0.0f;
+            for (int col = tid; col < visible_cols; col += blockDim.x) {
+                sum_term += pr[col] * gr[col];
+            }
+            smem[tid] = sum_term;
+            __syncthreads();
+            for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    smem[tid] += smem[tid + stride];
+                }
+                __syncthreads();
+            }
+
+            sum_term = smem[0];
+            for (int col = tid; col < cols; col += blockDim.x) {
+                orow[col] = col < visible_cols ? pr[col] * (gr[col] - sum_term) : 0.0f;
+            }
+        }
+        """,
+        options=("--std=c++11",),
+    )
+    return (
+        module.get_function("causal_softmax_forward_row"),
+        module.get_function("causal_softmax_backward_row"),
+    )
+
+
+def _cupy_causal_softmax_forward(x: Array) -> Optional[Array]:
+    if not _is_cupy_float32_contiguous(x) or x.ndim < 2 or x.shape[-1] < 1:
+        return None
+
+    seq_q = int(x.shape[-2])
+    cols = int(x.shape[-1])
+    rows = int(x.size // cols)
+    out = xp.empty_like(x)
+    threads = 256
+    forward_kernel, _ = _cupy_causal_softmax_row_kernels()
+    forward_kernel(
+        _cupy_row_grid(rows),
+        (threads,),
+        (x, out, rows, seq_q, cols),
+        shared_mem=threads * 4,
+    )
+    return out
+
+
+def _cupy_causal_softmax_backward(probs: Array, grad: Array) -> Optional[Array]:
+    if (
+        not _is_cupy_float32_contiguous(probs)
+        or not _is_cupy_float32_contiguous(grad)
+        or probs.shape != grad.shape
+        or probs.ndim < 2
+        or probs.shape[-1] < 1
+    ):
+        return None
+
+    seq_q = int(probs.shape[-2])
+    cols = int(probs.shape[-1])
+    rows = int(probs.size // cols)
+    out = xp.empty_like(probs)
+    threads = 256
+    _, backward_kernel = _cupy_causal_softmax_row_kernels()
+    backward_kernel(
+        _cupy_row_grid(rows),
+        (threads,),
+        (probs, grad, out, rows, seq_q, cols),
+        shared_mem=threads * 4,
+    )
+    return out
+
+
+@lru_cache(maxsize=1)
+def _cupy_cross_entropy_kernels() -> Tuple[Any, Any, Any, Any, Any, Any]:
+    module = xp.RawModule(
+        code=r"""
+        #include <cuda_bf16.h>
+
+        extern "C" __global__ void cross_entropy_forward_row(
+            const float* logits,
+            const long long* targets,
+            const float* weights,
+            float* probs,
+            float* losses,
+            const int rows,
+            const int cols
+        ) {
+            extern __shared__ float smem[];
+            int row = blockIdx.x + blockIdx.y * gridDim.x;
+            int tid = threadIdx.x;
+            if (row >= rows) return;
+
+            const float* xr = logits + ((long long)row) * cols;
+            float* pr = probs + ((long long)row) * cols;
+            int target = (int)targets[row];
+            float weight = weights[row];
+
+            float max_val = -3.4028234663852886e38F;
+            for (int col = tid; col < cols; col += blockDim.x) {
+                max_val = fmaxf(max_val, xr[col]);
+            }
+            smem[tid] = max_val;
+            __syncthreads();
+            for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    smem[tid] = fmaxf(smem[tid], smem[tid + stride]);
+                }
+                __syncthreads();
+            }
+
+            max_val = smem[0];
+            __syncthreads();
+            float sum_val = 0.0f;
+            for (int col = tid; col < cols; col += blockDim.x) {
+                sum_val += expf(xr[col] - max_val);
+            }
+            smem[tid] = sum_val;
+            __syncthreads();
+            for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    smem[tid] += smem[tid + stride];
+                }
+                __syncthreads();
+            }
+
+            float denom = smem[0];
+            for (int col = tid; col < cols; col += blockDim.x) {
+                pr[col] = expf(xr[col] - max_val) / denom;
+            }
+            if (tid == 0) {
+                losses[row] = -weight * (xr[target] - max_val - logf(denom));
+            }
+        }
+
+        extern "C" __global__ void cross_entropy_forward_bf16_row(
+            const __nv_bfloat16* logits,
+            const long long* targets,
+            const float* weights,
+            float* probs,
+            float* losses,
+            const int rows,
+            const int cols
+        ) {
+            extern __shared__ float smem[];
+            int row = blockIdx.x + blockIdx.y * gridDim.x;
+            int tid = threadIdx.x;
+            if (row >= rows) return;
+
+            const __nv_bfloat16* xr = logits + ((long long)row) * cols;
+            float* pr = probs + ((long long)row) * cols;
+            int target = (int)targets[row];
+            float weight = weights[row];
+
+            float max_val = -3.4028234663852886e38F;
+            for (int col = tid; col < cols; col += blockDim.x) {
+                max_val = fmaxf(max_val, __bfloat162float(xr[col]));
+            }
+            smem[tid] = max_val;
+            __syncthreads();
+            for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    smem[tid] = fmaxf(smem[tid], smem[tid + stride]);
+                }
+                __syncthreads();
+            }
+
+            max_val = smem[0];
+            __syncthreads();
+            float sum_val = 0.0f;
+            for (int col = tid; col < cols; col += blockDim.x) {
+                sum_val += expf(__bfloat162float(xr[col]) - max_val);
+            }
+            smem[tid] = sum_val;
+            __syncthreads();
+            for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    smem[tid] += smem[tid + stride];
+                }
+                __syncthreads();
+            }
+
+            float denom = smem[0];
+            for (int col = tid; col < cols; col += blockDim.x) {
+                pr[col] = expf(__bfloat162float(xr[col]) - max_val) / denom;
+            }
+            if (tid == 0) {
+                float target_logit = __bfloat162float(xr[target]);
+                losses[row] = -weight * (target_logit - max_val - logf(denom));
+            }
+        }
+
+        extern "C" __global__ void cross_entropy_forward_bf16_loss_row(
+            const __nv_bfloat16* logits,
+            const long long* targets,
+            const float* weights,
+            float* losses,
+            const int rows,
+            const int cols
+        ) {
+            extern __shared__ float smem[];
+            int row = blockIdx.x + blockIdx.y * gridDim.x;
+            int tid = threadIdx.x;
+            if (row >= rows) return;
+
+            const __nv_bfloat16* xr = logits + ((long long)row) * cols;
+            int target = (int)targets[row];
+            float weight = weights[row];
+
+            float max_val = -3.4028234663852886e38F;
+            for (int col = tid; col < cols; col += blockDim.x) {
+                max_val = fmaxf(max_val, __bfloat162float(xr[col]));
+            }
+            smem[tid] = max_val;
+            __syncthreads();
+            for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    smem[tid] = fmaxf(smem[tid], smem[tid + stride]);
+                }
+                __syncthreads();
+            }
+
+            max_val = smem[0];
+            __syncthreads();
+            float sum_val = 0.0f;
+            for (int col = tid; col < cols; col += blockDim.x) {
+                sum_val += expf(__bfloat162float(xr[col]) - max_val);
+            }
+            smem[tid] = sum_val;
+            __syncthreads();
+            for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    smem[tid] += smem[tid + stride];
+                }
+                __syncthreads();
+            }
+
+            if (tid == 0) {
+                float target_logit = __bfloat162float(xr[target]);
+                losses[row] = -weight * (target_logit - max_val - logf(smem[0]));
+            }
+        }
+
+        extern "C" __global__ void cross_entropy_backward_row(
+            const float* probs,
+            const long long* targets,
+            const float* weights,
+            const float* scale,
+            float* out,
+            const int rows,
+            const int cols
+        ) {
+            int row = blockIdx.x + blockIdx.y * gridDim.x;
+            int tid = threadIdx.x;
+            if (row >= rows) return;
+
+            const float* pr = probs + ((long long)row) * cols;
+            float* orow = out + ((long long)row) * cols;
+            int target = (int)targets[row];
+            float row_scale = weights[row] * scale[0];
+
+            for (int col = tid; col < cols; col += blockDim.x) {
+                float val = pr[col] - (col == target ? 1.0f : 0.0f);
+                orow[col] = val * row_scale;
+            }
+        }
+
+        extern "C" __global__ void cross_entropy_backward_bf16_logits_row(
+            const __nv_bfloat16* logits,
+            const long long* targets,
+            const float* weights,
+            const float* scale,
+            float* out,
+            const int rows,
+            const int cols
+        ) {
+            extern __shared__ float smem[];
+            int row = blockIdx.x + blockIdx.y * gridDim.x;
+            int tid = threadIdx.x;
+            if (row >= rows) return;
+
+            const __nv_bfloat16* xr = logits + ((long long)row) * cols;
+            float* orow = out + ((long long)row) * cols;
+            int target = (int)targets[row];
+            float row_scale = weights[row] * scale[0];
+
+            float max_val = -3.4028234663852886e38F;
+            for (int col = tid; col < cols; col += blockDim.x) {
+                max_val = fmaxf(max_val, __bfloat162float(xr[col]));
+            }
+            smem[tid] = max_val;
+            __syncthreads();
+            for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    smem[tid] = fmaxf(smem[tid], smem[tid + stride]);
+                }
+                __syncthreads();
+            }
+
+            max_val = smem[0];
+            __syncthreads();
+            float sum_val = 0.0f;
+            for (int col = tid; col < cols; col += blockDim.x) {
+                sum_val += expf(__bfloat162float(xr[col]) - max_val);
+            }
+            smem[tid] = sum_val;
+            __syncthreads();
+            for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    smem[tid] += smem[tid + stride];
+                }
+                __syncthreads();
+            }
+
+            float denom = smem[0];
+            for (int col = tid; col < cols; col += blockDim.x) {
+                float prob = expf(__bfloat162float(xr[col]) - max_val) / denom;
+                float val = prob - (col == target ? 1.0f : 0.0f);
+                orow[col] = val * row_scale;
+            }
+        }
+
+        extern "C" __global__ void cross_entropy_backward_bf16_logits_to_bf16_row(
+            const __nv_bfloat16* logits,
+            const long long* targets,
+            const float* weights,
+            const float* scale,
+            __nv_bfloat16* out,
+            const int rows,
+            const int cols
+        ) {
+            extern __shared__ float smem[];
+            int row = blockIdx.x + blockIdx.y * gridDim.x;
+            int tid = threadIdx.x;
+            if (row >= rows) return;
+
+            const __nv_bfloat16* xr = logits + ((long long)row) * cols;
+            __nv_bfloat16* orow = out + ((long long)row) * cols;
+            int target = (int)targets[row];
+            float row_scale = weights[row] * scale[0];
+
+            float max_val = -3.4028234663852886e38F;
+            for (int col = tid; col < cols; col += blockDim.x) {
+                max_val = fmaxf(max_val, __bfloat162float(xr[col]));
+            }
+            smem[tid] = max_val;
+            __syncthreads();
+            for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    smem[tid] = fmaxf(smem[tid], smem[tid + stride]);
+                }
+                __syncthreads();
+            }
+
+            max_val = smem[0];
+            __syncthreads();
+            float sum_val = 0.0f;
+            for (int col = tid; col < cols; col += blockDim.x) {
+                sum_val += expf(__bfloat162float(xr[col]) - max_val);
+            }
+            smem[tid] = sum_val;
+            __syncthreads();
+            for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    smem[tid] += smem[tid + stride];
+                }
+                __syncthreads();
+            }
+
+            float denom = smem[0];
+            for (int col = tid; col < cols; col += blockDim.x) {
+                float prob = expf(__bfloat162float(xr[col]) - max_val) / denom;
+                float val = prob - (col == target ? 1.0f : 0.0f);
+                orow[col] = __float2bfloat16(val * row_scale);
+            }
+        }
+
+        """,
+        options=("--std=c++11",),
+    )
+    return (
+        module.get_function("cross_entropy_forward_row"),
+        module.get_function("cross_entropy_forward_bf16_row"),
+        module.get_function("cross_entropy_backward_row"),
+        module.get_function("cross_entropy_forward_bf16_loss_row"),
+        module.get_function("cross_entropy_backward_bf16_logits_row"),
+        module.get_function("cross_entropy_backward_bf16_logits_to_bf16_row"),
+    )
+
+
+def _cupy_cross_entropy_forward(
+    logits: Array,
+    targets: Array,
+    weights: Array,
+) -> Optional[Tuple[Array, Array]]:
+    is_float32 = _is_cupy_float32_contiguous(logits)
+    is_bfloat16 = bool(
+        IS_CUPY
+        and hasattr(xp, "bfloat16")
+        and logits.dtype == xp.bfloat16
+        and logits.flags.c_contiguous
+    )
+    if (
+        not (is_float32 or is_bfloat16)
+        or logits.ndim != 2
+        or targets.dtype != xp.int64
+        or weights.dtype != xp.float32
+        or targets.ndim != 1
+        or weights.ndim != 1
+        or targets.shape[0] != logits.shape[0]
+        or weights.shape[0] != logits.shape[0]
+    ):
+        return None
+
+    rows = int(logits.shape[0])
+    cols = int(logits.shape[1])
+    probs = xp.empty(logits.shape, dtype=xp.float32)
+    losses = xp.empty((rows,), dtype=xp.float32)
+    threads = 1024
+    (
+        forward_float32_kernel,
+        forward_bf16_kernel,
+        _,
+        _,
+        _,
+        _,
+    ) = _cupy_cross_entropy_kernels()
+    forward_kernel = forward_float32_kernel if is_float32 else forward_bf16_kernel
+    forward_kernel(
+        _cupy_row_grid(rows),
+        (threads,),
+        (logits, targets, weights, probs, losses, rows, cols),
+        shared_mem=threads * 4,
+    )
+    return probs, losses
+
+
+def _cupy_cross_entropy_bf16_forward_loss(
+    logits: Array,
+    targets: Array,
+    weights: Array,
+) -> Optional[Array]:
+    if (
+        not IS_CUPY
+        or not hasattr(xp, "bfloat16")
+        or logits.dtype != xp.bfloat16
+        or not logits.flags.c_contiguous
+        or logits.ndim != 2
+        or targets.dtype != xp.int64
+        or weights.dtype != xp.float32
+        or targets.ndim != 1
+        or weights.ndim != 1
+        or targets.shape[0] != logits.shape[0]
+        or weights.shape[0] != logits.shape[0]
+    ):
+        return None
+
+    rows = int(logits.shape[0])
+    cols = int(logits.shape[1])
+    losses = xp.empty((rows,), dtype=xp.float32)
+    threads = 512
+    _, _, _, forward_kernel, _, _ = _cupy_cross_entropy_kernels()
+    forward_kernel(
+        _cupy_row_grid(rows),
+        (threads,),
+        (logits, targets, weights, losses, rows, cols),
+        shared_mem=threads * 4,
+    )
+    return losses
+
+
+def _cupy_cross_entropy_backward(
+    probs: Array,
+    targets: Array,
+    weights: Array,
+    scale: Array,
+) -> Optional[Array]:
+    if (
+        not _is_cupy_float32_contiguous(probs)
+        or probs.ndim != 2
+        or targets.dtype != xp.int64
+        or weights.dtype != xp.float32
+        or targets.ndim != 1
+        or weights.ndim != 1
+        or targets.shape[0] != probs.shape[0]
+        or weights.shape[0] != probs.shape[0]
+    ):
+        return None
+
+    scale = xp.asarray(scale, dtype=xp.float32).reshape(1)
+    rows = int(probs.shape[0])
+    cols = int(probs.shape[1])
+    out = xp.empty_like(probs)
+    threads = 1024
+    _, _, backward_kernel, _, _, _ = _cupy_cross_entropy_kernels()
+    backward_kernel(
+        _cupy_row_grid(rows),
+        (threads,),
+        (probs, targets, weights, scale, out, rows, cols),
+    )
+    return out
+
+
+def _cupy_cross_entropy_bf16_backward_from_logits(
+    logits: Array,
+    targets: Array,
+    weights: Array,
+    scale: Array,
+    out: Optional[Array] = None,
+) -> Optional[Array]:
+    if (
+        not IS_CUPY
+        or not hasattr(xp, "bfloat16")
+        or logits.dtype != xp.bfloat16
+        or not logits.flags.c_contiguous
+        or logits.ndim != 2
+        or targets.dtype != xp.int64
+        or weights.dtype != xp.float32
+        or targets.ndim != 1
+        or weights.ndim != 1
+        or targets.shape[0] != logits.shape[0]
+        or weights.shape[0] != logits.shape[0]
+    ):
+        return None
+
+    scale = xp.asarray(scale, dtype=xp.float32).reshape(1)
+    rows = int(logits.shape[0])
+    cols = int(logits.shape[1])
+    if out is None:
+        out = xp.empty(logits.shape, dtype=xp.bfloat16)
+    elif (
+        out.shape != logits.shape
+        or out.dtype != logits.dtype
+        or not out.flags.c_contiguous
+    ):
+        return None
+    threads = 512
+    _, _, _, _, _, backward_kernel = _cupy_cross_entropy_kernels()
+    backward_kernel(
+        _cupy_row_grid(rows),
+        (threads,),
+        (logits, targets, weights, scale, out, rows, cols),
+        shared_mem=threads * 4,
+    )
+    return out
 
 
 def log_softmax(x: Tensor, dim: int = -1) -> Tensor:
@@ -163,6 +1527,333 @@ def scaled_dot_product_attention_mlx_custom(
     )
 
 
+def scaled_dot_product_attention_cudnn(
+    query: Tensor,
+    key: Tensor,
+    value: Tensor,
+) -> Tensor:
+    """
+    cuDNN fused causal scaled-dot-product attention for the CuPy backend.
+
+    This path is intentionally narrow: 4D contiguous low-precision Q/K/V tensors
+    with identical shape and no dropout. It is used only for structural causal
+    self-attention; unsupported cases fall back to the dense Tensor expression.
+    """
+    ScaledDotProductAttentionCuDNN.validate(query.data, key.data, value.data)
+    return ScaledDotProductAttentionCuDNN.apply(query, key, value)
+
+
+def _cudnn_dtype_for_array(x: Array) -> Optional[Any]:
+    try:
+        import cudnn  # pyright: ignore[reportMissingImports]
+    except ModuleNotFoundError:
+        return None
+
+    if x.dtype == xp.float16:
+        return cudnn.data_type.HALF
+    if str(x.dtype) == "bfloat16":
+        return cudnn.data_type.BFLOAT16
+    return None
+
+
+def _cudnn_strides(shape: Tuple[int, ...]) -> list[int]:
+    stride: list[int] = []
+    running = 1
+    for dim in reversed(shape):
+        stride.append(running)
+        running *= int(dim)
+    return list(reversed(stride))
+
+
+def _cudnn_sdpa_bthd_output_stride(
+    shape: Tuple[int, int, int, int],
+) -> Tuple[int, int, int, int]:
+    batch_size, num_heads, seq_len, head_dim = shape
+    return (
+        seq_len * num_heads * head_dim,
+        head_dim,
+        num_heads * head_dim,
+        1,
+    )
+
+
+def _cupy_empty_bhtd_with_bthd_storage(
+    shape: Tuple[int, int, int, int],
+    dtype: Any,
+) -> Array:
+    batch_size, num_heads, seq_len, head_dim = shape
+    storage = xp.empty((batch_size, seq_len, num_heads, head_dim), dtype=dtype)
+    itemsize = int(storage.dtype.itemsize)
+    return xp.ndarray(
+        shape,
+        dtype=dtype,
+        memptr=storage.data,
+        strides=tuple(
+            stride * itemsize for stride in _cudnn_sdpa_bthd_output_stride(shape)
+        ),
+    )
+
+
+def _cupy_as_bhtd_with_bthd_storage(
+    x: Array,
+    shape: Tuple[int, int, int, int],
+) -> Array:
+    itemsize = int(x.dtype.itemsize)
+    output_stride = _cudnn_sdpa_bthd_output_stride(shape)
+    if tuple(int(stride // itemsize) for stride in x.strides) == output_stride:
+        return x
+
+    out = _cupy_empty_bhtd_with_bthd_storage(shape, x.dtype)
+    out[...] = x
+    return out
+
+
+def _cudnn_tensor(
+    graph: Any,
+    name: str,
+    shape: Tuple[int, ...],
+    data_type: Any,
+    stride: Optional[Tuple[int, ...]] = None,
+) -> Any:
+    return graph.tensor(
+        name=name,
+        dim=list(shape),
+        stride=list(stride) if stride is not None else _cudnn_strides(shape),
+        data_type=data_type,
+    )
+
+
+def _cudnn_mark_output(
+    tensor: Any,
+    shape: Tuple[int, ...],
+    data_type: Any,
+    stride: Optional[Tuple[int, ...]] = None,
+) -> Any:
+    return (
+        tensor.set_dim(list(shape))
+        .set_stride(list(stride) if stride is not None else _cudnn_strides(shape))
+        .set_output(True)
+        .set_data_type(data_type)
+    )
+
+
+@lru_cache(maxsize=8)
+def _cudnn_sdpa_forward_graph(
+    shape: Tuple[int, int, int, int],
+    input_stride: Tuple[int, int, int, int],
+    output_stride: Tuple[int, int, int, int],
+    data_type_name: str,
+) -> Tuple[Any, Tuple[Any, Any, Any, Any, Any]]:
+    import cudnn  # pyright: ignore[reportMissingImports]
+
+    data_type = getattr(cudnn.data_type, data_type_name)
+    batch_size, num_heads, seq_len, head_dim = shape
+    graph = cudnn.pygraph(
+        io_data_type=data_type,
+        intermediate_data_type=cudnn.data_type.FLOAT,
+        compute_data_type=cudnn.data_type.FLOAT,
+    )
+    query = _cudnn_tensor(graph, "query", shape, data_type, input_stride)
+    key = _cudnn_tensor(graph, "key", shape, data_type, input_stride)
+    value = _cudnn_tensor(graph, "value", shape, data_type, input_stride)
+    output, stats = graph.sdpa(
+        query,
+        key,
+        value,
+        attn_scale=float(head_dim) ** -0.5,
+        generate_stats=True,
+        diagonal_band_right_bound=0,
+        compute_data_type=cudnn.data_type.FLOAT,
+        name="cudnn_causal_sdpa",
+    )
+    _cudnn_mark_output(output, shape, data_type, output_stride)
+    _cudnn_mark_output(
+        stats, (batch_size, num_heads, seq_len, 1), cudnn.data_type.FLOAT
+    )
+    graph.validate()
+    graph.build_operation_graph()
+    graph.create_execution_plans([cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK])
+    graph.check_support()
+    graph.build_plans()
+    return graph, (query, key, value, output, stats)
+
+
+@lru_cache(maxsize=8)
+def _cudnn_sdpa_backward_graph(
+    shape: Tuple[int, int, int, int],
+    input_stride: Tuple[int, int, int, int],
+    output_stride: Tuple[int, int, int, int],
+    data_type_name: str,
+) -> Tuple[Any, Tuple[Any, Any, Any, Any, Any, Any, Any, Any, Any]]:
+    import cudnn  # pyright: ignore[reportMissingImports]
+
+    data_type = getattr(cudnn.data_type, data_type_name)
+    batch_size, num_heads, seq_len, head_dim = shape
+    stats_shape = (batch_size, num_heads, seq_len, 1)
+    graph = cudnn.pygraph(
+        io_data_type=data_type,
+        intermediate_data_type=cudnn.data_type.FLOAT,
+        compute_data_type=cudnn.data_type.FLOAT,
+    )
+    query = _cudnn_tensor(graph, "query", shape, data_type, input_stride)
+    key = _cudnn_tensor(graph, "key", shape, data_type, input_stride)
+    value = _cudnn_tensor(graph, "value", shape, data_type, input_stride)
+    output = _cudnn_tensor(graph, "output", shape, data_type, output_stride)
+    grad_output = _cudnn_tensor(graph, "grad_output", shape, data_type, output_stride)
+    stats = _cudnn_tensor(graph, "stats", stats_shape, cudnn.data_type.FLOAT)
+    grad_query, grad_key, grad_value = graph.sdpa_backward(
+        query,
+        key,
+        value,
+        output,
+        grad_output,
+        stats,
+        attn_scale=float(head_dim) ** -0.5,
+        diagonal_band_right_bound=0,
+        compute_data_type=cudnn.data_type.FLOAT,
+        name="cudnn_causal_sdpa_backward",
+    )
+    _cudnn_mark_output(grad_query, shape, data_type)
+    _cudnn_mark_output(grad_key, shape, data_type)
+    _cudnn_mark_output(grad_value, shape, data_type)
+    graph.validate()
+    graph.build_operation_graph()
+    graph.create_execution_plans([cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK])
+    graph.check_support()
+    graph.build_plans()
+    return (
+        graph,
+        (
+            query,
+            key,
+            value,
+            output,
+            grad_output,
+            stats,
+            grad_query,
+            grad_key,
+            grad_value,
+        ),
+    )
+
+
+class ScaledDotProductAttentionCuDNN(Function):
+    @staticmethod
+    def validate(query: Array, key: Array, value: Array) -> None:
+        if not IS_CUPY:
+            raise RuntimeError("cudnn SDPA requires the CuPy backend")
+        if query.shape != key.shape or query.shape != value.shape:
+            raise ValueError("cudnn SDPA requires Q, K, and V to share shape")
+        if query.ndim != 4:
+            raise ValueError("cudnn SDPA expects 4D [batch, heads, seq, dim] tensors")
+        if int(query.shape[-1]) % 8 != 0:
+            raise ValueError("cudnn SDPA requires head_dim to be a multiple of 8")
+        if query.strides != key.strides or query.strides != value.strides:
+            raise ValueError("cudnn SDPA requires Q, K, and V to share strides")
+        data_type = _cudnn_dtype_for_array(query)
+        if data_type is None:
+            raise ValueError("cudnn SDPA requires float16 or bfloat16 Q, K, and V")
+        if (
+            _cudnn_dtype_for_array(key) != data_type
+            or _cudnn_dtype_for_array(value) != data_type
+        ):
+            raise ValueError("cudnn SDPA requires matching Q, K, and V dtypes")
+
+    @staticmethod
+    def _cudnn_data_type_name(x: Array) -> str:
+        data_type = _cudnn_dtype_for_array(x)
+        if data_type is None:
+            raise ValueError("cudnn SDPA requires float16 or bfloat16 tensors")
+        return data_type.name
+
+    def forward(self, query: Array, key: Array, value: Array) -> Array:
+        self.validate(query, key, value)
+        self.data_type_name = self._cudnn_data_type_name(query)
+        self.shape: Tuple[int, int, int, int] = (
+            int(query.shape[0]),
+            int(query.shape[1]),
+            int(query.shape[2]),
+            int(query.shape[3]),
+        )
+        itemsize = int(query.dtype.itemsize)
+        self.input_stride: Tuple[int, int, int, int] = (
+            int(query.strides[0] // itemsize),
+            int(query.strides[1] // itemsize),
+            int(query.strides[2] // itemsize),
+            int(query.strides[3] // itemsize),
+        )
+        self.output_stride = _cudnn_sdpa_bthd_output_stride(self.shape)
+
+        graph, tensors = _cudnn_sdpa_forward_graph(
+            self.shape,
+            self.input_stride,
+            self.output_stride,
+            self.data_type_name,
+        )
+        query_t, key_t, value_t, output_t, stats_t = tensors
+        output = _cupy_empty_bhtd_with_bthd_storage(self.shape, query.dtype)
+        stats = xp.empty((*self.shape[:3], 1), dtype=xp.float32)
+        workspace = xp.empty((graph.get_workspace_size(),), dtype=xp.uint8)
+        graph.execute(
+            {
+                query_t: query,
+                key_t: key,
+                value_t: value,
+                output_t: output,
+                stats_t: stats,
+            },
+            workspace,
+        )
+        self.output = output
+        self.stats = stats
+        return output
+
+    def backward(self, grad: Tensor) -> Tuple[Array, Array, Array]:
+        query, key, value = (tensor.data for tensor in self.tensors)
+        graph, tensors = _cudnn_sdpa_backward_graph(
+            self.shape,
+            self.input_stride,
+            self.output_stride,
+            self.data_type_name,
+        )
+        (
+            query_t,
+            key_t,
+            value_t,
+            output_t,
+            grad_output_t,
+            stats_t,
+            grad_query_t,
+            grad_key_t,
+            grad_value_t,
+        ) = tensors
+        grad_query = xp.empty_like(query)
+        grad_key = xp.empty_like(key)
+        grad_value = xp.empty_like(value)
+        grad_output = _cupy_as_bhtd_with_bthd_storage(
+            grad.data.astype(query.dtype, copy=False),
+            self.shape,
+        )
+        workspace = xp.empty((graph.get_workspace_size(),), dtype=xp.uint8)
+        graph.execute(
+            {
+                query_t: query,
+                key_t: key,
+                value_t: value,
+                output_t: self.output,
+                grad_output_t: grad_output,
+                stats_t: self.stats,
+                grad_query_t: grad_query,
+                grad_key_t: grad_key,
+                grad_value_t: grad_value,
+            },
+            workspace,
+        )
+        self.output = None
+        self.stats = None
+        return grad_query, grad_key, grad_value
+
+
 class Relu(Function):
     r"""
     Rectified Linear Unit (ReLU) activation function.
@@ -204,7 +1895,137 @@ class Relu(Function):
         Returns:
             xp.ndarray: The gradient of the loss with respect to the input.
         """
+        cupy_grad = _cupy_relu_backward(grad.data, self.x)
+        if cupy_grad is not None:
+            return cupy_grad
         return grad.data * (self.x > 0)
+
+
+class LinearAffine(Function):
+    def forward(self, x: Array, weight: Array, bias: Array) -> Array:
+        if weight.ndim != 2:
+            raise ValueError("linear requires a 2D weight matrix")
+        if bias.shape != (weight.shape[-1],):
+            raise ValueError("linear bias must match the output dimension")
+        if x.shape[-1] != weight.shape[0]:
+            raise ValueError("linear input dimension must match weight")
+
+        self.x_shape = x.shape
+        self.bias_shape = bias.shape
+
+        out_dtype = (
+            x.dtype
+            if x.dtype == weight.dtype and x.dtype in LOW_PRECISION_FLOAT_DTYPES
+            else None
+        )
+        x_2d = x.reshape(-1, x.shape[-1])
+        out_2d = xp.matmul(x_2d, weight)
+        if out_dtype is not None and out_2d.dtype != out_dtype:
+            out_2d = out_2d.astype(out_dtype)
+
+        rows, cols = int(out_2d.shape[0]), int(out_2d.shape[1])
+        used_cupy = _cupy_linear_bias_forward(out_2d, bias, rows=rows, cols=cols)
+        out = (
+            out_2d.reshape(*x.shape[:-1], cols)
+            if used_cupy
+            else (out_2d + bias).reshape(*x.shape[:-1], cols)
+        )
+        self.out_shape = out.shape
+        return out
+
+    def backward(
+        self,
+        grad: Tensor,
+    ) -> Tuple[Optional[Array], Optional[Array], Optional[Array]]:
+        x, weight, bias = self.tensors
+        grad_data = Function.unbroadcast(grad.data, self.out_shape)
+        grad_2d = grad_data.reshape(-1, grad_data.shape[-1])
+        x_2d = x.data.reshape(-1, x.data.shape[-1])
+        grad_x = grad_weight = grad_bias = None
+
+        if x.requires_grad:
+            grad_x_2d = xp.matmul(grad_2d, xp.swapaxes(weight.data, -1, -2))
+            grad_x = grad_x_2d.reshape(self.x_shape)
+            if grad_x.dtype != x.data.dtype:
+                grad_x = grad_x.astype(x.data.dtype)
+
+        if weight.requires_grad:
+            grad_weight = xp.matmul(xp.swapaxes(x_2d, -1, -2), grad_2d)
+            if grad_weight.dtype != weight.data.dtype:
+                grad_weight = grad_weight.astype(weight.data.dtype)
+
+        if bias.requires_grad:
+            grad_bias = Function.unbroadcast(grad_data, self.bias_shape)
+            if grad_bias.dtype != bias.data.dtype:
+                grad_bias = grad_bias.astype(bias.data.dtype)
+
+        return grad_x, grad_weight, grad_bias
+
+
+class LinearRelu(Function):
+    def forward(self, x: Array, weight: Array, bias: Array) -> Array:
+        if weight.ndim != 2:
+            raise ValueError("linear_relu requires a 2D weight matrix")
+        if bias.shape != (weight.shape[-1],):
+            raise ValueError("linear_relu bias must match the output dimension")
+        if x.shape[-1] != weight.shape[0]:
+            raise ValueError("linear_relu input dimension must match weight")
+
+        self.x_shape = x.shape
+        self.bias_shape = bias.shape
+
+        out_dtype = (
+            x.dtype
+            if x.dtype == weight.dtype and x.dtype in LOW_PRECISION_FLOAT_DTYPES
+            else None
+        )
+        x_2d = x.reshape(-1, x.shape[-1])
+        out_2d = xp.matmul(x_2d, weight)
+        if out_dtype is not None and out_2d.dtype != out_dtype:
+            out_2d = out_2d.astype(out_dtype)
+
+        rows, cols = int(out_2d.shape[0]), int(out_2d.shape[1])
+        used_cupy = _cupy_linear_relu_forward(out_2d, bias, rows=rows, cols=cols)
+        out = (
+            out_2d.reshape(*x.shape[:-1], cols)
+            if used_cupy
+            else xp.maximum(out_2d + bias, 0).reshape(*x.shape[:-1], cols)
+        )
+        self.out_shape = out.shape
+        self.out = out
+        return out
+
+    def backward(
+        self,
+        grad: Tensor,
+    ) -> Tuple[Optional[Array], Optional[Array], Optional[Array]]:
+        x, weight, bias = self.tensors
+        grad_data = Function.unbroadcast(grad.data, self.out_shape)
+        grad_act = _cupy_linear_relu_backward(grad_data, self.out)
+        if grad_act is None:
+            grad_act = xp.where(self.out > 0, grad_data, 0)
+
+        grad_act_2d = grad_act.reshape(-1, grad_act.shape[-1])
+        x_2d = x.data.reshape(-1, x.data.shape[-1])
+        grad_x = grad_weight = grad_bias = None
+
+        if x.requires_grad:
+            grad_x_2d = xp.matmul(grad_act_2d, xp.swapaxes(weight.data, -1, -2))
+            grad_x = grad_x_2d.reshape(self.x_shape)
+            if grad_x.dtype != x.data.dtype:
+                grad_x = grad_x.astype(x.data.dtype)
+
+        if weight.requires_grad:
+            grad_weight = xp.matmul(xp.swapaxes(x_2d, -1, -2), grad_act_2d)
+            if grad_weight.dtype != weight.data.dtype:
+                grad_weight = grad_weight.astype(weight.data.dtype)
+
+        if bias.requires_grad:
+            grad_bias = Function.unbroadcast(grad_act, self.bias_shape)
+            if grad_bias.dtype != bias.data.dtype:
+                grad_bias = grad_bias.astype(bias.data.dtype)
+
+        return grad_x, grad_weight, grad_bias
 
 
 class Gelu(Function):
@@ -357,6 +2178,11 @@ class Softmax(Function):
         Returns:
             xp.ndarray: The softmax probabilities.
         """
+        cupy_probs = _cupy_softmax_forward(x)
+        if cupy_probs is not None:
+            self.probs = cupy_probs
+            return self.probs
+
         exp_x = xp.exp(x - xp.max(x, axis=-1, keepdims=True))
         self.probs = exp_x / xp.sum(exp_x, axis=-1, keepdims=True)
         return self.probs
@@ -382,9 +2208,176 @@ class Softmax(Function):
         # d(softmax(x))/dx_i = -softmax(x)_i * softmax(x)_j
 
         # dL/dx = y * (dL/dy - sum(dL/dy * y, axis=-1, keepdims=True))
+        cupy_grad = _cupy_softmax_backward(self.probs, grad.data)
+        if cupy_grad is not None:
+            return cupy_grad
+
         sum_term = xp.sum(grad.data * self.probs, axis=-1, keepdims=True)
         dLdx = self.probs * (grad.data - sum_term)
         return dLdx
+
+
+class CausalSoftmax(Function):
+    def forward(self, x: Array) -> Array:
+        cupy_probs = _cupy_causal_softmax_forward(x)
+        if cupy_probs is not None:
+            self.probs = cupy_probs
+            return self.probs
+
+        seq_q = int(x.shape[-2])
+        seq_k = int(x.shape[-1])
+        mask = xp.triu(xp.ones((seq_q, seq_k), dtype=x.dtype), k=1).reshape(
+            (1,) * (x.ndim - 2) + (seq_q, seq_k)
+        )
+        masked_x = x + (mask * -1e9)
+        exp_x = xp.exp(masked_x - xp.max(masked_x, axis=-1, keepdims=True))
+        self.probs = exp_x / xp.sum(exp_x, axis=-1, keepdims=True)
+        return self.probs
+
+    def backward(self, grad: Tensor) -> Array:
+        cupy_grad = _cupy_causal_softmax_backward(self.probs, grad.data)
+        if cupy_grad is not None:
+            return cupy_grad
+
+        sum_term = xp.sum(grad.data * self.probs, axis=-1, keepdims=True)
+        return self.probs * (grad.data - sum_term)
+
+
+class LayerNormAffine(Function):
+    def forward(
+        self,
+        x: Array,
+        gain: Array,
+        bias: Array,
+        epsilon: float,
+    ) -> Array:
+        is_bfloat16 = bool(
+            IS_CUPY
+            and hasattr(xp, "bfloat16")
+            and x.dtype == xp.bfloat16
+            and gain.dtype == xp.bfloat16
+            and bias.dtype == xp.bfloat16
+            and x.flags.c_contiguous
+        )
+        if (
+            not (_is_cupy_float32_contiguous(x) or is_bfloat16)
+            or not IS_CUPY
+            or gain.dtype not in (xp.float32, *LOW_PRECISION_FLOAT_DTYPES)
+            or bias.dtype not in (xp.float32, *LOW_PRECISION_FLOAT_DTYPES)
+            or not gain.flags.c_contiguous
+            or not bias.flags.c_contiguous
+            or x.ndim < 1
+            or gain.ndim != 1
+            or bias.ndim != 1
+            or x.shape[-1] != gain.shape[0]
+            or gain.shape != bias.shape
+        ):
+            raise ValueError(
+                "LayerNormAffine requires contiguous CuPy float32 or bf16 inputs"
+            )
+
+        self.original_shape = x.shape
+        self.rows = int(x.size // x.shape[-1])
+        self.cols = int(x.shape[-1])
+        self.is_bfloat16 = is_bfloat16
+        y = xp.empty_like(x)
+        self.x_hat = xp.empty_like(x)
+        self.rstd = xp.empty((self.rows,), dtype=xp.float32)
+        threads = 128
+        if self.is_bfloat16:
+            self.gain = gain
+            self.x_hat = xp.empty(x.shape, dtype=xp.float32)
+            _, _, _, forward_kernel, _, _, _, _ = _cupy_layer_norm_kernels()
+            kernel_gain = gain
+            kernel_bias = bias
+        else:
+            self.gain = gain if gain.dtype == xp.float32 else gain.astype(xp.float32)
+            bias32 = bias if bias.dtype == xp.float32 else bias.astype(xp.float32)
+            forward_kernel, _, _, _, _, _, _, _ = _cupy_layer_norm_kernels()
+            kernel_gain = self.gain
+            kernel_bias = bias32
+        forward_kernel(
+            _cupy_row_grid(self.rows),
+            (threads,),
+            (
+                x.reshape(self.rows, self.cols),
+                kernel_gain,
+                kernel_bias,
+                y.reshape(self.rows, self.cols),
+                self.x_hat.reshape(self.rows, self.cols),
+                self.rstd,
+                self.rows,
+                self.cols,
+                float(epsilon),
+            ),
+            shared_mem=threads * 4,
+        )
+        return y
+
+    def backward(self, grad: Tensor) -> Tuple[Array, Array, Array]:
+        grad_data = grad.data
+        if self.is_bfloat16:
+            if grad_data.dtype != xp.bfloat16:
+                grad_data = grad_data.astype(xp.bfloat16)
+        elif grad_data.dtype != xp.float32:
+            grad_data = grad_data.astype(xp.float32)
+        grad_2d = xp.ascontiguousarray(grad_data.reshape(self.rows, self.cols))
+        x_hat_2d = self.x_hat.reshape(self.rows, self.cols)
+        dx = xp.empty_like(grad_2d)
+        d_gain = xp.empty((self.cols,), dtype=xp.float32)
+        d_bias = xp.empty((self.cols,), dtype=xp.float32)
+        backward_x_threads = 128
+        if self.is_bfloat16:
+            (
+                _,
+                _,
+                _,
+                _,
+                backward_x_kernel,
+                _,
+                backward_param_partial_kernel,
+                backward_param_finalize_kernel,
+            ) = _cupy_layer_norm_kernels()
+            row_tiles = (self.rows + 255) // 256
+            partial_gain = xp.empty((row_tiles, self.cols), dtype=xp.float32)
+            partial_bias = xp.empty((row_tiles, self.cols), dtype=xp.float32)
+            backward_param_partial_kernel(
+                ((self.cols + 7) // 8, row_tiles),
+                (256,),
+                (
+                    grad_2d,
+                    x_hat_2d,
+                    partial_gain,
+                    partial_bias,
+                    self.rows,
+                    self.cols,
+                    row_tiles,
+                ),
+            )
+            backward_param_finalize_kernel(
+                (self.cols,),
+                (256,),
+                (partial_gain, partial_bias, d_gain, d_bias, self.cols, row_tiles),
+                shared_mem=256 * 2 * 4,
+            )
+        else:
+            backward_param_threads = 1024
+            _, backward_x_kernel, backward_param_kernel, _, _, _, _, _ = (
+                _cupy_layer_norm_kernels()
+            )
+            backward_param_kernel(
+                (self.cols,),
+                (backward_param_threads,),
+                (grad_2d, x_hat_2d, d_gain, d_bias, self.rows, self.cols),
+                shared_mem=backward_param_threads * 2 * 4,
+            )
+        backward_x_kernel(
+            _cupy_row_grid(self.rows),
+            (backward_x_threads,),
+            (grad_2d, x_hat_2d, self.rstd, self.gain, dx, self.rows, self.cols),
+            shared_mem=backward_x_threads * 2 * 4,
+        )
+        return dx.reshape(self.original_shape), d_gain, d_bias
 
 
 class LogSoftmax(Function):
@@ -652,7 +2645,7 @@ class ScaledDotProductAttentionMLXCustom(Function):
         numerator without materializing the dense score matrix.
         """
         try:
-            import mlx.core.fast as mx_fast  # pyright: ignore[reportMissingModuleSource]
+            import mlx.core.fast as mx_fast  # pyright: ignore[reportMissingImports]
         except ModuleNotFoundError as exc:  # pragma: no cover - platform dependent
             raise RuntimeError("mlx_custom requires the MLX backend") from exc
 
@@ -1155,6 +3148,7 @@ class CrossEntropy(Function):
         ignore_index: int = IGNORE_INDEX,
         label_smoothing: float = 0.0,
         reduction: str = "mean",
+        destructive_logits_backward: bool = False,
     ) -> Union[Array, float]:
         r"""
         Computes the cross-entropy loss with optional ignored targets and label smoothing.
@@ -1199,8 +3193,6 @@ class CrossEntropy(Function):
         """
 
         y_true = xp.array(y_true, dtype=xp.int64)
-        if y_pred.dtype in LOW_PRECISION_FLOAT_DTYPES:
-            y_pred = y_pred.astype(xp.float32)
 
         # 1. If 3D logits, flatten them for simpler processing while preserving
         # the original shape for the backward pass.
@@ -1215,10 +3207,63 @@ class CrossEntropy(Function):
         # 2. Mark which target positions contribute to the loss.
         non_ignored_weights = (y_true != ignore_index).astype(xp.float32)
         safe_y_true = xp.where(non_ignored_weights > 0, y_true, 0)
-        non_ignored_count = xp.maximum(
-            xp.sum(non_ignored_weights),
-            xp.array(1.0, dtype=xp.float32),
-        )
+        if reduction == "mean":
+            non_ignored_count = xp.maximum(
+                xp.sum(non_ignored_weights),
+                xp.array(1.0, dtype=xp.float32),
+            )
+        elif reduction == "sum":
+            non_ignored_count = xp.array(1.0, dtype=xp.float32)
+        else:
+            raise ValueError(f"Unsupported cross_entropy reduction: {reduction!r}")
+
+        if label_smoothing == 0.0:
+            cupy_bf16_losses = _cupy_cross_entropy_bf16_forward_loss(
+                y_pred,
+                safe_y_true,
+                non_ignored_weights,
+            )
+            if cupy_bf16_losses is not None:
+                loss_sum = xp.sum(cupy_bf16_losses)
+                if reduction == "mean":
+                    loss_val = loss_sum / non_ignored_count
+                else:
+                    loss_val = loss_sum
+                self.logits = y_pred
+                self.y_true = safe_y_true
+                self.non_ignored_weights = non_ignored_weights
+                self.non_ignored_count = non_ignored_count
+                self.label_smoothing = label_smoothing
+                self.num_classes = num_classes
+                self._cupy_fast_path = False
+                self._cupy_bf16_remat_path = True
+                self._destructive_logits_backward = destructive_logits_backward
+                return loss_val
+
+            cupy_ce = _cupy_cross_entropy_forward(
+                y_pred,
+                safe_y_true,
+                non_ignored_weights,
+            )
+            if cupy_ce is not None:
+                probs, losses = cupy_ce
+                loss_sum = xp.sum(losses)
+                if reduction == "mean":
+                    loss_val = loss_sum / non_ignored_count
+                else:
+                    loss_val = loss_sum
+                self.probs = probs
+                self.y_true = safe_y_true
+                self.non_ignored_weights = non_ignored_weights
+                self.non_ignored_count = non_ignored_count
+                self.label_smoothing = label_smoothing
+                self.num_classes = num_classes
+                self._cupy_fast_path = True
+                self._destructive_logits_backward = False
+                return loss_val
+
+        if y_pred.dtype in LOW_PRECISION_FLOAT_DTYPES:
+            y_pred = y_pred.astype(xp.float32)
 
         r"""
         3. Shift the logits so the softmax-related terms stay numerically stable.
@@ -1300,11 +3345,8 @@ class CrossEntropy(Function):
         loss_sum = xp.sum(losses * non_ignored_weights)
         if reduction == "mean":
             loss_val = loss_sum / non_ignored_count
-        elif reduction == "sum":
-            loss_val = loss_sum
-            non_ignored_count = xp.array(1.0, dtype=xp.float32)
         else:
-            raise ValueError(f"Unsupported cross_entropy reduction: {reduction!r}")
+            loss_val = loss_sum
 
         # 6) Store for backward pass:
         self.probs = probs
@@ -1313,6 +3355,8 @@ class CrossEntropy(Function):
         self.non_ignored_count = non_ignored_count
         self.label_smoothing = label_smoothing
         self.num_classes = num_classes
+        self._cupy_fast_path = False
+        self._destructive_logits_backward = False
         return loss_val
 
     def backward(self, grad: Tensor) -> Tuple[Array, None]:
@@ -1336,6 +3380,31 @@ class CrossEntropy(Function):
         Returns:
             Tuple[xp.ndarray, None]: A tuple containing the gradient with respect to the logits and None for $y_{true}$.
         """
+        if getattr(self, "_cupy_bf16_remat_path", False):
+            cupy_grad = _cupy_cross_entropy_bf16_backward_from_logits(
+                self.logits,
+                self.y_true,
+                self.non_ignored_weights,
+                grad.data / self.non_ignored_count,
+                out=(
+                    self.logits
+                    if getattr(self, "_destructive_logits_backward", False)
+                    else None
+                ),
+            )
+            if cupy_grad is not None:
+                return cupy_grad.reshape(self.original_shape), None
+
+        if getattr(self, "_cupy_fast_path", False):
+            cupy_grad = _cupy_cross_entropy_backward(
+                self.probs,
+                self.y_true,
+                self.non_ignored_weights,
+                grad.data / self.non_ignored_count,
+            )
+            if cupy_grad is not None:
+                return cupy_grad.reshape(self.original_shape), None
+
         # 1. Start from a dense copy of the probabilities.
         # We will transform this buffer into p_{i,j} - T_{i,j} in-place, which
         # avoids building a separate dense target tensor of the same shape.
@@ -1644,6 +3713,32 @@ def cross_entropy(
         ignore_index=ignore_index,
         label_smoothing=label_smoothing,
         reduction=reduction,
+    )
+
+
+def cross_entropy_private_logits(
+    y_pred: Tensor,
+    y_true: Union[Tensor, ArrayLike],
+    ignore_index: int = IGNORE_INDEX,
+    label_smoothing: float = 0.0,
+    reduction: str = "mean",
+) -> Tensor:
+    """
+    Cross entropy for call sites where logits are private to the loss.
+
+    On the CuPy bf16 fast path, backward may overwrite the logits buffer with
+    the logits gradient. Do not use this if the logits Tensor feeds any other
+    backward branch.
+    """
+    if not isinstance(y_true, Tensor):
+        y_true = Tensor(y_true, requires_grad=False)
+    return CrossEntropy.apply(
+        y_pred,
+        y_true,
+        ignore_index=ignore_index,
+        label_smoothing=label_smoothing,
+        reduction=reduction,
+        destructive_logits_backward=True,
     )
 
 
