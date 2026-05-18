@@ -232,6 +232,67 @@ class TestStructuralCausalAttention(TestCase):
         self.assertIsNotNone(value.grad)
 
     @skipUnless(IS_CUPY, "cuDNN SDPA requires the CuPy backend")
+    def test_cudnn_backward_matches_dense_with_permuted_qkv_strides(self):
+        # Regression: MHA produces Q/K/V via .view(B,T,H,D).permute(0,2,1,3),
+        # so they reach cuDNN with non-contiguous BTHD-storage strides. The
+        # cuDNN backward graph must mark grad_{Q,K,V} with those same strides
+        # to match xp.empty_like(query) — otherwise gradients are scrambled.
+        try:
+            import cudnn  # pyright: ignore[reportMissingImports]  # noqa: F401
+        except ModuleNotFoundError:
+            self.skipTest("nvidia-cudnn-frontend is not installed")
+
+        batch_size, seq_len, num_heads, head_dim = 2, 4, 3, 8
+        bthd_shape = (batch_size, seq_len, num_heads, head_dim)
+        bhtd_shape = (batch_size, num_heads, seq_len, head_dim)
+        dtype = xp.dtype("bfloat16")
+        query_bthd = xp.array(xp.random.normal(shape=bthd_shape), dtype=dtype)
+        key_bthd = xp.array(xp.random.normal(shape=bthd_shape), dtype=dtype)
+        value_bthd = xp.array(xp.random.normal(shape=bthd_shape), dtype=dtype)
+        upstream_bhtd = xp.array(xp.random.normal(shape=bhtd_shape), dtype=dtype)
+
+        # Permuted Q/K/V (this is the layout MHA actually feeds cuDNN).
+        cudnn_query = Tensor(query_bthd).permute(0, 2, 1, 3)
+        cudnn_key = Tensor(key_bthd).permute(0, 2, 1, 3)
+        cudnn_value = Tensor(value_bthd).permute(0, 2, 1, 3)
+        self.assertFalse(cudnn_query.data.flags.c_contiguous)
+        cudnn_out = scaled_dot_product_attention_cudnn(
+            cudnn_query, cudnn_key, cudnn_value
+        )
+        (cudnn_out * Tensor(upstream_bhtd)).sum().backward()
+
+        attention = ScaledDotProductAttention(dropout_prob=0.0)
+        with patch(
+            "autograd.nn.scaled_dot_product_attention_cudnn",
+            side_effect=RuntimeError("force dense fallback"),
+        ):
+            dense_query = Tensor(query_bthd).permute(0, 2, 1, 3)
+            dense_key = Tensor(key_bthd).permute(0, 2, 1, 3)
+            dense_value = Tensor(value_bthd).permute(0, 2, 1, 3)
+            dense_out = attention(
+                dense_query, dense_key, dense_value, mask=None, is_causal=True
+            )
+            (dense_out * Tensor(upstream_bhtd)).sum().backward()
+
+        assert allclose(
+            cudnn_out.data.astype(xp.float32),
+            dense_out.data.astype(xp.float32),
+            atol=1e-2,
+            rtol=1e-2,
+        )
+        for cudnn_grad, dense_grad in (
+            (cudnn_query.grad, dense_query.grad),
+            (cudnn_key.grad, dense_key.grad),
+            (cudnn_value.grad, dense_value.grad),
+        ):
+            assert allclose(
+                cudnn_grad.data.astype(xp.float32),
+                dense_grad.data.astype(xp.float32),
+                atol=1e-2,
+                rtol=1e-2,
+            )
+
+    @skipUnless(IS_CUPY, "cuDNN SDPA requires the CuPy backend")
     def test_cudnn_backward_releases_saved_output_and_stats(self):
         try:
             import cudnn  # pyright: ignore[reportMissingImports]  # noqa: F401
