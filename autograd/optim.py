@@ -583,7 +583,7 @@ class Adam(Optimizer):
         if not grad.flags.c_contiguous:
             grad = xp.ascontiguousarray(grad)
 
-        master = self._ensure_master(name, param)
+        master = self._states["master"].get(name)
         if master is None or not master.flags.c_contiguous:
             return False
 
