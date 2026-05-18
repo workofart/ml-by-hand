@@ -12,8 +12,12 @@ from autograd.backend import (
     ArrayLike,
     xp,
 )
-from autograd.cublaslt import can_use_lt, get_lt
-from autograd.tensor import Function, Tensor
+from autograd.tensor import (
+    Function,
+    Tensor,
+    _matmul_autocast,
+    _matmul_autocast_dW_bgrad,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -201,54 +205,6 @@ def _cupy_linear_relu_kernels() -> Tuple[Any, Any, Any]:
         module.get_function("linear_relu_bias_bf16"),
         module.get_function("linear_relu_backward_bf16"),
     )
-
-
-def _cupy_linear_bias_forward(
-    out: Array,
-    bias: Array,
-    *,
-    rows: int,
-    cols: int,
-) -> bool:
-    if (
-        not IS_CUPY
-        or not hasattr(xp, "bfloat16")
-        or out.dtype != xp.bfloat16
-        or bias.dtype != xp.bfloat16
-        or bias.shape != (cols,)
-        or not out.flags.c_contiguous
-    ):
-        return False
-
-    forward_kernel, _, _ = _cupy_linear_relu_kernels()
-    threads = 256
-    blocks = min((rows * cols + threads - 1) // threads, 1024)
-    forward_kernel((blocks,), (threads,), (out, bias, int(rows * cols), int(cols)))
-    return True
-
-
-def _cupy_linear_relu_forward(
-    out: Array,
-    bias: Array,
-    *,
-    rows: int,
-    cols: int,
-) -> bool:
-    if (
-        not IS_CUPY
-        or not hasattr(xp, "bfloat16")
-        or out.dtype != xp.bfloat16
-        or bias.dtype != xp.bfloat16
-        or bias.shape != (cols,)
-        or not out.flags.c_contiguous
-    ):
-        return False
-
-    _, forward_kernel, _ = _cupy_linear_relu_kernels()
-    threads = 256
-    blocks = min((rows * cols + threads - 1) // threads, 1024)
-    forward_kernel((blocks,), (threads,), (out, bias, int(rows * cols), int(cols)))
-    return True
 
 
 def _cupy_linear_relu_backward(grad: Array, out: Array) -> Optional[Array]:
@@ -1916,33 +1872,8 @@ class LinearAffine(Function):
 
         x_2d = x.reshape(-1, x.shape[-1])
         cols = int(weight.shape[1])
-
-        # cuBLASLt with BIAS epilogue fuses matmul+bias (~1.8x vs separate kernels
-        # on bf16 GPT-2 shapes); falls through to the cuBLAS-classic path otherwise.
-        if can_use_lt(x_2d, weight, bias):
-            lt = get_lt()
-            assert lt is not None
-            out_2d = lt.matmul_bias(x_2d, weight, bias, with_relu=False)
-            out = out_2d.reshape(*x.shape[:-1], cols)
-            self.out_shape = out.shape
-            return out
-
-        out_dtype = (
-            x.dtype
-            if x.dtype == weight.dtype and x.dtype in LOW_PRECISION_FLOAT_DTYPES
-            else None
-        )
-        out_2d = xp.matmul(x_2d, weight)
-        if out_dtype is not None and out_2d.dtype != out_dtype:
-            out_2d = out_2d.astype(out_dtype)
-
-        rows = int(out_2d.shape[0])
-        used_cupy = _cupy_linear_bias_forward(out_2d, bias, rows=rows, cols=cols)
-        out = (
-            out_2d.reshape(*x.shape[:-1], cols)
-            if used_cupy
-            else (out_2d + bias).reshape(*x.shape[:-1], cols)
-        )
+        out_2d = _matmul_autocast(x_2d, weight, bias, with_relu=False)
+        out = out_2d.reshape(*x.shape[:-1], cols)
         self.out_shape = out.shape
         return out
 
@@ -1956,41 +1887,28 @@ class LinearAffine(Function):
         x_2d = x.data.reshape(-1, x.data.shape[-1])
         grad_x = grad_weight = grad_bias = None
 
+        # dX = grad @ W^T. Autocast handles bf16/fp32 mixed precision in one place.
         if x.requires_grad:
-            grad_x_2d = xp.matmul(grad_2d, xp.swapaxes(weight.data, -1, -2))
+            grad_x_2d = _matmul_autocast(grad_2d, xp.swapaxes(weight.data, -1, -2))
             grad_x = grad_x_2d.reshape(self.x_shape)
-            if grad_x.dtype != x.data.dtype:
-                grad_x = grad_x.astype(x.data.dtype)
 
-        # cuBLASLt BGRADA fuses dW = X.T @ grad and dbias = column_sum(grad)
-        # into one kernel; otherwise fall back to the cuBLAS-classic matmul plus
-        # a separate Function.unbroadcast reduction for the bias gradient.
-        used_lt = False
+        # dW = X^T @ grad fused with dbias = column_sum(grad). Pass the weight
+        # dtype so the helper can match the forward GEMM precision (bf16 with
+        # fp32 accumulator) even when both x and grad arrive as fp32 — without
+        # the hint, the dtype-pair policy would pick a slow pure-fp32 GEMM.
         if (
             weight.requires_grad
             and bias.requires_grad
-            and can_use_lt(x_2d, grad_2d)
             and grad_data.shape == self.out_shape  # no broadcast on incoming grad
         ):
-            lt = get_lt()
-            assert lt is not None
-            grad_weight, grad_bias = lt.matmul_dW_bgrada(x_2d, grad_2d)
-            if grad_weight.dtype != weight.data.dtype:
-                grad_weight = grad_weight.astype(weight.data.dtype)
-            if grad_bias.dtype != bias.data.dtype:
-                grad_bias = grad_bias.astype(bias.data.dtype)
-            used_lt = True
-
-        if not used_lt:
+            grad_weight, grad_bias = _matmul_autocast_dW_bgrad(
+                x_2d, grad_2d, param_dtype=weight.data.dtype
+            )
+        else:
             if weight.requires_grad:
-                grad_weight = xp.matmul(xp.swapaxes(x_2d, -1, -2), grad_2d)
-                if grad_weight.dtype != weight.data.dtype:
-                    grad_weight = grad_weight.astype(weight.data.dtype)
-
+                grad_weight = _matmul_autocast(xp.swapaxes(x_2d, -1, -2), grad_2d)
             if bias.requires_grad:
                 grad_bias = Function.unbroadcast(grad_data, self.bias_shape)
-                if grad_bias.dtype != bias.data.dtype:
-                    grad_bias = grad_bias.astype(bias.data.dtype)
 
         return grad_x, grad_weight, grad_bias
 
@@ -2009,33 +1927,8 @@ class LinearRelu(Function):
 
         x_2d = x.reshape(-1, x.shape[-1])
         cols = int(weight.shape[1])
-
-        # cuBLASLt RELU_BIAS epilogue fuses matmul + bias + ReLU into one kernel.
-        if can_use_lt(x_2d, weight, bias):
-            lt = get_lt()
-            assert lt is not None
-            out_2d = lt.matmul_bias(x_2d, weight, bias, with_relu=True)
-            out = out_2d.reshape(*x.shape[:-1], cols)
-            self.out_shape = out.shape
-            self.out = out
-            return out
-
-        out_dtype = (
-            x.dtype
-            if x.dtype == weight.dtype and x.dtype in LOW_PRECISION_FLOAT_DTYPES
-            else None
-        )
-        out_2d = xp.matmul(x_2d, weight)
-        if out_dtype is not None and out_2d.dtype != out_dtype:
-            out_2d = out_2d.astype(out_dtype)
-
-        rows = int(out_2d.shape[0])
-        used_cupy = _cupy_linear_relu_forward(out_2d, bias, rows=rows, cols=cols)
-        out = (
-            out_2d.reshape(*x.shape[:-1], cols)
-            if used_cupy
-            else xp.maximum(out_2d + bias, 0).reshape(*x.shape[:-1], cols)
-        )
+        out_2d = _matmul_autocast(x_2d, weight, bias, with_relu=True)
+        out = out_2d.reshape(*x.shape[:-1], cols)
         self.out_shape = out.shape
         self.out = out
         return out
@@ -2055,38 +1948,18 @@ class LinearRelu(Function):
         grad_x = grad_weight = grad_bias = None
 
         if x.requires_grad:
-            grad_x_2d = xp.matmul(grad_act_2d, xp.swapaxes(weight.data, -1, -2))
+            grad_x_2d = _matmul_autocast(grad_act_2d, xp.swapaxes(weight.data, -1, -2))
             grad_x = grad_x_2d.reshape(self.x_shape)
-            if grad_x.dtype != x.data.dtype:
-                grad_x = grad_x.astype(x.data.dtype)
 
-        # cuBLASLt BGRADA fuses dW + dbias for the FC1 backward (saves the
-        # separate column-sum reduction that the plain path does in unbroadcast).
-        used_lt = False
-        if (
-            weight.requires_grad
-            and bias.requires_grad
-            and can_use_lt(x_2d, grad_act_2d)
-        ):
-            lt = get_lt()
-            assert lt is not None
-            grad_weight, grad_bias = lt.matmul_dW_bgrada(x_2d, grad_act_2d)
-            if grad_weight.dtype != weight.data.dtype:
-                grad_weight = grad_weight.astype(weight.data.dtype)
-            if grad_bias.dtype != bias.data.dtype:
-                grad_bias = grad_bias.astype(bias.data.dtype)
-            used_lt = True
-
-        if not used_lt:
+        if weight.requires_grad and bias.requires_grad:
+            grad_weight, grad_bias = _matmul_autocast_dW_bgrad(
+                x_2d, grad_act_2d, param_dtype=weight.data.dtype
+            )
+        else:
             if weight.requires_grad:
-                grad_weight = xp.matmul(xp.swapaxes(x_2d, -1, -2), grad_act_2d)
-                if grad_weight.dtype != weight.data.dtype:
-                    grad_weight = grad_weight.astype(weight.data.dtype)
-
+                grad_weight = _matmul_autocast(xp.swapaxes(x_2d, -1, -2), grad_act_2d)
             if bias.requires_grad:
                 grad_bias = Function.unbroadcast(grad_act, self.bias_shape)
-                if grad_bias.dtype != bias.data.dtype:
-                    grad_bias = grad_bias.astype(bias.data.dtype)
 
         return grad_x, grad_weight, grad_bias
 

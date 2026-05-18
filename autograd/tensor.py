@@ -16,6 +16,7 @@ from typing import (
 
 from autograd.backend import (
     ARRAY_TYPE,
+    IS_CUPY,
     LOW_PRECISION_FLOAT_DTYPES,
     Array,
     ArrayLike,
@@ -23,6 +24,7 @@ from autograd.backend import (
     set_random_state,
     xp,
 )
+from autograd.cublaslt import can_use_lt, get_lt
 
 logger = logging.getLogger(__name__)
 
@@ -1435,6 +1437,146 @@ class Pow(Function):
         return grad_x, grad_y
 
 
+def _autocast_target(a_dtype, b_dtype) -> Tuple[Any, Any]:
+    """Single source of truth for the bf16/fp32 matmul autocast policy.
+
+    Returns (cast_dtype, out_dtype):
+      - bf16 @ bf16 → (None, bf16): no cast, bf16 output (legacy fast path).
+      - bf16 + fp32 mixed → (bf16, bf16): autocast the fp32 operand to bf16
+        (matmul boundary), run bf16 GEMM with fp32 accumulator internally,
+        return bf16 output. This is PyTorch's autocast contract for matmul.
+        The fp32 residual stream is preserved by the residual sum itself
+        (`bf16_linear_out + fp32_residual → fp32` via auto-promotion), not
+        by the matmul output dtype — so we avoid the cascade of fp32↔bf16
+        conversions that would otherwise wrap every Linear in the model.
+      - any other pairing (e.g., fp32 @ fp32, fp16 @ fp16, dtype mismatches
+        without bf16) → (None, None): pass through, no autocast.
+    """
+    bf16 = getattr(xp, "bfloat16", None)
+    if bf16 is None:
+        return None, None
+    if a_dtype == bf16 and b_dtype == bf16:
+        return None, bf16
+    a_mixed = a_dtype == bf16 and b_dtype == xp.float32
+    b_mixed = b_dtype == bf16 and a_dtype == xp.float32
+    if a_mixed or b_mixed:
+        return bf16, bf16
+    return None, None
+
+
+def _matmul_autocast(
+    a: Array,
+    b: Array,
+    bias: Optional[Array] = None,
+    *,
+    with_relu: bool = False,
+) -> Array:
+    """Autocast-aware matmul (+ optional bias / ReLU epilogue).
+
+    Dispatch point for the precision contract (`_autocast_target`). Autocast
+    is gated to 2D matmuls only — these are Linear layers, where the bf16/fp32
+    mixed case dominates training-step wall time and where the cuBLASLt
+    fp32-output fast path is available. Higher-rank batched matmul (e.g.,
+    attention Q@K^T, attn@V) keeps the legacy xp.matmul behavior: bf16@bf16
+    stays bf16, mixed dtypes auto-promote to fp32. This matches what the
+    dense attention path already assumes (Q/K upcast to fp32 before the
+    batched matmul to avoid stale-CuPy bf16-batched failures).
+    """
+    is_2d = a.ndim == 2 and b.ndim == 2
+    bf16 = getattr(xp, "bfloat16", None)
+    if is_2d:
+        cast_dtype, out_dtype = _autocast_target(a.dtype, b.dtype)
+    elif bf16 is not None and a.dtype == bf16 and b.dtype == bf16:
+        # Batched bf16@bf16 preserves legacy bf16 output (no cast).
+        cast_dtype, out_dtype = None, bf16
+    else:
+        cast_dtype, out_dtype = None, None
+    if cast_dtype is not None:
+        a_in = a if a.dtype == cast_dtype else a.astype(cast_dtype)
+        b_in = b if b.dtype == cast_dtype else b.astype(cast_dtype)
+    else:
+        a_in, b_in = a, b
+    if bias is not None and out_dtype is not None and bias.dtype != out_dtype:
+        bias_in = bias.astype(out_dtype)
+    else:
+        bias_in = bias
+
+    if is_2d and IS_CUPY and get_lt() is not None and can_use_lt(a_in, b_in):
+        bias_arr = (
+            xp.ascontiguousarray(bias_in)
+            if bias_in is not None and not bias_in.flags.c_contiguous
+            else bias_in
+        )
+        lt = get_lt()
+        assert lt is not None
+        return lt.matmul_bias(a_in, b_in, bias_arr, with_relu=with_relu)
+
+    out = xp.matmul(a_in, b_in)
+    if out_dtype is not None and out.dtype != out_dtype:
+        out = out.astype(out_dtype)
+    if bias_in is not None:
+        if bias_in.dtype != out.dtype:
+            bias_in = bias_in.astype(out.dtype)
+        out = out + bias_in
+    if with_relu:
+        out = xp.maximum(out, 0)
+    return out
+
+
+def _matmul_autocast_dW_bgrad(
+    x_2d: Array,
+    grad_2d: Array,
+    *,
+    param_dtype: Optional[Any] = None,
+) -> Tuple[Array, Array]:
+    """Fused dW = X.T @ grad and dbias = column_sum(grad), autocast-aware.
+
+    Used by LinearAffine/LinearRelu backward. The forward saw a (typically
+    fp32 input @ bf16 weight) GEMM and emitted bf16 output via the autocast
+    policy; symmetrically, dW should run on the same bf16 tensor cores. But
+    by the time we reach backward, both x and grad are usually fp32 (the
+    saved activation is fp32 because it lives on the residual stream, and
+    the grad is fp32 because the residual sum auto-promotes), so the dtype-
+    pair policy alone would pick "pass-through" and fall onto a slow fp32
+    GEMM with no tensor-core acceleration.
+
+    ``param_dtype`` lets the caller hint the matmul precision based on
+    context (here: the Linear's weight dtype). When it's bf16 we cast both
+    inputs and run bf16 GEMM, matching the forward and recovering the
+    tensor-core fast path.
+    """
+    bf16 = getattr(xp, "bfloat16", None)
+    if bf16 is not None and param_dtype == bf16:
+        cast_dtype, out_dtype = bf16, bf16
+    else:
+        cast_dtype, out_dtype = _autocast_target(x_2d.dtype, grad_2d.dtype)
+
+    x_in = (
+        x_2d
+        if cast_dtype is None or x_2d.dtype == cast_dtype
+        else x_2d.astype(cast_dtype)
+    )
+    g_in = (
+        grad_2d
+        if cast_dtype is None or grad_2d.dtype == cast_dtype
+        else grad_2d.astype(cast_dtype)
+    )
+
+    if IS_CUPY and get_lt() is not None and can_use_lt(x_in, g_in):
+        lt = get_lt()
+        assert lt is not None
+        return lt.matmul_dW_bgrada(x_in, g_in)
+
+    dW = xp.matmul(xp.swapaxes(x_in, -1, -2), g_in)
+    dbias = xp.sum(g_in, axis=0)
+    if out_dtype is not None:
+        if dW.dtype != out_dtype:
+            dW = dW.astype(out_dtype)
+        if dbias.dtype != out_dtype:
+            dbias = dbias.astype(out_dtype)
+    return dW, dbias
+
+
 class Matmul(Function):
     """Matrix multiplication of two tensors.
     See :func:`autograd.tensor.Tensor.__matmul__` function
@@ -1450,6 +1592,10 @@ class Matmul(Function):
 
         The operation uses ``xp.matmul``, which handles broadcasting and batching.
 
+        Delegates the precision contract to :func:`_matmul_autocast`; the
+        3D@2D Linear-projection rewrite stays here so we can flatten the
+        leading batch dims and reach the cuBLASLt 2D fast path.
+
         Args:
             x (xp.ndarray): The first tensor.
             y (xp.ndarray): The second tensor.
@@ -1460,11 +1606,6 @@ class Matmul(Function):
         # Save references so backward() can know which Tensors to differentiate
         self.x_shape = x.shape
         self.y_shape = y.shape
-        out_dtype = (
-            x.dtype
-            if x.dtype == y.dtype and x.dtype in LOW_PRECISION_FLOAT_DTYPES
-            else None
-        )
         if x.ndim > 2 and y.ndim == 2:
             # A common neural-net projection applies the same 2D weight matrix
             # to every leading batch position:
@@ -1474,18 +1615,10 @@ class Matmul(Function):
             # This is equivalent to:
             #   (batch * time, hidden) @ (hidden, vocab)
             # then reshaping back to (batch, time, vocab).
-            x_shape = x.shape
-            x_2d = x.reshape(-1, x_shape[-1])
-            out_2d = xp.matmul(x_2d, y)
-            out = out_2d.reshape(*x_shape[:-1], y.shape[-1])
-            if out_dtype is not None and out.dtype != out_dtype:
-                return out.astype(out_dtype)
-            return out
-
-        out = xp.matmul(x, y)
-        if out_dtype is not None and out.dtype != out_dtype:
-            return out.astype(out_dtype)
-        return out
+            x_2d = x.reshape(-1, x.shape[-1])
+            out_2d = _matmul_autocast(x_2d, y)
+            return out_2d.reshape(*x.shape[:-1], y.shape[-1])
+        return _matmul_autocast(x, y)
 
     def backward(self, grad: "Tensor") -> Tuple[Optional[Array], Optional[Array]]:
         r"""Compute the gradient for the matrix multiplication operation.
@@ -1563,10 +1696,10 @@ class Matmul(Function):
                 #   dx:   (batch, time, hidden)
                 grad_shape = grad.data.shape
                 grad_2d = grad.data.reshape(-1, grad_shape[-1])
-                grad_x_2d = xp.matmul(grad_2d, y_t)
+                grad_x_2d = _matmul_autocast(grad_2d, y_t)
                 grad_x = grad_x_2d.reshape(*grad_shape[:-1], y_t.shape[-1])
             else:
-                grad_x = xp.matmul(grad.data, y_t)
+                grad_x = _matmul_autocast(grad.data, y_t)
             # shape of grad_x should match x.data.shape
 
         if y.requires_grad:
@@ -1580,12 +1713,12 @@ class Matmul(Function):
                 # temporary and summing it afterward.
                 x_flat = x.data.reshape(-1, x.data.shape[-1])
                 grad_flat = grad.data.reshape(-1, grad.data.shape[-1])
-                grad_y = xp.matmul(xp.swapaxes(x_flat, -1, -2), grad_flat)
+                grad_y = _matmul_autocast(xp.swapaxes(x_flat, -1, -2), grad_flat)
             else:
                 # Otherwise preserve the general batched matmul path, including
                 # cases where y itself has batch dimensions.
                 x_t = xp.swapaxes(x.data, -1, -2)
-                raw_grad_y = xp.matmul(x_t, grad.data)
+                raw_grad_y = _matmul_autocast(x_t, grad.data)
                 # Now if y was 2D => shape (m, p), but raw_grad_y might be (B,m,p). We sum over batch dims.
                 # Let's figure out how many leading dims y has (besides the last 2).
                 if y.data.ndim == 2 and raw_grad_y.ndim > 2:

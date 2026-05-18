@@ -9,7 +9,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from autograd import functional, nn, optim
-from autograd.backend import LOW_PRECISION_FLOAT_DTYPES, Array, resolve_dtype, xp
+from autograd.backend import Array, resolve_dtype, xp
 from autograd.data.collator import CausalLMWindowCollator
 from autograd.data.data_loader import DataLoader
 from autograd.data.dataset import TokenWindowMapDataset
@@ -133,8 +133,10 @@ class GPT2(nn.Module):
         # Final normalization
         output = self.layer_norm(h_0)
 
-        # Output logits: multiply by the transpose of the embedding matrix
-        # This ties the weights with the input embedding,
+        # Output logits: multiply by the transpose of the embedding matrix.
+        # This ties the weights with the input embedding. Under the bf16
+        # autocast policy this mixed (fp32 @ bf16) matmul returns bf16 logits
+        # automatically, matching the bf16 CE kernel's expected dtype.
         output = (
             output @ self.token_embedding.parameters["weight"].T
         )  # shape (batch_size, seq_len, vocab_size)
@@ -195,24 +197,13 @@ class DecoderSublayer(nn.Module):
         )
 
     def forward(self, x: Tensor) -> Tensor:
-        input_dtype = x.data.dtype
-        low_precision_input = input_dtype in LOW_PRECISION_FLOAT_DTYPES
-
         # Pre-norm before attention
         a = self.layer_norm1(x)
-
         x = x + self.multi_head_attention(a, a, a, is_causal=True)
-        if low_precision_input and x.data.dtype != input_dtype:
-            # Dense attention can promote through its fp32 mask path; cast the residual
-            # stream back so later matmuls keep the intended low-precision activations.
-            x = x.astype(input_dtype)
 
         # Pre-norm before feed-forward
         b = self.layer_norm2(x)
         x = x + self.feedforward(b)
-        if low_precision_input and x.data.dtype != input_dtype:
-            # Linear bias/addition can also promote; preserve the block's input dtype.
-            x = x.astype(input_dtype)
         return x
 
 

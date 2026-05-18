@@ -1781,3 +1781,33 @@ class TestTensorRoll(TestTensor):
         x_rolled_torch.sum().backward()  # apply sum() as a no-op because when you do loss.backward(), it is a shortcut for loss.backward(torch.Tensor([1])). This in only valid if loss is a tensor containing a single element.
 
         assert allclose(self.x_matrix.grad.data, self.x_matrix_torch.grad.data)
+
+
+class TestAutocastPolicy(TestCase):
+    """Directly exercise the (cast_dtype, out_dtype) lookup table in
+    `_autocast_target`. This is the single source of truth for the matmul
+    autocast contract; every Linear / matmul fast path branches off of it."""
+
+    def test_autocast_target_policy(self):
+        from autograd.tensor import _autocast_target
+
+        bf16 = getattr(xp, "bfloat16", None)
+        if bf16 is None:
+            self.skipTest("backend has no bfloat16 dtype")
+
+        # bf16 @ bf16: legacy fast path, no cast, bf16 output.
+        assert _autocast_target(bf16, bf16) == (None, bf16)
+
+        # Mixed bf16 + fp32 (either operand order): PyTorch autocast contract.
+        # Cast the fp32 operand to bf16 at the matmul boundary, return bf16.
+        assert _autocast_target(bf16, xp.float32) == (bf16, bf16)
+        assert _autocast_target(xp.float32, bf16) == (bf16, bf16)
+
+        # fp32 @ fp32: pass through (no autocast, dtype stays).
+        assert _autocast_target(xp.float32, xp.float32) == (None, None)
+
+        # fp16 pairs are not part of the bf16 autocast contract -> pass through.
+        fp16 = getattr(xp, "float16", None)
+        if fp16 is not None:
+            assert _autocast_target(fp16, fp16) == (None, None)
+            assert _autocast_target(bf16, fp16) == (None, None)

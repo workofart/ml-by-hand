@@ -171,7 +171,14 @@ class LtMatmulBias:
         self._workspace = cp.empty((self._WORKSPACE_BYTES,), dtype=cp.uint8)
         self._cache: Dict[Any, Tuple[Any, ...]] = {}
 
-    def _build_plan(self, M: int, N: int, K: int, with_relu: bool):
+    def _build_plan(
+        self,
+        M: int,
+        N: int,
+        K: int,
+        with_relu: bool,
+        with_bias: bool,
+    ):
         lib = self._lib
         desc = ctypes.c_void_p()
         _check(
@@ -201,9 +208,13 @@ class LtMatmulBias:
             "transB",
         )
 
-        ep = ctypes.c_uint32(
-            CUBLASLT_EPILOGUE_RELU_BIAS if with_relu else CUBLASLT_EPILOGUE_BIAS
-        )
+        if with_bias:
+            ep_val = (
+                CUBLASLT_EPILOGUE_RELU_BIAS if with_relu else CUBLASLT_EPILOGUE_BIAS
+            )
+        else:
+            ep_val = CUBLASLT_EPILOGUE_RELU if with_relu else CUBLASLT_EPILOGUE_DEFAULT
+        ep = ctypes.c_uint32(ep_val)
         _check(
             lib.cublasLtMatmulDescSetAttribute(
                 desc, CUBLASLT_MATMUL_DESC_EPILOGUE, ctypes.byref(ep), ctypes.sizeof(ep)
@@ -211,18 +222,21 @@ class LtMatmulBias:
             "epilogue",
         )
 
-        bias_dt = ctypes.c_int32(CUDA_R_16BF)
-        _check(
-            lib.cublasLtMatmulDescSetAttribute(
-                desc,
-                CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE,
-                ctypes.byref(bias_dt),
-                ctypes.sizeof(bias_dt),
-            ),
-            "biasDtype",
-        )
+        if with_bias:
+            bias_dt = ctypes.c_int32(CUDA_R_16BF)
+            _check(
+                lib.cublasLtMatmulDescSetAttribute(
+                    desc,
+                    CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE,
+                    ctypes.byref(bias_dt),
+                    ctypes.sizeof(bias_dt),
+                ),
+                "biasDtype",
+            )
 
         # Layouts: row-major (M,N) computed via col-major (N,M) = (N,K)*(K,M).
+        # bf16 inputs, bf16 output; the fp32 accumulator lives inside the
+        # CUBLAS_COMPUTE_32F descriptor (PyTorch-autocast pattern).
         ay = ctypes.c_void_p()  # cuBLAS A := our B, shape (N,K) col-major ld=N
         _check(
             lib.cublasLtMatrixLayoutCreate(ctypes.byref(ay), CUDA_R_16BF, N, K, N),
@@ -282,33 +296,46 @@ class LtMatmulBias:
             )
         return desc, ay, by, cy, dy, heur
 
-    def matmul_bias(self, A, B, bias, with_relu: bool = False):
-        """A:(M,K) row-major bf16, B:(K,N) row-major bf16, bias:(N,) bf16."""
+    def matmul_bias(
+        self,
+        A,
+        B,
+        bias=None,
+        with_relu: bool = False,
+    ):
+        """A:(M,K) row-major bf16, B:(K,N) row-major bf16 → D:(M,N) bf16.
+
+        bias:(N,) optional bf16; added via the cuBLASLt BIAS epilogue. Uses
+        the CUBLAS_COMPUTE_32F descriptor so the accumulator runs in fp32
+        (PyTorch-autocast pattern) while inputs/outputs stay bf16.
+        """
         cp = self._cp
         M, K = int(A.shape[0]), int(A.shape[1])
         K2, N = int(B.shape[0]), int(B.shape[1])
         if K != K2:
             raise ValueError("matmul shape mismatch")
 
-        key = (M, N, K, with_relu)
+        with_bias = bias is not None
+        key = (M, N, K, with_relu, with_bias)
         plan = self._cache.get(key)
         if plan is None:
-            plan = self._build_plan(M, N, K, with_relu)
+            plan = self._build_plan(M, N, K, with_relu, with_bias)
             self._cache[key] = plan
         desc, ay, by, cy, dy, heur = plan
 
         D = cp.empty((M, N), dtype="bfloat16")
 
-        bias_ptr = ctypes.c_void_p(int(bias.data.ptr))
-        _check(
-            self._lib.cublasLtMatmulDescSetAttribute(
-                desc,
-                CUBLASLT_MATMUL_DESC_BIAS_POINTER,
-                ctypes.byref(bias_ptr),
-                ctypes.sizeof(bias_ptr),
-            ),
-            "biasPtr",
-        )
+        if with_bias:
+            bias_ptr = ctypes.c_void_p(int(bias.data.ptr))
+            _check(
+                self._lib.cublasLtMatmulDescSetAttribute(
+                    desc,
+                    CUBLASLT_MATMUL_DESC_BIAS_POINTER,
+                    ctypes.byref(bias_ptr),
+                    ctypes.sizeof(bias_ptr),
+                ),
+                "biasPtr",
+            )
 
         alpha = ctypes.c_float(1.0)
         beta = ctypes.c_float(0.0)
@@ -345,6 +372,8 @@ class LtMatmulBias:
             cuBLAS A = grad (op=N), cuBLAS B = X (op=T)
         BGRADA refers to cuBLAS A which is grad, so column_sum(grad) is what
         we want for the bias gradient of `Y = X @ W + b`.
+
+        bf16 inputs / bf16 outputs (dW and dbias both bf16); fp32 accumulator.
         """
         lib = self._lib
         desc = ctypes.c_void_p()
@@ -450,165 +479,12 @@ class LtMatmulBias:
             raise RuntimeError(f"cuBLASLt no algo for dW shape (K={K},N={N},BT={BT})")
         return desc, ay, by, cy, dy, heur
 
-    def _build_dx_plan(self, BT: int, K: int, N: int):
-        """Plan for dX(BT,K) = grad(BT,N) @ W(K,N)^T, no epilogue.
-
-        Derivation (cuBLAS col-major):
-            dX_col(K, BT) = W_col(N, K)^T @ grad_col(N, BT)
-        cuBLAS A = W (layout (N, K) col-major, ld=N, op=T -> virtual (K, N)).
-        cuBLAS B = grad (layout (N, BT) col-major, ld=N, op=N).
-        D = dX, col-major (K, BT) ld=K == row-major (BT, K) ld=K.
-        """
-        lib = self._lib
-        desc = ctypes.c_void_p()
-        _check(
-            lib.cublasLtMatmulDescCreate(
-                ctypes.byref(desc), CUBLAS_COMPUTE_32F, CUDA_R_32F
-            ),
-            "dxDesc",
-        )
-        op_n = ctypes.c_int32(CUBLAS_OP_N)
-        op_t = ctypes.c_int32(CUBLAS_OP_T)
-        # cuBLAS A = W, transposed.
-        _check(
-            lib.cublasLtMatmulDescSetAttribute(
-                desc,
-                CUBLASLT_MATMUL_DESC_TRANSA,
-                ctypes.byref(op_t),
-                ctypes.sizeof(op_t),
-            ),
-            "dxTransA",
-        )
-        # cuBLAS B = grad, no transpose.
-        _check(
-            lib.cublasLtMatmulDescSetAttribute(
-                desc,
-                CUBLASLT_MATMUL_DESC_TRANSB,
-                ctypes.byref(op_n),
-                ctypes.sizeof(op_n),
-            ),
-            "dxTransB",
-        )
-        ep = ctypes.c_uint32(CUBLASLT_EPILOGUE_DEFAULT)
-        _check(
-            lib.cublasLtMatmulDescSetAttribute(
-                desc, CUBLASLT_MATMUL_DESC_EPILOGUE, ctypes.byref(ep), ctypes.sizeof(ep)
-            ),
-            "dxEpilogue",
-        )
-
-        # cuBLAS A = W: (N, K) col-major, ld=N. op=T (set above).
-        ay = ctypes.c_void_p()
-        _check(
-            lib.cublasLtMatrixLayoutCreate(ctypes.byref(ay), CUDA_R_16BF, N, K, N),
-            "dxAlayout",
-        )
-        # cuBLAS B = grad: (N, BT) col-major, ld=N.
-        by = ctypes.c_void_p()
-        _check(
-            lib.cublasLtMatrixLayoutCreate(ctypes.byref(by), CUDA_R_16BF, N, BT, N),
-            "dxBlayout",
-        )
-        # D = dX: col-major (K, BT) ld=K -> row-major (BT, K) ld=K
-        cy = ctypes.c_void_p()
-        _check(
-            lib.cublasLtMatrixLayoutCreate(ctypes.byref(cy), CUDA_R_16BF, K, BT, K),
-            "dxClayout",
-        )
-        dy = ctypes.c_void_p()
-        _check(
-            lib.cublasLtMatrixLayoutCreate(ctypes.byref(dy), CUDA_R_16BF, K, BT, K),
-            "dxDlayout",
-        )
-
-        pref = ctypes.c_void_p()
-        _check(lib.cublasLtMatmulPreferenceCreate(ctypes.byref(pref)), "dxPref")
-        ws = ctypes.c_size_t(self._WORKSPACE_BYTES)
-        _check(
-            lib.cublasLtMatmulPreferenceSetAttribute(
-                pref,
-                CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
-                ctypes.byref(ws),
-                ctypes.sizeof(ws),
-            ),
-            "dxPrefWs",
-        )
-
-        heur = (_HeurResult * 1)()
-        returned = ctypes.c_int(0)
-        _check(
-            lib.cublasLtMatmulAlgoGetHeuristic(
-                self._handle,
-                desc,
-                ay,
-                by,
-                cy,
-                dy,
-                pref,
-                1,
-                heur,
-                ctypes.byref(returned),
-            ),
-            "dxHeuristic",
-        )
-        if returned.value == 0:
-            raise RuntimeError(f"cuBLASLt no algo for dX shape (BT={BT},K={K},N={N})")
-        return desc, ay, by, cy, dy, heur
-
-    def matmul_dX(self, grad, W, dX_dtype="bfloat16"):
-        """Compute dX(BT, K) = grad(BT, N) @ W(K, N).T.
-
-        W is the forward weight matrix (in_dim, out_dim) = (K, N), passed
-        without explicit transpose. cuBLAS A = W (op=T, layout (N,K) ld=N),
-        cuBLAS B = grad (op=N, layout (N,BT) ld=N) -> D_col(K,BT).
-        """
-        cp = self._cp
-        BT, N = int(grad.shape[0]), int(grad.shape[1])
-        K, N2 = int(W.shape[0]), int(W.shape[1])
-        if N != N2:
-            raise ValueError("matmul_dX shape mismatch")
-
-        key = ("dX", BT, K, N)
-        plan = self._cache.get(key)
-        if plan is None:
-            plan = self._build_dx_plan(BT, K, N)
-            self._cache[key] = plan
-        desc, ay, by, cy, dy, heur = plan
-
-        dX = cp.empty((BT, K), dtype=dX_dtype)
-        alpha = ctypes.c_float(1.0)
-        beta = ctypes.c_float(0.0)
-        stream = cp.cuda.get_current_stream()
-        # cuBLAS A = W (with `ay` layout), cuBLAS B = grad (with `by` layout)
-        _check(
-            self._lib.cublasLtMatmul(
-                self._handle,
-                desc,
-                ctypes.byref(alpha),
-                ctypes.c_void_p(int(W.data.ptr)),
-                ay,
-                ctypes.c_void_p(int(grad.data.ptr)),
-                by,
-                ctypes.byref(beta),
-                ctypes.c_void_p(int(dX.data.ptr)),
-                cy,
-                ctypes.c_void_p(int(dX.data.ptr)),
-                dy,
-                ctypes.cast(ctypes.byref(heur), ctypes.c_void_p),
-                ctypes.c_void_p(int(self._workspace.data.ptr)),
-                ctypes.c_size_t(self._WORKSPACE_BYTES),
-                ctypes.c_void_p(int(stream.ptr)),
-            ),
-            "dxMatmul",
-        )
-        return dX
-
-    def matmul_dW_bgrada(self, X, grad, dW_dtype="bfloat16"):
+    def matmul_dW_bgrada(self, X, grad):
         """Compute dW = X.T @ grad and dbias = column_sum(grad) in one call.
 
         X: (BT, K) row-major bf16 (contiguous)
         grad: (BT, N) row-major bf16 (contiguous)
-        Returns (dW (K, N) bf16, dbias (N,) bf16).
+        Returns (dW (K, N), dbias (N,)), both bf16. fp32 accumulator.
         """
         cp = self._cp
         BT, K = int(X.shape[0]), int(X.shape[1])
@@ -623,7 +499,7 @@ class LtMatmulBias:
             self._cache[key] = plan
         desc, ay, by, cy, dy, heur = plan
 
-        dW = cp.empty((K, N), dtype=dW_dtype)
+        dW = cp.empty((K, N), dtype="bfloat16")
         dbias = cp.empty((N,), dtype="bfloat16")
 
         bias_ptr = ctypes.c_void_p(int(dbias.data.ptr))
