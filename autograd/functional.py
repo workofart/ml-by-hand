@@ -12,6 +12,7 @@ from autograd.backend import (
     ArrayLike,
     xp,
 )
+from autograd.cublaslt import can_use_lt, get_lt
 from autograd.tensor import Function, Tensor
 
 logger = logging.getLogger(__name__)
@@ -1913,17 +1914,29 @@ class LinearAffine(Function):
         self.x_shape = x.shape
         self.bias_shape = bias.shape
 
+        x_2d = x.reshape(-1, x.shape[-1])
+        cols = int(weight.shape[1])
+
+        # cuBLASLt with BIAS epilogue fuses matmul+bias (~1.8x vs separate kernels
+        # on bf16 GPT-2 shapes); falls through to the cuBLAS-classic path otherwise.
+        if can_use_lt(x_2d, weight, bias):
+            lt = get_lt()
+            assert lt is not None
+            out_2d = lt.matmul_bias(x_2d, weight, bias, with_relu=False)
+            out = out_2d.reshape(*x.shape[:-1], cols)
+            self.out_shape = out.shape
+            return out
+
         out_dtype = (
             x.dtype
             if x.dtype == weight.dtype and x.dtype in LOW_PRECISION_FLOAT_DTYPES
             else None
         )
-        x_2d = x.reshape(-1, x.shape[-1])
         out_2d = xp.matmul(x_2d, weight)
         if out_dtype is not None and out_2d.dtype != out_dtype:
             out_2d = out_2d.astype(out_dtype)
 
-        rows, cols = int(out_2d.shape[0]), int(out_2d.shape[1])
+        rows = int(out_2d.shape[0])
         used_cupy = _cupy_linear_bias_forward(out_2d, bias, rows=rows, cols=cols)
         out = (
             out_2d.reshape(*x.shape[:-1], cols)
@@ -1949,15 +1962,35 @@ class LinearAffine(Function):
             if grad_x.dtype != x.data.dtype:
                 grad_x = grad_x.astype(x.data.dtype)
 
-        if weight.requires_grad:
-            grad_weight = xp.matmul(xp.swapaxes(x_2d, -1, -2), grad_2d)
+        # cuBLASLt BGRADA fuses dW = X.T @ grad and dbias = column_sum(grad)
+        # into one kernel; otherwise fall back to the cuBLAS-classic matmul plus
+        # a separate Function.unbroadcast reduction for the bias gradient.
+        used_lt = False
+        if (
+            weight.requires_grad
+            and bias.requires_grad
+            and can_use_lt(x_2d, grad_2d)
+            and grad_data.shape == self.out_shape  # no broadcast on incoming grad
+        ):
+            lt = get_lt()
+            assert lt is not None
+            grad_weight, grad_bias = lt.matmul_dW_bgrada(x_2d, grad_2d)
             if grad_weight.dtype != weight.data.dtype:
                 grad_weight = grad_weight.astype(weight.data.dtype)
-
-        if bias.requires_grad:
-            grad_bias = Function.unbroadcast(grad_data, self.bias_shape)
             if grad_bias.dtype != bias.data.dtype:
                 grad_bias = grad_bias.astype(bias.data.dtype)
+            used_lt = True
+
+        if not used_lt:
+            if weight.requires_grad:
+                grad_weight = xp.matmul(xp.swapaxes(x_2d, -1, -2), grad_2d)
+                if grad_weight.dtype != weight.data.dtype:
+                    grad_weight = grad_weight.astype(weight.data.dtype)
+
+            if bias.requires_grad:
+                grad_bias = Function.unbroadcast(grad_data, self.bias_shape)
+                if grad_bias.dtype != bias.data.dtype:
+                    grad_bias = grad_bias.astype(bias.data.dtype)
 
         return grad_x, grad_weight, grad_bias
 
@@ -1974,17 +2007,29 @@ class LinearRelu(Function):
         self.x_shape = x.shape
         self.bias_shape = bias.shape
 
+        x_2d = x.reshape(-1, x.shape[-1])
+        cols = int(weight.shape[1])
+
+        # cuBLASLt RELU_BIAS epilogue fuses matmul + bias + ReLU into one kernel.
+        if can_use_lt(x_2d, weight, bias):
+            lt = get_lt()
+            assert lt is not None
+            out_2d = lt.matmul_bias(x_2d, weight, bias, with_relu=True)
+            out = out_2d.reshape(*x.shape[:-1], cols)
+            self.out_shape = out.shape
+            self.out = out
+            return out
+
         out_dtype = (
             x.dtype
             if x.dtype == weight.dtype and x.dtype in LOW_PRECISION_FLOAT_DTYPES
             else None
         )
-        x_2d = x.reshape(-1, x.shape[-1])
         out_2d = xp.matmul(x_2d, weight)
         if out_dtype is not None and out_2d.dtype != out_dtype:
             out_2d = out_2d.astype(out_dtype)
 
-        rows, cols = int(out_2d.shape[0]), int(out_2d.shape[1])
+        rows = int(out_2d.shape[0])
         used_cupy = _cupy_linear_relu_forward(out_2d, bias, rows=rows, cols=cols)
         out = (
             out_2d.reshape(*x.shape[:-1], cols)
@@ -2015,15 +2060,33 @@ class LinearRelu(Function):
             if grad_x.dtype != x.data.dtype:
                 grad_x = grad_x.astype(x.data.dtype)
 
-        if weight.requires_grad:
-            grad_weight = xp.matmul(xp.swapaxes(x_2d, -1, -2), grad_act_2d)
+        # cuBLASLt BGRADA fuses dW + dbias for the FC1 backward (saves the
+        # separate column-sum reduction that the plain path does in unbroadcast).
+        used_lt = False
+        if (
+            weight.requires_grad
+            and bias.requires_grad
+            and can_use_lt(x_2d, grad_act_2d)
+        ):
+            lt = get_lt()
+            assert lt is not None
+            grad_weight, grad_bias = lt.matmul_dW_bgrada(x_2d, grad_act_2d)
             if grad_weight.dtype != weight.data.dtype:
                 grad_weight = grad_weight.astype(weight.data.dtype)
-
-        if bias.requires_grad:
-            grad_bias = Function.unbroadcast(grad_act, self.bias_shape)
             if grad_bias.dtype != bias.data.dtype:
                 grad_bias = grad_bias.astype(bias.data.dtype)
+            used_lt = True
+
+        if not used_lt:
+            if weight.requires_grad:
+                grad_weight = xp.matmul(xp.swapaxes(x_2d, -1, -2), grad_act_2d)
+                if grad_weight.dtype != weight.data.dtype:
+                    grad_weight = grad_weight.astype(weight.data.dtype)
+
+            if bias.requires_grad:
+                grad_bias = Function.unbroadcast(grad_act, self.bias_shape)
+                if grad_bias.dtype != bias.data.dtype:
+                    grad_bias = grad_bias.astype(bias.data.dtype)
 
         return grad_x, grad_weight, grad_bias
 
