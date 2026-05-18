@@ -56,6 +56,8 @@ class RandomSampler(Sampler):
     attached samplers.
     """
 
+    _REPLACEMENT_CHUNK_SIZE = 8_192
+
     def __init__(
         self,
         dataset: MapDataset,
@@ -88,10 +90,10 @@ class RandomSampler(Sampler):
     def _iter_with_replacement(self) -> Iterator[int]:
         remaining = self.num_samples
         n = len(self.dataset)
-        chunk_size = min(n, 1_000_000)
+        chunk_size = min(n, self._REPLACEMENT_CHUNK_SIZE)
         while remaining > 0:
             batch = min(chunk_size, remaining)
-            yield from np.random.randint(0, n, size=batch).tolist()
+            yield from np.random.randint(0, n, size=batch)
             remaining -= batch
 
     def on_epoch_start(self) -> None:

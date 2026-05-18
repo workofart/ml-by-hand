@@ -43,6 +43,33 @@ def test_random_sampler_replacement_respects_num_samples():
     assert all(0 <= index < len(dataset) for index in indices)
 
 
+def test_random_sampler_replacement_does_not_materialize_numpy_chunk_as_list(
+    monkeypatch,
+):
+    dataset = make_token_dataset(
+        [xp.arange(2), xp.arange(3), xp.arange(4), xp.arange(5), xp.arange(6)]
+    )
+
+    class NoListChunk:
+        def __init__(self, size):
+            self.size = size
+
+        def __iter__(self):
+            return iter([2, 0, 1, 2][: self.size])
+
+        def tolist(self):
+            raise AssertionError("replacement sampler should not call tolist")
+
+    monkeypatch.setattr(
+        "autograd.data.sampler.np.random.randint",
+        lambda *args, **kwargs: NoListChunk(kwargs["size"]),
+    )
+
+    sampler = RandomSampler(dataset, replacement=True, num_samples=4)
+
+    assert list(sampler) == [2, 0, 1, 2]
+
+
 def test_random_sampler_without_replacement_respects_num_samples():
     dataset = make_token_dataset([xp.arange(2), xp.arange(3), xp.arange(4)])
 
