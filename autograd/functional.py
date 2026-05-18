@@ -1670,9 +1670,14 @@ def _cudnn_sdpa_backward_graph(
         compute_data_type=cudnn.data_type.FLOAT,
         name="cudnn_causal_sdpa_backward",
     )
-    _cudnn_mark_output(grad_query, shape, data_type)
-    _cudnn_mark_output(grad_key, shape, data_type)
-    _cudnn_mark_output(grad_value, shape, data_type)
+    # grad_{query,key,value} buffers are allocated via xp.empty_like(query/key/value)
+    # in the backward, which preserves the (non-contiguous) BTHD-storage stride
+    # pattern of Q/K/V. The cuDNN graph must be told to write the gradients with
+    # those same strides — otherwise it writes assuming default C-contiguous BHTD
+    # layout and downstream reads land on the wrong elements.
+    _cudnn_mark_output(grad_query, shape, data_type, input_stride)
+    _cudnn_mark_output(grad_key, shape, data_type, input_stride)
+    _cudnn_mark_output(grad_value, shape, data_type, input_stride)
     graph.validate()
     graph.build_operation_graph()
     graph.create_execution_plans([cudnn.heur_mode.A, cudnn.heur_mode.FALLBACK])
