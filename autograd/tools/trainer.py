@@ -255,13 +255,13 @@ class TrainingState:
                         xp.asarray(train_loss_total_weight, dtype=xp.float32),
                     ]
                 )
-                if eval_state is not None:
-                    values.extend(
-                        [
-                            xp.asarray(val_loss_sum, dtype=xp.float32),
-                            xp.asarray(val_loss_total_weight, dtype=xp.float32),
-                        ]
-                    )
+            if eval_state is not None:
+                values.extend(
+                    [
+                        xp.asarray(val_loss_sum, dtype=xp.float32),
+                        xp.asarray(val_loss_total_weight, dtype=xp.float32),
+                    ]
+                )
             if eval_state is not None:
                 for key in metric_keys:
                     values.extend(eval_metric_totals[key])
@@ -275,10 +275,10 @@ class TrainingState:
                 train_loss_sum = reduced[offset]
                 train_loss_total_weight = reduced[offset + 1]
                 offset += 2
-                if eval_state is not None:
-                    val_loss_sum = reduced[offset]
-                    val_loss_total_weight = reduced[offset + 1]
-                    offset += 2
+            if eval_state is not None:
+                val_loss_sum = reduced[offset]
+                val_loss_total_weight = reduced[offset + 1]
+                offset += 2
             for key in metric_keys:
                 eval_metric_totals[key] = (reduced[offset], reduced[offset + 1])
                 offset += 2
