@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import torch  # for comparison
 
-from autograd.backend import xp
+from autograd.backend import resolve_dtype, xp
 from autograd.tensor import Tensor, is_grad_enabled, no_grad
 from test.helpers import allclose, array_equal, isclose
 
@@ -1204,6 +1204,69 @@ class TestTensorSetitem(TestTensor):
         x = Tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
         x[0, 1] = Tensor([5.0], requires_grad=True)
         assert array_equal(x.data, [[1.0, 5.0], [3.0, 4.0]])
+
+
+class TestTensorAccumulateGradDtype(TestCase):
+    """Verify ``_accumulate_grad`` picks the right accumulator dtype on both
+    the idx and non-idx paths.
+
+    When the Optimizer flags a parameter with
+    ``_use_fp32_grad_accumulator=True``, bf16 grads must be upgraded to fp32
+    so cross-microbatch sums don't lose precision (the LayerNorm-gain bug).
+    Untagged tensors must preserve their incoming grad dtype so backward
+    ops that produce low-precision grads stay dtype-preserving.
+
+    The accumulator dtype must also match the incoming addend on the
+    second call, so the in-place ``+=`` does not need a runtime cast.
+    """
+
+    def _grad_dtype_after_two_accumulations(self, dtype, tagged, idx):
+        t = Tensor(xp.ones((4,), dtype=dtype), requires_grad=True)
+        t._use_fp32_grad_accumulator = tagged
+        g = xp.asarray([1.0, 2.0, 3.0, 4.0], dtype=dtype)
+        t._accumulate_grad(Tensor(g, requires_grad=False), idx=idx)
+        # Second call hits the in-place += branch; if accumulator dtype
+        # disagrees with the addend, a hidden cast would be needed.
+        t._accumulate_grad(Tensor(g, requires_grad=False), idx=idx)
+        return t.grad.data.dtype
+
+    def test_tagged_bf16_upgrades_to_fp32(self):
+        if not hasattr(xp, "bfloat16"):
+            self.skipTest("bfloat16 dtype not available on this backend")
+        bf16 = resolve_dtype("bfloat16")
+        assert (
+            self._grad_dtype_after_two_accumulations(bf16, tagged=True, idx=None)
+            == xp.float32
+        )
+        assert (
+            self._grad_dtype_after_two_accumulations(bf16, tagged=True, idx=slice(None))
+            == xp.float32
+        )
+
+    def test_untagged_bf16_preserves_dtype(self):
+        if not hasattr(xp, "bfloat16"):
+            self.skipTest("bfloat16 dtype not available on this backend")
+        bf16 = resolve_dtype("bfloat16")
+        assert (
+            self._grad_dtype_after_two_accumulations(bf16, tagged=False, idx=None)
+            == bf16
+        )
+        assert (
+            self._grad_dtype_after_two_accumulations(
+                bf16, tagged=False, idx=slice(None)
+            )
+            == bf16
+        )
+
+    def test_fp32_passthrough(self):
+        for tagged in (True, False):
+            for idx in (None, slice(None)):
+                assert (
+                    self._grad_dtype_after_two_accumulations(
+                        xp.float32, tagged=tagged, idx=idx
+                    )
+                    == xp.float32
+                )
 
 
 class TestTensorIAdd(TestTensor):

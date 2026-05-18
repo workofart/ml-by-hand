@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import torch  # for test validation
 
-from autograd.backend import xp
+from autograd.backend import IS_CUPY, resolve_dtype, xp
 from autograd.nn import Tensor
 from autograd.optim import SGD, Adam, CosineScheduler, Optimizer
 from test.helpers import allclose
@@ -117,6 +117,18 @@ class TestOptimizer(TestCase):
             assert allclose(old_sd["states"]["m"][pid], new_sd["states"]["m"][pid])
             assert allclose(old_sd["states"]["v"][pid], new_sd["states"]["v"][pid])
         self.assertEqual(old_sd["states"]["timestep"], new_sd["states"]["timestep"])
+
+    def test_optimizer_load_state_dict_preserves_empty_state_groups(self):
+        saved_state = {
+            "hyperparams": {"lr": 0.01},
+            "states": {"timestep": 3, "empty_group": {}},
+        }
+
+        new_optimizer = Optimizer(self.params, lr=999.0)
+        new_optimizer.load_state_dict(saved_state)
+
+        self.assertIn("empty_group", new_optimizer.state_dict()["states"])
+        self.assertEqual(new_optimizer.state_dict()["states"]["empty_group"], {})
 
     def test_base_optimizer_step_is_not_implemented(self):
         with self.assertRaises(NotImplementedError):
@@ -572,6 +584,104 @@ class TestAdam(TestCase):
         # Should match within a small tolerance
         assert allclose(custom_final_p1, torch_final_p1, atol=1e-6, rtol=1e-6)
         assert allclose(custom_final_p2, torch_final_p2, atol=1e-6, rtol=1e-6)
+
+    def test_bf16_step_matches_fp32_reference(self):
+        if not IS_CUPY:
+            self.skipTest("bf16 requires CuPy backend")
+
+        dtype = resolve_dtype("bfloat16")
+        param_data = xp.array([1.0, -2.0, 3.0, -4.0], dtype=dtype)
+        grad_data = xp.array([0.25, -0.5, 0.75, -1.0], dtype=dtype)
+
+        bf16_param = Tensor(param_data.copy())
+        bf16_param.grad = Tensor(grad_data.copy(), requires_grad=False)
+        bf16_adam = Adam(
+            {"param": bf16_param},
+            lr=0.01,
+            beta1=0.8,
+            beta2=0.9,
+            epsilon=1e-5,
+            weight_decay=0.01,
+        )
+        bf16_adam.step()
+
+        ref_param = Tensor(param_data.astype(xp.float32))
+        ref_param.grad = Tensor(grad_data.astype(xp.float32), requires_grad=False)
+        reference = Adam(
+            {"param": ref_param},
+            lr=0.01,
+            beta1=0.8,
+            beta2=0.9,
+            epsilon=1e-5,
+            weight_decay=0.01,
+        )
+        reference.step()
+
+        assert bf16_param.data.dtype == dtype
+        assert allclose(
+            bf16_param.data.astype(xp.float32),
+            reference.model_parameters["param"].data.astype(xp.float32),
+            atol=2e-2,
+            rtol=2e-2,
+        )
+        assert allclose(
+            bf16_adam._states["m"]["param"],
+            reference._states["m"]["param"],
+            atol=1e-6,
+            rtol=1e-6,
+        )
+        assert allclose(
+            bf16_adam._states["v"]["param"],
+            reference._states["v"]["param"],
+            atol=1e-6,
+            rtol=1e-6,
+        )
+
+    def test_cupy_bf16_master_advances_gain_at_one_with_small_lr(self):
+        """Regression: bf16 LayerNorm-style gain (init=1.0) must move under
+        Adam updates with lr=6e-4 thanks to the fp32 master copy.
+
+        Without the master, every Adam update of magnitude ~1e-4..1e-3 is
+        below the bf16 ULP near 1.0 (~7.8e-3), so the store rounds back to
+        exactly 1.0 and the parameter is frozen for the entire training run.
+        """
+        if not IS_CUPY:
+            self.skipTest("CuPy-only bf16 master test")
+
+        dtype = resolve_dtype("bfloat16")
+        param = Tensor(xp.ones((768,), dtype=dtype))
+        adam = Adam(
+            {"layer_norm.gain": param},
+            lr=6e-4,
+            beta1=0.9,
+            beta2=0.95,
+            epsilon=1e-8,
+            weight_decay=0.1,
+        )
+
+        rng = xp.random.RandomState(0) if hasattr(xp.random, "RandomState") else None
+        before = param.data.astype(xp.float32).copy()
+        for _ in range(50):
+            grad = xp.asarray(
+                (rng.randn(768) if rng is not None else xp.random.randn(768)) * 0.05,
+                dtype=xp.float32,
+            )
+            param.grad = Tensor(grad, requires_grad=False)
+            adam.step()
+        after = param.data.astype(xp.float32)
+
+        delta = xp.abs(after - before)
+        n_changed = int((delta > 0).sum())
+        # Without the master fix this is 0 / 768. With the master it must be
+        # essentially all of them; allow a few stragglers in case some entries
+        # genuinely net to ~0 after weight decay and Adam momenta cancel.
+        assert n_changed > 700, (
+            f"bf16 gain stuck: only {n_changed}/768 entries moved under Adam; "
+            "master-copy path is not running."
+        )
+        assert "layer_norm.gain" in adam._states["master"], (
+            "Adam did not allocate an fp32 master for the bf16 param"
+        )
 
 
 class TestCosineScheduler(TestCase):

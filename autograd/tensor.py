@@ -238,6 +238,12 @@ class Tensor:
         self.creator = creator
         self._backward = lambda: None
         self.requires_grad = requires_grad
+        # Mixed-precision flag: when True, _accumulate_grad upgrades incoming
+        # low-precision grads to fp32 so cross-microbatch sums don't lose
+        # precision. The Optimizer flips this on for every parameter it owns;
+        # intermediate / activation Tensors keep the dtype-preserving behavior
+        # that downstream tests rely on.
+        self._use_fp32_grad_accumulator = False
 
     @property
     def data(self) -> Array:
@@ -1073,11 +1079,28 @@ class Tensor:
         if not isinstance(grad, Tensor):
             grad = Tensor(grad, requires_grad=False)
 
+        # Mixed-precision: parameter tensors accumulate gradients in fp32 to
+        # prevent silent precision loss across microbatches.
+        # bf16 += bf16 quantizes each addition to the bf16 grid;
+        # for ~1e-3 magnitude grads summed over several microbatches the error
+        # compounds to several percent. The optimizer is responsible for setting
+        # the _use_fp32_grad_accumulator to True for mixed-precision training.
+        if (
+            self._use_fp32_grad_accumulator
+            and grad.data.dtype in LOW_PRECISION_FLOAT_DTYPES
+        ):
+            grad = Tensor(grad.data.astype(xp.float32), requires_grad=False)
+
         # Initialize or accumulate gradient
         if self._grad is None:
             if idx is not None:
                 # Initialize with zeros
-                self._grad = Tensor(xp.zeros_like(self.data), requires_grad=False)
+                # Accumulator dtype matches the (possibly fp32-upgraded) grad,
+                # so subsequent += never needs a dtype cast.
+                self._grad = Tensor(
+                    xp.zeros(self.data.shape, dtype=grad.data.dtype),
+                    requires_grad=False,
+                )
                 # Accumulate at index without reshaping
                 self._grad.data[idx] = grad.data
             else:

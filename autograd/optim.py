@@ -146,6 +146,12 @@ class Optimizer:
         # We assume this is a flattened named parameter dict
         # passed by calling Optimizer(model.parameters())
         self.model_parameters = model_parameters
+        # Mark every owned tensor as a parameter so backward accumulates its
+        # gradient in fp32 — the cross-microbatch sum on bf16 would otherwise
+        # introduce ~1% rounding noise per accumulation step. The flag is
+        # idempotent and only affects subsequent _accumulate_grad calls.
+        for param in self.model_parameters.values():
+            param._use_fp32_grad_accumulator = True
         self._hyperparams["lr"] = lr
         self.initial_lr = lr
         if lr_scheduler_kwargs:
@@ -347,6 +353,7 @@ class Optimizer:
             if state_key == "timestep":
                 self._states["timestep"] = name_dict
             else:
+                self._states[state_key] = {}
                 for param_name, val in name_dict.items():
                     if param_name in self.model_parameters:
                         self._states[state_key][param_name] = val
@@ -445,6 +452,13 @@ class Adam(Optimizer):
         # Internal state
         self._states["m"] = defaultdict(float)  # first momentum estimate
         self._states["v"] = defaultdict(float)  # second momentum estimate
+        # fp32 master copy for low-precision params. Adam updates are computed
+        # in fp32 against the master and the working copy (param.data) is
+        # re-derived from it each step.
+        self._states["master"] = {}
+        for name, param in self.model_parameters.items():
+            if param.data.dtype in LOW_PRECISION_FLOAT_DTYPES:
+                self._states["master"][name] = param.data.astype(xp.float32)
 
     def step(self) -> None:
         """
@@ -494,13 +508,19 @@ class Adam(Optimizer):
             m_hat = new_m / (1 - beta1**self.timestep)
             v_hat = new_v / (1 - beta2**self.timestep)
 
-            # Weight decay step (decoupled)
-            if weight_decay > 0.0:
-                param.data = param.data - self.lr * weight_decay * param.data
-            param.data -= self.lr * m_hat / (xp.sqrt(v_hat) + epsilon)
-
-            # For mixed precision, return to the param_dtype so the following dense ops stay low precision.
-            if param_dtype in LOW_PRECISION_FLOAT_DTYPES:
-                param.data = param.data.astype(param_dtype)
+            # For low-precision params, do the update against the fp32 master
+            # and then re-derive the working copy.
+            # For fp32 params (no master), update `param.data` directly.
+            master = self._states["master"].get(name)
+            if master is not None:
+                if weight_decay > 0.0:
+                    master = master - self.lr * weight_decay * master
+                master -= self.lr * m_hat / (xp.sqrt(v_hat) + epsilon)
+                self._states["master"][name] = master
+                param.data = master.astype(param_dtype)
+            else:
+                if weight_decay > 0.0:
+                    param.data = param.data - self.lr * weight_decay * param.data
+                param.data -= self.lr * m_hat / (xp.sqrt(v_hat) + epsilon)
         materialize(self.model_parameters, self._states)
         return None
