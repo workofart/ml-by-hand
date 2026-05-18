@@ -13,45 +13,23 @@ logger = logging.getLogger(__name__)
 
 
 @lru_cache(maxsize=1)
-def _cupy_adamw_bf16_kernels() -> tuple[Any, Any]:
+def _cupy_adamw_bf16_master_kernel() -> Any:
+    """AdamW kernel for bf16 params with an fp32 master copy.
+
+    All math happens in fp32: read the master, apply weight decay + Adam
+    update, write the master back, and refresh the bf16 working copy. This
+    prevents the bf16-ULP-swallowing bug where small updates to a parameter
+    near magnitude 1.0 round to zero on store (`2^-7 ~= 0.0078` distance
+    between adjacent bf16 values near 1.0, vs. typical Adam updates of
+    `lr ~= 6e-4`).
+    """
     module = xp.RawModule(
         code=r"""
         #include <cuda_bf16.h>
 
-        extern "C" __global__ void adamw_bf16_grad_bf16(
+        extern "C" __global__ void adamw_bf16_master(
             __nv_bfloat16* param,
-            const __nv_bfloat16* grad,
-            float* m,
-            float* v,
-            const long long size,
-            const float lr,
-            const float beta1,
-            const float beta2,
-            const float one_minus_beta1,
-            const float one_minus_beta2,
-            const float bias_correction1,
-            const float bias_correction2,
-            const float epsilon,
-            const float weight_decay
-        ) {
-            long long idx = blockIdx.x * blockDim.x + threadIdx.x;
-            long long stride = blockDim.x * gridDim.x;
-            for (; idx < size; idx += stride) {
-                float g = __bfloat162float(grad[idx]);
-                float new_m = beta1 * m[idx] + one_minus_beta1 * g;
-                float new_v = beta2 * v[idx] + one_minus_beta2 * g * g;
-                m[idx] = new_m;
-                v[idx] = new_v;
-                float p = __bfloat162float(param[idx]);
-                p = p - lr * weight_decay * p;
-                p = p - lr * (new_m / bias_correction1) /
-                    (sqrtf(new_v / bias_correction2) + epsilon);
-                param[idx] = __float2bfloat16(p);
-            }
-        }
-
-        extern "C" __global__ void adamw_bf16_grad_float(
-            __nv_bfloat16* param,
+            float* master,
             const float* grad,
             float* m,
             float* v,
@@ -74,20 +52,18 @@ def _cupy_adamw_bf16_kernels() -> tuple[Any, Any]:
                 float new_v = beta2 * v[idx] + one_minus_beta2 * g * g;
                 m[idx] = new_m;
                 v[idx] = new_v;
-                float p = __bfloat162float(param[idx]);
+                float p = master[idx];
                 p = p - lr * weight_decay * p;
                 p = p - lr * (new_m / bias_correction1) /
                     (sqrtf(new_v / bias_correction2) + epsilon);
+                master[idx] = p;
                 param[idx] = __float2bfloat16(p);
             }
         }
         """,
         options=("--std=c++11",),
     )
-    return (
-        module.get_function("adamw_bf16_grad_bf16"),
-        module.get_function("adamw_bf16_grad_float"),
-    )
+    return module.get_function("adamw_bf16_master")
 
 
 class LRScheduler:
@@ -554,10 +530,21 @@ class Adam(Optimizer):
             not IS_CUPY
             or not hasattr(xp, "bfloat16")
             or param.data.dtype != xp.bfloat16
-            or grad.dtype not in (xp.bfloat16, xp.float32)
             or not param.data.flags.c_contiguous
-            or not grad.flags.c_contiguous
         ):
+            return False
+
+        # The fused kernel expects an fp32 grad. Tensor._accumulate_grad
+        # upgrades low-precision grads to fp32 on intake, so we should rarely
+        # need this cast — keep it as a defensive shim for direct .grad
+        # assignments (e.g., unit tests).
+        if grad.dtype != xp.float32:
+            grad = grad.astype(xp.float32)
+        if not grad.flags.c_contiguous:
+            grad = xp.ascontiguousarray(grad)
+
+        master = self._ensure_master(name, param)
+        if master is None or not master.flags.c_contiguous:
             return False
 
         m_old = self._states["m"][name]
@@ -576,8 +563,7 @@ class Adam(Optimizer):
 
         self._states["m"][name] = m_old
         self._states["v"][name] = v_old
-        grad_bf16_kernel, grad_float_kernel = _cupy_adamw_bf16_kernels()
-        kernel = grad_bf16_kernel if grad.dtype == xp.bfloat16 else grad_float_kernel
+        kernel = _cupy_adamw_bf16_master_kernel()
         threads = 256
         blocks = min((int(param.data.size) + threads - 1) // threads, 1024)
         kernel(
@@ -585,6 +571,7 @@ class Adam(Optimizer):
             (threads,),
             (
                 param.data,
+                master,
                 grad,
                 m_old,
                 v_old,
