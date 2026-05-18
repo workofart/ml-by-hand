@@ -19,6 +19,7 @@ from autograd.tools.config_schema import (
     GenericTrainingConfig,
     TransformerTrainingConfig,
 )
+from autograd.tools.model import save_checkpoint
 from autograd.tools.trainer import (
     AbstractTrainer,
     LLMTrainer,
@@ -804,14 +805,15 @@ class TestSimpleTrainer(BaseTrainerTest):
             mock_save_checkpoint.call_args.kwargs["checkpoint_name"].endswith("_2")
         )
 
-    @patch("autograd.tools.trainer.load_checkpoint")
-    def test_fit_rejects_epoch_mode_mid_epoch_resume(self, mock_load_checkpoint):
-        mock_load_checkpoint.return_value = {
+    @patch("autograd.tools.trainer.load_checkpoint_state_into")
+    @patch("autograd.tools.trainer.load_checkpoint_metadata")
+    def test_fit_rejects_epoch_mode_mid_epoch_resume(
+        self, mock_load_metadata, _mock_load_state
+    ):
+        mock_load_metadata.return_value = {
             "epoch": 0,
             "step_count": 1,
             "steps_per_epoch": len(self.train_loader),
-            "model_state_dict": {},
-            "optimizer_state_dict": {},
             "model_init_kwargs": self.config.model_kwargs,
             "optimizer_init_kwargs": self.config.optimizer_kwargs,
         }
@@ -828,16 +830,15 @@ class TestSimpleTrainer(BaseTrainerTest):
                 checkpoint_path="dummy",
             )
 
-    @patch("autograd.tools.trainer.load_checkpoint")
+    @patch("autograd.tools.trainer.load_checkpoint_state_into")
+    @patch("autograd.tools.trainer.load_checkpoint_metadata")
     def test_fit_rejects_epoch_mode_resume_with_changed_steps_per_epoch(
-        self, mock_load_checkpoint
+        self, mock_load_metadata, _mock_load_state
     ):
-        mock_load_checkpoint.return_value = {
+        mock_load_metadata.return_value = {
             "epoch": 1,
             "step_count": len(self.train_loader) + 1,
             "steps_per_epoch": len(self.train_loader) + 1,
-            "model_state_dict": {},
-            "optimizer_state_dict": {},
             "model_init_kwargs": self.config.model_kwargs,
             "optimizer_init_kwargs": self.config.optimizer_kwargs,
         }
@@ -856,15 +857,16 @@ class TestSimpleTrainer(BaseTrainerTest):
         ):
             trainer.fit(self.train_loader, self.val_loader)
 
-    @patch("autograd.tools.trainer.load_checkpoint")
-    def test_resume_restores_best_val_loss_from_checkpoint(self, mock_load_checkpoint):
-        mock_load_checkpoint.return_value = {
+    @patch("autograd.tools.trainer.load_checkpoint_state_into")
+    @patch("autograd.tools.trainer.load_checkpoint_metadata")
+    def test_resume_restores_best_val_loss_from_checkpoint(
+        self, mock_load_metadata, _mock_load_state
+    ):
+        mock_load_metadata.return_value = {
             "epoch": 1,
             "step_count": len(self.train_loader),
             "steps_per_epoch": len(self.train_loader),
             "best_val_loss": 0.5,
-            "model_state_dict": {},
-            "optimizer_state_dict": {},
             "model_init_kwargs": self.config.model_kwargs,
             "optimizer_init_kwargs": self.config.optimizer_kwargs,
         }
@@ -880,9 +882,10 @@ class TestSimpleTrainer(BaseTrainerTest):
         self.assertEqual(trainer.best_val_loss, 0.5)
 
     @patch("autograd.tools.trainer.save_checkpoint")
-    @patch("autograd.tools.trainer.load_checkpoint")
+    @patch("autograd.tools.trainer.load_checkpoint_state_into")
+    @patch("autograd.tools.trainer.load_checkpoint_metadata")
     def test_save_checkpoint_reuses_loaded_init_kwargs(
-        self, mock_load_checkpoint, mock_save_checkpoint
+        self, mock_load_metadata, _mock_load_state, mock_save_checkpoint
     ):
         mock_save_checkpoint.return_value = (
             "checkpoints/default_MockModelClass_1.json",
@@ -890,12 +893,10 @@ class TestSimpleTrainer(BaseTrainerTest):
         )
         loaded_model_kwargs = {"hidden_size": 128}
         loaded_optimizer_kwargs = {"lr": 0.02}
-        mock_load_checkpoint.return_value = {
+        mock_load_metadata.return_value = {
             "epoch": 1,
             "step_count": len(self.train_loader),
             "steps_per_epoch": len(self.train_loader),
-            "model_state_dict": {},
-            "optimizer_state_dict": {},
             "model_init_kwargs": loaded_model_kwargs,
             "optimizer_init_kwargs": loaded_optimizer_kwargs,
         }
@@ -929,35 +930,24 @@ class TestSimpleTrainer(BaseTrainerTest):
         self.assertEqual(checkpoint["model_init_kwargs"], loaded_model_kwargs)
         self.assertEqual(checkpoint["optimizer_init_kwargs"], loaded_optimizer_kwargs)
 
-    @patch("autograd.tools.trainer.load_checkpoint")
+    @patch("autograd.tools.trainer.load_checkpoint_state_into")
+    @patch("autograd.tools.trainer.load_checkpoint_metadata")
     def test_pretrained_checkpoint_path_loads_weights_but_resets_training_state(
-        self, mock_load_checkpoint
+        self, mock_load_metadata, mock_load_state
     ):
         class TrackingModel(MockModelClass):
             def __init__(self, hidden_size=128, **kwargs):
                 super().__init__(hidden_size=hidden_size, **kwargs)
-                self.loaded_state_dict = None
-
-            def load_state_dict(self, state_dict):
-                self.loaded_state_dict = state_dict
 
         class TrackingOptimizer(MockOptimizerClass):
             def __init__(self, parameters, lr=1e-3, **kwargs):
                 super().__init__(parameters, lr=lr, **kwargs)
-                self.loaded_state_dict = None
 
-            def load_state_dict(self, state_dict):
-                self.loaded_state_dict = state_dict
-
-        model_state_dict = {"parameters": {}, "states": {}}
-        optimizer_state_dict = {"step": 123}
-        mock_load_checkpoint.return_value = {
+        mock_load_metadata.return_value = {
             "epoch": 9,
             "step_count": len(self.train_loader),
             "steps_per_epoch": len(self.train_loader),
             "best_val_loss": 0.25,
-            "model_state_dict": model_state_dict,
-            "optimizer_state_dict": optimizer_state_dict,
             "model_init_kwargs": {"hidden_size": 512},
             "optimizer_init_kwargs": {"lr": 0.02},
         }
@@ -979,28 +969,26 @@ class TestSimpleTrainer(BaseTrainerTest):
         )
 
         self.assertEqual(trainer.model.hidden_size, 256)
-        self.assertEqual(trainer.model.loaded_state_dict, model_state_dict)
-        self.assertIsNone(trainer.optimizer.loaded_state_dict)
         self.assertEqual(trainer.optimizer.lr, 0.01)
         self.assertEqual(trainer.global_step, 0)
         self.assertIsNone(trainer.best_val_loss)
         self.assertEqual(trainer.checkpoint, {})
-        mock_load_checkpoint.assert_called_once_with(
-            "dummy_pretrained.json", "dummy_pretrained.npz"
+        mock_load_metadata.assert_called_once_with(
+            "dummy_pretrained.json",
+            "dummy_pretrained.npz",
+            skip_keys=("model_state_dict", "optimizer_state_dict"),
         )
+        self.assertIsNone(mock_load_state.call_args.kwargs["optimizer"])
 
-    @patch("autograd.tools.trainer.load_checkpoint")
+    @patch("autograd.tools.trainer.load_checkpoint_state_into")
+    @patch("autograd.tools.trainer.load_checkpoint_metadata")
     def test_pretrained_checkpoint_path_rejects_shape_mismatch(
-        self, mock_load_checkpoint
+        self, mock_load_metadata, mock_load_state
     ):
-        mock_load_checkpoint.return_value = {
-            "model_state_dict": {
-                "parameters": {
-                    "weight": xp.ones((2, 2), dtype=xp.float32),
-                },
-                "states": {},
-            },
-        }
+        mock_load_metadata.return_value = {}
+        mock_load_state.side_effect = ValueError(
+            "parameter 'weight' shape mismatch: model=(1, 1), ckpt=(2, 2)"
+        )
         config = GenericTrainingConfig(
             max_epochs=1,
             checkpoint_freq=1,
@@ -1043,16 +1031,15 @@ class TestSimpleTrainer(BaseTrainerTest):
                 output_type="logits",
             )
 
-    @patch("autograd.tools.trainer.load_checkpoint")
+    @patch("autograd.tools.trainer.load_checkpoint_state_into")
+    @patch("autograd.tools.trainer.load_checkpoint_metadata")
     def test_checkpoint_path_resume_uses_checkpoint_progress_not_config_hint(
-        self, mock_load_checkpoint
+        self, mock_load_metadata, _mock_load_state
     ):
-        mock_load_checkpoint.return_value = {
+        mock_load_metadata.return_value = {
             "epoch": 99,
             "step_count": len(self.train_loader),
             "steps_per_epoch": len(self.train_loader),
-            "model_state_dict": {},
-            "optimizer_state_dict": {},
             "model_init_kwargs": self.config.model_kwargs,
             "optimizer_init_kwargs": self.config.optimizer_kwargs,
         }
@@ -1077,13 +1064,108 @@ class TestSimpleTrainer(BaseTrainerTest):
         self.assertEqual(trainer.global_step, len(self.train_loader))
         self.assertEqual(trainer.optimizer.step_call_count, 0)
 
-    @patch("autograd.tools.trainer.load_checkpoint")
-    def test_fit_rejects_checkpoint_step_beyond_max_steps(self, mock_load_checkpoint):
-        mock_load_checkpoint.return_value = {
+    @patch("autograd.tools.trainer.load_checkpoint", create=True)
+    def test_checkpoint_resume_does_not_full_deserialize_checkpoint(
+        self, mock_load_checkpoint
+    ):
+        model = ScalarWeightModel(initial_weight=3.0)
+        optimizer = SGD(model.parameters, lr=0.02)
+        optimizer.timestep = 7
+        checkpoint_name = "resume_streaming"
+        save_checkpoint(
+            {
+                "epoch": 0,
+                "step_count": 1,
+                "steps_per_epoch": None,
+                "best_val_loss": 0.5,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "model_init_kwargs": {"initial_weight": 0.0},
+                "optimizer_init_kwargs": {"lr": 0.02},
+            },
+            checkpoint_dir=self.checkpoint_dir,
+            checkpoint_name=checkpoint_name,
+        )
+        mock_load_checkpoint.side_effect = AssertionError(
+            "resume should not deserialize the full checkpoint"
+        )
+        config = GenericTrainingConfig(
+            max_steps=2,
+            checkpoint_freq=1,
+            model_kwargs={"initial_weight": 0.0},
+            optimizer_kwargs={"lr": 0.01},
+            resume_epoch=None,
+        )
+
+        trainer = SimpleTrainer(
+            model_cls=ScalarWeightModel,
+            optimizer_cls=SGD,
+            loss_fn=self.loss_fn,
+            config=config,
+            output_type="logits",
+            checkpoint_path=os.path.join(self.checkpoint_dir, checkpoint_name),
+        )
+
+        self.assertEqual(trainer.global_step, 1)
+        self.assertEqual(trainer.best_val_loss, 0.5)
+        self.assertAlmostEqual(
+            float(xp.to_scalar(trainer.model.parameters["weight"].data[0, 0])),
+            3.0,
+            places=5,
+        )
+        self.assertEqual(trainer.optimizer.timestep, 7)
+        mock_load_checkpoint.assert_not_called()
+
+    @unittest.skipIf(
+        IS_MLX,
+        "MLX lazy graphs are not thread-safe under the in-process DDP mock.",
+    )
+    def test_checkpoint_resume_loads_arrays_only_on_rank_zero_under_ddp(self):
+        from autograd.distributed import rank
+
+        config = GenericTrainingConfig(
+            max_steps=2,
+            checkpoint_freq=1,
+            model_kwargs={"hidden_size": 256},
+            optimizer_kwargs={"lr": 0.01},
+            global_batch_size=2,
+            micro_batch_size=1,
+            resume_epoch=None,
+        )
+
+        def target():
+            with (
+                patch("autograd.tools.trainer.load_checkpoint_metadata") as metadata,
+                patch("autograd.tools.trainer.load_checkpoint_state_into") as state,
+                patch("autograd.tools.trainer._release_backend_memory_pool"),
+            ):
+                metadata.return_value = {
+                    "epoch": 0,
+                    "step_count": 1,
+                    "model_init_kwargs": config.model_kwargs,
+                    "optimizer_init_kwargs": config.optimizer_kwargs,
+                }
+                SimpleTrainer(
+                    model_cls=MockModelClass,
+                    optimizer_cls=MockOptimizerClass,
+                    loss_fn=self.loss_fn,
+                    config=config,
+                    output_type="logits",
+                    checkpoint_path="dummy",
+                )
+                return rank(), state.call_args.kwargs["load_arrays"]
+
+        per_rank = run_mock_ranks(2, target)
+        self.assertEqual(per_rank, [(0, True), (1, False)])
+
+    @patch("autograd.tools.trainer.load_checkpoint_state_into")
+    @patch("autograd.tools.trainer.load_checkpoint_metadata")
+    def test_fit_rejects_checkpoint_step_beyond_max_steps(
+        self, mock_load_metadata, _mock_load_state
+    ):
+        mock_load_metadata.return_value = {
             "epoch": 0,
             "step_count": 3,
-            "model_state_dict": {},
-            "optimizer_state_dict": {},
             "model_init_kwargs": self.config.model_kwargs,
             "optimizer_init_kwargs": self.config.optimizer_kwargs,
         }

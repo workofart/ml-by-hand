@@ -38,9 +38,28 @@ from autograd.tools.config_schema import (
     GenericTrainingConfig,
     TransformerTrainingConfig,
 )
-from autograd.tools.model import load_checkpoint, save_checkpoint
+from autograd.tools.model import (
+    load_checkpoint_metadata,
+    load_checkpoint_state_into,
+    save_checkpoint,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _release_backend_memory_pool() -> None:
+    if not hasattr(xp, "get_default_memory_pool"):
+        return
+    device = getattr(xp, "cuda", None)
+    if device is not None:
+        runtime = getattr(device, "runtime", None)
+        synchronize = getattr(runtime, "deviceSynchronize", None)
+        if callable(synchronize):
+            synchronize()
+    pool = xp.get_default_memory_pool()
+    free_all_blocks = getattr(pool, "free_all_blocks", None)
+    if callable(free_all_blocks):
+        free_all_blocks()
 
 
 def _pformat_log_dict(payload: Mapping[str, Any]) -> str:
@@ -837,14 +856,25 @@ class AbstractTrainer(ABC):
             logger.info(
                 f"Attempting to load pretrained weights from checkpoint: {ckpt_json}, {ckpt_npz}"
             )
-            loaded_ckpt = load_checkpoint(ckpt_json, ckpt_npz)
+            loaded_ckpt = load_checkpoint_metadata(
+                ckpt_json,
+                ckpt_npz,
+                skip_keys=("model_state_dict", "optimizer_state_dict"),
+            )
 
             model = model_class(**model_kwargs)
-            optimizer = optimizer_class(model.parameters, **optimizer_kwargs)
             # The configured model architecture must match the checkpoint.
-            model.load_state_dict(loaded_ckpt["model_state_dict"])
+            load_checkpoint_state_into(
+                model=model,
+                optimizer=None,
+                json_path=ckpt_json,
+                npz_path=ckpt_npz,
+                load_arrays=not is_distributed() or rank() == 0,
+            )
             # Keep loaded params identical across DDP ranks.
             broadcast_parameters(model.parameters, from_rank=0)
+            _release_backend_memory_pool()
+            optimizer = optimizer_class(model.parameters, **optimizer_kwargs)
             logger.info(
                 f"Loaded pretrained {model_class.__name__} weights from {pretrained_checkpoint_path}"
             )
@@ -866,7 +896,7 @@ class AbstractTrainer(ABC):
                 )
 
             logger.info(f"Attempting to load from checkpoint: {ckpt_json}, {ckpt_npz}")
-            loaded_ckpt = load_checkpoint(ckpt_json, ckpt_npz)
+            loaded_ckpt = load_checkpoint_metadata(ckpt_json, ckpt_npz)
             loaded_step_count = int(loaded_ckpt.get("step_count", 0))
             if (
                 self.config.max_steps is not None
@@ -897,11 +927,17 @@ class AbstractTrainer(ABC):
             optimizer = optimizer_class(model.parameters, **optimizer_init_kwargs)
 
             # Load model/optimizer state
-            model.load_state_dict(loaded_ckpt["model_state_dict"])
-            optimizer.load_state_dict(loaded_ckpt["optimizer_state_dict"])
+            load_checkpoint_state_into(
+                model=model,
+                optimizer=optimizer,
+                json_path=ckpt_json,
+                npz_path=ckpt_npz,
+                load_arrays=not is_distributed() or rank() == 0,
+            )
             # Keep loaded params and optimizer moments identical across DDP ranks.
             broadcast_parameters(model.parameters, from_rank=0)
             broadcast_optimizer_state(optimizer, from_rank=0)
+            _release_backend_memory_pool()
 
             logger.info(
                 f"Loaded {model_class.__name__} from epoch {loaded_ckpt.get('epoch', '?')} "

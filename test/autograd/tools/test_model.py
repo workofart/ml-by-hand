@@ -8,9 +8,14 @@ from unittest import TestCase
 from autograd.backend import xp
 from autograd.init import xavier_uniform
 from autograd.nn import Module
-from autograd.optim import CosineScheduler
+from autograd.optim import Adam, CosineScheduler
 from autograd.tensor import Tensor
-from autograd.tools.model import load_checkpoint, save_checkpoint
+from autograd.tools.model import (
+    load_checkpoint,
+    load_checkpoint_metadata,
+    load_checkpoint_state_into,
+    save_checkpoint,
+)
 
 
 class MockModule(Module):
@@ -277,3 +282,82 @@ class TestModel(TestCase):
 
         self.assertEqual(restored.dtype, bf16)
         self.assertTrue(xp.all(restored == original))
+
+    def test_incremental_checkpoint_load_restores_model_and_optimizer_state(self):
+        optimizer = Adam(self.model.parameters, lr=0.01)
+        for name, param in self.model.parameters.items():
+            optimizer._states["m"][name] = xp.ones_like(param.data) * 2.0
+            optimizer._states["v"][name] = xp.ones_like(param.data) * 3.0
+        optimizer.timestep = 11
+        save_checkpoint(
+            {
+                "step_count": 4,
+                "model_state_dict": self.model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "model_init_kwargs": {"arg0": 999, "kwarg0": "testing_kwarg0"},
+                "optimizer_init_kwargs": {"lr": 0.01},
+            },
+            checkpoint_dir=self.checkpoint_dir,
+            checkpoint_name=self.checkpoint_name,
+        )
+
+        new_model = MockModule(999, kwarg0="testing_kwarg0")
+        new_optimizer = Adam(new_model.parameters, lr=0.5)
+
+        metadata = load_checkpoint_metadata(self.json_path, self.npz_path)
+        load_checkpoint_state_into(
+            model=new_model,
+            optimizer=new_optimizer,
+            json_path=self.json_path,
+            npz_path=self.npz_path,
+        )
+
+        self.assertEqual(metadata["step_count"], 4)
+        self.assertEqual(new_optimizer.timestep, 11)
+        self.assertEqual(new_optimizer.lr, 0.01)
+        for name, param in self.model.parameters.items():
+            self.assertTrue(xp.allclose(new_model.parameters[name].data, param.data))
+            self.assertTrue(
+                xp.allclose(
+                    new_optimizer._states["m"][name],
+                    xp.ones_like(param.data) * 2.0,
+                )
+            )
+            self.assertTrue(
+                xp.allclose(
+                    new_optimizer._states["v"][name],
+                    xp.ones_like(param.data) * 3.0,
+                )
+            )
+
+    def test_incremental_checkpoint_load_can_prepare_empty_broadcast_buffers(self):
+        optimizer = Adam(self.model.parameters, lr=0.01)
+        for name, param in self.model.parameters.items():
+            optimizer._states["m"][name] = xp.ones_like(param.data) * 2.0
+            optimizer._states["v"][name] = xp.ones_like(param.data) * 3.0
+        optimizer.timestep = 11
+        save_checkpoint(
+            {
+                "model_state_dict": self.model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+            },
+            checkpoint_dir=self.checkpoint_dir,
+            checkpoint_name=self.checkpoint_name,
+        )
+
+        new_model = MockModule(999, kwarg0="testing_kwarg0")
+        new_optimizer = Adam(new_model.parameters, lr=0.5)
+        load_checkpoint_state_into(
+            model=new_model,
+            optimizer=new_optimizer,
+            json_path=self.json_path,
+            npz_path=self.npz_path,
+            load_arrays=False,
+        )
+
+        self.assertEqual(new_optimizer.timestep, 11)
+        for name, param in self.model.parameters.items():
+            self.assertEqual(new_model.parameters[name].data.shape, param.data.shape)
+            self.assertEqual(new_optimizer._states["m"][name].shape, param.data.shape)
+            self.assertEqual(new_optimizer._states["v"][name].shape, param.data.shape)
+            self.assertEqual(new_optimizer._states["m"][name].dtype, param.data.dtype)
