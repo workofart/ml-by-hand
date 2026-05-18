@@ -263,6 +263,99 @@ class TestActivationFunctions(TestCase):
         assert allclose(weight_fast.grad.data, weight.grad.data, atol=0, rtol=0)
         assert allclose(bias_fast.grad.data, bias.grad.data, atol=0, rtol=0)
 
+    @skipUnless(IS_CUPY, "CuPy bf16 autocast requires the CuPy backend")
+    def test_cupy_linear_mixed_fp32_input_returns_bfloat16(self):
+        """PyTorch autocast contract: fp32 input @ bf16 weight -> bf16 output.
+
+        The forward must cast fp32 input to bf16 at the matmul boundary and
+        return bf16 (not fp32) output. This is the central behavior of the
+        mixed-precision policy in `_autocast_target`; without it the head
+        matmul / per-Linear projection would inflate the output buffer to
+        fp32 and blow the GPU memory budget at the OpenWebText config.
+        """
+        bf16 = resolve_dtype("bfloat16")
+        x_data = xp.array(
+            [
+                [[0.25, -0.5, 0.75], [1.0, -0.25, 0.5]],
+                [[-0.75, 0.5, 0.125], [0.25, 0.75, -0.375]],
+            ],
+            dtype=xp.float32,
+        )
+        weight_data = xp.array(
+            [
+                [0.25, -0.5, 0.125, 0.75],
+                [-0.375, 0.625, 0.25, -0.125],
+                [0.875, 0.25, -0.5, 0.375],
+            ],
+            dtype=bf16,
+        )
+        bias_data = xp.array([0.125, -0.25, 0.0625, -0.125], dtype=bf16)
+
+        x = Tensor(xp.array(x_data), requires_grad=True)
+        weight = Tensor(xp.array(weight_data), requires_grad=True)
+        bias = Tensor(xp.array(bias_data), requires_grad=True)
+        out = functional.linear(x, weight, bias)
+
+        assert out.data.dtype == bf16, f"expected bf16 output, got {out.data.dtype}"
+        # Contract: cast x to bf16, then run the matmul. Comparing in bf16
+        # (atol=0, rtol=0) verifies the policy didn't keep fp32 accumulation
+        # in the returned tensor.
+        expected = x_data.astype(bf16) @ weight_data + bias_data
+        assert allclose(out.data, expected, atol=0, rtol=0)
+
+    @skipUnless(IS_CUPY, "CuPy bf16 fast path requires the CuPy backend")
+    def test_cupy_linear_backward_param_dtype_forces_bfloat16_gemm(self):
+        """`_matmul_autocast_dW_bgrad` uses the weight-dtype hint to keep
+        backward dW on bf16 tensor cores when both x and grad arrive as fp32.
+
+        Without the hint, the dtype-pair policy would see (fp32, fp32) and
+        skip autocast -> slow fp32 GEMM, fp32 grads. With the hint, both
+        operands are cast to bf16 at the matmul boundary and the grads land
+        as bf16 matching the weight.
+        """
+        bf16 = resolve_dtype("bfloat16")
+        x_data = xp.array(
+            [
+                [[0.25, -0.5, 0.75], [1.0, -0.25, 0.5]],
+                [[-0.75, 0.5, 0.125], [0.25, 0.75, -0.375]],
+            ],
+            dtype=xp.float32,  # fp32 input (e.g., post-LayerNorm residual)
+        )
+        weight_data = xp.array(
+            [
+                [0.25, -0.5, 0.125, 0.75],
+                [-0.375, 0.625, 0.25, -0.125],
+                [0.875, 0.25, -0.5, 0.375],
+            ],
+            dtype=bf16,  # bf16 weight -> this is the param_dtype hint
+        )
+        bias_data = xp.array([0.125, -0.25, 0.0625, -0.125], dtype=bf16)
+        upstream = xp.ones((2, 2, 4), dtype=xp.float32)  # fp32 grad
+
+        x = Tensor(xp.array(x_data), requires_grad=True)
+        weight = Tensor(xp.array(weight_data), requires_grad=True)
+        bias = Tensor(xp.array(bias_data), requires_grad=True)
+        out = functional.linear(x, weight, bias)
+        out.backward(upstream)
+
+        # The hint forces bf16 GEMM in backward; grads land as bf16.
+        assert weight.grad is not None and bias.grad is not None
+        assert weight.grad.data.dtype == bf16, (
+            f"weight.grad dtype is {weight.grad.data.dtype}, expected bf16"
+        )
+        assert bias.grad.data.dtype == bf16, (
+            f"bias.grad dtype is {bias.grad.data.dtype}, expected bf16"
+        )
+
+        # Reference: cast x and grad to bf16, then compute dW and dbias by
+        # hand. This is what the hint achieves transparently inside the helper.
+        x_2d_bf16 = x_data.reshape(-1, 3).astype(bf16)
+        grad_2d_bf16 = upstream.reshape(-1, 4).astype(bf16)
+        expected_dW = x_2d_bf16.T @ grad_2d_bf16
+        expected_dbias = grad_2d_bf16.sum(axis=0)
+        assert allclose(weight.grad.data, expected_dW, atol=0, rtol=0)
+        assert allclose(bias.grad.data, expected_dbias, atol=0, rtol=0)
+
     def test_softmax_forward(self):
         assert allclose(
             functional.softmax(self.X).data,
