@@ -530,12 +530,22 @@ class TestAdam(TestCase):
         """
         Verify that our custom Adam with weight_decay>0 matches PyTorch's AdamW
         implementation (which also decouples weight decay).
+
+        Uses 2D params because our Adam intentionally diverges from torch.AdamW
+        on 1D params: nanoGPT-style convention excludes LN gains / biases from
+        WD (see Adam class docstring).
         """
         wd = 0.01  # some non-zero weight decay
 
+        # Realistic "weight" shape so WD is actually applied (ndim >= 2).
+        weight_init = [[1.0, -0.5], [0.5, 2.0]]
+        bias_init = [[2.0, -1.0]]
+        param1 = Tensor(xp.array(weight_init, dtype=xp.float32))
+        param2 = Tensor(xp.array(bias_init, dtype=xp.float32))
+
         custom_params = {
-            "custom_module.weight": self.param1,
-            "custom_module.bias": self.param2,
+            "custom_module.weight": param1,
+            "custom_module.bias": param2,
         }
         custom_adam = Adam(
             model_parameters=custom_params,
@@ -547,43 +557,32 @@ class TestAdam(TestCase):
         )
 
         # Create equivalent PyTorch AdamW
-        torch_p1 = torch.nn.Parameter(torch.tensor(self.param1.data))
-        torch_p2 = torch.nn.Parameter(torch.tensor(self.param2.data))
+        torch_p1 = torch.nn.Parameter(torch.tensor(weight_init, dtype=torch.float32))
+        torch_p2 = torch.nn.Parameter(torch.tensor(bias_init, dtype=torch.float32))
         torch_adamw = torch.optim.AdamW(
             [torch_p1, torch_p2], lr=0.01, betas=(0.9, 0.999), eps=1e-8, weight_decay=wd
         )
 
         num_steps = 5
+        weight_shape = (2, 2)
+        bias_shape = (1, 2)
         for _ in range(num_steps):
-            # Set some gradient
-            grad1 = float(xp.random.normal(shape=()).item())  # or a fixed value
-            grad2 = float(xp.random.normal(shape=()).item())  # or a fixed value
+            grad1 = xp.random.normal(shape=weight_shape).astype(xp.float32)
+            grad2 = xp.random.normal(shape=bias_shape).astype(xp.float32)
 
-            # Assign to custom
-            self.param1.grad = grad1
-            self.param2.grad = grad2
-
-            # Assign to torch
+            param1.grad = Tensor(grad1, requires_grad=False)
+            param2.grad = Tensor(grad2, requires_grad=False)
             torch_p1.grad = torch.tensor(grad1, dtype=torch.float32)
             torch_p2.grad = torch.tensor(grad2, dtype=torch.float32)
 
-            # Step both optimizers
             custom_adam.step()
             torch_adamw.step()
 
-            # Zero grad for next iteration
             custom_adam.zero_grad()
             torch_adamw.zero_grad()
 
-        # Compare final parameter values
-        custom_final_p1 = self.param1.data
-        custom_final_p2 = self.param2.data
-        torch_final_p1 = torch_p1.detach().numpy()
-        torch_final_p2 = torch_p2.detach().numpy()
-
-        # Should match within a small tolerance
-        assert allclose(custom_final_p1, torch_final_p1, atol=1e-6, rtol=1e-6)
-        assert allclose(custom_final_p2, torch_final_p2, atol=1e-6, rtol=1e-6)
+        assert allclose(param1.data, torch_p1.detach().numpy(), atol=1e-6, rtol=1e-6)
+        assert allclose(param2.data, torch_p2.detach().numpy(), atol=1e-6, rtol=1e-6)
 
     def test_bf16_step_matches_fp32_reference(self):
         if not IS_CUPY:

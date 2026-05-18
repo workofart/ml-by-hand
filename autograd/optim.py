@@ -473,6 +473,16 @@ class Adam(Optimizer):
     "Decoupled Weight Decay Regularization" (https://arxiv.org/abs/1711.05101).
 
     When `weight_decay` is set to 0, AdamW is equivalent to Adam.
+
+    Weight decay is only applied to params with `ndim >= 2` (Linear / Embedding
+    weights). 1D params — LayerNorm gains, biases — are excluded, matching the
+    nanoGPT / GPT-2 / Megatron-LM convention. The reasoning:
+      * LN gain is initialized at 1.0 (identity); a prior toward 0 is silent
+        ablation, not regularization.
+      * Biases are additive shifts with no overparameterization or
+        Lipschitz-bounding argument for shrinking them to 0.
+      * 1D params sit on the pre-LN scale degeneracy direction, so WD on them
+        fights WD on the matching 2D weight.
     """
 
     def __init__(
@@ -543,7 +553,7 @@ class Adam(Optimizer):
         if not grad.flags.c_contiguous:
             grad = xp.ascontiguousarray(grad)
 
-        master = self._ensure_master(name, param)
+        master = self._states["master"].get(name)
         if master is None or not master.flags.c_contiguous:
             return False
 
@@ -622,6 +632,11 @@ class Adam(Optimizer):
 
             # For mixed precision, keep Adam statistics in fp32 for stability.
             param_dtype = param.data.dtype
+
+            # Apply WD only to params with ndim >= 2 (Linear/Embedding weights);
+            # exclude 1D params (LN gains, biases). See class docstring for why.
+            effective_wd = weight_decay if param.data.ndim >= 2 else 0.0
+
             if self._cupy_bf16_step_param(
                 name,
                 param,
@@ -629,7 +644,7 @@ class Adam(Optimizer):
                 beta1=beta1,
                 beta2=beta2,
                 epsilon=epsilon,
-                weight_decay=weight_decay,
+                weight_decay=effective_wd,
             ):
                 continue
 
@@ -653,14 +668,14 @@ class Adam(Optimizer):
             # For fp32 params (no master), update `param.data` directly.
             master = self._states["master"].get(name)
             if master is not None:
-                if weight_decay > 0.0:
-                    master = master - self.lr * weight_decay * master
+                if effective_wd > 0.0:
+                    master = master - self.lr * effective_wd * master
                 master -= self.lr * m_hat / (xp.sqrt(v_hat) + epsilon)
                 self._states["master"][name] = master
                 param.data = master.astype(param_dtype)
             else:
-                if weight_decay > 0.0:
-                    param.data = param.data - self.lr * weight_decay * param.data
+                if effective_wd > 0.0:
+                    param.data = param.data - self.lr * effective_wd * param.data
                 param.data -= self.lr * m_hat / (xp.sqrt(v_hat) + epsilon)
         materialize(self.model_parameters, self._states)
         return None
