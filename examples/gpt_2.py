@@ -67,6 +67,7 @@ class GPT2(nn.Module):
         num_decoder_layers: int = 12,  # GPT-2 small has 12 layers
         activation_checkpointing: bool = False,
         parameter_dtype=None,
+        use_packed_qkv: bool = False,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -90,6 +91,7 @@ class GPT2(nn.Module):
                     ff_hidden_size=4 * hidden_size,  # GPT-2 typically 4 * hidden
                     num_attention_heads=num_attention_heads,
                     dropout_prob=dropout_prob,
+                    use_packed_qkv=use_packed_qkv,
                 )
                 for _ in range(num_decoder_layers)
             ]
@@ -188,6 +190,7 @@ class DecoderSublayer(nn.Module):
         ff_hidden_size: int = 3072,
         num_attention_heads: int = 12,
         dropout_prob: float = 0.1,
+        use_packed_qkv: bool = False,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -199,6 +202,7 @@ class DecoderSublayer(nn.Module):
             hidden_size=hidden_size,
             num_heads=num_attention_heads,
             dropout_prob=dropout_prob,
+            use_packed_qkv=use_packed_qkv,
         )
 
         # Second LayerNorm (for the feed-forward sub-layer)

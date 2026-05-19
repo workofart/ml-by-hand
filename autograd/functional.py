@@ -1816,6 +1816,276 @@ class ScaledDotProductAttentionCuDNN(Function):
         return grad_query, grad_key, grad_value
 
 
+def packed_qkv_attention(
+    x: Tensor,
+    weight_qkv: Tensor,
+    bias_qkv: Tensor,
+    weight_o: Tensor,
+    bias_o: Tensor,
+    *,
+    num_heads: int,
+    is_causal: bool = True,
+) -> Tensor:
+    """Fused multi-head self-attention with packed Q/K/V projection.
+
+    Computes ``out = (cuDNN_SDPA(x @ Wqkv viewed as interleaved Q,K,V) @ Wo + bo)``
+    while keeping the Q/K/V splits as offset *views* into one packed
+    [B,T,3,NH,D] buffer. The backward writes into a packed dQKV view as
+    well, so the QKV projection backward becomes a single GEMM pair
+    instead of three. cuDNN's BS3HD interleaved layout is what makes the
+    views legal Q/K/V tensors for the SDPA graph.
+
+    Currently CuPy + cuDNN only. is_causal=True only (matches the
+    existing cuDNN SDPA fast path).
+    """
+    return PackedQKVAttention.apply(
+        x,
+        weight_qkv,
+        bias_qkv,
+        weight_o,
+        bias_o,
+        num_heads=num_heads,
+        is_causal=is_causal,
+    )
+
+
+class PackedQKVAttention(Function):
+    """Forward + backward in one autograd node so Q/K/V views never leak as
+    autograd-graph tensors. Without this packaging, slicing the packed QKV
+    buffer would create ``GetItem`` nodes whose backward does scatter — the
+    same overhead that killed the earlier fused-QKV attempt."""
+
+    def forward(
+        self,
+        x: Array,
+        weight_qkv: Array,
+        bias_qkv: Array,
+        weight_o: Array,
+        bias_o: Array,
+        *,
+        num_heads: int,
+        is_causal: bool = True,
+    ) -> Array:
+        if not IS_CUPY:
+            raise RuntimeError("packed_qkv_attention requires the CuPy backend")
+        if not is_causal:
+            raise ValueError(
+                "packed_qkv_attention currently requires is_causal=True; "
+                "matches the cuDNN SDPA fast path the project supports."
+            )
+        if x.ndim != 3:
+            raise ValueError("packed_qkv_attention expects x with shape (B, T, H)")
+        if weight_qkv.ndim != 2 or weight_qkv.shape[1] != 3 * weight_qkv.shape[0]:
+            raise ValueError(
+                "weight_qkv must be (H, 3H); call sites pack [Wq | Wk | Wv]"
+            )
+
+        batch_size, seq_len, hidden_size = (
+            int(x.shape[0]),
+            int(x.shape[1]),
+            int(x.shape[2]),
+        )
+        head_dim = hidden_size // num_heads
+        if num_heads * head_dim != hidden_size:
+            raise ValueError("hidden_size must be divisible by num_heads")
+        if head_dim % 8 != 0:
+            raise ValueError("cudnn SDPA requires head_dim multiple of 8")
+        if head_dim > 128:
+            raise ValueError("cudnn interleaved SDPA requires head_dim <= 128")
+
+        # Packed QKV projection: [B*T, H] @ [H, 3H] (+bias) -> [B*T, 3H]
+        x_2d = x.reshape(batch_size * seq_len, hidden_size)
+        qkv_flat = _matmul_autocast(x_2d, weight_qkv, bias_qkv, with_relu=False)
+        # No-copy reshape: contiguous [B*T, 3H] -> [B, T, 3, NH, D] (BS3HD).
+        qkv = qkv_flat.reshape(batch_size, seq_len, 3, num_heads, head_dim)
+
+        # Interleaved Q/K/V views: strides land at offsets 0, H*D, 2*H*D in
+        # the "3" axis. permute(0,2,1,3) brings them to cuDNN's expected
+        # [B, NH, T, D] logical shape without copying.
+        q_view = qkv[:, :, 0, :, :].transpose(0, 2, 1, 3)
+        k_view = qkv[:, :, 1, :, :].transpose(0, 2, 1, 3)
+        v_view = qkv[:, :, 2, :, :].transpose(0, 2, 1, 3)
+
+        data_type_name = ScaledDotProductAttentionCuDNN._cudnn_data_type_name(q_view)
+        shape4d: Tuple[int, int, int, int] = (
+            batch_size,
+            num_heads,
+            seq_len,
+            head_dim,
+        )
+        itemsize = int(q_view.dtype.itemsize)
+        input_stride: Tuple[int, int, int, int] = (
+            int(q_view.strides[0] // itemsize),
+            int(q_view.strides[1] // itemsize),
+            int(q_view.strides[2] // itemsize),
+            int(q_view.strides[3] // itemsize),
+        )
+        output_stride = _cudnn_sdpa_bthd_output_stride(shape4d)
+
+        # cuDNN SDPA forward into a BHTD-logical / BTHD-storage output.
+        fwd_graph, fwd_tensors = _cudnn_sdpa_forward_graph(
+            shape4d, input_stride, output_stride, data_type_name
+        )
+        query_t, key_t, value_t, output_t, stats_t = fwd_tensors
+        attn = _cupy_empty_bhtd_with_bthd_storage(shape4d, q_view.dtype)
+        stats = xp.empty((*shape4d[:3], 1), dtype=xp.float32)
+        workspace = xp.empty((fwd_graph.get_workspace_size(),), dtype=xp.uint8)
+        fwd_graph.execute(
+            {
+                query_t: q_view,
+                key_t: k_view,
+                value_t: v_view,
+                output_t: attn,
+                stats_t: stats,
+            },
+            workspace,
+        )
+
+        # attn has BTHD storage: permute(0,2,1,3) yields a C-contiguous
+        # [B, T, NH, D] view, so the reshape to [B, T, H] is a no-copy
+        # reinterpretation of the same memory.
+        attn_flat = attn.transpose(0, 2, 1, 3).reshape(batch_size, seq_len, hidden_size)
+        attn_flat_2d = attn_flat.reshape(batch_size * seq_len, hidden_size)
+        out_2d = _matmul_autocast(attn_flat_2d, weight_o, bias_o, with_relu=False)
+        out = out_2d.reshape(batch_size, seq_len, hidden_size)
+
+        # Cache state for backward. Save qkv (=> Q/K/V), attn (=> O), and stats
+        # (=> LSE) — same memory footprint as the existing SDPA path.
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.shape4d = shape4d
+        self.input_stride = input_stride
+        self.output_stride = output_stride
+        self.data_type_name = data_type_name
+        self.qkv = qkv
+        self.attn = attn
+        self.stats = stats
+        self.attn_flat_2d_shape = attn_flat_2d.shape
+        self.x_shape = x.shape
+        return out
+
+    def backward(
+        self, grad: Tensor
+    ) -> Tuple[
+        Optional[Array],
+        Optional[Array],
+        Optional[Array],
+        Optional[Array],
+        Optional[Array],
+    ]:
+        x, weight_qkv, bias_qkv, weight_o, bias_o = self.tensors
+        batch_size, num_heads, seq_len, head_dim = self.shape4d
+        hidden_size = num_heads * head_dim
+        attn = self.attn
+        qkv = self.qkv
+        stats = self.stats
+        assert attn is not None and qkv is not None and stats is not None
+
+        # Incoming grad: [B, T, H]. Output-projection backward gives
+        # d_attn_flat and (dW_o, db_o) via the BGRADA epilogue.
+        dout = grad.data
+        dout_2d = dout.reshape(batch_size * seq_len, hidden_size)
+        attn_flat_2d = attn.transpose(0, 2, 1, 3).reshape(
+            batch_size * seq_len, hidden_size
+        )
+
+        grad_x = grad_weight_qkv = grad_bias_qkv = None
+        grad_weight_o = grad_bias_o = None
+
+        if weight_o.requires_grad and bias_o.requires_grad:
+            grad_weight_o, grad_bias_o = _matmul_autocast_dW_bgrad(
+                attn_flat_2d, dout_2d, param_dtype=weight_o.data.dtype
+            )
+        else:
+            if weight_o.requires_grad:
+                grad_weight_o = _matmul_autocast(
+                    xp.swapaxes(attn_flat_2d, -1, -2), dout_2d
+                )
+            if bias_o.requires_grad:
+                grad_bias_o = Function.unbroadcast(dout, (hidden_size,))
+
+        d_attn_flat_2d = _matmul_autocast(dout_2d, xp.swapaxes(weight_o.data, -1, -2))
+        # Reshape d_attn back into a BHTD-logical / BTHD-storage view so cuDNN's
+        # backward graph reads it with the same strides as the forward output.
+        d_attn = d_attn_flat_2d.reshape(
+            batch_size, seq_len, num_heads, head_dim
+        ).transpose(0, 2, 1, 3)
+
+        # Packed dQKV: same layout as the cached qkv so the inverse reshape to
+        # [B*T, 3H] is a no-copy reinterpretation for the QKV-proj backward.
+        dqkv = xp.empty_like(qkv)
+        dq_view = dqkv[:, :, 0, :, :].transpose(0, 2, 1, 3)
+        dk_view = dqkv[:, :, 1, :, :].transpose(0, 2, 1, 3)
+        dv_view = dqkv[:, :, 2, :, :].transpose(0, 2, 1, 3)
+
+        bwd_graph, bwd_tensors = _cudnn_sdpa_backward_graph(
+            self.shape4d,
+            self.input_stride,
+            self.output_stride,
+            self.data_type_name,
+        )
+        (
+            query_t,
+            key_t,
+            value_t,
+            output_t,
+            grad_output_t,
+            stats_t,
+            grad_query_t,
+            grad_key_t,
+            grad_value_t,
+        ) = bwd_tensors
+        q_view = qkv[:, :, 0, :, :].transpose(0, 2, 1, 3)
+        k_view = qkv[:, :, 1, :, :].transpose(0, 2, 1, 3)
+        v_view = qkv[:, :, 2, :, :].transpose(0, 2, 1, 3)
+        workspace = xp.empty((bwd_graph.get_workspace_size(),), dtype=xp.uint8)
+        bwd_graph.execute(
+            {
+                query_t: q_view,
+                key_t: k_view,
+                value_t: v_view,
+                output_t: attn,
+                grad_output_t: d_attn,
+                stats_t: stats,
+                grad_query_t: dq_view,
+                grad_key_t: dk_view,
+                grad_value_t: dv_view,
+            },
+            workspace,
+        )
+
+        # QKV-projection backward over the packed dQKV buffer.
+        dqkv_flat_2d = dqkv.reshape(batch_size * seq_len, 3 * hidden_size)
+        x_2d = x.data.reshape(batch_size * seq_len, hidden_size)
+
+        if weight_qkv.requires_grad and bias_qkv.requires_grad:
+            grad_weight_qkv, grad_bias_qkv = _matmul_autocast_dW_bgrad(
+                x_2d, dqkv_flat_2d, param_dtype=weight_qkv.data.dtype
+            )
+        else:
+            if weight_qkv.requires_grad:
+                grad_weight_qkv = _matmul_autocast(
+                    xp.swapaxes(x_2d, -1, -2), dqkv_flat_2d
+                )
+            if bias_qkv.requires_grad:
+                grad_bias_qkv = Function.unbroadcast(
+                    dqkv_flat_2d.reshape(batch_size, seq_len, 3 * hidden_size),
+                    (3 * hidden_size,),
+                )
+
+        if x.requires_grad:
+            grad_x_2d = _matmul_autocast(
+                dqkv_flat_2d, xp.swapaxes(weight_qkv.data, -1, -2)
+            )
+            grad_x = grad_x_2d.reshape(self.x_shape)
+
+        # Release the cached intermediates.
+        self.qkv = None
+        self.attn = None
+        self.stats = None
+        return grad_x, grad_weight_qkv, grad_bias_qkv, grad_weight_o, grad_bias_o
+
+
 class Relu(Function):
     r"""
     Rectified Linear Unit (ReLU) activation function.

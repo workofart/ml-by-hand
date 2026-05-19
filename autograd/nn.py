@@ -18,6 +18,7 @@ from .functional import (
     causal_softmax,
     layer_norm_affine,
     linear,
+    packed_qkv_attention,
     relu,
     scaled_dot_product_attention_cudnn,
     scaled_dot_product_attention_mlx_custom,
@@ -1707,7 +1708,11 @@ class MultiHeadAttention(Module):
     """
 
     def __init__(
-        self, num_heads: int, hidden_size: int, dropout_prob: float = 0.1
+        self,
+        num_heads: int,
+        hidden_size: int,
+        dropout_prob: float = 0.1,
+        use_packed_qkv: bool = False,
     ) -> None:
         """
         Initialize the MultiHeadAttention layer.
@@ -1716,17 +1721,31 @@ class MultiHeadAttention(Module):
             num_heads (int): Number of attention heads.
             hidden_size (int): Size of the hidden representation.
             dropout_prob (float, optional): Dropout probability. Defaults to 0.1.
+            use_packed_qkv (bool, optional): Pack Q/K/V into a single
+                ``[H, 3H]`` projection and route through cuDNN's interleaved-
+                Q/K/V attention path. Forward + backward become single GEMMs
+                each instead of three. CuPy + causal self-attention + zero
+                dropout only.
         """
         super().__init__()
         self.num_heads = num_heads
         self.attention_size = (
             hidden_size // num_heads
         )  # We assume query, key, value all have the same dimension
+        self.use_packed_qkv = use_packed_qkv
 
-        # Project query, key, value using linear layers before passing to attention
-        self.q_linear = Linear(hidden_size, hidden_size)
-        self.k_linear = Linear(hidden_size, hidden_size)
-        self.v_linear = Linear(hidden_size, hidden_size)
+        if use_packed_qkv:
+            if dropout_prob != 0.0:
+                raise ValueError(
+                    "use_packed_qkv=True requires dropout_prob=0.0 (matches the "
+                    "cuDNN SDPA precondition)"
+                )
+            self.qkv_linear = Linear(hidden_size, 3 * hidden_size)
+        else:
+            # Project query, key, value using linear layers before passing to attention
+            self.q_linear = Linear(hidden_size, hidden_size)
+            self.k_linear = Linear(hidden_size, hidden_size)
+            self.v_linear = Linear(hidden_size, hidden_size)
 
         self.attention = ScaledDotProductAttention(dropout_prob=dropout_prob)
         self.fc = Linear(hidden_size, hidden_size)
@@ -1761,6 +1780,27 @@ class MultiHeadAttention(Module):
             >>> output = mha(x, x, x) # Expected: (2, 5, 16)
         """
         batch_size = query.shape[0]
+
+        # Packed-QKV fast path: one combined GEMM per direction, cuDNN's
+        # BS3HD interleaved attention. Only valid for CuPy + causal
+        # self-attention + zero dropout (preconditions checked at init).
+        if (
+            self.use_packed_qkv
+            and query is key
+            and key is value
+            and NAME == "cupy"
+            and mask is None
+            and is_causal
+        ):
+            return packed_qkv_attention(
+                query,
+                self.qkv_linear.parameters["weight"],
+                self.qkv_linear.parameters["bias"],
+                self.fc.parameters["weight"],
+                self.fc.parameters["bias"],
+                num_heads=self.num_heads,
+                is_causal=True,
+            )
 
         # We try to avoid explicitly splitting and combining the heads
         # So we are just using matrix multiplication to paralellize everything
