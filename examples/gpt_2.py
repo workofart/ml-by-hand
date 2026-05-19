@@ -351,13 +351,13 @@ if __name__ == "__main__":
     OPENWEBTEXT_CONFIG = TransformerTrainingConfig(
         training_run_name="openwebtext_gpt2_124m_baseline",
         dataset_name="openwebtext",
-        max_steps=5000,
-        max_eval_steps=200,
-        checkpoint_freq=200,
-        report_every_steps=100,
+        max_steps=600_000,
+        max_eval_steps=100,
+        checkpoint_freq=500,
+        report_every_steps=250,
         global_batch_size=480,
-        micro_batch_size=120,
-        eval_batch_size=60,
+        micro_batch_size=48,
+        eval_batch_size=24,
         max_grad_norm=1.0,
         model_kwargs={
             "num_attention_heads": 12,
@@ -370,6 +370,7 @@ if __name__ == "__main__":
             "num_decoder_layers": 12,
             "activation_checkpointing": False,
             "parameter_dtype": "bfloat16",
+            "use_packed_qkv": True,
         },
         optimizer_kwargs={
             "lr": 6e-4,
@@ -377,8 +378,8 @@ if __name__ == "__main__":
             "weight_decay": 0.1,
             "lr_scheduler_kwargs": {
                 "lr_scheduler_cls": optim.CosineScheduler,
-                "warmup_steps": 750,
-                "lr_decay_iters": 5000,
+                "warmup_steps": 1000,
+                "lr_decay_iters": 600_000,
             },
         },
         resume_epoch=None,
@@ -482,7 +483,7 @@ if __name__ == "__main__":
             prediction_func=GPT2ForwardFn(),
             bpe=bpe,
             start_tokens=config.eval_start_string,
-            max_length=min(256, int(model.max_seq_len)),
+            max_length=min(64, int(model.max_seq_len)),
             temperature=0.8,
             top_k=config.eval_top_k,
         )
@@ -547,16 +548,3 @@ if __name__ == "__main__":
             ),
             max_length=trainer.model.max_seq_len // 3,
         )
-
-    # Inference test
-    for k in range(5):
-        generate_text(
-            model=trainer.model,
-            prediction_func=GPT2ForwardFn(),
-            bpe=bpe,
-            start_tokens=CONFIG.eval_start_string,
-            max_length=int(trainer.model.max_seq_len),
-            temperature=0.8,
-            top_k=CONFIG.eval_top_k,
-        )
-        print("\n------------------------\n")
