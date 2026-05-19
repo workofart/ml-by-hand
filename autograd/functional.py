@@ -1501,10 +1501,10 @@ def scaled_dot_product_attention_cudnn(
 
 
 def _cudnn_dtype_for_array(x: Array) -> Optional[Any]:
-    try:
-        import cudnn  # pyright: ignore[reportMissingImports]
-    except ModuleNotFoundError:
-        return None
+    # Let ModuleNotFoundError propagate so the SDPA dispatch in
+    # nn.ScaledDotProductAttention can warn that the cuDNN fast path is
+    # falling back to dense softmax.
+    import cudnn  # pyright: ignore[reportMissingImports]
 
     if x.dtype == xp.float16:
         return cudnn.data_type.HALF

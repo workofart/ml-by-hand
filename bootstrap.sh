@@ -122,6 +122,19 @@ if [[ -n "$CUPY_EXTRA" ]]; then
     fi
 fi
 
+# 4c. Verify nvidia-cudnn-frontend is importable. The SDPA fast path in
+# autograd/nn.py silently falls back to dense softmax (~2x slower at small
+# batches) when the frontend is missing, so install it defensively if the
+# sync somehow skipped it (e.g., a manually bootstrapped venv).
+if [[ -n "$CUPY_EXTRA" ]]; then
+    if .venv/bin/python -c "import cudnn" >/dev/null 2>&1; then
+        echo "OK: cuDNN frontend is available."
+    else
+        echo "WARNING: cuDNN frontend missing; installing nvidia-cudnn-frontend."
+        uv pip install nvidia-cudnn-frontend
+    fi
+fi
+
 # 5. Install PyTorch separately for unit test validation
 echo "Installing CPU-only PyTorch for test validation..."
 uv pip install torch --index-url https://download.pytorch.org/whl/cpu
