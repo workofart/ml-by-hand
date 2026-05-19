@@ -443,6 +443,11 @@ def _sample_categorical_with_options(
     )
 
 
+def _empty(shape: Any, dtype: Any = None):
+    kwargs = {"dtype": dtype} if dtype is not None else {}
+    return xp.zeros(shape, **kwargs)
+
+
 def _clone_random_state(state: Any):
     if isinstance(state, tuple):
         return tuple(_clone_random_state(x) for x in state)
@@ -491,6 +496,9 @@ def set_random_state(state: Any) -> None:
 
 if not hasattr(xp, "scatter_add"):
     xp.scatter_add = _scatter_add
+
+if not hasattr(xp, "empty"):
+    xp.empty = _empty
 
 xp.to_scalar = _to_scalar
 xp.as_strided_view = _as_strided_view

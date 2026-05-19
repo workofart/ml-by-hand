@@ -1808,20 +1808,27 @@ class MultiHeadAttention(Module):
         # dimensions
         # 1. Linear Projections
         # (batch_size, num_heads, seq_len, input_size)
-        query = (
-            self.q_linear(query)
-            .view(batch_size, -1, self.num_heads, self.attention_size)
-            .permute(0, 2, 1, 3)
+        if self.use_packed_qkv:
+            if not (query is key and key is value):
+                raise ValueError("use_packed_qkv=True only supports self-attention")
+            qkv = self.qkv_linear(query)
+            hidden_size = self.num_heads * self.attention_size
+            query = qkv[:, :, :hidden_size]
+            key = qkv[:, :, hidden_size : 2 * hidden_size]
+            value = qkv[:, :, 2 * hidden_size :]
+        else:
+            query = self.q_linear(query)
+            key = self.k_linear(key)
+            value = self.v_linear(value)
+
+        query = query.view(batch_size, -1, self.num_heads, self.attention_size).permute(
+            0, 2, 1, 3
         )
-        key = (
-            self.k_linear(key)
-            .view(batch_size, -1, self.num_heads, self.attention_size)
-            .permute(0, 2, 1, 3)
+        key = key.view(batch_size, -1, self.num_heads, self.attention_size).permute(
+            0, 2, 1, 3
         )
-        value = (
-            self.v_linear(value)
-            .view(batch_size, -1, self.num_heads, self.attention_size)
-            .permute(0, 2, 1, 3)
+        value = value.view(batch_size, -1, self.num_heads, self.attention_size).permute(
+            0, 2, 1, 3
         )
 
         # 2. Apply Attention

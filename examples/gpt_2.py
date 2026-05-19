@@ -67,7 +67,7 @@ class GPT2(nn.Module):
         num_decoder_layers: int = 12,  # GPT-2 small has 12 layers
         activation_checkpointing: bool = False,
         parameter_dtype=None,
-        use_packed_qkv: bool = False,
+        use_packed_qkv: bool = True,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
@@ -84,6 +84,9 @@ class GPT2(nn.Module):
         # Dropout applied after embeddings (same as GPT-1)
         self.dropout = nn.Dropout(dropout_prob)
 
+        # Packed QKV is a zero-dropout self-attention path; dropout configs use
+        # the split projections so GPT-2's default dropout remains constructible.
+        effective_use_packed_qkv = use_packed_qkv and dropout_prob == 0.0
         self.sublayers = nn.ModuleList(
             [
                 DecoderSublayer(
@@ -91,7 +94,7 @@ class GPT2(nn.Module):
                     ff_hidden_size=4 * hidden_size,  # GPT-2 typically 4 * hidden
                     num_attention_heads=num_attention_heads,
                     dropout_prob=dropout_prob,
-                    use_packed_qkv=use_packed_qkv,
+                    use_packed_qkv=effective_use_packed_qkv,
                 )
                 for _ in range(num_decoder_layers)
             ]

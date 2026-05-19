@@ -8,6 +8,8 @@ comes from the packed-projection / interleaved-SDPA path itself.
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import numpy as _np
 import pytest
 
@@ -36,7 +38,7 @@ def _rel_max(a_data, b_data) -> float:
 def _build_split_and_packed(B: int, T: int, NH: int, H: int, *, dtype):
     """Build a split-QKV MHA and a parallel packed-QKV path that share weights."""
     xp.random.seed(0)
-    x_data = (xp.random.randn(B, T, H) * 0.05).astype(dtype)
+    x_data = (xp.random.normal(shape=(B, T, H)) * 0.05).astype(dtype)
 
     mha = nn.MultiHeadAttention(num_heads=NH, hidden_size=H, dropout_prob=0.0)
     mha.train()
@@ -144,14 +146,37 @@ def test_packed_qkv_backward_matches_split():
     )
 
 
+def test_packed_qkv_self_attention_dense_fallback_matches_split():
+    B, T, NH, H = 2, 4, 2, 8
+    dtype = xp.float32
+    split_mha, x_data, (W_qkv, b_qkv, Wo, bo) = _build_split_and_packed(
+        B, T, NH, H, dtype=dtype
+    )
+    packed_mha = nn.MultiHeadAttention(
+        num_heads=NH, hidden_size=H, dropout_prob=0.0, use_packed_qkv=True
+    )
+    packed_mha.qkv_linear.parameters["weight"].data = W_qkv
+    packed_mha.qkv_linear.parameters["bias"].data = b_qkv
+    packed_mha.fc.parameters["weight"].data = Wo
+    packed_mha.fc.parameters["bias"].data = bo
+
+    x_ref = Tensor(x_data, requires_grad=False)
+    out_ref = split_mha(x_ref, x_ref, x_ref, is_causal=True)
+
+    x_packed = Tensor(x_data, requires_grad=False)
+    with patch("autograd.nn.NAME", "numpy"):
+        out_packed = packed_mha(x_packed, x_packed, x_packed, is_causal=True)
+
+    assert _rel_max(out_packed.data, out_ref.data) < 1e-6
+
+
 def test_packed_qkv_rejects_non_self_attention():
     """Cross-attention should error: packed path assumes Q is K is V."""
-    _skip_if_not_cupy()
     B, T, NH, H = 2, 16, 4, 256
-    dtype = xp.bfloat16
+    dtype = getattr(xp, "bfloat16", xp.float32)
     xp.random.seed(0)
-    x = xp.random.randn(B, T, H).astype(dtype) * 0.05
-    y = xp.random.randn(B, T, H).astype(dtype) * 0.05
+    x = xp.random.normal(shape=(B, T, H)).astype(dtype) * 0.05
+    y = xp.random.normal(shape=(B, T, H)).astype(dtype) * 0.05
 
     mha = nn.MultiHeadAttention(
         num_heads=NH, hidden_size=H, dropout_prob=0.0, use_packed_qkv=True
@@ -160,18 +185,14 @@ def test_packed_qkv_rejects_non_self_attention():
     for p in mha.parameters.values():
         p.data = p.data.astype(dtype)
 
-    # Self-attention call: packed path engages and returns.
+    # Self-attention call returns on both packed fast path and dense fallback.
     q_self = Tensor(x, requires_grad=False)
     out_self = mha(q_self, q_self, q_self, is_causal=True)
     assert out_self.shape == (B, T, H)
 
-    # Cross-attention call: packed precondition (query is key is value) fails;
-    # the layer was built without q_linear/k_linear/v_linear, so the fallback
-    # path raises AttributeError before any compute. We treat that as the
-    # intended "packed mode means self-attention only" signal.
     q_cross = Tensor(x, requires_grad=False)
     k_cross = Tensor(y, requires_grad=False)
-    with pytest.raises((AttributeError, ValueError, KeyError)):
+    with pytest.raises(ValueError, match="self-attention"):
         mha(q_cross, k_cross, k_cross, is_causal=True)
 
 
