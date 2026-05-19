@@ -1870,6 +1870,41 @@ def packed_qkv_attention(
     )
 
 
+def packed_rope_gqa_attention(
+    x: Tensor,
+    weight_qkv: Tensor,
+    bias_qkv: Tensor,
+    weight_o: Tensor,
+    bias_o: Tensor,
+    rope_cos: Tensor,
+    rope_sin: Tensor,
+    *,
+    num_heads: int,
+    num_kv_heads: int,
+    is_causal: bool = True,
+) -> Tensor:
+    """Packed Q/K/V projection + RoPE + GQA causal attention.
+
+    This is the Llama-style counterpart to :func:`packed_qkv_attention`. The
+    Q projection keeps ``num_heads`` heads, while K/V keep ``num_kv_heads``
+    heads and are repeated inside the autograd node before cuDNN SDPA. RoPE
+    and the repeat/reduce bookkeeping stay private to this Function so their
+    slice/cat nodes do not appear in the outer autograd graph.
+    """
+    return PackedRoPEGQAAttention.apply(
+        x,
+        weight_qkv,
+        bias_qkv,
+        weight_o,
+        bias_o,
+        rope_cos,
+        rope_sin,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        is_causal=is_causal,
+    )
+
+
 class PackedQKVAttention(Function):
     """Forward + backward in one autograd node so Q/K/V views never leak as
     autograd-graph tensors. Without this packaging, slicing the packed QKV
@@ -2105,6 +2140,333 @@ class PackedQKVAttention(Function):
         self.attn = None
         self.stats = None
         return grad_x, grad_weight_qkv, grad_bias_qkv, grad_weight_o, grad_bias_o
+
+
+def _rotate_half_array(x: Array) -> Array:
+    half = int(x.shape[-1]) // 2
+    return xp.concatenate([-x[..., half:], x[..., :half]], axis=-1)
+
+
+def _apply_rope_array(
+    x: Array,
+    cos: Array,
+    sin: Array,
+    *,
+    output_dtype: Any,
+) -> Array:
+    out = x * cos + _rotate_half_array(x) * sin
+    return out.astype(output_dtype, copy=False)
+
+
+def _rope_backward_array(
+    grad: Array,
+    cos: Array,
+    sin: Array,
+) -> Array:
+    # RoPE is an orthogonal rotation. If y = x*cos + rotate_half(x)*sin,
+    # then dL/dx = dL/dy*cos - rotate_half(dL/dy)*sin.
+    return grad * cos - _rotate_half_array(grad) * sin
+
+
+def _reduce_repeated_gqa_heads(
+    grad: Array,
+    *,
+    num_kv_heads: int,
+    group_size: int,
+) -> Array:
+    if group_size == 1:
+        return grad
+    batch_size, _, seq_len, head_dim = grad.shape
+    return grad.reshape(batch_size, group_size, num_kv_heads, seq_len, head_dim).sum(
+        axis=1
+    )
+
+
+class PackedRoPEGQAAttention(Function):
+    """Llama-style packed projection attention.
+
+    Q/K/V projection gradients are computed as one packed GEMM pair. K/V GQA
+    repeats are reduced inside this Function before that packed projection
+    backward, matching ``Tensor.cat([x] * repeats, axis=1)`` from
+    ``examples.gpt_2_llama._repeat_heads``.
+    """
+
+    def forward(
+        self,
+        x: Array,
+        weight_qkv: Array,
+        bias_qkv: Array,
+        weight_o: Array,
+        bias_o: Array,
+        rope_cos: Array,
+        rope_sin: Array,
+        *,
+        num_heads: int,
+        num_kv_heads: int,
+        is_causal: bool = True,
+    ) -> Array:
+        if not IS_CUPY:
+            raise RuntimeError("packed_rope_gqa_attention requires the CuPy backend")
+        if not is_causal:
+            raise ValueError("packed_rope_gqa_attention requires is_causal=True")
+        if x.ndim != 3:
+            raise ValueError("packed_rope_gqa_attention expects x with shape (B, T, H)")
+        if num_heads % num_kv_heads != 0:
+            raise ValueError("num_heads must be divisible by num_kv_heads")
+
+        batch_size, seq_len, hidden_size = (
+            int(x.shape[0]),
+            int(x.shape[1]),
+            int(x.shape[2]),
+        )
+        head_dim = hidden_size // num_heads
+        kv_dim = num_kv_heads * head_dim
+        packed_width = hidden_size + 2 * kv_dim
+        if num_heads * head_dim != hidden_size:
+            raise ValueError("hidden_size must be divisible by num_heads")
+        if weight_qkv.shape != (hidden_size, packed_width):
+            raise ValueError("weight_qkv must have shape (H, H + 2 * KV)")
+        if bias_qkv.shape != (packed_width,):
+            raise ValueError("bias_qkv must have shape (H + 2 * KV,)")
+        if head_dim % 8 != 0:
+            raise ValueError("cudnn SDPA requires head_dim multiple of 8")
+        if head_dim > 128:
+            raise ValueError("cudnn SDPA requires head_dim <= 128")
+        if _cudnn_dtype_for_array(x) is None:
+            raise ValueError("packed_rope_gqa_attention requires float16 or bfloat16")
+
+        group_size = num_heads // num_kv_heads
+        x_2d = x.reshape(batch_size * seq_len, hidden_size)
+        qkv_flat = _matmul_autocast(x_2d, weight_qkv, bias_qkv, with_relu=False)
+        qkv_dtype = qkv_flat.dtype
+
+        q = qkv_flat[:, :hidden_size].reshape(batch_size, seq_len, num_heads, head_dim)
+        k = qkv_flat[:, hidden_size : hidden_size + kv_dim].reshape(
+            batch_size, seq_len, num_kv_heads, head_dim
+        )
+        v = qkv_flat[:, hidden_size + kv_dim :].reshape(
+            batch_size, seq_len, num_kv_heads, head_dim
+        )
+        q = q.transpose(0, 2, 1, 3)
+        k = k.transpose(0, 2, 1, 3)
+        v = v.transpose(0, 2, 1, 3)
+
+        q_rope = xp.ascontiguousarray(
+            _apply_rope_array(q, rope_cos, rope_sin, output_dtype=qkv_dtype)
+        )
+        k_rope = xp.ascontiguousarray(
+            _apply_rope_array(k, rope_cos, rope_sin, output_dtype=qkv_dtype)
+        )
+        if group_size != 1:
+            k_attn = xp.concatenate([k_rope] * group_size, axis=1)
+            v_attn = xp.concatenate([v] * group_size, axis=1)
+        else:
+            k_attn = k_rope
+            v_attn = xp.ascontiguousarray(v)
+
+        data_type_name = ScaledDotProductAttentionCuDNN._cudnn_data_type_name(q_rope)
+        shape4d: Tuple[int, int, int, int] = (
+            batch_size,
+            num_heads,
+            seq_len,
+            head_dim,
+        )
+        itemsize = int(q_rope.dtype.itemsize)
+        input_stride = tuple(int(stride // itemsize) for stride in q_rope.strides)
+        output_stride = _cudnn_sdpa_bthd_output_stride(shape4d)
+
+        fwd_graph, fwd_tensors = _cudnn_sdpa_forward_graph(
+            shape4d,
+            input_stride,
+            output_stride,
+            data_type_name,
+        )
+        query_t, key_t, value_t, output_t, stats_t = fwd_tensors
+        attn = _cupy_empty_bhtd_with_bthd_storage(shape4d, q_rope.dtype)
+        stats = xp.empty((*shape4d[:3], 1), dtype=xp.float32)
+        workspace = xp.empty((fwd_graph.get_workspace_size(),), dtype=xp.uint8)
+        fwd_graph.execute(
+            {
+                query_t: q_rope,
+                key_t: k_attn,
+                value_t: v_attn,
+                output_t: attn,
+                stats_t: stats,
+            },
+            workspace,
+        )
+
+        attn_flat_2d = attn.transpose(0, 2, 1, 3).reshape(
+            batch_size * seq_len, hidden_size
+        )
+        out_2d = _matmul_autocast(attn_flat_2d, weight_o, bias_o, with_relu=False)
+
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
+        self.group_size = group_size
+        self.head_dim = head_dim
+        self.kv_dim = kv_dim
+        self.shape4d = shape4d
+        self.input_stride = input_stride
+        self.output_stride = output_stride
+        self.data_type_name = data_type_name
+        self.x_shape = x.shape
+        self.q_rope = q_rope
+        self.k_attn = k_attn
+        self.v_attn = v_attn
+        self.attn = attn
+        self.stats = stats
+        self.rope_cos = rope_cos
+        self.rope_sin = rope_sin
+        return out_2d.reshape(batch_size, seq_len, hidden_size)
+
+    def backward(
+        self, grad: Tensor
+    ) -> Tuple[
+        Optional[Array],
+        Optional[Array],
+        Optional[Array],
+        Optional[Array],
+        Optional[Array],
+        None,
+        None,
+    ]:
+        x, weight_qkv, bias_qkv, weight_o, bias_o, _, _ = self.tensors
+        batch_size, num_heads, seq_len, head_dim = self.shape4d
+        hidden_size = num_heads * head_dim
+        kv_dim = self.kv_dim
+
+        q_rope = self.q_rope
+        k_attn = self.k_attn
+        v_attn = self.v_attn
+        attn = self.attn
+        stats = self.stats
+        rope_cos = self.rope_cos
+        rope_sin = self.rope_sin
+        assert (
+            q_rope is not None
+            and k_attn is not None
+            and v_attn is not None
+            and attn is not None
+            and stats is not None
+            and rope_cos is not None
+            and rope_sin is not None
+        )
+
+        dout = grad.data
+        dout_2d = dout.reshape(batch_size * seq_len, hidden_size)
+        attn_flat_2d = attn.transpose(0, 2, 1, 3).reshape(
+            batch_size * seq_len, hidden_size
+        )
+
+        grad_x = grad_weight_qkv = grad_bias_qkv = None
+        grad_weight_o = grad_bias_o = None
+
+        if weight_o.requires_grad and bias_o.requires_grad:
+            grad_weight_o, grad_bias_o = _matmul_autocast_dW_bgrad(
+                attn_flat_2d, dout_2d, param_dtype=weight_o.data.dtype
+            )
+        else:
+            if weight_o.requires_grad:
+                grad_weight_o = _matmul_autocast(
+                    xp.swapaxes(attn_flat_2d, -1, -2), dout_2d
+                )
+            if bias_o.requires_grad:
+                grad_bias_o = Function.unbroadcast(dout, (hidden_size,))
+
+        d_attn_flat_2d = _matmul_autocast(dout_2d, xp.swapaxes(weight_o.data, -1, -2))
+        d_attn = d_attn_flat_2d.reshape(
+            batch_size, seq_len, num_heads, head_dim
+        ).transpose(0, 2, 1, 3)
+
+        dq_rope = xp.empty_like(q_rope)
+        dk_attn = xp.empty_like(k_attn)
+        dv_attn = xp.empty_like(v_attn)
+        bwd_graph, bwd_tensors = _cudnn_sdpa_backward_graph(
+            self.shape4d,
+            self.input_stride,
+            self.output_stride,
+            self.data_type_name,
+        )
+        (
+            query_t,
+            key_t,
+            value_t,
+            output_t,
+            grad_output_t,
+            stats_t,
+            grad_query_t,
+            grad_key_t,
+            grad_value_t,
+        ) = bwd_tensors
+        workspace = xp.empty((bwd_graph.get_workspace_size(),), dtype=xp.uint8)
+        bwd_graph.execute(
+            {
+                query_t: q_rope,
+                key_t: k_attn,
+                value_t: v_attn,
+                output_t: attn,
+                grad_output_t: d_attn,
+                stats_t: stats,
+                grad_query_t: dq_rope,
+                grad_key_t: dk_attn,
+                grad_value_t: dv_attn,
+            },
+            workspace,
+        )
+
+        dk_rope = _reduce_repeated_gqa_heads(
+            dk_attn, num_kv_heads=self.num_kv_heads, group_size=self.group_size
+        )
+        dv = _reduce_repeated_gqa_heads(
+            dv_attn, num_kv_heads=self.num_kv_heads, group_size=self.group_size
+        )
+        dq = _rope_backward_array(dq_rope, rope_cos, rope_sin)
+        dk = _rope_backward_array(dk_rope, rope_cos, rope_sin)
+
+        dq_flat = dq.transpose(0, 2, 1, 3).reshape(batch_size * seq_len, hidden_size)
+        dk_flat = dk.transpose(0, 2, 1, 3).reshape(batch_size * seq_len, kv_dim)
+        dv_flat = dv.transpose(0, 2, 1, 3).reshape(batch_size * seq_len, kv_dim)
+        dqkv_flat_2d = xp.concatenate([dq_flat, dk_flat, dv_flat], axis=1)
+        x_2d = x.data.reshape(batch_size * seq_len, hidden_size)
+
+        if weight_qkv.requires_grad and bias_qkv.requires_grad:
+            grad_weight_qkv, grad_bias_qkv = _matmul_autocast_dW_bgrad(
+                x_2d, dqkv_flat_2d, param_dtype=weight_qkv.data.dtype
+            )
+        else:
+            if weight_qkv.requires_grad:
+                grad_weight_qkv = _matmul_autocast(
+                    xp.swapaxes(x_2d, -1, -2), dqkv_flat_2d
+                )
+            if bias_qkv.requires_grad:
+                grad_bias_qkv = Function.unbroadcast(
+                    dqkv_flat_2d.reshape(batch_size, seq_len, hidden_size + 2 * kv_dim),
+                    (hidden_size + 2 * kv_dim,),
+                )
+
+        if x.requires_grad:
+            grad_x_2d = _matmul_autocast(
+                dqkv_flat_2d, xp.swapaxes(weight_qkv.data, -1, -2)
+            )
+            grad_x = grad_x_2d.reshape(self.x_shape)
+
+        self.q_rope = None
+        self.k_attn = None
+        self.v_attn = None
+        self.attn = None
+        self.stats = None
+        self.rope_cos = None
+        self.rope_sin = None
+        return (
+            grad_x,
+            grad_weight_qkv,
+            grad_bias_qkv,
+            grad_weight_o,
+            grad_bias_o,
+            None,
+            None,
+        )
 
 
 class Relu(Function):
