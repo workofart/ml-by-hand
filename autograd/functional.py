@@ -233,12 +233,15 @@ def _cupy_layer_norm_kernels() -> Tuple[Any, Any, Any, Any, Any, Any, Any, Any]:
         code=r"""
         #include <cuda_bf16.h>
 
+        // LN remat: stores per-row mean and rstd only; backward recomputes
+        // x_hat = (x - mean) * rstd from the still-live input. This saves
+        // B*T*H*4 bytes per LN vs storing fp32 x_hat.
         extern "C" __global__ void layer_norm_forward_row(
             const float* x,
             const float* gain,
             const float* bias,
             float* y,
-            float* x_hat,
+            float* mean_out,
             float* rstd,
             const int rows,
             const int cols,
@@ -251,7 +254,6 @@ def _cupy_layer_norm_kernels() -> Tuple[Any, Any, Any, Any, Any, Any, Any, Any]:
 
             const float* xr = x + ((long long)row) * cols;
             float* yr = y + ((long long)row) * cols;
-            float* hr = x_hat + ((long long)row) * cols;
 
             float sum_val = 0.0f;
             for (int col = tid; col < cols; col += blockDim.x) {
@@ -284,11 +286,11 @@ def _cupy_layer_norm_kernels() -> Tuple[Any, Any, Any, Any, Any, Any, Any, Any]:
 
             float inv = rsqrtf(smem[0] / cols + epsilon);
             if (tid == 0) {
+                mean_out[row] = mean;
                 rstd[row] = inv;
             }
             for (int col = tid; col < cols; col += blockDim.x) {
                 float h = (xr[col] - mean) * inv;
-                hr[col] = h;
                 yr[col] = h * gain[col] + bias[col];
             }
         }
@@ -298,7 +300,7 @@ def _cupy_layer_norm_kernels() -> Tuple[Any, Any, Any, Any, Any, Any, Any, Any]:
             const __nv_bfloat16* gain,
             const __nv_bfloat16* bias,
             __nv_bfloat16* y,
-            float* x_hat,
+            float* mean_out,
             float* rstd,
             const int rows,
             const int cols,
@@ -311,7 +313,6 @@ def _cupy_layer_norm_kernels() -> Tuple[Any, Any, Any, Any, Any, Any, Any, Any]:
 
             const __nv_bfloat16* xr = x + ((long long)row) * cols;
             __nv_bfloat16* yr = y + ((long long)row) * cols;
-            float* hr = x_hat + ((long long)row) * cols;
 
             float sum_val = 0.0f;
             for (int col = tid; col < cols; col += blockDim.x) {
@@ -344,19 +345,23 @@ def _cupy_layer_norm_kernels() -> Tuple[Any, Any, Any, Any, Any, Any, Any, Any]:
 
             float inv = rsqrtf(smem[0] / cols + epsilon);
             if (tid == 0) {
+                mean_out[row] = mean;
                 rstd[row] = inv;
             }
             for (int col = tid; col < cols; col += blockDim.x) {
                 float h = (__bfloat162float(xr[col]) - mean) * inv;
-                hr[col] = h;
                 float out = h * __bfloat162float(gain[col]) + __bfloat162float(bias[col]);
                 yr[col] = __float2bfloat16(out);
             }
         }
 
+        // LN remat: x_hat is no longer saved; recompute it from x, mean[row],
+        // rstd[row] inside both passes. Cheap (one sub + mul per element) and
+        // x is already alive on the residual stream.
         extern "C" __global__ void layer_norm_backward_x_row(
             const float* grad,
-            const float* x_hat,
+            const float* x,
+            const float* mean_g,
             const float* rstd,
             const float* gain,
             float* dx,
@@ -371,15 +376,18 @@ def _cupy_layer_norm_kernels() -> Tuple[Any, Any, Any, Any, Any, Any, Any, Any]:
             if (row >= rows) return;
 
             const float* gr = grad + ((long long)row) * cols;
-            const float* hr = x_hat + ((long long)row) * cols;
+            const float* xr = x + ((long long)row) * cols;
             float* dxr = dx + ((long long)row) * cols;
+            float mean = mean_g[row];
+            float inv = rstd[row];
 
             float sum1 = 0.0f;
             float sum2 = 0.0f;
             for (int col = tid; col < cols; col += blockDim.x) {
+                float xh = (xr[col] - mean) * inv;
                 float dx_hat = gr[col] * gain[col];
                 sum1 += dx_hat;
-                sum2 += dx_hat * hr[col];
+                sum2 += dx_hat * xh;
             }
             sum1_s[tid] = sum1;
             sum2_s[tid] = sum2;
@@ -392,19 +400,20 @@ def _cupy_layer_norm_kernels() -> Tuple[Any, Any, Any, Any, Any, Any, Any, Any]:
                 __syncthreads();
             }
 
-            float inv = rstd[row];
             float row_sum1 = sum1_s[0];
             float row_sum2 = sum2_s[0];
             float scale = inv / cols;
             for (int col = tid; col < cols; col += blockDim.x) {
+                float xh = (xr[col] - mean) * inv;
                 float dx_hat = gr[col] * gain[col];
-                dxr[col] = scale * (cols * dx_hat - row_sum1 - hr[col] * row_sum2);
+                dxr[col] = scale * (cols * dx_hat - row_sum1 - xh * row_sum2);
             }
         }
 
         extern "C" __global__ void layer_norm_backward_x_bf16_row(
             const __nv_bfloat16* grad,
-            const float* x_hat,
+            const __nv_bfloat16* x,
+            const float* mean_g,
             const float* rstd,
             const __nv_bfloat16* gain,
             __nv_bfloat16* dx,
@@ -419,15 +428,18 @@ def _cupy_layer_norm_kernels() -> Tuple[Any, Any, Any, Any, Any, Any, Any, Any]:
             if (row >= rows) return;
 
             const __nv_bfloat16* gr = grad + ((long long)row) * cols;
-            const float* hr = x_hat + ((long long)row) * cols;
+            const __nv_bfloat16* xr = x + ((long long)row) * cols;
             __nv_bfloat16* dxr = dx + ((long long)row) * cols;
+            float mean = mean_g[row];
+            float inv = rstd[row];
 
             float sum1 = 0.0f;
             float sum2 = 0.0f;
             for (int col = tid; col < cols; col += blockDim.x) {
+                float xh = (__bfloat162float(xr[col]) - mean) * inv;
                 float dx_hat = __bfloat162float(gr[col]) * __bfloat162float(gain[col]);
                 sum1 += dx_hat;
-                sum2 += dx_hat * hr[col];
+                sum2 += dx_hat * xh;
             }
             sum1_s[tid] = sum1;
             sum2_s[tid] = sum2;
@@ -440,20 +452,22 @@ def _cupy_layer_norm_kernels() -> Tuple[Any, Any, Any, Any, Any, Any, Any, Any]:
                 __syncthreads();
             }
 
-            float inv = rstd[row];
             float row_sum1 = sum1_s[0];
             float row_sum2 = sum2_s[0];
             float scale = inv / cols;
             for (int col = tid; col < cols; col += blockDim.x) {
+                float xh = (__bfloat162float(xr[col]) - mean) * inv;
                 float dx_hat = __bfloat162float(gr[col]) * __bfloat162float(gain[col]);
-                float out = scale * (cols * dx_hat - row_sum1 - hr[col] * row_sum2);
+                float out = scale * (cols * dx_hat - row_sum1 - xh * row_sum2);
                 dxr[col] = __float2bfloat16(out);
             }
         }
 
         extern "C" __global__ void layer_norm_backward_param_col(
             const float* grad,
-            const float* x_hat,
+            const float* x,
+            const float* mean_g,
+            const float* rstd,
             float* d_gain,
             float* d_bias,
             const int rows,
@@ -471,7 +485,8 @@ def _cupy_layer_norm_kernels() -> Tuple[Any, Any, Any, Any, Any, Any, Any, Any]:
             for (int row = tid; row < rows; row += blockDim.x) {
                 long long idx = ((long long)row) * cols + col;
                 float g = grad[idx];
-                gain_sum += g * x_hat[idx];
+                float xh = (x[idx] - mean_g[row]) * rstd[row];
+                gain_sum += g * xh;
                 bias_sum += g;
             }
             gain_s[tid] = gain_sum;
@@ -492,7 +507,9 @@ def _cupy_layer_norm_kernels() -> Tuple[Any, Any, Any, Any, Any, Any, Any, Any]:
 
         extern "C" __global__ void layer_norm_backward_param_bf16_col(
             const __nv_bfloat16* grad,
-            const float* x_hat,
+            const __nv_bfloat16* x,
+            const float* mean_g,
+            const float* rstd,
             float* d_gain,
             float* d_bias,
             const int rows,
@@ -510,7 +527,8 @@ def _cupy_layer_norm_kernels() -> Tuple[Any, Any, Any, Any, Any, Any, Any, Any]:
             for (int row = tid; row < rows; row += blockDim.x) {
                 long long idx = ((long long)row) * cols + col;
                 float g = __bfloat162float(grad[idx]);
-                gain_sum += g * x_hat[idx];
+                float xh = (__bfloat162float(x[idx]) - mean_g[row]) * rstd[row];
+                gain_sum += g * xh;
                 bias_sum += g;
             }
             gain_s[tid] = gain_sum;
@@ -534,7 +552,9 @@ def _cupy_layer_norm_kernels() -> Tuple[Any, Any, Any, Any, Any, Any, Any, Any]:
         // reads coalesced across columns, unlike the one-column strided kernel.
         extern "C" __global__ void layer_norm_backward_param_bf16_partial_8col(
             const __nv_bfloat16* grad,
-            const float* x_hat,
+            const __nv_bfloat16* x,
+            const float* mean_g,
+            const float* rstd,
             float* partial_gain,
             float* partial_bias,
             const int rows,
@@ -557,7 +577,8 @@ def _cupy_layer_norm_kernels() -> Tuple[Any, Any, Any, Any, Any, Any, Any, Any]:
                 for (int row = row_start + lane_row; row < row_end; row += 32) {
                     long long idx = ((long long)row) * cols + col;
                     float g = __bfloat162float(grad[idx]);
-                    gain_sum += g * x_hat[idx];
+                    float xh = (__bfloat162float(x[idx]) - mean_g[row]) * rstd[row];
+                    gain_sum += g * xh;
                     bias_sum += g;
                 }
             }
@@ -2492,12 +2513,13 @@ class LayerNormAffine(Function):
         self.cols = int(x.shape[-1])
         self.is_bfloat16 = is_bfloat16
         y = xp.empty_like(x)
-        self.x_hat = xp.empty_like(x)
+        # LN remat: store only per-row stats; recompute x_hat in backward from
+        # self.tensors[0].data (x is already alive via the Function input refs).
+        self.mean = xp.empty((self.rows,), dtype=xp.float32)
         self.rstd = xp.empty((self.rows,), dtype=xp.float32)
         threads = 128
         if self.is_bfloat16:
             self.gain = gain
-            self.x_hat = xp.empty(x.shape, dtype=xp.float32)
             _, _, _, forward_kernel, _, _, _, _ = _cupy_layer_norm_kernels()
             kernel_gain = gain
             kernel_bias = bias
@@ -2515,7 +2537,7 @@ class LayerNormAffine(Function):
                 kernel_gain,
                 kernel_bias,
                 y.reshape(self.rows, self.cols),
-                self.x_hat.reshape(self.rows, self.cols),
+                self.mean,
                 self.rstd,
                 self.rows,
                 self.cols,
@@ -2533,7 +2555,9 @@ class LayerNormAffine(Function):
         elif grad_data.dtype != xp.float32:
             grad_data = grad_data.astype(xp.float32)
         grad_2d = xp.ascontiguousarray(grad_data.reshape(self.rows, self.cols))
-        x_hat_2d = self.x_hat.reshape(self.rows, self.cols)
+        # LN remat: pull x directly from the saved Function input, recompute
+        # x_hat = (x - mean) * rstd inside the kernels.
+        x_2d = self.tensors[0].data.reshape(self.rows, self.cols)
         dx = xp.empty_like(grad_2d)
         d_gain = xp.empty((self.cols,), dtype=xp.float32)
         d_bias = xp.empty((self.cols,), dtype=xp.float32)
@@ -2557,7 +2581,9 @@ class LayerNormAffine(Function):
                 (256,),
                 (
                     grad_2d,
-                    x_hat_2d,
+                    x_2d,
+                    self.mean,
+                    self.rstd,
                     partial_gain,
                     partial_bias,
                     self.rows,
@@ -2579,13 +2605,31 @@ class LayerNormAffine(Function):
             backward_param_kernel(
                 (self.cols,),
                 (backward_param_threads,),
-                (grad_2d, x_hat_2d, d_gain, d_bias, self.rows, self.cols),
+                (
+                    grad_2d,
+                    x_2d,
+                    self.mean,
+                    self.rstd,
+                    d_gain,
+                    d_bias,
+                    self.rows,
+                    self.cols,
+                ),
                 shared_mem=backward_param_threads * 2 * 4,
             )
         backward_x_kernel(
             _cupy_row_grid(self.rows),
             (backward_x_threads,),
-            (grad_2d, x_hat_2d, self.rstd, self.gain, dx, self.rows, self.cols),
+            (
+                grad_2d,
+                x_2d,
+                self.mean,
+                self.rstd,
+                self.gain,
+                dx,
+                self.rows,
+                self.cols,
+            ),
             shared_mem=backward_x_threads * 2 * 4,
         )
         return dx.reshape(self.original_shape), d_gain, d_bias
