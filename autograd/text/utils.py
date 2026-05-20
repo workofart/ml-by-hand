@@ -45,6 +45,13 @@ class GenerationResult:
     stop_reason: str
 
 
+def _has_forward_kv(model: Any) -> bool:
+    if callable(getattr(type(model), "forward_kv", None)):
+        return True
+    instance_attrs = getattr(model, "__dict__", {})
+    return callable(instance_attrs.get("forward_kv"))
+
+
 @dataclass
 class OpenWebTextSource:
     parquet_files: list[dict[str, Any]]
@@ -131,7 +138,7 @@ def generate(
     if num_generations < 1:
         raise ValueError(f"num_generations must be >= 1, got {num_generations}")
 
-    if num_generations == 1 and hasattr(model, "forward_kv"):
+    if num_generations == 1 and _has_forward_kv(model):
         return [
             _generate_with_kv_cache(
                 model=model,
