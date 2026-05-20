@@ -78,12 +78,24 @@ class RMSNorm(nn.Module):
         self._parameters["gain"] = Tensor(xp.ones((input_size,), dtype=xp.float32))
 
     def forward(self, x: Tensor) -> Tensor:
+        gain = self._parameters["gain"]
+        # Fused CuPy fast path: contiguous fp32 or bf16 with matching gain dtype.
+        if (
+            NAME == "cupy"
+            and x.data.flags.c_contiguous
+            and x.data.dtype == gain.data.dtype
+            and x.data.dtype in (xp.float32, *LOW_PRECISION_FLOAT_DTYPES)
+            and x.data.shape[-1] == gain.data.shape[0]
+        ):
+            return functional.rms_norm_affine(x, gain, epsilon=self.epsilon)
+
+        # Eager fallback (numpy / MLX / non-contiguous / dtype mismatch).
         input_dtype = x.data.dtype
         low_precision_input = input_dtype in LOW_PRECISION_FLOAT_DTYPES
         stats_x = x.astype(xp.float32) if low_precision_input else x
         mean_sq = (stats_x * stats_x).mean(axis=-1, keepdims=True)
         x_norm = stats_x / (mean_sq + self.epsilon).sqrt()
-        out = x_norm * self._parameters["gain"].expand(x_norm.shape)
+        out = x_norm * gain.expand(x_norm.shape)
         if low_precision_input:
             out = out.astype(input_dtype)
         return out

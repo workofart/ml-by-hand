@@ -651,6 +651,303 @@ def _cupy_layer_norm_kernels() -> Tuple[Any, Any, Any, Any, Any, Any, Any, Any]:
 
 
 @lru_cache(maxsize=1)
+def _cupy_rms_norm_kernels() -> Tuple[Any, Any, Any, Any, Any, Any, Any]:
+    """Fused RMSNorm kernels (fp32 + bf16 variants).
+
+    RMSNorm has no mean centering and no bias, so it saves only `rstd` per
+    row. Backward recomputes `xh = x * rstd` inline (cheap; x is alive on
+    the residual stream just like LN-remat).
+    """
+    module = xp.RawModule(
+        code=r"""
+        #include <cuda_bf16.h>
+
+        extern "C" __global__ void rms_norm_forward_row(
+            const float* x,
+            const float* gain,
+            float* y,
+            float* rstd,
+            const int rows,
+            const int cols,
+            const float epsilon
+        ) {
+            extern __shared__ float smem[];
+            int row = blockIdx.x + blockIdx.y * gridDim.x;
+            int tid = threadIdx.x;
+            if (row >= rows) return;
+
+            const float* xr = x + ((long long)row) * cols;
+            float* yr = y + ((long long)row) * cols;
+
+            float sum_sq = 0.0f;
+            for (int col = tid; col < cols; col += blockDim.x) {
+                float v = xr[col];
+                sum_sq += v * v;
+            }
+            smem[tid] = sum_sq;
+            __syncthreads();
+            for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    smem[tid] += smem[tid + stride];
+                }
+                __syncthreads();
+            }
+
+            float inv = rsqrtf(smem[0] / cols + epsilon);
+            if (tid == 0) {
+                rstd[row] = inv;
+            }
+            for (int col = tid; col < cols; col += blockDim.x) {
+                yr[col] = xr[col] * inv * gain[col];
+            }
+        }
+
+        extern "C" __global__ void rms_norm_forward_bf16_row(
+            const __nv_bfloat16* x,
+            const __nv_bfloat16* gain,
+            __nv_bfloat16* y,
+            float* rstd,
+            const int rows,
+            const int cols,
+            const float epsilon
+        ) {
+            extern __shared__ float smem[];
+            int row = blockIdx.x + blockIdx.y * gridDim.x;
+            int tid = threadIdx.x;
+            if (row >= rows) return;
+
+            const __nv_bfloat16* xr = x + ((long long)row) * cols;
+            __nv_bfloat16* yr = y + ((long long)row) * cols;
+
+            float sum_sq = 0.0f;
+            for (int col = tid; col < cols; col += blockDim.x) {
+                float v = __bfloat162float(xr[col]);
+                sum_sq += v * v;
+            }
+            smem[tid] = sum_sq;
+            __syncthreads();
+            for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    smem[tid] += smem[tid + stride];
+                }
+                __syncthreads();
+            }
+
+            float inv = rsqrtf(smem[0] / cols + epsilon);
+            if (tid == 0) {
+                rstd[row] = inv;
+            }
+            for (int col = tid; col < cols; col += blockDim.x) {
+                float h = __bfloat162float(xr[col]) * inv;
+                float out = h * __bfloat162float(gain[col]);
+                yr[col] = __float2bfloat16(out);
+            }
+        }
+
+        extern "C" __global__ void rms_norm_backward_x_row(
+            const float* grad,
+            const float* x,
+            const float* rstd,
+            const float* gain,
+            float* dx,
+            const int rows,
+            const int cols
+        ) {
+            extern __shared__ float smem[];
+            int row = blockIdx.x + blockIdx.y * gridDim.x;
+            int tid = threadIdx.x;
+            if (row >= rows) return;
+
+            const float* gr = grad + ((long long)row) * cols;
+            const float* xr = x + ((long long)row) * cols;
+            float* dxr = dx + ((long long)row) * cols;
+            float inv = rstd[row];
+
+            // S = sum(d_xh * xh) over the last dim; d_xh = grad * gain, xh = x * rstd.
+            float sum_S = 0.0f;
+            for (int col = tid; col < cols; col += blockDim.x) {
+                float xh = xr[col] * inv;
+                float d_xh = gr[col] * gain[col];
+                sum_S += d_xh * xh;
+            }
+            smem[tid] = sum_S;
+            __syncthreads();
+            for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    smem[tid] += smem[tid + stride];
+                }
+                __syncthreads();
+            }
+            float S = smem[0];
+            float scale_S = S / cols;
+            for (int col = tid; col < cols; col += blockDim.x) {
+                float xh = xr[col] * inv;
+                float d_xh = gr[col] * gain[col];
+                dxr[col] = inv * (d_xh - xh * scale_S);
+            }
+        }
+
+        extern "C" __global__ void rms_norm_backward_x_bf16_row(
+            const __nv_bfloat16* grad,
+            const __nv_bfloat16* x,
+            const float* rstd,
+            const __nv_bfloat16* gain,
+            __nv_bfloat16* dx,
+            const int rows,
+            const int cols
+        ) {
+            extern __shared__ float smem[];
+            int row = blockIdx.x + blockIdx.y * gridDim.x;
+            int tid = threadIdx.x;
+            if (row >= rows) return;
+
+            const __nv_bfloat16* gr = grad + ((long long)row) * cols;
+            const __nv_bfloat16* xr = x + ((long long)row) * cols;
+            __nv_bfloat16* dxr = dx + ((long long)row) * cols;
+            float inv = rstd[row];
+
+            float sum_S = 0.0f;
+            for (int col = tid; col < cols; col += blockDim.x) {
+                float xh = __bfloat162float(xr[col]) * inv;
+                float d_xh = __bfloat162float(gr[col]) * __bfloat162float(gain[col]);
+                sum_S += d_xh * xh;
+            }
+            smem[tid] = sum_S;
+            __syncthreads();
+            for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    smem[tid] += smem[tid + stride];
+                }
+                __syncthreads();
+            }
+            float S = smem[0];
+            float scale_S = S / cols;
+            for (int col = tid; col < cols; col += blockDim.x) {
+                float xh = __bfloat162float(xr[col]) * inv;
+                float d_xh = __bfloat162float(gr[col]) * __bfloat162float(gain[col]);
+                float dx_v = inv * (d_xh - xh * scale_S);
+                dxr[col] = __float2bfloat16(dx_v);
+            }
+        }
+
+        extern "C" __global__ void rms_norm_backward_param_col(
+            const float* grad,
+            const float* x,
+            const float* rstd,
+            float* d_gain,
+            const int rows,
+            const int cols
+        ) {
+            extern __shared__ float smem[];
+            int col = blockIdx.x;
+            int tid = threadIdx.x;
+            if (col >= cols) return;
+
+            float gain_sum = 0.0f;
+            for (int row = tid; row < rows; row += blockDim.x) {
+                long long idx = ((long long)row) * cols + col;
+                float g = grad[idx];
+                float xh = x[idx] * rstd[row];
+                gain_sum += g * xh;
+            }
+            smem[tid] = gain_sum;
+            __syncthreads();
+            for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+                if (tid < stride) {
+                    smem[tid] += smem[tid + stride];
+                }
+                __syncthreads();
+            }
+            if (tid == 0) {
+                d_gain[col] = smem[0];
+            }
+        }
+
+        // Coalesced first-stage reduction for bf16 RMSNorm parameter grads
+        // (8 adjacent columns per block × 256-row tile).
+        extern "C" __global__ void rms_norm_backward_param_bf16_partial_8col(
+            const __nv_bfloat16* grad,
+            const __nv_bfloat16* x,
+            const float* rstd,
+            float* partial_gain,
+            const int rows,
+            const int cols,
+            const int tiles
+        ) {
+            __shared__ float gain_s[256];
+            int tid = threadIdx.x;
+            int lane_col = tid & 7;
+            int lane_row = tid >> 3;
+            int col = blockIdx.x * 8 + lane_col;
+            int tile = blockIdx.y;
+            int row_start = tile * 256;
+            int row_end = min(row_start + 256, rows);
+
+            float gain_sum = 0.0f;
+            if (col < cols) {
+                for (int row = row_start + lane_row; row < row_end; row += 32) {
+                    long long idx = ((long long)row) * cols + col;
+                    float g = __bfloat162float(grad[idx]);
+                    float xh = __bfloat162float(x[idx]) * rstd[row];
+                    gain_sum += g * xh;
+                }
+            }
+            gain_s[tid] = gain_sum;
+            __syncthreads();
+            for (int offset = 16; offset > 0; offset >>= 1) {
+                if (lane_row < offset) {
+                    int other = ((lane_row + offset) << 3) + lane_col;
+                    gain_s[tid] += gain_s[other];
+                }
+                __syncthreads();
+            }
+            if (lane_row == 0 && col < cols) {
+                long long out_idx = ((long long)tile) * cols + col;
+                partial_gain[out_idx] = gain_s[tid];
+            }
+        }
+
+        extern "C" __global__ void rms_norm_backward_param_bf16_finalize(
+            const float* partial_gain,
+            float* d_gain,
+            const int cols,
+            const int tiles
+        ) {
+            extern __shared__ float smem[];
+            int col = blockIdx.x;
+            int tid = threadIdx.x;
+            float gain_sum = 0.0f;
+            for (int tile = tid; tile < tiles; tile += blockDim.x) {
+                long long idx = ((long long)tile) * cols + col;
+                gain_sum += partial_gain[idx];
+            }
+            smem[tid] = gain_sum;
+            __syncthreads();
+            for (int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+                if (tid < offset) {
+                    smem[tid] += smem[tid + offset];
+                }
+                __syncthreads();
+            }
+            if (tid == 0) {
+                d_gain[col] = smem[0];
+            }
+        }
+        """,
+        options=("--std=c++11",),
+    )
+    return (
+        module.get_function("rms_norm_forward_row"),
+        module.get_function("rms_norm_backward_x_row"),
+        module.get_function("rms_norm_backward_param_col"),
+        module.get_function("rms_norm_forward_bf16_row"),
+        module.get_function("rms_norm_backward_x_bf16_row"),
+        module.get_function("rms_norm_backward_param_bf16_partial_8col"),
+        module.get_function("rms_norm_backward_param_bf16_finalize"),
+    )
+
+
+@lru_cache(maxsize=1)
 def _cupy_softmax_row_kernels() -> Tuple[Any, Any]:
     module = xp.RawModule(
         code=r"""
@@ -2995,6 +3292,155 @@ class LayerNormAffine(Function):
             shared_mem=backward_x_threads * 2 * 4,
         )
         return dx.reshape(self.original_shape), d_gain, d_bias
+
+
+class RMSNormAffine(Function):
+    """Fused RMSNorm with affine gain (no bias, no mean centering).
+
+    Forward:  y = x * rstd * gain,  rstd = 1 / sqrt(mean(x^2) + epsilon).
+    Backward: saves only `rstd` (rows × 4 bytes). Recomputes `xh = x * rstd`
+    inline from `self.tensors[0].data` (x stays alive on the residual stream),
+    mirroring the LN-remat pattern.
+    """
+
+    def forward(self, x: Array, gain: Array, epsilon: float) -> Array:
+        is_bfloat16 = bool(
+            IS_CUPY
+            and hasattr(xp, "bfloat16")
+            and x.dtype == xp.bfloat16
+            and gain.dtype == xp.bfloat16
+            and x.flags.c_contiguous
+        )
+        if (
+            not (_is_cupy_float32_contiguous(x) or is_bfloat16)
+            or not IS_CUPY
+            or gain.dtype not in (xp.float32, *LOW_PRECISION_FLOAT_DTYPES)
+            or not gain.flags.c_contiguous
+            or x.ndim < 1
+            or gain.ndim != 1
+            or x.shape[-1] != gain.shape[0]
+        ):
+            raise ValueError(
+                "RMSNormAffine requires contiguous CuPy float32 or bf16 inputs"
+            )
+
+        self.original_shape = x.shape
+        self.rows = int(x.size // x.shape[-1])
+        self.cols = int(x.shape[-1])
+        self.is_bfloat16 = is_bfloat16
+        y = xp.empty_like(x)
+        self.rstd = xp.empty((self.rows,), dtype=xp.float32)
+        threads = 128
+        if self.is_bfloat16:
+            self.gain = gain
+            _, _, _, forward_kernel, _, _, _ = _cupy_rms_norm_kernels()
+            kernel_gain = gain
+        else:
+            self.gain = gain if gain.dtype == xp.float32 else gain.astype(xp.float32)
+            forward_kernel, _, _, _, _, _, _ = _cupy_rms_norm_kernels()
+            kernel_gain = self.gain
+        forward_kernel(
+            _cupy_row_grid(self.rows),
+            (threads,),
+            (
+                x.reshape(self.rows, self.cols),
+                kernel_gain,
+                y.reshape(self.rows, self.cols),
+                self.rstd,
+                self.rows,
+                self.cols,
+                float(epsilon),
+            ),
+            shared_mem=threads * 4,
+        )
+        return y
+
+    def backward(self, grad: Tensor) -> Tuple[Array, Array]:
+        grad_data = grad.data
+        if self.is_bfloat16:
+            if grad_data.dtype != xp.bfloat16:
+                grad_data = grad_data.astype(xp.bfloat16)
+        elif grad_data.dtype != xp.float32:
+            grad_data = grad_data.astype(xp.float32)
+        grad_2d = xp.ascontiguousarray(grad_data.reshape(self.rows, self.cols))
+        x_2d = self.tensors[0].data.reshape(self.rows, self.cols)
+        dx = xp.empty_like(grad_2d)
+        d_gain = xp.empty((self.cols,), dtype=xp.float32)
+        backward_x_threads = 128
+        if self.is_bfloat16:
+            (
+                _,
+                _,
+                _,
+                _,
+                backward_x_kernel,
+                backward_param_partial_kernel,
+                backward_param_finalize_kernel,
+            ) = _cupy_rms_norm_kernels()
+            row_tiles = (self.rows + 255) // 256
+            partial_gain = xp.empty((row_tiles, self.cols), dtype=xp.float32)
+            backward_param_partial_kernel(
+                ((self.cols + 7) // 8, row_tiles),
+                (256,),
+                (
+                    grad_2d,
+                    x_2d,
+                    self.rstd,
+                    partial_gain,
+                    self.rows,
+                    self.cols,
+                    row_tiles,
+                ),
+            )
+            backward_param_finalize_kernel(
+                (self.cols,),
+                (256,),
+                (partial_gain, d_gain, self.cols, row_tiles),
+                shared_mem=256 * 4,
+            )
+        else:
+            backward_param_threads = 1024
+            _, backward_x_kernel, backward_param_kernel, _, _, _, _ = (
+                _cupy_rms_norm_kernels()
+            )
+            backward_param_kernel(
+                (self.cols,),
+                (backward_param_threads,),
+                (
+                    grad_2d,
+                    x_2d,
+                    self.rstd,
+                    d_gain,
+                    self.rows,
+                    self.cols,
+                ),
+                shared_mem=backward_param_threads * 4,
+            )
+        backward_x_kernel(
+            _cupy_row_grid(self.rows),
+            (backward_x_threads,),
+            (
+                grad_2d,
+                x_2d,
+                self.rstd,
+                self.gain,
+                dx,
+                self.rows,
+                self.cols,
+            ),
+            shared_mem=backward_x_threads * 4,
+        )
+        # Cast d_gain back to the parameter's dtype if needed (e.g. bf16 path).
+        if self.is_bfloat16:
+            d_gain_out = d_gain.astype(xp.bfloat16)
+        else:
+            d_gain_out = d_gain
+        return dx.reshape(self.original_shape), d_gain_out
+
+
+def rms_norm_affine(x: Tensor, gain: Tensor, *, epsilon: float = 1e-5) -> Tensor:
+    """Fused RMSNorm (gain-only). Wrapper around :class:`RMSNormAffine`."""
+    return RMSNormAffine.apply(x, gain, epsilon=epsilon)
 
 
 class LogSoftmax(Function):
