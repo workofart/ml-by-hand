@@ -158,7 +158,13 @@ class LtMatmulBias:
     on every call so we can pass arbitrary tensors without rebuilding.
     """
 
-    _WORKSPACE_BYTES = 64 * 1024 * 1024
+    # NVIDIA recommends >= 32 MiB on Ampere and >= 256 MiB on Hopper/Blackwell
+    # for the cuBLASLt heuristic to consider split-K and other higher-throughput
+    # algorithms. The cost is one-time scratch allocation (per-process), so
+    # we set the larger value unconditionally — wasted memory if we're on
+    # older hardware, but never wrong. Bumping past 256 MiB (tried 1 GiB on
+    # RTX 5090) produced no measurable speedup at our GEMM shapes.
+    _WORKSPACE_BYTES = 256 * 1024 * 1024
 
     def __init__(self, lib: ctypes.CDLL):
         import cupy as cp  # local import; module must be CuPy-only

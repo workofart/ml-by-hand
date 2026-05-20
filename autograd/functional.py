@@ -2562,18 +2562,20 @@ def _cupy_rope_apply_kernels() -> Any:
         }
 
         // Backward fused kernel: optional GQA reduce + optional RoPE backward,
-        // with strided fp32 output. Handles three cases used by
-        // ``PackedRoPEGQAAttention.backward``:
+        // with strided output. Two variants below: fp32 output (preserves
+        // precision contract of the unfused path) and bf16 output (writes
+        // directly into a bf16 dqkv_flat_2d slot, skipping the implicit
+        // fp32→bf16 cast that ``_matmul_autocast_dW_bgrad`` would do before
+        // the cuBLASLt bf16 GEMM — saves one full read+write of the packed
+        // gradient buffer per layer, plus halves the dqkv_flat_2d allocation).
+        // Handles three cases used by ``PackedRoPEGQAAttention.backward``:
         //   - dq backward (group_size=1, sign_lower=+1):
         //       y[b,t,h,d] = dq_rope[b,h,t,d]*cos + sgn * dq_rope[b,h,t,d_pair]*sin
         //   - dk backward (group_size=g, sign_lower=+1):
         //       y[b,t,h_in,d] = (sum_k dk_attn[b, h_in + k*H_out, t, d]) * cos
         //                     + sgn * (sum_k dk_attn[b, h_in + k*H_out, t, d_pair]) * sin
         //   - dv backward (group_size=g, sign_lower=0): just the sum.
-        // Output is written into a strided slot of the pre-allocated packed
-        // dqkv buffer in (B, T, H, D) layout, so the caller can skip the
-        // explicit transpose+reshape+concat path. Accumulator is fp32, which
-        // is more accurate than the bf16-intermediate path it replaces.
+        // Accumulator stays fp32 — only the final write differs.
         extern "C" __global__ void rope_reduce_strided_bf16_fp32(
             const __nv_bfloat16* __restrict__ in_,
             const float* __restrict__ cos_,
@@ -2637,13 +2639,81 @@ def _cupy_rope_apply_kernels() -> Any:
                 }
             }
         }
+
+        // Same kernel, bf16 output (caller pre-cast aware): caller passes a
+        // bf16 slot pointer so the cuBLASLt bf16 GEMM downstream can read
+        // dqkv_flat_2d directly without a second fp32→bf16 cast pass.
+        extern "C" __global__ void rope_reduce_strided_bf16_bf16(
+            const __nv_bfloat16* __restrict__ in_,
+            const float* __restrict__ cos_,
+            const float* __restrict__ sin_,
+            __nv_bfloat16* __restrict__ out_,
+            const long long total,
+            const int T,
+            const int H_out,
+            const int D,
+            const int half,
+            const int sign_lower,
+            const int group_size,
+            const long long in_stride_b,
+            const long long in_stride_h,
+            const long long in_stride_t,
+            const long long in_stride_d,
+            const long long out_stride_b,
+            const long long out_stride_h,
+            const long long out_stride_t,
+            const long long out_stride_d
+        ) {
+            long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+            long long stride = (long long)gridDim.x * blockDim.x;
+            for (; idx < total; idx += stride) {
+                int d = (int)(idx % D);
+                long long rest = idx / D;
+                int t = (int)(rest % T);
+                rest /= T;
+                int h_out = (int)(rest % H_out);
+                int b = (int)(rest / H_out);
+                long long in_bt = (long long)b * in_stride_b
+                                + (long long)t * in_stride_t;
+                float xv = 0.0f;
+                #pragma unroll 1
+                for (int k = 0; k < group_size; ++k) {
+                    long long h_in = (long long)(h_out + k * H_out);
+                    xv += __bfloat162float(
+                        in_[in_bt + h_in * in_stride_h + (long long)d * in_stride_d]
+                    );
+                }
+                long long out_off = (long long)b * out_stride_b
+                                  + (long long)h_out * out_stride_h
+                                  + (long long)t * out_stride_t
+                                  + (long long)d * out_stride_d;
+                if (sign_lower == 0) {
+                    out_[out_off] = __float2bfloat16(xv);
+                } else {
+                    int pair_d = (d < half) ? (d + half) : (d - half);
+                    float xp_ = 0.0f;
+                    #pragma unroll 1
+                    for (int k = 0; k < group_size; ++k) {
+                        long long h_in = (long long)(h_out + k * H_out);
+                        xp_ += __bfloat162float(
+                            in_[in_bt + h_in * in_stride_h + (long long)pair_d * in_stride_d]
+                        );
+                    }
+                    float c = cos_[(long long)t * D + d];
+                    float s = sin_[(long long)t * D + d];
+                    float sgn = (d < half) ? (float)sign_lower : (float)(-sign_lower);
+                    out_[out_off] = __float2bfloat16(xv * c + sgn * xp_ * s);
+                }
+            }
+        }
         """,
         options=("--std=c++11",),
     )
     return {
         xp.dtype(xp.bfloat16): module.get_function("rope_apply_bf16_bf16"),
         xp.dtype(xp.float32): module.get_function("rope_apply_bf16_fp32"),
-        "reduce_strided": module.get_function("rope_reduce_strided_bf16_fp32"),
+        "reduce_strided_fp32": module.get_function("rope_reduce_strided_bf16_fp32"),
+        "reduce_strided_bf16": module.get_function("rope_reduce_strided_bf16_bf16"),
     }
 
 
@@ -2822,14 +2892,17 @@ def _cupy_rope_reduce_strided(
     sign_lower: int,
     group_size: int,
 ) -> bool:
-    """Fused GQA-reduce + RoPE-backward writing into a strided fp32 slot.
+    """Fused GQA-reduce + RoPE-backward writing into a strided fp32 or bf16 slot.
 
     ``grad`` is the cuDNN-shaped (B, H_in, T, D) bf16 gradient. ``out_4d`` is
-    an fp32 (B, T, H_out, D) view into a wider pre-allocated buffer (typically
-    one of three slots in ``dqkv_flat_2d.view(B, T, H_total, D)``). When
+    a (B, T, H_out, D) view into a wider pre-allocated buffer (typically one
+    of three slots in ``dqkv_flat_2d.view(B, T, H_total, D)``) — fp32 if the
+    caller needs the unrounded sum, bf16 if the caller is feeding the result
+    straight into a bf16 GEMM (saves one fp32→bf16 cast pass). When
     ``group_size > 1`` the kernel sums the broadcast heads into the H_out
     output head before applying RoPE; when ``sign_lower == 0`` the RoPE step
-    is skipped (used for dV which never went through RoPE).
+    is skipped (used for dV which never went through RoPE). The accumulator
+    is fp32 in both variants, so precision matches a downstream bf16 cast.
     """
     if (
         not IS_CUPY
@@ -2837,8 +2910,13 @@ def _cupy_rope_reduce_strided(
         or grad.dtype != xp.bfloat16
         or cos.dtype != xp.float32
         or sin.dtype != xp.float32
-        or out_4d.dtype != xp.float32
     ):
+        return False
+    if out_4d.dtype == xp.float32:
+        kernel_key = "reduce_strided_fp32"
+    elif out_4d.dtype == xp.bfloat16:
+        kernel_key = "reduce_strided_bf16"
+    else:
         return False
     if grad.ndim != 4 or out_4d.ndim != 4:
         return False
@@ -2869,7 +2947,7 @@ def _cupy_rope_reduce_strided(
     total = int(out_4d.size)
     threads = 256
     blocks = min((total + threads - 1) // threads, 65535)
-    kernel = _cupy_rope_apply_kernels()["reduce_strided"]
+    kernel = _cupy_rope_apply_kernels()[kernel_key]
     kernel(
         (blocks,),
         (threads,),
@@ -3164,12 +3242,19 @@ class PackedRoPEGQAAttention(Function):
         # in (B, T, H, D) layout. That collapses what used to be a sequence
         # of [_reduce_repeated_gqa_heads → _rope_backward_array →
         # transpose(0,2,1,3) → reshape → xp.concatenate] into a single
-        # element-wise kernel per slot, saving ~5 intermediate buffers and
-        # ~108 ms/step at micro=60.
+        # element-wise kernel per slot, saving ~5 intermediate buffers.
+        #
+        # Output dtype = weight dtype (bf16 in production): the cuBLASLt bf16
+        # GEMM downstream would re-cast a fp32 buffer anyway, so writing bf16
+        # directly here skips one full read+write pass (~9 GB/step at
+        # micro=60) and halves the dqkv_flat_2d allocation. The accumulator
+        # stays fp32 inside the fused kernel, so precision matches the cast
+        # path bit-for-bit.
         x_2d = x.data.reshape(batch_size * seq_len, hidden_size)
         h_total_slots = num_heads + 2 * self.num_kv_heads
+        out_dtype = weight_qkv.data.dtype
         dqkv_flat_2d = xp.empty(
-            (batch_size * seq_len, h_total_slots * head_dim), dtype=xp.float32
+            (batch_size * seq_len, h_total_slots * head_dim), dtype=out_dtype
         )
         dqkv_4d = dqkv_flat_2d.reshape(batch_size, seq_len, h_total_slots, head_dim)
         dq_slot = dqkv_4d[:, :, :num_heads, :]
@@ -3185,7 +3270,7 @@ class PackedRoPEGQAAttention(Function):
         ):
             # Fallback (non-fast-path or shape rejection): old multi-step path.
             dq = _rope_backward_array(dq_rope, rope_cos, rope_sin)
-            dq_slot[...] = dq.transpose(0, 2, 1, 3)
+            dq_slot[...] = dq.transpose(0, 2, 1, 3).astype(out_dtype, copy=False)
         if not _cupy_rope_reduce_strided(
             dk_attn,
             rope_cos,
@@ -3198,7 +3283,7 @@ class PackedRoPEGQAAttention(Function):
                 dk_attn, num_kv_heads=self.num_kv_heads, group_size=self.group_size
             )
             dk = _rope_backward_array(dk_rope, rope_cos, rope_sin)
-            dk_slot[...] = dk.transpose(0, 2, 1, 3)
+            dk_slot[...] = dk.transpose(0, 2, 1, 3).astype(out_dtype, copy=False)
         if not _cupy_rope_reduce_strided(
             dv_attn,
             rope_cos,
@@ -3210,7 +3295,7 @@ class PackedRoPEGQAAttention(Function):
             dv = _reduce_repeated_gqa_heads(
                 dv_attn, num_kv_heads=self.num_kv_heads, group_size=self.group_size
             )
-            dv_slot[...] = dv.transpose(0, 2, 1, 3).astype(xp.float32, copy=False)
+            dv_slot[...] = dv.transpose(0, 2, 1, 3).astype(out_dtype, copy=False)
 
         if weight_qkv.requires_grad and bias_qkv.requires_grad:
             grad_weight_qkv, grad_bias_qkv = _matmul_autocast_dW_bgrad(
