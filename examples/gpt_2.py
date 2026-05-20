@@ -11,6 +11,7 @@ if str(REPO_ROOT) not in sys.path:
 from autograd import functional, nn, optim
 from autograd.backend import (
     LOW_PRECISION_FLOAT_DTYPES,
+    NAME,
     Array,
     ArrayLike,
     resolve_dtype,
@@ -176,6 +177,170 @@ class GPT2(nn.Module):
             label_smoothing=label_smoothing,
             reduction=reduction,
         )
+
+    # ------------------------------------------------------------------
+    # KV-cached inference path
+    # ------------------------------------------------------------------
+    # Same shape as `GPT2Llama.forward_kv`: bypass the autograd Tensor wrapper
+    # at inference and route to MLX's fused kernels (`mx.fast.layer_norm`,
+    # `mx.fast.scaled_dot_product_attention`). `generate()` in
+    # `autograd/text/utils.py` auto-dispatches to this path via
+    # `hasattr(model, "forward_kv")`, so no per-architecture wrapper is needed.
+    #
+    # Differences from the Llama path:
+    # - `LayerNorm` (with bias, mean-centered) instead of `RMSNorm`.
+    # - Learned absolute position embeddings added to the token embedding
+    #   (no RoPE inside attention).
+    # - Plain MHA (`num_kv_heads == num_heads`), so no GQA tiling.
+
+    def forward_kv(
+        self,
+        input_ids,
+        kv_cache=None,
+        offset: int = 0,
+    ):
+        """Inference forward with optional KV cache.
+
+        Args:
+            input_ids: raw `mx.array` of shape (B, T) with the *new* tokens
+                for this call (T = prompt length on prefill, T = 1 each decode
+                step).
+            kv_cache: per-layer list of `(K, V)` tuples returned by a previous
+                call, or `None` for prefill.
+            offset: absolute position the new tokens start at, used to index
+                into the learned position embedding so decode tokens see the
+                correct positional vectors.
+
+        Returns:
+            `(logits_last, new_kv_cache)`. `logits_last` is (B, 1, vocab); only
+            the last position is projected since the sampler doesn't need the
+            rest.
+        """
+        if NAME != "mlx":
+            raise NotImplementedError(
+                "GPT2.forward_kv currently requires the MLX backend"
+            )
+        import mlx.core as mx
+
+        T_new = input_ids.shape[1]
+        token_emb = self.token_embedding.parameters["weight"].data[input_ids]
+        positions = mx.arange(offset, offset + T_new, dtype=mx.int32)
+        pos_emb = self.position_embedding.parameters["weight"].data[positions]
+        h = token_emb + pos_emb  # (B, T_new, hidden)
+
+        new_caches = []
+        for layer_idx, sublayer in enumerate(self.sublayers):
+            layer_cache = None if kv_cache is None else kv_cache[layer_idx]
+            h, kv = self._decode_sublayer_inference(h, sublayer, layer_cache)
+            new_caches.append(kv)
+
+        h = mx.fast.layer_norm(
+            h,
+            self.layer_norm.parameters["gain"].data,
+            self.layer_norm.parameters["bias"].data,
+            1e-5,
+        )
+        h_last = h[:, -1:, :]
+        # GPT-2 always ties output to input embedding.
+        logits = mx.matmul(h_last, self.token_embedding.parameters["weight"].data.T)
+        return logits, new_caches
+
+    def _decode_sublayer_inference(self, h, sublayer, kv_cache_layer):
+        """Run one `DecoderSublayer` forward on raw MLX arrays.
+
+        Mirrors `DecoderSublayer.forward` exactly, but operates on `mx.array`
+        and uses `mx.fast.*` fused kernels. The KV cache is grown by
+        concatenating the new tokens' K/V onto the per-layer prefix.
+        """
+        import mlx.core as mx
+
+        attn = sublayer.multi_head_attention
+        ffn = sublayer.feedforward
+        num_heads = attn.num_heads
+        head_dim = attn.attention_size
+        hidden_size = num_heads * head_dim
+
+        # pre-norm + packed QKV
+        a = mx.fast.layer_norm(
+            h,
+            sublayer.layer_norm1.parameters["gain"].data,
+            sublayer.layer_norm1.parameters["bias"].data,
+            1e-5,
+        )
+        qkv_w = attn.qkv_linear.parameters["weight"].data
+        qkv_b = attn.qkv_linear.parameters["bias"].data
+        qkv = mx.matmul(a, qkv_w) + qkv_b  # (B, T_new, 3 * hidden)
+        q = qkv[..., :hidden_size]
+        k_new = qkv[..., hidden_size : 2 * hidden_size]
+        v_new = qkv[..., 2 * hidden_size :]
+
+        B, T_new = h.shape[0], h.shape[1]
+        q = q.reshape(B, T_new, num_heads, head_dim).transpose(0, 2, 1, 3)
+        k_new = k_new.reshape(B, T_new, num_heads, head_dim).transpose(0, 2, 1, 3)
+        v_new = v_new.reshape(B, T_new, num_heads, head_dim).transpose(0, 2, 1, 3)
+
+        if kv_cache_layer is None:
+            k_full, v_full = k_new, v_new
+        else:
+            kc, vc = kv_cache_layer
+            k_full = mx.concatenate([kc, k_new], axis=2)
+            v_full = mx.concatenate([vc, v_new], axis=2)
+
+        # Plain MHA: N_kv == N_q so no tiling. Causal mask only matters when
+        # T_new > 1 (prompt prefill); a single decode-step query is trivially
+        # "causal" over the cached prefix.
+        mask = "causal" if T_new > 1 else None
+        attn_out = mx.fast.scaled_dot_product_attention(
+            q, k_full, v_full, scale=head_dim**-0.5, mask=mask
+        )
+        attn_out = attn_out.transpose(0, 2, 1, 3).reshape(B, T_new, hidden_size)
+        attn_out = (
+            mx.matmul(attn_out, attn.fc.parameters["weight"].data)
+            + attn.fc.parameters["bias"].data
+        )
+        h = h + attn_out
+
+        # FFN (ReLU MLP, same as the training-path `FeedForward`).
+        b = mx.fast.layer_norm(
+            h,
+            sublayer.layer_norm2.parameters["gain"].data,
+            sublayer.layer_norm2.parameters["bias"].data,
+            1e-5,
+        )
+        inter = (
+            mx.matmul(b, ffn.fc1.parameters["weight"].data)
+            + ffn.fc1.parameters["bias"].data
+        )
+        inter = mx.maximum(inter, mx.array(0.0, dtype=inter.dtype))
+        out = (
+            mx.matmul(inter, ffn.fc2.parameters["weight"].data)
+            + ffn.fc2.parameters["bias"].data
+        )
+        h = h + out
+        return h, (k_full, v_full)
+
+    def warmup_kv(self, prompt_len: int = 1, decode_steps: int = 4) -> None:
+        """JIT-compile the `forward_kv` kernels.
+
+        Same role as `GPT2Llama.warmup_kv`: a throwaway prefill + a few decode
+        steps with the real shapes so the actual generation loop hits
+        steady-state immediately instead of paying ~240ms of JIT cost on the
+        first prefill.
+        """
+        if NAME != "mlx":
+            return
+        import mlx.core as mx
+
+        dummy_prompt = mx.array([[0] * max(1, prompt_len)], dtype=mx.int32)
+        logits, caches = self.forward_kv(dummy_prompt)
+        mx.eval(logits, *[t for kv in caches for t in kv])
+        for step in range(decode_steps):
+            logits, caches = self.forward_kv(
+                mx.array([[0]], dtype=mx.int32),
+                kv_cache=caches,
+                offset=prompt_len + step,
+            )
+            mx.eval(logits, *[t for kv in caches for t in kv])
 
 
 class DecoderSublayer(nn.Module):

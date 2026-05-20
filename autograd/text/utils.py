@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import re
-import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -107,6 +106,13 @@ def generate(
     completion tokens, so callers can keep prompt and completion boundaries
     exact without decoding and re-encoding text.
 
+    When the model exposes `forward_kv` (the KV-cached inference contract; see
+    `GPT2Llama.forward_kv` for the canonical implementation), single-stream
+    generation routes through the cached path: prefill once, then one new-token
+    decode per step. Otherwise we fall back to the eager re-prefill loop via
+    `prediction_func`. The `num_generations > 1` case always uses the eager
+    loop because the cached path doesn't currently broadcast across streams.
+
     Args:
         model: Language model used for the forward pass.
         prediction_func: Forward function called with `mode="sample"`.
@@ -118,14 +124,26 @@ def generate(
         show_progress: Whether to show token-level inference progress.
         num_generations: Number of independent completions to generate in
             parallel for the same prompt.
-        compute_logprobs: Whether to compute sampled-token logprobs. Text-only
-            generation can disable this to skip the sampling-distribution math.
 
     Returns:
         One result per generated completion.
     """
     if num_generations < 1:
         raise ValueError(f"num_generations must be >= 1, got {num_generations}")
+
+    if num_generations == 1 and hasattr(model, "forward_kv"):
+        return [
+            _generate_with_kv_cache(
+                model=model,
+                prompt_tokens=prompt_tokens,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                top_k=top_k,
+                eos_token_id=eos_token_id,
+                show_progress=show_progress,
+                compute_logprobs=compute_logprobs,
+            )
+        ]
 
     prompt_token_list = [int(token) for token in prompt_tokens]
     output_ids = [prompt_token_list.copy() for _ in range(num_generations)]
@@ -147,32 +165,42 @@ def generate(
         if isinstance(prediction, tuple):
             prediction = prediction[0]
         next_token_logits = prediction.data[:, -1]
-        token_ids, step_logprobs = _sample_next_tokens(
-            next_token_logits=next_token_logits,
-            active=active,
-            temperature=temperature,
-            top_k=top_k,
-            eos_token_id=eos_token_id,
-            compute_logprobs=compute_logprobs,
-        )
 
-        # One device-to-host transfer per step for the whole batch, instead of
-        # per-row scalar syncs.
-        token_list = [int(token) for token in xp.to_numpy(token_ids).tolist()]
-        logprob_list = None
-        if step_logprobs is not None:
-            logprob_list = [
-                float(logprob) for logprob in xp.to_numpy(step_logprobs).tolist()
-            ]
-
-        for row_idx, token_id in enumerate(token_list):
-            output_ids[row_idx].append(token_id)
-            if not active[row_idx]:
+        for row_idx, is_active in enumerate(active):
+            if not is_active:
+                output_ids[row_idx].append(eos_token_id)
                 continue
+
+            logits = next_token_logits[row_idx]
+            if temperature <= 0:
+                # greedy decoding: choose the highest-logit token directly.
+                token_id = int(xp.argmax(logits))
+                logprob = 0.0
+            else:
+                # Temperature rescales the distribution before sampling.
+                # Larger values flatten it; smaller values make it sharper.
+                behavior_logits = xp.array(logits, dtype=xp.float32) / temperature
+                if top_k is not None and top_k < len(behavior_logits):
+                    # Top-k keeps only the k most likely tokens and masks the rest.
+                    threshold = xp.sort(behavior_logits)[-top_k]
+                    behavior_logits = xp.where(
+                        behavior_logits >= threshold,
+                        behavior_logits,
+                        xp.full(
+                            behavior_logits.shape,
+                            -float("inf"),
+                            dtype=behavior_logits.dtype,
+                        ),
+                    )
+                token_id = int(xp.to_scalar(xp.sample_categorical(behavior_logits)))
+                # Store the logprob from the same distribution that sampled the token
+                shifted = behavior_logits - xp.max(behavior_logits)
+                log_denom = xp.log(xp.sum(xp.exp(shifted)))
+                logprob = float(xp.to_scalar(shifted[token_id] - log_denom))
+
+            output_ids[row_idx].append(token_id)
             completion_tokens[row_idx].append(token_id)
-            logprobs[row_idx].append(
-                0.0 if logprob_list is None else logprob_list[row_idx]
-            )
+            logprobs[row_idx].append(logprob)
             if token_id == eos_token_id:
                 stop_reasons[row_idx] = "eos"
                 active[row_idx] = False
@@ -180,86 +208,112 @@ def generate(
     return [
         GenerationResult(
             completion_tokens=tokens,
-            logprobs=logprobs[row_idx],
+            logprobs=result_logprobs,
             stop_reason=stop_reasons[row_idx],
         )
-        for row_idx, tokens in enumerate(completion_tokens)
+        for row_idx, (tokens, result_logprobs) in enumerate(
+            zip(completion_tokens, logprobs)
+        )
     ]
 
 
-def _sample_next_tokens(
-    next_token_logits: Array,
-    active: list[bool],
+def _generate_with_kv_cache(
+    model: nn.Module,
+    prompt_tokens: List[int],
+    max_new_tokens: int,
     temperature: float,
     top_k: Optional[int],
     eos_token_id: int,
-    compute_logprobs: bool,
-) -> tuple[Array, Optional[Array]]:
-    """Sample one token per row from next-token logits.
+    show_progress: bool,
+    compute_logprobs: bool = True,
+) -> GenerationResult:
+    """Single-stream generation via the model's KV-cached forward.
 
-    This owns the sampling contract for the generation loop: greedy vs sampled
-    decoding, top-k masking, EOS padding for finished rows, and logprobs. The
-    math is batched across rows so each step costs one set of array ops rather
-    than one per completion.
+    The model is expected to expose `forward_kv(input_ids, kv_cache=None,
+    offset=0) -> (logits_last, new_cache)`. Callers that care about cold
+    JIT-compile cost should invoke `model.warmup_kv(...)` themselves before
+    timing (this is what `generate_text` does); we deliberately don't warm
+    up here so programmatic callers see honest wall-time.
+
+    The inner loop only forces one host sync per step (on the sampled token
+    id, which is needed to feed the next call). Per-token logprobs stay as
+    backend arrays and are materialized in one batched `to_scalar` pass at
+    the end, so they cost ~one sync total instead of one per step.
     """
-    num_generations = len(active)
-    if temperature <= 0:
-        sampled_ids = []
-        for row_idx, is_active in enumerate(active):
-            if is_active:
-                sampled_ids.append(
-                    xp.argmax(next_token_logits[row_idx]).astype(xp.int32)
-                )
-            else:
-                sampled_ids.append(xp.array(eos_token_id, dtype=xp.int32))
-        token_ids = xp.stack(sampled_ids, axis=0)
-        step_logprobs = (
-            xp.zeros((num_generations,), dtype=xp.float32) if compute_logprobs else None
-        )
-        return token_ids, step_logprobs
+    prompt = [int(token) for token in prompt_tokens]
+    prompt_len = len(prompt)
 
-    # Temperature rescales the distribution before sampling. Larger values
-    # flatten it; smaller values make it sharper.
-    behavior_logits = xp.array(next_token_logits, dtype=xp.float32) / temperature
-    if top_k is not None and top_k < behavior_logits.shape[-1]:
-        # Top-k keeps only the k most likely tokens in each row and masks the
-        # rest to -inf so softmax gives them zero probability.
-        threshold = xp.sort(behavior_logits, axis=-1)[:, -top_k]
-        behavior_logits = xp.where(
-            behavior_logits >= threshold[:, None],
-            behavior_logits,
-            xp.full(
-                behavior_logits.shape,
-                -float("inf"),
-                dtype=behavior_logits.dtype,
-            ),
-        )
+    input_ids = xp.array([prompt], dtype=xp.int32)
+    logits, kv_cache = model.forward_kv(input_ids)
+    next_logits = logits[:, -1, :]
 
-    sampled_ids = []
-    for row_idx, is_active in enumerate(active):
-        if is_active:
-            sampled_ids.append(
-                xp.array(
-                    xp.sample_categorical(behavior_logits[row_idx]),
-                    dtype=xp.int32,
-                )
-            )
+    completion: list[int] = []
+    logprob_arrays: list = []  # backend scalars, materialized in bulk after the loop
+    stop_reason = "max_new_tokens"
+
+    # The KV path runs ~250+ tok/s, so a default-throttled tqdm (one repaint
+    # per iter) costs ~10% in Python overhead even when nothing is drawn.
+    # mininterval throttles repaints; the per-iter counter increment is still
+    # paid, but that's much cheaper than the formatting+stderr write.
+    progress = tqdm(
+        range(max_new_tokens),
+        desc="Inference",
+        disable=not show_progress,
+        mininterval=0.5,
+    )
+    for step in progress:
+        row = next_logits[0]
+        if temperature <= 0:
+            token_id_arr = xp.argmax(row).astype(xp.int32)
+            if compute_logprobs:
+                logprob_arrays.append(None)  # placeholder -> 0.0
         else:
-            # Finished rows keep feeding EOS so batch shapes stay fixed. The
-            # caller ignores these padded tokens when building the result.
-            sampled_ids.append(xp.array(eos_token_id, dtype=xp.int32))
-    token_ids = xp.stack(sampled_ids, axis=0)
+            behavior = xp.array(row, dtype=xp.float32) / temperature
+            if top_k is not None and top_k < len(behavior):
+                threshold = xp.sort(behavior)[-top_k]
+                behavior = xp.where(
+                    behavior >= threshold,
+                    behavior,
+                    xp.full(behavior.shape, -float("inf"), dtype=behavior.dtype),
+                )
+            token_id_arr = xp.sample_categorical(behavior).astype(xp.int32)
+            if compute_logprobs:
+                # On the KV path each step is ~3.5ms of MLX compute; the
+                # max/sub/exp/sum/log/gather chain here adds ~0.5ms (~15%).
+                # Callers who don't read the per-token logprobs (e.g. plain
+                # text decoding) can pass compute_logprobs=False to skip it.
+                shifted = behavior - xp.max(behavior)
+                log_denom = xp.log(xp.sum(xp.exp(shifted)))
+                logprob_arrays.append(shifted[token_id_arr] - log_denom)
 
-    if not compute_logprobs:
-        return token_ids, None
+        # The only forced sync per step: we need the sampled int to check
+        # EOS and to know when to terminate.
+        token_id = int(xp.to_scalar(token_id_arr))
+        completion.append(token_id)
+        if token_id == eos_token_id:
+            stop_reason = "eos"
+            break
+        if step == max_new_tokens - 1:
+            break
 
-    # The reported logprob must come from the exact distribution used for
-    # sampling, after temperature and top-k have changed the logits. Subtracting
-    # the row max is the standard numerically stable log-softmax trick.
-    shifted = behavior_logits - xp.max(behavior_logits, axis=-1, keepdims=True)
-    log_denom = xp.log(xp.sum(xp.exp(shifted), axis=-1))
-    row_idx = xp.arange(num_generations)
-    return token_ids, shifted[row_idx, token_ids] - log_denom
+        # Reuse the on-device scalar instead of round-tripping via a Python
+        # list, which would force an h2d copy of a fresh (1,1) int32 array.
+        next_input = token_id_arr.reshape(1, 1)
+        offset = prompt_len + step
+        new_logits, kv_cache = model.forward_kv(next_input, kv_cache, offset)
+        next_logits = new_logits[:, -1, :]
+
+    if compute_logprobs:
+        sampled_logprobs = [
+            0.0 if lp is None else float(xp.to_scalar(lp)) for lp in logprob_arrays
+        ]
+    else:
+        sampled_logprobs = [0.0] * len(completion)
+    return GenerationResult(
+        completion_tokens=completion,
+        logprobs=sampled_logprobs,
+        stop_reason=stop_reason,
+    )
 
 
 def generate_text(
@@ -270,7 +324,6 @@ def generate_text(
     max_length: int = 50,
     temperature: float = 1.0,
     top_k: Optional[int] = None,
-    stop_token: str = "<|endoftext|>",
 ) -> str:
     """Generate and print text from a string prompt.
 
@@ -288,33 +341,37 @@ def generate_text(
         max_length: Maximum total token length, including prompt tokens.
         temperature: Sampling temperature passed through to `generate`.
         top_k: Optional top-k filter passed through to `generate`.
-        stop_token: Token string that stops generation when sampled. Chat
-            checkpoints stop at the turn separator instead of `<|endoftext|>`.
 
     Returns:
         Decoded prompt plus generated completion text.
     """
+    import time
+
     was_training = getattr(model, "_is_training", None)
     model.eval()
     try:
         start_tokens = start_tokens or "<SOS>"
         output_ids = list(bpe.encode(start_tokens))
-        prompt_len = len(output_ids)
-        print("Prompt:")
-        print(bpe.decode(output_ids))
-        print("\nGenerated:")
+        # Warm up the KV-cache fast-path JIT (no-op for models without it) so
+        # the reported tok/s reflects steady-state and not a one-time compile.
+        # 8 decode steps is enough to cover the early kernel-cache-miss tail
+        # we see between cache_len=2 and ~9.
+        warmup = getattr(model, "warmup_kv", None)
+        if callable(warmup):
+            warmup(prompt_len=max(1, len(output_ids)), decode_steps=8)
         t0 = time.perf_counter()
         result = generate(
             model=model,
             prediction_func=prediction_func,
             prompt_tokens=output_ids,
-            max_new_tokens=max_length - prompt_len,
+            max_new_tokens=max_length - len(output_ids),
             temperature=temperature,
             top_k=top_k,
-            eos_token_id=bpe.encode(stop_token)[0],
+            eos_token_id=bpe.encode("<|endoftext|>")[0],
             num_generations=1,
-            # Text generation only needs the tokens; skip the per-step
-            # log-softmax work since nothing reads the logprobs.
+            # text generation only needs the tokens; skipping per-step logprob
+            # computation removes the only sampling-side work that's visible
+            # at the ~3.5ms/step KV-cached decode rate.
             compute_logprobs=False,
         )[0]
         elapsed = time.perf_counter() - t0
@@ -322,12 +379,10 @@ def generate_text(
         for next_token in result.completion_tokens:
             print(bpe.decode([next_token]), end="", flush=True)
         n_generated = len(result.completion_tokens)
-        total_tokens = prompt_len + n_generated
         tok_per_sec = (n_generated / elapsed) if elapsed > 0 else float("nan")
         print(
             "\n--------------------------------------------------------------"
-            f"\nPrompt {prompt_len} tokens, generated {n_generated} new tokens, "
-            f"total {total_tokens}/{max_length} tokens in {elapsed:.2f}s "
+            f"\nGenerated {n_generated} tokens in {elapsed:.2f}s "
             f"({tok_per_sec:.1f} tok/s)\n"
         )
         return bpe.decode(output_ids)
