@@ -2921,8 +2921,8 @@ def _cupy_rope_reduce_strided(
     if grad.ndim != 4 or out_4d.ndim != 4:
         return False
     B = int(out_4d.shape[0])
-    H_out = int(out_4d.shape[1])
-    T = int(out_4d.shape[2])
+    T = int(out_4d.shape[1])
+    H_out = int(out_4d.shape[2])
     D = int(out_4d.shape[3])
     if int(grad.shape[0]) != B or int(grad.shape[2]) != T or int(grad.shape[3]) != D:
         return False
@@ -2941,8 +2941,8 @@ def _cupy_rope_reduce_strided(
     in_st = int(grad.strides[2] // in_itemsize)
     in_sd = int(grad.strides[3] // in_itemsize)
     out_sb = int(out_4d.strides[0] // out_itemsize)
-    out_sh = int(out_4d.strides[1] // out_itemsize)
-    out_st = int(out_4d.strides[2] // out_itemsize)
+    out_st = int(out_4d.strides[1] // out_itemsize)
+    out_sh = int(out_4d.strides[2] // out_itemsize)
     out_sd = int(out_4d.strides[3] // out_itemsize)
     total = int(out_4d.size)
     threads = 256

@@ -98,6 +98,95 @@ def _build_weights(*, hidden_size: int, num_heads: int, num_kv_heads: int, dtype
     )
 
 
+class _FakeFlags:
+    c_contiguous = True
+
+
+class _FakeDType:
+    def __init__(self, itemsize: int):
+        self.itemsize = itemsize
+
+
+class _FakeXP:
+    bfloat16 = _FakeDType(2)
+    float32 = _FakeDType(4)
+    int32 = int
+    int64 = int
+
+
+class _FakeArray:
+    def __init__(self, shape, dtype, strides=None):
+        self.shape = tuple(shape)
+        self.dtype = dtype
+        self.ndim = len(self.shape)
+        itemsize = dtype.itemsize
+        if strides is None:
+            strides_elems = []
+            stride = 1
+            for dim in reversed(self.shape):
+                strides_elems.append(stride)
+                stride *= dim
+            strides_elems.reverse()
+            strides = tuple(stride * itemsize for stride in strides_elems)
+        self.strides = strides
+        self.flags = _FakeFlags()
+        size = 1
+        for dim in self.shape:
+            size *= dim
+        self.size = size
+
+    def reshape(self, *shape):
+        assert shape == (-1,)
+        out = _FakeArray((self.size,), self.dtype, (self.dtype.itemsize,))
+        out.size = self.size
+        return out
+
+
+def test_cupy_rope_reduce_strided_accepts_bthd_output_slot(monkeypatch):
+    fake_xp = _FakeXP()
+    batch_size, seq_len, num_heads, head_dim = 2, 16, 4, 8
+    h_total_slots = 8
+    grad = _FakeArray((batch_size, num_heads, seq_len, head_dim), fake_xp.bfloat16)
+    cos = _FakeArray((1, 1, seq_len, head_dim), fake_xp.float32)
+    sin = _FakeArray((1, 1, seq_len, head_dim), fake_xp.float32)
+    out = _FakeArray(
+        (batch_size, seq_len, num_heads, head_dim),
+        fake_xp.bfloat16,
+        (
+            seq_len * h_total_slots * head_dim * fake_xp.bfloat16.itemsize,
+            h_total_slots * head_dim * fake_xp.bfloat16.itemsize,
+            head_dim * fake_xp.bfloat16.itemsize,
+            fake_xp.bfloat16.itemsize,
+        ),
+    )
+    calls = []
+
+    def kernel(grid, block, args):
+        calls.append((grid, block, args))
+
+    monkeypatch.setattr(functional, "IS_CUPY", True)
+    monkeypatch.setattr(functional, "xp", fake_xp)
+    monkeypatch.setattr(
+        functional,
+        "_cupy_rope_apply_kernels",
+        lambda: {"reduce_strided_bf16": kernel},
+    )
+
+    assert functional._cupy_rope_reduce_strided(
+        grad,
+        cos,
+        sin,
+        out_4d=out,
+        sign_lower=1,
+        group_size=1,
+    )
+    _, _, args = calls[0]
+    assert args[5] == seq_len
+    assert args[6] == num_heads
+    assert args[16] == head_dim
+    assert args[17] == h_total_slots * head_dim
+
+
 def test_packed_rope_gqa_fallback_matches_split_attention_on_cpu_backends():
     batch_size, seq_len, hidden_size, num_heads, num_kv_heads = 2, 4, 16, 4, 2
     dtype = xp.float32
