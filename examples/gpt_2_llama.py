@@ -947,6 +947,7 @@ if __name__ == "__main__":
         report_every_steps=250,
         global_batch_size=480,
         micro_batch_size=24,
+        eval_batch_size=12,
         max_grad_norm=1.0,
         log_global_loss=True,
         model_kwargs={
@@ -1081,7 +1082,7 @@ if __name__ == "__main__":
     )
     test_data_loader = DataLoader(
         dataset=test_dataset,
-        batch_size=max(1, CONFIG.micro_batch_size // 2),
+        batch_size=CONFIG.eval_batch_size,
         collator=CausalLMWindowCollator(),
         sampler=test_sampler,
     )
