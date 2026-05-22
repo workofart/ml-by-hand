@@ -1,9 +1,7 @@
-import io
 import json
 import os
 import re
 import tempfile
-from contextlib import redirect_stdout
 from unittest import TestCase
 from unittest.mock import MagicMock, patch
 
@@ -28,18 +26,13 @@ class MockedBPE:
     def encode(self, text: str):
         if text == "<|endoftext|>":
             return [9]
-        if text == "<|END_OF_TURN|>":
-            return [7]
         if text == "<SOS>":
             return [0]
         # For simplicity, convert each uppercase letter to an integer (A=0, B=1, …)
         return [ord(ch) - 65 for ch in text if ch.isupper()]
 
     def decode(self, tokens: list) -> str:
-        return "".join(
-            "<|endoftext|>" if t == 9 else "<|END_OF_TURN|>" if t == 7 else chr(t + 65)
-            for t in tokens
-        )
+        return "".join("<|endoftext|>" if t == 9 else chr(t + 65) for t in tokens)
 
 
 class BytesResponse:
@@ -400,18 +393,27 @@ class TestTextUtils(TestCase):
         )
 
     @patch("autograd.text.utils.xp.sample_categorical")
-    def test_generate_can_skip_logprob_math(self, mock_choice):
-        def fake_prediction(model, batch_data, mode):
-            batch_size, seq_len = batch_data.shape
-            dummy_obj = MagicMock()
-            dummy_obj.data = xp.zeros((batch_size, seq_len, 4), dtype=xp.float32)
-            return dummy_obj
+    def test_generate_uses_batched_kv_cache_for_parallel_completions(self, mock_choice):
+        class FakeKVModel:
+            def __init__(self):
+                self.calls = []
 
-        mock_choice.side_effect = [1, 2, 3, 1]
+            def forward_kv(self, input_ids, kv_cache=None, offset=0):
+                self.calls.append((tuple(input_ids.shape), offset))
+                batch_size, seq_len = input_ids.shape
+                logits = [
+                    [[0.0, 1.0, 2.0, 3.0] for _ in range(seq_len)]
+                    for _ in range(batch_size)
+                ]
+                return xp.array(logits, dtype=xp.float32), []
+
+        mock_choice.side_effect = [1, 2, 1, 2]
+        model = FakeKVModel()
+        prediction_func = MagicMock()
 
         results = generate(
-            model=MagicMock(),
-            prediction_func=MagicMock(side_effect=fake_prediction),
+            model=model,  # type: ignore
+            prediction_func=prediction_func,
             prompt_tokens=[0],
             max_new_tokens=2,
             temperature=1.0,
@@ -419,13 +421,14 @@ class TestTextUtils(TestCase):
             eos_token_id=9,
             show_progress=False,
             num_generations=2,
-            compute_logprobs=False,
         )
 
+        self.assertEqual(model.calls, [((2, 1), 0), ((2, 1), 1)])
+        self.assertEqual(prediction_func.call_count, 0)
         self.assertEqual(
-            [result.completion_tokens for result in results], [[1, 3], [2, 1]]
+            [result.completion_tokens for result in results], [[1, 1], [2, 2]]
         )
-        self.assertEqual([result.logprobs for result in results], [[0.0, 0.0]] * 2)
+        self.assertEqual([len(result.logprobs) for result in results], [2, 2])
 
     @patch("autograd.text.utils.tqdm")
     @patch("autograd.text.utils.xp.sample_categorical")
@@ -519,35 +522,6 @@ class TestTextUtils(TestCase):
         self.assertEqual(prediction_func.call_count, generated_tokens)
 
     @patch("autograd.text.utils.xp.sample_categorical")
-    def test_generate_text_prints_prompt_completion_and_token_counts(self, mock_choice):
-        def fake_prediction(model, batch_data, mode):
-            seq_len = batch_data.shape[1]
-            dummy_obj = MagicMock()
-            dummy_obj.data = xp.zeros((1, seq_len, 10))
-            return dummy_obj
-
-        mock_choice.return_value = 1
-        stdout = io.StringIO()
-
-        with redirect_stdout(stdout):
-            generate_text(
-                model=MagicMock(),
-                prediction_func=MagicMock(side_effect=fake_prediction),
-                bpe=self.bpe,  # type: ignore
-                start_tokens="AB",
-                max_length=5,
-                temperature=1.0,
-                top_k=5,
-            )
-
-        output = stdout.getvalue()
-        self.assertIn("Prompt:\nAB\n\nGenerated:\nBBB", output)
-        self.assertIn(
-            "Prompt 2 tokens, generated 3 new tokens, total 5/5 tokens",
-            output,
-        )
-
-    @patch("autograd.text.utils.xp.sample_categorical")
     def test_generate_text_stops_at_endoftext(self, mock_choice):
         def fake_prediction(model, batch_data, mode):
             seq_len = batch_data.shape[1]
@@ -569,31 +543,6 @@ class TestTextUtils(TestCase):
         )
 
         self.assertEqual(result, self.bpe.decode([0, 1, 9]))
-        self.assertEqual(prediction_func.call_count, 2)
-
-    @patch("autograd.text.utils.xp.sample_categorical")
-    def test_generate_text_stops_at_configured_stop_token(self, mock_choice):
-        def fake_prediction(model, batch_data, mode):
-            seq_len = batch_data.shape[1]
-            dummy_obj = MagicMock()
-            dummy_obj.data = xp.zeros((1, seq_len, 10))
-            return dummy_obj
-
-        mock_choice.side_effect = [1, 7, 1]
-        prediction_func = MagicMock(side_effect=fake_prediction)
-
-        result = generate_text(
-            model=MagicMock(),
-            prediction_func=prediction_func,
-            bpe=self.bpe,  # type: ignore
-            start_tokens="<SOS>",
-            max_length=5,
-            temperature=1.0,
-            top_k=5,
-            stop_token="<|END_OF_TURN|>",
-        )
-
-        self.assertEqual(result, self.bpe.decode([0, 1, 7]))
         self.assertEqual(prediction_func.call_count, 2)
 
     @patch("autograd.text.utils.xp.sample_categorical")

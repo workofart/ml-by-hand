@@ -13,6 +13,7 @@ from autograd.text.tokenizer import BytePairEncoder
 from autograd.tools.config_schema import GenericTrainingConfig
 from examples.gpt_2 import GPT2
 from examples.grpo import (
+    TOKENIZER_VOCAB_PATH,
     GRPOBatch,
     GRPOCollator,
     GRPOTrainer,
@@ -140,6 +141,13 @@ def test_grpo_collator_aligns_generated_tokens_with_shifted_completion_labels():
     )
     assert not hasattr(batch, "loss_total_weight")
     assert float(xp.to_scalar(GRPOTrainer._loss_total_weight(None, batch))) == 3.0
+
+
+def test_grpo_tokenizer_vocab_path_exists_and_matches_pretrained_tokenizer_size():
+    tokenizer = BytePairEncoder(num_merges=49990, vocab_file_path=TOKENIZER_VOCAB_PATH)
+
+    assert tokenizer.n_vocab == 50257
+    assert tokenizer.encode("<|endoftext|>") == [256]
 
 
 def test_sample_requires_completion_logprob_alignment():
@@ -283,6 +291,33 @@ def test_gsm8k_row_to_task_uses_question_and_final_answer():
         "source": "openai/gsm8k",
         "reasoning": "1 + 1 = <<1+1=2>>2",
     }
+
+
+def test_load_gsm8k_tasks_uses_shared_row_loader(monkeypatch):
+    calls = []
+
+    def fake_load_gsm8k_rows(split, max_rows):
+        calls.append((split, max_rows))
+        return [
+            {
+                "question": "What is 1 + 1?",
+                "answer": "1 + 1 = <<1+1=2>>2 #### 2",
+            }
+        ]
+
+    monkeypatch.setattr("examples.grpo.load_gsm8k_rows", fake_load_gsm8k_rows)
+
+    tasks = MathEnvironment.load_gsm8k_tasks(split="train", max_tasks=4)
+
+    assert calls == [("train", 4)]
+    assert tasks == [
+        Task(
+            task_id="gsm8k-0",
+            raw_input="What is 1 + 1?",
+            answer="2",
+            metadata={"source": "openai/gsm8k"},
+        )
+    ]
 
 
 def test_score_group_attaches_rewards_without_advantages():
