@@ -18,6 +18,11 @@ from autograd import functional
 from autograd.backend import Array, ArrayLike, xp
 from autograd.data.collator import Collator, pad_right_1d
 from autograd.data.gsm8k import load_gsm8k_rows, split_gsm8k_answer
+from autograd.data.sft import (
+    SFT_ROLE_MARKERS,
+    SFT_SYSTEM_PROMPT,
+    SFT_TURN_SEPARATOR,
+)
 from autograd.nn import Module
 from autograd.optim import Adam
 from autograd.tensor import Tensor, no_grad
@@ -28,18 +33,8 @@ from autograd.tools.model import load_checkpoint_metadata
 from autograd.tools.trainer import AbstractTrainer, TrainingState
 from examples.gpt_2 import GPT2, GPT2ForwardFn
 
-# Template for DeepSeek-R1-Zero. Table 1
-# Paper: https://arxiv.org/pdf/2501.12948
-SYSTEM_PROMPT = """
-A conversation between User and Assistant. The user asks a question, and the Assistant solves
-it. The assistant first thinks about the reasoning process in the mind and then provides the user
-with the answer. The reasoning process and answer are enclosed within <think>...</think>
-and <answer>...</answer> tags, respectively, i.e., <think> reasoning process here </think>
-<answer> answer here </answer>.
-"""
-
-EOS_TOKEN = "<|endoftext|>"
-PRETRAINED_CHECKPOINT_PATH = "checkpoints/openwebtext_gpt2_124m_baseline_GPT2_14000"
+EOS_TOKEN = SFT_TURN_SEPARATOR
+PRETRAINED_CHECKPOINT_PATH = "checkpoints/sft_gsm8k_grpo_system_GPT2_900"
 TOKENIZER_VOCAB_PATH = "training_data/openwebtext_vocab_49990.pkl"
 
 
@@ -316,7 +311,11 @@ class Environment:
     def _render_prompt(self, user_prompt: str) -> str:
         # Private template helper. This should stay string-in/string-out and not
         # know about Task, rewards, or rollout state.
-        return SYSTEM_PROMPT + f"User: {user_prompt}{EOS_TOKEN}Assistant: "
+        return (
+            f"{SFT_ROLE_MARKERS['system']}{SFT_SYSTEM_PROMPT}"
+            f"{SFT_TURN_SEPARATOR}{SFT_ROLE_MARKERS['user']}{user_prompt}"
+            f"{SFT_TURN_SEPARATOR}{SFT_ROLE_MARKERS['assistant']}"
+        )
 
     @abstractmethod
     def _compute_reward(self, task: Task, sample: Sample) -> float:  # pyright: ignore[reportReturnType]
