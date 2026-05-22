@@ -410,6 +410,7 @@ def generate_text(
     max_length: int = 50,
     temperature: float = 1.0,
     top_k: Optional[int] = None,
+    stop_token: str = "<|endoftext|>",
 ) -> str:
     """Generate and print text from a string prompt.
 
@@ -427,6 +428,7 @@ def generate_text(
         max_length: Maximum total token length, including prompt tokens.
         temperature: Sampling temperature passed through to `generate`.
         top_k: Optional top-k filter passed through to `generate`.
+        stop_token: Token string that stops generation when sampled.
 
     Returns:
         Decoded prompt plus generated completion text.
@@ -438,6 +440,10 @@ def generate_text(
     try:
         start_tokens = start_tokens or "<SOS>"
         output_ids = list(bpe.encode(start_tokens))
+        prompt_len = len(output_ids)
+        print("Prompt:")
+        print(bpe.decode(output_ids))
+        print("\nGenerated:")
         # Warm up the KV-cache fast-path JIT (no-op for models without it) so
         # the reported tok/s reflects steady-state and not a one-time compile.
         # 8 decode steps is enough to cover the early kernel-cache-miss tail
@@ -450,10 +456,10 @@ def generate_text(
             model=model,
             prediction_func=prediction_func,
             prompt_tokens=output_ids,
-            max_new_tokens=max_length - len(output_ids),
+            max_new_tokens=max_length - prompt_len,
             temperature=temperature,
             top_k=top_k,
-            eos_token_id=bpe.encode("<|endoftext|>")[0],
+            eos_token_id=bpe.encode(stop_token)[0],
             num_generations=1,
             # text generation only needs the tokens; skipping per-step logprob
             # computation removes the only sampling-side work that's visible
@@ -465,10 +471,12 @@ def generate_text(
         for next_token in result.completion_tokens:
             print(bpe.decode([next_token]), end="", flush=True)
         n_generated = len(result.completion_tokens)
+        total_tokens = prompt_len + n_generated
         tok_per_sec = (n_generated / elapsed) if elapsed > 0 else float("nan")
         print(
             "\n--------------------------------------------------------------"
-            f"\nGenerated {n_generated} tokens in {elapsed:.2f}s "
+            f"\nPrompt {prompt_len} tokens, generated {n_generated} new tokens, "
+            f"total {total_tokens}/{max_length} tokens in {elapsed:.2f}s "
             f"({tok_per_sec:.1f} tok/s)\n"
         )
         return bpe.decode(output_ids)
