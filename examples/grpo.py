@@ -34,7 +34,7 @@ from autograd.tools.trainer import AbstractTrainer, TrainingState
 from examples.gpt_2 import GPT2, GPT2ForwardFn
 
 EOS_TOKEN = SFT_TURN_SEPARATOR
-PRETRAINED_CHECKPOINT_PATH = "checkpoints/sft_gsm8k_grpo_system_GPT2_900"
+PRETRAINED_CHECKPOINT_PATH = "checkpoints/sft_gsm8k_grpo_system_GPT2_300"
 TOKENIZER_VOCAB_PATH = "training_data/openwebtext_vocab_49990.pkl"
 
 
@@ -342,9 +342,13 @@ class MathEnvironment(Environment):
     checking is enough to prove the full loop learns.
     """
 
-    # This regex should be consistent with the SYSTEM_PROMPT defined at the
-    # top of this module
-    ANSWER_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.DOTALL)
+    # This should be consistent with the SYSTEM_PROMPT
+    RESPONSE_RE = re.compile(
+        r"\A\s*<think>(.*?)</think>\s*<answer>\s*(.*?)\s*</answer>\s*"
+        + re.escape(SFT_TURN_SEPARATOR)
+        + r"\s*\Z",
+        re.DOTALL,
+    )
 
     @staticmethod
     def normalize_answer(answer: str) -> str:
@@ -376,23 +380,30 @@ class MathEnvironment(Environment):
         return [cls.gsm8k_row_to_task(row_idx, row) for row_idx, row in enumerate(rows)]
 
     def _compute_reward(self, task: Task, sample: Sample) -> float:
-        reward = 0.0
-        if "<think>" in sample.completion_text:
-            reward += 0.1
-        if "</think>" in sample.completion_text:
-            reward += 0.1
-        if "<answer>" in sample.completion_text:
-            reward += 0.1
-        if "</answer>" in sample.completion_text:
-            reward += 0.1
+        match = self.RESPONSE_RE.match(sample.completion_text)
+        format_valid = match is not None
+        parsed_answer = None
+        exact_match = False
+        if format_valid:
+            parsed_answer = self.normalize_answer(match.group(2))
+            expected_answer = self.normalize_answer(task.answer)
+            exact_match = parsed_answer == expected_answer
 
-        match = self.ANSWER_RE.search(sample.completion_text)
-        if match is None:
-            return reward
+        if sample.metadata is None:
+            sample.metadata = {}
+        sample.metadata.update(
+            {
+                "format_valid": format_valid,
+                "exact_match": exact_match,
+                "parsed_answer": parsed_answer,
+            }
+        )
 
-        parsed_answer = self.normalize_answer(match.group(1))
-        expected_answer = self.normalize_answer(task.answer)
-        if parsed_answer == expected_answer:
+        if not format_valid:
+            return 0.0
+
+        reward = 0.4
+        if exact_match:
             reward += 1.0
 
         return reward
@@ -652,6 +663,54 @@ def generation(
     ]
 
 
+def rollout_metrics(samples: Sequence[Sample]) -> dict[str, float]:
+    if not samples:
+        raise ValueError("rollout metrics require at least one sample")
+
+    rewards = []
+    format_valid = 0
+    exact_match = 0
+    turn_end = 0
+    completion_lengths = []
+    for sample in samples:
+        if sample.reward is None:
+            raise ValueError("sample.reward must be set before logging")
+        metadata = sample.metadata or {}
+        rewards.append(sample.reward)
+        format_valid += int(bool(metadata.get("format_valid", False)))
+        exact_match += int(bool(metadata.get("exact_match", False)))
+        turn_end += int(metadata.get("stop_reason") == "eos")
+        completion_lengths.append(len(sample.completion_tokens))
+
+    rewards_array = np.array(rewards, dtype=np.float32)
+    sample_count = float(len(samples))
+    return {
+        "reward_mean": float(rewards_array.mean()),
+        "reward_std": float(rewards_array.std()),
+        "reward_max": float(rewards_array.max()),
+        "format_valid_rate": format_valid / sample_count,
+        "exact_match_rate": exact_match / sample_count,
+        "turn_end_rate": turn_end / sample_count,
+        "completion_len_mean": float(np.mean(completion_lengths)),
+    }
+
+
+def filter_fitting_tasks(
+    tasks: Sequence[Task],
+    *,
+    environment: Environment,
+    tokenizer: BytePairEncoder,
+    max_tokens: int,
+    max_generation_tokens: int,
+) -> list[Task]:
+    fitting_tasks = []
+    for task in tasks:
+        prompt_len = len(tokenizer.encode(environment.render_task(task)))
+        if prompt_len + max_generation_tokens <= max_tokens:
+            fitting_tasks.append(task)
+    return fitting_tasks
+
+
 def main():
     ckpt = load_checkpoint_metadata(
         f"{PRETRAINED_CHECKPOINT_PATH}.json",
@@ -691,14 +750,37 @@ def main():
         vocab_file_path=TOKENIZER_VOCAB_PATH,
     )
     environment = MathEnvironment()
-    raw_tasks = environment.load_gsm8k_tasks(split="train", max_tasks=128)
-    tasks = []
-    for task in raw_tasks:
-        prompt_len = len(bpe.encode(environment.render_task(task)))
-        if prompt_len + TRAIN_CONFIG.max_generation_tokens <= trainer.model.max_seq_len:
-            tasks.append(task)
-    if not tasks:
+    raw_train_tasks = environment.load_gsm8k_tasks(split="train", max_tasks=128)
+    raw_validation_tasks = environment.load_gsm8k_tasks(
+        split="test",
+        max_tasks=TRAIN_CONFIG.max_eval_steps,
+    )
+    train_tasks = filter_fitting_tasks(
+        raw_train_tasks,
+        environment=environment,
+        tokenizer=bpe,
+        max_tokens=trainer.model.max_seq_len,
+        max_generation_tokens=TRAIN_CONFIG.max_generation_tokens,
+    )
+    validation_tasks = filter_fitting_tasks(
+        raw_validation_tasks,
+        environment=environment,
+        tokenizer=bpe,
+        max_tokens=trainer.model.max_seq_len,
+        max_generation_tokens=TRAIN_CONFIG.max_generation_tokens,
+    )
+    if not train_tasks:
         raise ValueError("No GSM8K tasks fit within the model context window")
+    if not validation_tasks:
+        raise ValueError(
+            "No GSM8K validation tasks fit within the model context window"
+        )
+
+    print(
+        "Data length: "
+        f"raw_train={len(raw_train_tasks)} raw_val={len(raw_validation_tasks)} "
+        f"fit_train={len(train_tasks)} fit_val={len(validation_tasks)}"
+    )
 
     rollout_generator = RolloutGenerator(TRAIN_CONFIG)
     collator = GRPOCollator(
@@ -714,7 +796,7 @@ def main():
     ) as progress_bar:
         while trainer.global_step < TRAIN_CONFIG.max_steps:
             step_before = trainer.global_step
-            task = tasks[trainer.global_step % len(tasks)]
+            task = train_tasks[trainer.global_step % len(train_tasks)]
             rollout_group = rollout_generator.rollout(
                 model=trainer.model,
                 task=task,
@@ -723,29 +805,30 @@ def main():
             )
             loss = trainer.train_step(collator([rollout_group]))
 
-            rewards = []
-            for sample in rollout_group.samples:
-                if sample.reward is None:
-                    raise ValueError("sample.reward must be set before logging")
-                rewards.append(sample.reward)
-            rewards_array = np.array(rewards, dtype=np.float32)
+            train_metrics = rollout_metrics(rollout_group.samples)
             progress_bar.update(trainer.global_step - step_before)
             progress_bar.set_postfix(
                 loss=f"{float(xp.to_scalar(loss.data)):.4f}",
-                reward_mean=f"{float(rewards_array.mean()):.3f}",
-                reward_std=f"{float(rewards_array.std()):.3f}",
+                reward_mean=f"{train_metrics['reward_mean']:.3f}",
+                exact=f"{train_metrics['exact_match_rate']:.3f}",
+                format=f"{train_metrics['format_valid_rate']:.3f}",
             )
 
             if trainer.global_step != step_before:
                 should_validate = trainer.global_step % report_every_steps == 0
                 if should_validate or trainer.global_step >= TRAIN_CONFIG.max_steps:
+                    validation_idx = (
+                        trainer.global_step // report_every_steps - 1
+                    ) % len(validation_tasks)
+                    validation_task = validation_tasks[validation_idx]
                     with no_grad():
                         validation_group = rollout_generator.rollout(
                             model=trainer.model,
-                            task=task,
+                            task=validation_task,
                             tokenizer=bpe,
                             environment=environment,
                         )
+                    validation_metrics = rollout_metrics(validation_group.samples)
                     validation_rewards = []
                     for sample in validation_group.samples:
                         if sample.reward is None:
@@ -762,9 +845,18 @@ def main():
                     progress_bar.write(
                         "validation "
                         f"step={trainer.global_step} "
-                        f"reward_mean={float(validation_rewards_array.mean()):.3f} "
-                        f"reward_max={float(validation_rewards_array.max()):.3f} "
-                        f"completion={best_sample.completion_text!r}"
+                        f"reward_mean={validation_metrics['reward_mean']:.3f} "
+                        f"reward_max={validation_metrics['reward_max']:.3f} "
+                        f"exact={validation_metrics['exact_match_rate']:.3f} "
+                        f"format={validation_metrics['format_valid_rate']:.3f} "
+                        f"turn_end={validation_metrics['turn_end_rate']:.3f} "
+                        f"len={validation_metrics['completion_len_mean']:.1f}"
+                    )
+                    progress_bar.write("Prompt:")
+                    progress_bar.write(bpe.decode(validation_group.prompt_tokens))
+                    progress_bar.write(best_sample.completion_text)
+                    progress_bar.write(
+                        "--------------------------------------------------------------"
                     )
 
 

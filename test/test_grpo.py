@@ -26,8 +26,10 @@ from examples.grpo import (
     RolloutGroup,
     Sample,
     Task,
+    filter_fitting_tasks,
     generation,
     grpo_loss,
+    rollout_metrics,
 )
 
 
@@ -208,35 +210,48 @@ def test_grpo_collator_rejects_rows_longer_than_max_tokens():
         GRPOCollator(max_tokens=3, pad_idx=0)([group])
 
 
-def test_math_environment_parses_answer_tags_for_reward():
+def test_math_environment_rewards_only_clean_turn_terminated_answers():
     environment = MathEnvironment()
     task = Task(task_id="math-1", raw_input="What is 1 + 1?", answer="2")
 
     correct = Sample(
         completion_tokens=xp.array([20], dtype=xp.int32),
-        completion_text="<think>1 + 1 = 2</think><answer>2</answer>",
+        completion_text=(
+            f"<think>1 + 1 = 2</think><answer>2</answer>{SFT_TURN_SEPARATOR}"
+        ),
         sampled_token_logprobs=xp.array([-0.1], dtype=xp.float32),
     )
     wrong = Sample(
         completion_tokens=xp.array([21], dtype=xp.int32),
-        completion_text="<answer>3</answer>",
+        completion_text=f"<think>1 + 1 = 3</think><answer>3</answer>{SFT_TURN_SEPARATOR}",
         sampled_token_logprobs=xp.array([-0.2], dtype=xp.float32),
     )
-    unformatted = Sample(
+    tag_junk = Sample(
         completion_tokens=xp.array([22], dtype=xp.int32),
-        completion_text="2",
+        completion_text=(
+            f"<think>1 + 1 = 2</think><answer>2</answer>junk{SFT_TURN_SEPARATOR}"
+        ),
         sampled_token_logprobs=xp.array([-0.3], dtype=xp.float32),
     )
-    partial_format = Sample(
+    missing_turn_end = Sample(
         completion_tokens=xp.array([23], dtype=xp.int32),
-        completion_text="<think>1 + 1 = 2</think><answer>3",
+        completion_text="<think>1 + 1 = 2</think><answer>2</answer>",
         sampled_token_logprobs=xp.array([-0.4], dtype=xp.float32),
     )
 
     assert environment._compute_reward(task, correct) == pytest.approx(1.4)
-    assert environment._compute_reward(task, wrong) == pytest.approx(0.2)
-    assert environment._compute_reward(task, unformatted) == 0.0
-    assert environment._compute_reward(task, partial_format) == pytest.approx(0.3)
+    assert correct.metadata["format_valid"] is True
+    assert correct.metadata["exact_match"] is True
+    assert correct.metadata["parsed_answer"] == "2"
+    assert environment._compute_reward(task, wrong) == pytest.approx(0.4)
+    assert wrong.metadata["format_valid"] is True
+    assert wrong.metadata["exact_match"] is False
+    assert environment._compute_reward(task, tag_junk) == 0.0
+    assert tag_junk.metadata["format_valid"] is False
+    assert tag_junk.metadata["exact_match"] is False
+    assert environment._compute_reward(task, missing_turn_end) == 0.0
+    assert missing_turn_end.metadata["format_valid"] is False
+    assert missing_turn_end.metadata["exact_match"] is False
 
 
 def test_math_environment_normalizes_comma_separated_answers():
@@ -244,7 +259,7 @@ def test_math_environment_normalizes_comma_separated_answers():
     task = Task(task_id="math-1", raw_input="How much profit?", answer="22500")
     sample = Sample(
         completion_tokens=xp.array([20], dtype=xp.int32),
-        completion_text="<think>math</think><answer>22,500</answer>",
+        completion_text=f"<think>math</think><answer>22,500</answer>{SFT_TURN_SEPARATOR}",
         sampled_token_logprobs=xp.array([-0.1], dtype=xp.float32),
     )
 
@@ -311,6 +326,29 @@ def test_math_environment_renders_tasks_with_sft_prompt_contract():
     )
 
 
+def test_filter_fitting_tasks_applies_prompt_plus_generation_budget():
+    class FakeTokenizer:
+        def encode(self, text):
+            if "short" in text:
+                return [1, 2]
+            return [1, 2, 3, 4]
+
+    tasks = [
+        Task(task_id="short", raw_input="short", answer="1"),
+        Task(task_id="long", raw_input="long", answer="2"),
+    ]
+
+    fitting_tasks = filter_fitting_tasks(
+        tasks,
+        environment=MathEnvironment(),
+        tokenizer=cast(BytePairEncoder, FakeTokenizer()),
+        max_tokens=5,
+        max_generation_tokens=2,
+    )
+
+    assert fitting_tasks == [tasks[0]]
+
+
 def test_score_group_attaches_rewards_without_advantages():
     environment = MathEnvironment()
     task = Task(task_id="math-1", raw_input="What is 1 + 1?", answer="2")
@@ -335,6 +373,42 @@ def test_score_group_attaches_rewards_without_advantages():
 
     assert [sample.reward for sample in scored_group.samples] == [0.0, 0.0]
     assert [sample.advantage for sample in scored_group.samples] == [None, None]
+
+
+def test_rollout_metrics_reports_reward_quality_and_termination():
+    samples = [
+        Sample(
+            completion_tokens=xp.array([20, 21], dtype=xp.int32),
+            completion_text="",
+            sampled_token_logprobs=xp.array([-0.1, -0.2], dtype=xp.float32),
+            reward=1.4,
+            metadata={
+                "format_valid": True,
+                "exact_match": True,
+                "stop_reason": "eos",
+            },
+        ),
+        Sample(
+            completion_tokens=xp.array([30], dtype=xp.int32),
+            completion_text="",
+            sampled_token_logprobs=xp.array([-0.3], dtype=xp.float32),
+            reward=0.0,
+            metadata={
+                "format_valid": False,
+                "exact_match": False,
+                "stop_reason": "max_new_tokens",
+            },
+        ),
+    ]
+
+    metrics = rollout_metrics(samples)
+
+    assert metrics["reward_mean"] == pytest.approx(0.7)
+    assert metrics["reward_max"] == pytest.approx(1.4)
+    assert metrics["format_valid_rate"] == pytest.approx(0.5)
+    assert metrics["exact_match_rate"] == pytest.approx(0.5)
+    assert metrics["turn_end_rate"] == pytest.approx(0.5)
+    assert metrics["completion_len_mean"] == pytest.approx(1.5)
 
 
 def test_rollout_generator_uses_zero_advantage_when_rewards_have_no_variance():
