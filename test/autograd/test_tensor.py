@@ -1145,6 +1145,19 @@ class TestTensorGetitem(TestTensor):
         z_torch.backward(torch.ones_like(z_torch))
         assert array_equal(self.x_matrix.grad.data, self.x_matrix_torch.grad.numpy())
 
+    def test_getitem_slice_backward_does_not_need_scatter_add(self):
+        def fail_scatter_add(*args, **kwargs):
+            raise AssertionError("slice getitem backward should use direct assignment")
+
+        with patch("autograd.tensor.xp.scatter_add", fail_scatter_add):
+            z = self.x_matrix[:2, 1]
+            z.backward(xp.ones_like(z.data))
+
+        assert array_equal(
+            self.x_matrix.grad.data,
+            xp.array([[0.0, 1.0], [0.0, 1.0]], dtype=xp.float32),
+        )
+
     def test_getitem_row(self):
         """Test getting an entire row"""
         a = self.x_matrix[0]

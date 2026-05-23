@@ -399,22 +399,34 @@ class TestTextUtils(TestCase):
             [result.completion_tokens for result in results], [[1, 1], [2, 2]]
         )
 
-    @patch("autograd.text.utils.xp.sample_categorical")
+    @patch("autograd.text.utils.xp.random.categorical")
     def test_generate_uses_batched_kv_cache_for_parallel_completions(self, mock_choice):
         class FakeKVModel:
             def __init__(self):
                 self.calls = []
+                self.decode_cache_batch_sizes = []
 
             def forward_kv(self, input_ids, kv_cache=None, offset=0):
                 self.calls.append((tuple(input_ids.shape), offset))
                 batch_size, seq_len = input_ids.shape
+                if kv_cache is not None:
+                    self.decode_cache_batch_sizes.append(int(kv_cache[0][0].shape[0]))
                 logits = [
                     [[0.0, 1.0, 2.0, 3.0] for _ in range(seq_len)]
                     for _ in range(batch_size)
                 ]
-                return xp.array(logits, dtype=xp.float32), []
+                cache = [
+                    (
+                        xp.zeros((batch_size, 1, seq_len, 1), dtype=xp.float32),
+                        xp.zeros((batch_size, 1, seq_len, 1), dtype=xp.float32),
+                    )
+                ]
+                return xp.array(logits, dtype=xp.float32), cache
 
-        mock_choice.side_effect = [1, 2, 1, 2]
+        mock_choice.side_effect = [
+            xp.array([1, 2], dtype=xp.int32),
+            xp.array([1, 2], dtype=xp.int32),
+        ]
         model = FakeKVModel()
         prediction_func = MagicMock()
 
@@ -430,12 +442,94 @@ class TestTextUtils(TestCase):
             num_generations=2,
         )
 
-        self.assertEqual(model.calls, [((2, 1), 0), ((2, 1), 1)])
+        self.assertEqual(model.calls, [((1, 1), 0), ((2, 1), 1)])
+        self.assertEqual(model.decode_cache_batch_sizes, [2])
         self.assertEqual(prediction_func.call_count, 0)
         self.assertEqual(
             [result.completion_tokens for result in results], [[1, 1], [2, 2]]
         )
         self.assertEqual([len(result.logprobs) for result in results], [2, 2])
+
+    @patch("autograd.text.utils.xp.random.categorical")
+    def test_generate_can_skip_kv_logprob_math(self, mock_choice):
+        class FakeKVModel:
+            def forward_kv(self, input_ids, kv_cache=None, offset=0):
+                batch_size, seq_len = input_ids.shape
+                logits = [
+                    [[0.0, 1.0, 2.0, 3.0] for _ in range(seq_len)]
+                    for _ in range(batch_size)
+                ]
+                cache = [
+                    (
+                        xp.zeros((batch_size, 1, seq_len, 1), dtype=xp.float32),
+                        xp.zeros((batch_size, 1, seq_len, 1), dtype=xp.float32),
+                    )
+                ]
+                return xp.array(logits, dtype=xp.float32), cache
+
+        mock_choice.side_effect = [
+            xp.array([1, 2], dtype=xp.int32),
+            xp.array([3, 1], dtype=xp.int32),
+        ]
+
+        results = generate(
+            model=FakeKVModel(),  # type: ignore
+            prediction_func=MagicMock(),
+            prompt_tokens=[0],
+            max_new_tokens=2,
+            temperature=1.0,
+            top_k=None,
+            eos_token_id=9,
+            show_progress=False,
+            num_generations=2,
+            compute_logprobs=False,
+        )
+
+        self.assertEqual(
+            [result.completion_tokens for result in results], [[1, 3], [2, 1]]
+        )
+        self.assertEqual([result.logprobs for result in results], [[0.0, 0.0]] * 2)
+
+    @patch("autograd.text.utils.IS_MLX", True)
+    def test_generate_compacts_finished_kv_rows_between_chunks(self):
+        class FakeKVModel:
+            def __init__(self):
+                self.calls = []
+
+            def forward_kv(self, input_ids, kv_cache=None, offset=0):
+                self.calls.append((tuple(input_ids.shape), offset))
+                batch_size, seq_len = input_ids.shape
+                logits = [
+                    [[0.0, 1.0, 2.0, 3.0] for _ in range(seq_len)]
+                    for _ in range(batch_size)
+                ]
+                return xp.array(logits, dtype=xp.float32), []
+
+        def fake_categorical(logits, **kwargs):
+            batch_size = logits.shape[0]
+            if batch_size == 2:
+                return xp.array([9, 2], dtype=xp.int32)
+            return xp.array([2], dtype=xp.int32)
+
+        model = FakeKVModel()
+        prediction_func = MagicMock()
+        with patch("autograd.text.utils.xp.random.categorical", fake_categorical):
+            results = generate(
+                model=model,  # type: ignore
+                prediction_func=prediction_func,
+                prompt_tokens=[0],
+                max_new_tokens=65,
+                temperature=1.0,
+                top_k=None,
+                eos_token_id=9,
+                show_progress=False,
+                num_generations=2,
+            )
+
+        self.assertEqual(results[0].completion_tokens, [9])
+        self.assertEqual(len(results[1].completion_tokens), 65)
+        self.assertIn(((1, 1), 33), model.calls)
+        self.assertEqual(prediction_func.call_count, 0)
 
     @patch("autograd.text.utils.tqdm")
     @patch("autograd.text.utils.xp.sample_categorical")

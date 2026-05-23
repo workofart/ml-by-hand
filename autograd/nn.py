@@ -1644,16 +1644,17 @@ class ScaledDotProductAttention(Module):
         # Dense remains the contract fallback for structural causality and for
         # everything outside the supported explicit causal self-attention slice.
         if NAME == "cupy" and mask is None and is_causal and self.dropout.p == 0.0:
-            try:
-                return scaled_dot_product_attention_cudnn(query, key, value)
-            except ModuleNotFoundError:
-                logger.warning(
-                    "cuDNN frontend (nvidia-cudnn-frontend) not installed; "
-                    "SDPA falling back to dense softmax (~2x slower at small "
-                    "batches). Install: uv pip install nvidia-cudnn-frontend"
-                )
-            except (RuntimeError, ValueError):
-                pass
+            if not self._is_training:
+                try:
+                    return scaled_dot_product_attention_cudnn(query, key, value)
+                except ModuleNotFoundError:
+                    logger.warning(
+                        "cuDNN frontend (nvidia-cudnn-frontend) not installed; "
+                        "SDPA falling back to dense softmax (~2x slower at small "
+                        "batches). Install: uv pip install nvidia-cudnn-frontend"
+                    )
+                except (RuntimeError, ValueError):
+                    pass
 
         input_dtype = query.data.dtype
         low_precision_input = (
@@ -1791,6 +1792,7 @@ class MultiHeadAttention(Module):
             and NAME == "cupy"
             and mask is None
             and is_causal
+            and not self._is_training
         ):
             return packed_qkv_attention(
                 query,

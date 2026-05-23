@@ -319,7 +319,12 @@ class GPT2(nn.Module):
         h = h + out
         return h, (k_full, v_full)
 
-    def warmup_kv(self, prompt_len: int = 1, decode_steps: int = 4) -> None:
+    def warmup_kv(
+        self,
+        prompt_len: int = 1,
+        decode_steps: int = 4,
+        batch_size: int = 1,
+    ) -> None:
         """JIT-compile the `forward_kv` kernels.
 
         Same role as `GPT2Llama.warmup_kv`: a throwaway prefill + a few decode
@@ -331,12 +336,23 @@ class GPT2(nn.Module):
             return
         import mlx.core as mx
 
-        dummy_prompt = mx.array([[0] * max(1, prompt_len)], dtype=mx.int32)
+        batch_size = max(1, int(batch_size))
+        prompt_len = max(1, int(prompt_len))
+        dummy_prompt = mx.array([[0] * prompt_len], dtype=mx.int32)
         logits, caches = self.forward_kv(dummy_prompt)
         mx.eval(logits, *[t for kv in caches for t in kv])
+        if batch_size > 1:
+            # GRPO rolls out many completions for one prompt; repeat the
+            # prefilled cache so warmup covers the real batched decode shape.
+            logits = mx.repeat(logits, batch_size, axis=0)
+            caches = [
+                (mx.repeat(k, batch_size, axis=0), mx.repeat(v, batch_size, axis=0))
+                for k, v in caches
+            ]
+            mx.eval(logits, *[t for kv in caches for t in kv])
         for step in range(decode_steps):
             logits, caches = self.forward_kv(
-                mx.array([[0]], dtype=mx.int32),
+                mx.zeros((batch_size, 1), dtype=mx.int32),
                 kv_cache=caches,
                 offset=prompt_len + step,
             )

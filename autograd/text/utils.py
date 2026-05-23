@@ -27,7 +27,7 @@ from urllib.request import Request, urlopen
 from pyarrow import parquet as pq  # pyright: ignore[reportMissingImports]
 from tqdm import tqdm
 
-from autograd.backend import Array, ArrayLike, xp
+from autograd.backend import IS_MLX, Array, ArrayLike, xp
 from autograd.tensor import Tensor
 from autograd.text.tokenizer import BytePairEncoder
 
@@ -330,6 +330,18 @@ def _generate_with_kv_cache(
 
     A batch row is one independent completion stream for the same prompt.
     """
+    if IS_MLX and num_generations > 1 and temperature > 0 and top_k is None:
+        return _generate_with_mlx_kv_cache_no_sync(
+            forward_kv=forward_kv,
+            prompt_tokens=prompt_tokens,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            eos_token_id=eos_token_id,
+            show_progress=show_progress,
+            num_generations=num_generations,
+            compute_logprobs=compute_logprobs,
+        )
+
     prompt = [int(token) for token in prompt_tokens]
     prompt_len = len(prompt)
 
@@ -396,6 +408,143 @@ def _generate_with_kv_cache(
         GenerationResult(
             completion_tokens=tokens,
             logprobs=logprobs[row_idx],
+            stop_reason=stop_reasons[row_idx],
+        )
+        for row_idx, tokens in enumerate(completion_tokens)
+    ]
+
+
+def _generate_with_mlx_kv_cache_no_sync(
+    forward_kv: Callable[..., tuple[Any, Any]],
+    prompt_tokens: List[int],
+    max_new_tokens: int,
+    temperature: float,
+    eos_token_id: int,
+    show_progress: bool,
+    num_generations: int,
+    compute_logprobs: bool,
+) -> list[GenerationResult]:
+    """MLX KV generation that avoids per-token CPU synchronization.
+
+    The generic KV loop converts token ids and logprobs to Python each step so
+    it can update row-local state. On MLX that forces one GPU sync per decode
+    token. GRPO's common path samples fixed-length groups with no top-k, so we
+    can keep active flags, sampled ids, and logprobs on device, then trim EOS
+    after one host transfer at the end.
+    """
+    prompt = [int(token) for token in prompt_tokens]
+    prompt_len = len(prompt)
+    active_rows = list(range(num_generations))
+    input_ids = xp.array([prompt], dtype=xp.int32)
+    logits, kv_cache = forward_kv(input_ids)
+    next_logits = xp.repeat(logits[:, -1, :], len(active_rows), axis=0)
+    kv_cache = [
+        (xp.repeat(k, len(active_rows), axis=0), xp.repeat(v, len(active_rows), axis=0))
+        for k, v in kv_cache
+    ]
+
+    eos_value = xp.array(eos_token_id, dtype=xp.int32)
+    completion_tokens: list[list[int]] = [[] for _ in range(num_generations)]
+    logprobs: list[list[float]] = [[] for _ in range(num_generations)]
+    stop_reasons = ["max_new_tokens" for _ in range(num_generations)]
+    generated_steps = 0
+    chunk_size = 32
+
+    progress = (
+        tqdm(
+            range(max_new_tokens),
+            desc="Inference",
+            mininterval=0.5,
+        )
+        if show_progress
+        else None
+    )
+    while active_rows and generated_steps < max_new_tokens:
+        steps_this_chunk = min(chunk_size, max_new_tokens - generated_steps)
+        chunk_active = xp.ones((len(active_rows),), dtype=xp.bool_)
+        row_idx = xp.arange(len(active_rows)) if compute_logprobs else None
+        token_steps = []
+        logprob_steps = []
+
+        for chunk_step in range(steps_this_chunk):
+            behavior_logits = xp.array(next_logits, dtype=xp.float32) / temperature
+            sampled_ids = xp.random.categorical(behavior_logits, axis=-1).astype(
+                xp.int32
+            )
+            token_ids = xp.where(chunk_active, sampled_ids, eos_value)
+            token_steps.append(token_ids)
+
+            if compute_logprobs:
+                assert row_idx is not None
+                shifted = behavior_logits - xp.max(
+                    behavior_logits, axis=-1, keepdims=True
+                )
+                log_denom = xp.log(xp.sum(xp.exp(shifted), axis=-1))
+                step_logprobs = shifted[row_idx, sampled_ids] - log_denom
+                step_logprobs = xp.where(
+                    chunk_active,
+                    step_logprobs,
+                    xp.zeros((len(active_rows),), dtype=xp.float32),
+                )
+                logprob_steps.append(step_logprobs)
+
+            chunk_active = chunk_active & (token_ids != eos_token_id)
+            is_last_step = generated_steps + chunk_step == max_new_tokens - 1
+            if is_last_step:
+                break
+
+            next_input = token_ids.reshape(len(active_rows), 1)
+            new_logits, kv_cache = forward_kv(
+                next_input,
+                kv_cache,
+                prompt_len + generated_steps + chunk_step,
+            )
+            next_logits = new_logits[:, -1, :]
+
+        token_matrix = xp.to_numpy(xp.stack(token_steps, axis=1))
+        logprob_matrix = (
+            xp.to_numpy(xp.stack(logprob_steps, axis=1)) if compute_logprobs else None
+        )
+        generated_steps += token_matrix.shape[1]
+        if progress is not None:
+            progress.update(token_matrix.shape[1])
+
+        keep_positions = []
+        kept_rows = []
+        for local_row, original_row in enumerate(active_rows):
+            row_tokens = [int(token) for token in token_matrix[local_row].tolist()]
+            row_logprobs = None
+            if logprob_matrix is not None:
+                row_logprobs = [
+                    float(logprob) for logprob in logprob_matrix[local_row].tolist()
+                ]
+            if eos_token_id in row_tokens:
+                eos_pos = row_tokens.index(eos_token_id) + 1
+                completion_tokens[original_row].extend(row_tokens[:eos_pos])
+                if row_logprobs is not None:
+                    logprobs[original_row].extend(row_logprobs[:eos_pos])
+                stop_reasons[original_row] = "eos"
+            else:
+                completion_tokens[original_row].extend(row_tokens)
+                if row_logprobs is not None:
+                    logprobs[original_row].extend(row_logprobs)
+                keep_positions.append(local_row)
+                kept_rows.append(original_row)
+
+        if not kept_rows or generated_steps >= max_new_tokens:
+            break
+
+        keep_idx = xp.array(keep_positions, dtype=xp.int32)
+        next_logits = next_logits[keep_idx]
+        kv_cache = [(k[keep_idx], v[keep_idx]) for k, v in kv_cache]
+        active_rows = kept_rows
+
+    if progress is not None:
+        progress.close()
+    return [
+        GenerationResult(
+            completion_tokens=tokens,
+            logprobs=logprobs[row_idx] if compute_logprobs else [0.0 for _ in tokens],
             stop_reason=stop_reasons[row_idx],
         )
         for row_idx, tokens in enumerate(completion_tokens)

@@ -170,6 +170,60 @@ def test_packed_qkv_self_attention_dense_fallback_matches_split():
     assert _rel_max(out_packed.data, out_ref.data) < 1e-6
 
 
+def test_packed_qkv_training_does_not_use_cudnn_fast_path():
+    B, T, NH, H = 2, 4, 2, 8
+    dtype = xp.float32
+    _, x_data, (W_qkv, b_qkv, Wo, bo) = _build_split_and_packed(
+        B, T, NH, H, dtype=dtype
+    )
+    packed_mha = nn.MultiHeadAttention(
+        num_heads=NH, hidden_size=H, dropout_prob=0.0, use_packed_qkv=True
+    )
+    packed_mha.qkv_linear.parameters["weight"].data = W_qkv
+    packed_mha.qkv_linear.parameters["bias"].data = b_qkv
+    packed_mha.fc.parameters["weight"].data = Wo
+    packed_mha.fc.parameters["bias"].data = bo
+    packed_mha.train()
+
+    x = Tensor(x_data, requires_grad=False)
+    with (
+        patch("autograd.nn.NAME", "cupy"),
+        patch(
+            "autograd.nn.packed_qkv_attention",
+            side_effect=AssertionError("training must not use packed cuDNN"),
+        ) as packed_mock,
+        patch(
+            "autograd.nn.scaled_dot_product_attention_cudnn",
+            side_effect=AssertionError("training must not use cuDNN SDPA"),
+        ) as sdpa_mock,
+    ):
+        out = packed_mha(x, x, x, is_causal=True)
+
+    assert out.shape == (B, T, H)
+    assert packed_mock.call_count == 0
+    assert sdpa_mock.call_count == 0
+
+
+def test_packed_qkv_eval_can_use_cudnn_fast_path():
+    B, T, NH, H = 2, 4, 2, 8
+    x_data = xp.ones((B, T, H), dtype=xp.float32)
+    packed_mha = nn.MultiHeadAttention(
+        num_heads=NH, hidden_size=H, dropout_prob=0.0, use_packed_qkv=True
+    )
+    packed_mha.eval()
+
+    expected = Tensor(xp.zeros((B, T, H), dtype=xp.float32), requires_grad=False)
+    x = Tensor(x_data, requires_grad=False)
+    with (
+        patch("autograd.nn.NAME", "cupy"),
+        patch("autograd.nn.packed_qkv_attention", return_value=expected) as packed_mock,
+    ):
+        out = packed_mha(x, x, x, is_causal=True)
+
+    assert out is expected
+    assert packed_mock.call_count == 1
+
+
 def test_packed_qkv_rejects_non_self_attention():
     """Cross-attention should error: packed path assumes Q is K is V."""
     B, T, NH, H = 2, 16, 4, 256

@@ -1821,6 +1821,18 @@ class GetItem(Function):
 
         # Create a zero tensor of the original shape
         out = xp.zeros_like(self.tensors[0].data)
+        # Basic indexing cannot repeat input positions, so direct assignment
+        # avoids the heavier scatter-add accumulation path.
+        components = self.idx if isinstance(self.idx, tuple) else (self.idx,)
+        is_basic_index = all(
+            component is Ellipsis
+            or isinstance(component, slice)
+            or (isinstance(component, int) and not isinstance(component, bool))
+            for component in components
+        )
+        if is_basic_index:
+            out[self.idx] = grad_data
+            return out
         out = xp.scatter_add(out, self.idx, grad_data)
         return out
 

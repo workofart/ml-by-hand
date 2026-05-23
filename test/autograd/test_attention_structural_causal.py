@@ -139,6 +139,51 @@ class TestStructuralCausalAttention(TestCase):
 
         self.assertEqual(apply_mock.call_count, 0)
 
+    def test_structural_causal_training_does_not_use_cudnn(self):
+        attention = ScaledDotProductAttention(dropout_prob=0.0)
+        attention.train()
+
+        with (
+            patch("autograd.nn.NAME", "cupy"),
+            patch(
+                "autograd.nn.scaled_dot_product_attention_cudnn",
+                side_effect=AssertionError("training must not use cuDNN SDPA"),
+            ) as cudnn_mock,
+        ):
+            out = attention(
+                self.query,
+                self.key,
+                self.value,
+                mask=None,
+                is_causal=True,
+            )
+
+        self.assertEqual(out.shape, self.query.shape)
+        self.assertEqual(cudnn_mock.call_count, 0)
+
+    def test_structural_causal_eval_can_use_cudnn(self):
+        attention = ScaledDotProductAttention(dropout_prob=0.0)
+        attention.eval()
+        expected = Tensor(xp.zeros_like(self.query.data), requires_grad=False)
+
+        with (
+            patch("autograd.nn.NAME", "cupy"),
+            patch(
+                "autograd.nn.scaled_dot_product_attention_cudnn",
+                return_value=expected,
+            ) as cudnn_mock,
+        ):
+            out = attention(
+                self.query,
+                self.key,
+                self.value,
+                mask=None,
+                is_causal=True,
+            )
+
+        self.assertIs(out, expected)
+        self.assertEqual(cudnn_mock.call_count, 1)
+
     @skipUnless(IS_CUPY, "cuDNN SDPA requires the CuPy backend")
     def test_cudnn_structural_causal_attention_matches_dense_bf16(self):
         try:
