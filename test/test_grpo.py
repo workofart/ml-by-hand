@@ -6,17 +6,12 @@ import torch
 
 from autograd.backend import xp
 from autograd.data.collator import Collator
-from autograd.data.sft import (
-    SFT_ROLE_MARKERS,
-    SFT_SYSTEM_PROMPT,
-    SFT_TURN_SEPARATOR,
-)
+from autograd.data.sft import SFT_TURN_SEPARATOR
 from autograd.nn import Module
 from autograd.tensor import Tensor
 from autograd.text.tokenizer import BytePairEncoder
 from autograd.tools.config_schema import GenericTrainingConfig
 from examples.grpo import (
-    TOKENIZER_VOCAB_PATH,
     GRPOBatch,
     GRPOCollator,
     GRPOTrainer,
@@ -26,10 +21,7 @@ from examples.grpo import (
     RolloutGroup,
     Sample,
     Task,
-    filter_fitting_tasks,
-    generation,
     grpo_loss,
-    rollout_metrics,
 )
 
 
@@ -64,8 +56,10 @@ def test_grpo_training_config_extends_generic_training_config_for_rollouts():
 
 
 def test_grpo_training_config_rejects_sampling_that_breaks_logprob_contract():
-    with pytest.raises(ValueError, match="temperature=1.0 and top_k=None"):
-        _grpo_training_config(temperature=0.8)
+    with pytest.raises(ValueError, match="temperature > 0 and top_k=None"):
+        _grpo_training_config(temperature=0.0)
+    with pytest.raises(ValueError, match="temperature > 0 and top_k=None"):
+        _grpo_training_config(top_k=50)
 
 
 def test_grpo_training_config_requires_max_steps_argument():
@@ -110,6 +104,10 @@ def test_grpo_collator_aligns_generated_tokens_with_shifted_completion_labels():
         ],
     )
 
+    # Dynamic padding: rows are padded to batch_max_tokens = max(prompt+completion)
+    # over the batch (4 here), not to the configured max_tokens (5). After causal
+    # shift this yields shape (2, 3). This is a speed/memory optimization over
+    # fixed-length padding when actual rows are shorter than max_tokens.
     batch = GRPOCollator(max_tokens=5, pad_idx=0)([group])
 
     np.testing.assert_array_equal(
@@ -140,13 +138,6 @@ def test_grpo_collator_aligns_generated_tokens_with_shifted_completion_labels():
     )
     assert not hasattr(batch, "loss_total_weight")
     assert float(xp.to_scalar(GRPOTrainer._loss_total_weight(None, batch))) == 3.0
-
-
-def test_grpo_tokenizer_vocab_path_exists_and_matches_pretrained_tokenizer_size():
-    tokenizer = BytePairEncoder(num_merges=49990, vocab_file_path=TOKENIZER_VOCAB_PATH)
-
-    assert tokenizer.n_vocab == 50257
-    assert tokenizer.encode("<|endoftext|>") == [256]
 
 
 def test_sample_requires_completion_logprob_alignment():
@@ -210,48 +201,46 @@ def test_grpo_collator_rejects_rows_longer_than_max_tokens():
         GRPOCollator(max_tokens=3, pad_idx=0)([group])
 
 
-def test_math_environment_rewards_only_clean_turn_terminated_answers():
+def test_math_environment_parses_answer_tags_for_reward():
+    # Exact-only reward (settled by E24/E33): format-valid completion that
+    # matches the reference answer earns 1.0; everything else earns 0.0. Shaped
+    # per-tag rewards on the previous trainer were dropped because they
+    # rewarded incoherent arithmetic without lifting pass@1.
     environment = MathEnvironment()
     task = Task(task_id="math-1", raw_input="What is 1 + 1?", answer="2")
+    eos = SFT_TURN_SEPARATOR
 
     correct = Sample(
         completion_tokens=xp.array([20], dtype=xp.int32),
-        completion_text=(
-            f"<think>1 + 1 = 2</think><answer>2</answer>{SFT_TURN_SEPARATOR}"
-        ),
+        completion_text=f"<think>1 + 1 = 2</think><answer>2</answer>{eos}",
         sampled_token_logprobs=xp.array([-0.1], dtype=xp.float32),
     )
-    wrong = Sample(
+    wrong_answer = Sample(
         completion_tokens=xp.array([21], dtype=xp.int32),
-        completion_text=f"<think>1 + 1 = 3</think><answer>3</answer>{SFT_TURN_SEPARATOR}",
+        completion_text=f"<think>1 + 1 = 3</think><answer>3</answer>{eos}",
         sampled_token_logprobs=xp.array([-0.2], dtype=xp.float32),
     )
-    tag_junk = Sample(
+    missing_think = Sample(
         completion_tokens=xp.array([22], dtype=xp.int32),
-        completion_text=(
-            f"<think>1 + 1 = 2</think><answer>2</answer>junk{SFT_TURN_SEPARATOR}"
-        ),
+        completion_text=f"<answer>2</answer>{eos}",
         sampled_token_logprobs=xp.array([-0.3], dtype=xp.float32),
     )
-    missing_turn_end = Sample(
+    no_eos = Sample(
         completion_tokens=xp.array([23], dtype=xp.int32),
         completion_text="<think>1 + 1 = 2</think><answer>2</answer>",
         sampled_token_logprobs=xp.array([-0.4], dtype=xp.float32),
     )
+    unformatted = Sample(
+        completion_tokens=xp.array([24], dtype=xp.int32),
+        completion_text="2",
+        sampled_token_logprobs=xp.array([-0.5], dtype=xp.float32),
+    )
 
-    assert environment._compute_reward(task, correct) == pytest.approx(1.4)
-    assert correct.metadata["format_valid"] is True
-    assert correct.metadata["exact_match"] is True
-    assert correct.metadata["parsed_answer"] == "2"
-    assert environment._compute_reward(task, wrong) == pytest.approx(0.4)
-    assert wrong.metadata["format_valid"] is True
-    assert wrong.metadata["exact_match"] is False
-    assert environment._compute_reward(task, tag_junk) == 0.0
-    assert tag_junk.metadata["format_valid"] is False
-    assert tag_junk.metadata["exact_match"] is False
-    assert environment._compute_reward(task, missing_turn_end) == 0.0
-    assert missing_turn_end.metadata["format_valid"] is False
-    assert missing_turn_end.metadata["exact_match"] is False
+    assert environment._compute_reward(task, correct) == pytest.approx(1.0)
+    assert environment._compute_reward(task, wrong_answer) == 0.0
+    assert environment._compute_reward(task, missing_think) == 0.0
+    assert environment._compute_reward(task, no_eos) == 0.0
+    assert environment._compute_reward(task, unformatted) == 0.0
 
 
 def test_math_environment_normalizes_comma_separated_answers():
@@ -259,11 +248,13 @@ def test_math_environment_normalizes_comma_separated_answers():
     task = Task(task_id="math-1", raw_input="How much profit?", answer="22500")
     sample = Sample(
         completion_tokens=xp.array([20], dtype=xp.int32),
-        completion_text=f"<think>math</think><answer>22,500</answer>{SFT_TURN_SEPARATOR}",
+        completion_text=(
+            f"<think>math</think><answer>22,500</answer>{SFT_TURN_SEPARATOR}"
+        ),
         sampled_token_logprobs=xp.array([-0.1], dtype=xp.float32),
     )
 
-    assert environment._compute_reward(task, sample) == pytest.approx(1.4)
+    assert environment._compute_reward(task, sample) == pytest.approx(1.0)
 
 
 def test_extract_gsm8k_final_answer_from_hash_marker():
@@ -284,69 +275,12 @@ def test_gsm8k_row_to_task_uses_question_and_final_answer():
     assert task.task_id == "gsm8k-3"
     assert task.raw_input == "What is 1 + 1?"
     assert task.answer == "2"
-    assert task.metadata == {"source": "openai/gsm8k"}
-
-
-def test_load_gsm8k_tasks_uses_shared_row_loader(monkeypatch):
-    calls = []
-
-    def fake_load_gsm8k_rows(split, max_rows):
-        calls.append((split, max_rows))
-        return [
-            {
-                "question": "What is 1 + 1?",
-                "answer": "1 + 1 = <<1+1=2>>2 #### 2",
-            }
-        ]
-
-    monkeypatch.setattr("examples.grpo.load_gsm8k_rows", fake_load_gsm8k_rows)
-
-    tasks = MathEnvironment.load_gsm8k_tasks(split="train", max_tasks=4)
-
-    assert calls == [("train", 4)]
-    assert tasks == [
-        Task(
-            task_id="gsm8k-0",
-            raw_input="What is 1 + 1?",
-            answer="2",
-            metadata={"source": "openai/gsm8k"},
-        )
-    ]
-
-
-def test_math_environment_renders_tasks_with_sft_prompt_contract():
-    prompt = MathEnvironment().render_task(
-        Task(task_id="math-1", raw_input="What is 1 + 1?", answer="2")
-    )
-
-    assert prompt == (
-        f"{SFT_ROLE_MARKERS['system']}{SFT_SYSTEM_PROMPT}"
-        f"{SFT_TURN_SEPARATOR}{SFT_ROLE_MARKERS['user']}What is 1 + 1?"
-        f"{SFT_TURN_SEPARATOR}{SFT_ROLE_MARKERS['assistant']}"
-    )
-
-
-def test_filter_fitting_tasks_applies_prompt_plus_generation_budget():
-    class FakeTokenizer:
-        def encode(self, text):
-            if "short" in text:
-                return [1, 2]
-            return [1, 2, 3, 4]
-
-    tasks = [
-        Task(task_id="short", raw_input="short", answer="1"),
-        Task(task_id="long", raw_input="long", answer="2"),
-    ]
-
-    fitting_tasks = filter_fitting_tasks(
-        tasks,
-        environment=MathEnvironment(),
-        tokenizer=cast(BytePairEncoder, FakeTokenizer()),
-        max_tokens=5,
-        max_generation_tokens=2,
-    )
-
-    assert fitting_tasks == [tasks[0]]
+    # `reasoning` is the dataset's pre-final-answer text, kept on the Task so
+    # future rationale-target SFT (E37) can read it without re-parsing.
+    assert task.metadata == {
+        "source": "openai/gsm8k",
+        "reasoning": "1 + 1 = <<1+1=2>>2",
+    }
 
 
 def test_score_group_attaches_rewards_without_advantages():
@@ -373,42 +307,6 @@ def test_score_group_attaches_rewards_without_advantages():
 
     assert [sample.reward for sample in scored_group.samples] == [0.0, 0.0]
     assert [sample.advantage for sample in scored_group.samples] == [None, None]
-
-
-def test_rollout_metrics_reports_reward_quality_and_termination():
-    samples = [
-        Sample(
-            completion_tokens=xp.array([20, 21], dtype=xp.int32),
-            completion_text="",
-            sampled_token_logprobs=xp.array([-0.1, -0.2], dtype=xp.float32),
-            reward=1.4,
-            metadata={
-                "format_valid": True,
-                "exact_match": True,
-                "stop_reason": "eos",
-            },
-        ),
-        Sample(
-            completion_tokens=xp.array([30], dtype=xp.int32),
-            completion_text="",
-            sampled_token_logprobs=xp.array([-0.3], dtype=xp.float32),
-            reward=0.0,
-            metadata={
-                "format_valid": False,
-                "exact_match": False,
-                "stop_reason": "max_new_tokens",
-            },
-        ),
-    ]
-
-    metrics = rollout_metrics(samples)
-
-    assert metrics["reward_mean"] == pytest.approx(0.7)
-    assert metrics["reward_max"] == pytest.approx(1.4)
-    assert metrics["format_valid_rate"] == pytest.approx(0.5)
-    assert metrics["exact_match_rate"] == pytest.approx(0.5)
-    assert metrics["turn_end_rate"] == pytest.approx(0.5)
-    assert metrics["completion_len_mean"] == pytest.approx(1.5)
 
 
 def test_rollout_generator_uses_zero_advantage_when_rewards_have_no_variance():
@@ -492,73 +390,27 @@ def test_rollout_generator_batches_generation_forward_passes(monkeypatch):
         np.testing.assert_array_equal(xp.to_numpy(sample.completion_tokens), [1, 1])
 
 
-def test_generation_rejects_prompt_that_fills_context_window():
+def test_rollout_rejects_prompt_that_fills_context_window():
     class FakeModel:
         max_seq_len = 2
+        _is_training = False
 
     class FakeTokenizer:
-        def encode(self, token):
-            return [9]
-
-    with pytest.raises(ValueError, match="prompt length"):
-        generation(
-            FakeModel(),
-            xp.array([1, 2], dtype=xp.int32),
-            FakeTokenizer(),
-            num_generations=1,
-            max_generation_tokens=1,
-            temperature=1.0,
-            top_k=None,
-        )
-
-
-def test_generation_defaults_to_sft_turn_separator_stop_token(monkeypatch):
-    class FakeModel:
-        max_seq_len = 4
-
-        def eval(self):
-            pass
-
-        def __call__(self, input_ids):
-            batch_size, seq_len = input_ids.shape
-            return Tensor(xp.zeros((batch_size, seq_len, 10), dtype=xp.float32))
-
-    class FakeTokenizer:
-        def __init__(self):
-            self.encoded_tokens = []
-
-        def encode(self, token):
-            self.encoded_tokens.append(token)
-            if token == SFT_TURN_SEPARATOR:
-                return [7]
-            return [9]
+        # Rendered prompt encodes to more tokens than max_seq_len, so the
+        # rollout has no room left for completions and must raise.
+        def encode(self, text):
+            return [9, 10, 11]
 
         def decode(self, tokens):
-            return "".join(
-                SFT_TURN_SEPARATOR if int(token) == 7 else str(int(token))
-                for token in tokens
-            )
+            return ""
 
-    monkeypatch.setattr(
-        xp,
-        "sample_categorical",
-        lambda logits: xp.array(7, dtype=xp.int32),
-    )
-    tokenizer = FakeTokenizer()
-
-    samples = generation(
-        FakeModel(),
-        xp.array([1], dtype=xp.int32),
-        tokenizer,
-        num_generations=1,
-        max_generation_tokens=3,
-        temperature=1.0,
-        top_k=None,
-    )
-
-    assert tokenizer.encoded_tokens == [SFT_TURN_SEPARATOR]
-    assert samples[0].completion_text == SFT_TURN_SEPARATOR
-    assert samples[0].metadata["stop_reason"] == "eos"
+    with pytest.raises(ValueError, match="prompt length"):
+        RolloutGenerator(_grpo_training_config()).rollout(
+            model=cast(Module, FakeModel()),
+            task=Task(task_id="math-1", raw_input="x", answer="0"),
+            tokenizer=cast(BytePairEncoder, FakeTokenizer()),
+            environment=MathEnvironment(),
+        )
 
 
 def test_grpo_loss_matches_pytorch_reference():
@@ -640,8 +492,9 @@ def test_grpo_trainer_train_step_runs_one_optimizer_step():
         def _loss_total_weight(self, batch):
             return self.total_weight
 
-        def optimizer_step(self, state, *, record_grad_norm=True):
+        def optimizer_step(self, state, **kwargs):
             self.optimizer_step_called = True
+            self.optimizer_step_kwargs = kwargs
             assert state.accumulated_batches == 1
             np.testing.assert_allclose(
                 xp.to_numpy(state.accumulated_loss_total_weight),
