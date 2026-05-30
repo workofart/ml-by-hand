@@ -13,7 +13,11 @@ from autograd.backend import xp
 def _to_numpy(value):
     if isinstance(value, np.ndarray):
         return value
-    if torch is not None and isinstance(value, torch.Tensor):
+    if (
+        torch is not None
+        and hasattr(torch, "Tensor")
+        and isinstance(value, torch.Tensor)
+    ):
         return value.detach().cpu().numpy()
     if isinstance(value, (numbers.Number, bool)):
         return np.asarray(value)

@@ -1912,6 +1912,22 @@ def _cudnn_mark_output(
     )
 
 
+def _cudnn_execute(
+    graph: Any, tensor_to_device_buffer: dict[Any, Array], workspace: Array
+):
+    # nvidia-cudnn-frontend accepts raw device pointers. Passing CuPy arrays makes
+    # it probe optional Torch support first, which can crash when a namespace-only
+    # torch package is installed.
+    graph.execute(
+        {
+            tensor: int(buffer.data.ptr)
+            for tensor, buffer in tensor_to_device_buffer.items()
+            if tensor is not None
+        },
+        int(workspace.data.ptr),
+    )
+
+
 @lru_cache(maxsize=8)
 def _cudnn_sdpa_forward_graph(
     shape: Tuple[int, int, int, int],
@@ -2074,7 +2090,8 @@ class ScaledDotProductAttentionCuDNN(Function):
         output = _cupy_empty_bhtd_with_bthd_storage(self.shape, query.dtype)
         stats = xp.empty((*self.shape[:3], 1), dtype=xp.float32)
         workspace = xp.empty((graph.get_workspace_size(),), dtype=xp.uint8)
-        graph.execute(
+        _cudnn_execute(
+            graph,
             {
                 query_t: query,
                 key_t: key,
@@ -2115,7 +2132,8 @@ class ScaledDotProductAttentionCuDNN(Function):
             self.shape,
         )
         workspace = xp.empty((graph.get_workspace_size(),), dtype=xp.uint8)
-        graph.execute(
+        _cudnn_execute(
+            graph,
             {
                 query_t: query,
                 key_t: key,
@@ -2283,7 +2301,8 @@ class PackedQKVAttention(Function):
         attn = _cupy_empty_bhtd_with_bthd_storage(shape4d, q_view.dtype)
         stats = xp.empty((*shape4d[:3], 1), dtype=xp.float32)
         workspace = xp.empty((fwd_graph.get_workspace_size(),), dtype=xp.uint8)
-        fwd_graph.execute(
+        _cudnn_execute(
+            fwd_graph,
             {
                 query_t: q_view,
                 key_t: k_view,
@@ -2392,7 +2411,8 @@ class PackedQKVAttention(Function):
         k_view = qkv[:, :, 1, :, :].transpose(0, 2, 1, 3)
         v_view = qkv[:, :, 2, :, :].transpose(0, 2, 1, 3)
         workspace = xp.empty((bwd_graph.get_workspace_size(),), dtype=xp.uint8)
-        bwd_graph.execute(
+        _cudnn_execute(
+            bwd_graph,
             {
                 query_t: q_view,
                 key_t: k_view,
@@ -3103,7 +3123,8 @@ class PackedRoPEGQAAttention(Function):
         attn = _cupy_empty_bhtd_with_bthd_storage(shape4d, q_rope.dtype)
         stats = xp.empty((*shape4d[:3], 1), dtype=xp.float32)
         workspace = xp.empty((fwd_graph.get_workspace_size(),), dtype=xp.uint8)
-        fwd_graph.execute(
+        _cudnn_execute(
+            fwd_graph,
             {
                 query_t: q_rope,
                 key_t: k_attn,
@@ -3218,7 +3239,8 @@ class PackedRoPEGQAAttention(Function):
             grad_value_t,
         ) = bwd_tensors
         workspace = xp.empty((bwd_graph.get_workspace_size(),), dtype=xp.uint8)
-        bwd_graph.execute(
+        _cudnn_execute(
+            bwd_graph,
             {
                 query_t: q_rope,
                 key_t: k_attn,

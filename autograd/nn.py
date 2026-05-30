@@ -1792,7 +1792,6 @@ class MultiHeadAttention(Module):
             and NAME == "cupy"
             and mask is None
             and is_causal
-            and not self._is_training
         ):
             return packed_qkv_attention(
                 query,

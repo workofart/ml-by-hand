@@ -28,7 +28,7 @@ from autograd.data.sampler import (
 from autograd.data.types import CausalLMBatch
 from autograd.data.utils import train_test_split
 from autograd.distributed import is_distributed, rank, world_size
-from autograd.tensor import Tensor, checkpoint
+from autograd.tensor import Tensor, _matmul_autocast, checkpoint
 from autograd.text import utils as text_utils
 from autograd.text.tokenizer import BytePairEncoder
 from autograd.text.utils import (
@@ -42,6 +42,47 @@ from autograd.tools.trainer import LLMTrainer
 from examples.transformers import (
     FeedForward,
 )
+
+
+def _array_layer_norm(x, gain, bias, epsilon: float):
+    input_dtype = x.dtype
+    low_precision_input = input_dtype in LOW_PRECISION_FLOAT_DTYPES
+    stats_x = x.astype(xp.float32) if low_precision_input else x
+    mean = xp.mean(stats_x, axis=-1, keepdims=True)
+    var = xp.mean((stats_x - mean) ** 2, axis=-1, keepdims=True)
+    out = (stats_x - mean) / xp.sqrt(var + epsilon) * gain + bias
+    if low_precision_input:
+        out = out.astype(input_dtype)
+    return out
+
+
+def _array_linear(x, weight, bias=None):
+    if x.ndim > 2 and weight.ndim == 2:
+        x_2d = x.reshape(-1, x.shape[-1])
+        out_2d = _matmul_autocast(x_2d, weight, bias)
+        return out_2d.reshape(*x.shape[:-1], weight.shape[-1])
+    return _matmul_autocast(x, weight, bias)
+
+
+def _array_causal_attention(q, k, v, *, offset: int, input_dtype):
+    q_scores = q.astype(xp.float32) if q.dtype in LOW_PRECISION_FLOAT_DTYPES else q
+    k_scores = k.astype(xp.float32) if k.dtype in LOW_PRECISION_FLOAT_DTYPES else k
+    v_values = v.astype(xp.float32) if v.dtype in LOW_PRECISION_FLOAT_DTYPES else v
+    scores = (q_scores * (q.shape[-1] ** -0.5)) @ k_scores.transpose(0, 1, 3, 2)
+
+    T_new = q.shape[2]
+    T_full = k.shape[2]
+    key_positions = xp.arange(T_full).reshape(1, 1, 1, T_full)
+    query_positions = xp.arange(offset, offset + T_new).reshape(1, 1, T_new, 1)
+    scores = xp.where(key_positions > query_positions, -1e9, scores)
+
+    scores = scores - xp.max(scores, axis=-1, keepdims=True)
+    probs = xp.exp(scores)
+    probs = probs / xp.sum(probs, axis=-1, keepdims=True)
+    out = probs @ v_values
+    if input_dtype in LOW_PRECISION_FLOAT_DTYPES and out.dtype != input_dtype:
+        out = out.astype(input_dtype)
+    return out
 
 
 class GPT2(nn.Module):
@@ -182,8 +223,9 @@ class GPT2(nn.Module):
     # KV-cached inference path
     # ------------------------------------------------------------------
     # Same shape as `GPT2Llama.forward_kv`: bypass the autograd Tensor wrapper
-    # at inference and route to MLX's fused kernels (`mx.fast.layer_norm`,
-    # `mx.fast.scaled_dot_product_attention`). `generate()` in
+    # at inference and route to backend arrays. MLX uses fused kernels
+    # (`mx.fast.layer_norm`, `mx.fast.scaled_dot_product_attention`); CUDA/CuPy
+    # uses raw arrays to avoid building autograd graphs. `generate()` in
     # `autograd/text/utils.py` auto-dispatches to this path via
     # `hasattr(model, "forward_kv")`, so no per-architecture wrapper is needed.
     #
@@ -216,11 +258,13 @@ class GPT2(nn.Module):
             the last position is projected since the sampler doesn't need the
             rest.
         """
+        if NAME == "cupy":
+            return self._forward_kv_array(input_ids, kv_cache=kv_cache, offset=offset)
         if NAME != "mlx":
             raise NotImplementedError(
-                "GPT2.forward_kv currently requires the MLX backend"
+                "GPT2.forward_kv requires the MLX or CUDA/CuPy backend"
             )
-        import mlx.core as mx
+        import mlx.core as mx  # pyright: ignore[reportMissingImports]
 
         T_new = input_ids.shape[1]
         token_emb = self.token_embedding.parameters["weight"].data[input_ids]
@@ -245,6 +289,43 @@ class GPT2(nn.Module):
         logits = mx.matmul(h_last, self.token_embedding.parameters["weight"].data.T)
         return logits, new_caches
 
+    def _forward_kv_array(
+        self,
+        input_ids,
+        kv_cache=None,
+        offset: int = 0,
+    ):
+        T_new = input_ids.shape[1]
+        token_emb = self.token_embedding.parameters["weight"].data[input_ids]
+        positions = xp.arange(offset, offset + T_new, dtype=xp.int32)
+        pos_emb = self.position_embedding.parameters["weight"].data[positions]
+        h = token_emb + pos_emb
+
+        new_caches = []
+        for layer_idx, sublayer in enumerate(self.sublayers):
+            layer_cache = None if kv_cache is None else kv_cache[layer_idx]
+            h, kv = self._decode_sublayer_inference_array(
+                h,
+                sublayer,
+                layer_cache,
+                offset,
+            )
+            new_caches.append(kv)
+
+        h = _array_layer_norm(
+            h,
+            self.layer_norm.parameters["gain"].data,
+            self.layer_norm.parameters["bias"].data,
+            1e-5,
+        )
+        h_last = h[:, -1:, :]
+        logits = _array_linear(
+            h_last,
+            self.token_embedding.parameters["weight"].data.T,
+            None,
+        )
+        return logits, new_caches
+
     def _decode_sublayer_inference(self, h, sublayer, kv_cache_layer):
         """Run one `DecoderSublayer` forward on raw MLX arrays.
 
@@ -252,7 +333,7 @@ class GPT2(nn.Module):
         and uses `mx.fast.*` fused kernels. The KV cache is grown by
         concatenating the new tokens' K/V onto the per-layer prefix.
         """
-        import mlx.core as mx
+        import mlx.core as mx  # pyright: ignore[reportMissingImports]
 
         attn = sublayer.multi_head_attention
         ffn = sublayer.feedforward
@@ -319,6 +400,95 @@ class GPT2(nn.Module):
         h = h + out
         return h, (k_full, v_full)
 
+    def _decode_sublayer_inference_array(self, h, sublayer, kv_cache_layer, offset):
+        """Run one `DecoderSublayer` forward on raw CuPy-compatible arrays."""
+        attn = sublayer.multi_head_attention
+        ffn = sublayer.feedforward
+        num_heads = attn.num_heads
+        head_dim = attn.attention_size
+        hidden_size = num_heads * head_dim
+
+        a = _array_layer_norm(
+            h,
+            sublayer.layer_norm1.parameters["gain"].data,
+            sublayer.layer_norm1.parameters["bias"].data,
+            1e-5,
+        )
+        if attn.use_packed_qkv:
+            qkv = _array_linear(
+                a,
+                attn.qkv_linear.parameters["weight"].data,
+                attn.qkv_linear.parameters["bias"].data,
+            )
+            q = qkv[..., :hidden_size]
+            k_new = qkv[..., hidden_size : 2 * hidden_size]
+            v_new = qkv[..., 2 * hidden_size :]
+        else:
+            q = _array_linear(
+                a,
+                attn.q_linear.parameters["weight"].data,
+                attn.q_linear.parameters["bias"].data,
+            )
+            k_new = _array_linear(
+                a,
+                attn.k_linear.parameters["weight"].data,
+                attn.k_linear.parameters["bias"].data,
+            )
+            v_new = _array_linear(
+                a,
+                attn.v_linear.parameters["weight"].data,
+                attn.v_linear.parameters["bias"].data,
+            )
+
+        B, T_new = h.shape[0], h.shape[1]
+        q = q.reshape(B, T_new, num_heads, head_dim).transpose(0, 2, 1, 3)
+        k_new = k_new.reshape(B, T_new, num_heads, head_dim).transpose(0, 2, 1, 3)
+        v_new = v_new.reshape(B, T_new, num_heads, head_dim).transpose(0, 2, 1, 3)
+
+        if kv_cache_layer is None:
+            k_full, v_full = k_new, v_new
+        else:
+            kc, vc = kv_cache_layer
+            k_full = xp.concatenate([kc, k_new], axis=2)
+            v_full = xp.concatenate([vc, v_new], axis=2)
+
+        attn_out = _array_causal_attention(
+            q,
+            k_full,
+            v_full,
+            offset=offset,
+            input_dtype=h.dtype,
+        )
+        attn_out = attn_out.transpose(0, 2, 1, 3).reshape(B, T_new, hidden_size)
+        if h.dtype in LOW_PRECISION_FLOAT_DTYPES and attn_out.dtype != h.dtype:
+            attn_out = attn_out.astype(h.dtype)
+        attn_out = _array_linear(
+            attn_out,
+            attn.fc.parameters["weight"].data,
+            attn.fc.parameters["bias"].data,
+        )
+        h = h + attn_out
+
+        b = _array_layer_norm(
+            h,
+            sublayer.layer_norm2.parameters["gain"].data,
+            sublayer.layer_norm2.parameters["bias"].data,
+            1e-5,
+        )
+        inter = _array_linear(
+            b,
+            ffn.fc1.parameters["weight"].data,
+            ffn.fc1.parameters["bias"].data,
+        )
+        inter = xp.maximum(inter, xp.array(0.0, dtype=inter.dtype))
+        out = _array_linear(
+            inter,
+            ffn.fc2.parameters["weight"].data,
+            ffn.fc2.parameters["bias"].data,
+        )
+        h = h + out
+        return h, (k_full, v_full)
+
     def warmup_kv(
         self,
         prompt_len: int = 1,
@@ -334,7 +504,7 @@ class GPT2(nn.Module):
         """
         if NAME != "mlx":
             return
-        import mlx.core as mx
+        import mlx.core as mx  # pyright: ignore[reportMissingImports]
 
         batch_size = max(1, int(batch_size))
         prompt_len = max(1, int(prompt_len))

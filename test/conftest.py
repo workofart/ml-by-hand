@@ -13,7 +13,7 @@ def patch_torch_numpy():
     returns a CPU NumPy array (avoiding errors if
     the tensor is on CUDA).
     """
-    if torch is None:
+    if torch is None or not hasattr(torch, "Tensor"):
         yield
         return
 

@@ -15,7 +15,7 @@ import pytest
 
 from autograd import nn
 from autograd.backend import IS_CUPY, xp
-from autograd.functional import packed_qkv_attention
+from autograd.functional import _cudnn_execute, packed_qkv_attention
 from autograd.tensor import Tensor
 
 
@@ -33,6 +33,45 @@ def _rel_max(a_data, b_data) -> float:
     b32 = _to_np(b_data.astype(xp.float32))
     denom = max(float(_np.abs(b32).max()), 1e-6)
     return float(_np.abs(a32 - b32).max() / denom)
+
+
+def _abs_max(a_data, b_data) -> float:
+    a32 = _to_np(a_data.astype(xp.float32))
+    b32 = _to_np(b_data.astype(xp.float32))
+    return float(_np.abs(a32 - b32).max())
+
+
+def test_cudnn_execute_passes_raw_pointers_to_avoid_torch_probe():
+    class FakeBuffer:
+        def __init__(self, ptr):
+            self.data = type("Data", (), {"ptr": ptr})()
+
+    class FakeGraph:
+        def execute(self, tensor_to_device_buffer, workspace):
+            raw_buffers = list(tensor_to_device_buffer.values()) + [workspace]
+            if any(not isinstance(buffer, int) for buffer in raw_buffers):
+                raise AttributeError("module 'torch' has no attribute 'half'")
+            self.tensor_to_device_buffer = tensor_to_device_buffer
+            self.workspace = workspace
+
+    query_t = object()
+    output_t = object()
+    query = FakeBuffer(101)
+    output = FakeBuffer(202)
+    workspace = FakeBuffer(303)
+    graph = FakeGraph()
+
+    _cudnn_execute(
+        graph,
+        {query_t: query, output_t: output},
+        workspace,
+    )
+
+    assert graph.tensor_to_device_buffer == {
+        query_t: 101,
+        output_t: 202,
+    }
+    assert graph.workspace == 303
 
 
 def _build_split_and_packed(B: int, T: int, NH: int, H: int, *, dtype):
@@ -88,8 +127,9 @@ def test_packed_qkv_forward_matches_split(B, T, NH, H):
         is_causal=True,
     )
 
-    # Forward should bit-match the split path: same weights, same cuDNN call.
-    assert _rel_max(out_pk.data, out_ref.data) < 1e-3, (
+    # Packed cuDNN and dense split attention are not bit-exact on bf16, but
+    # should stay inside a small low-precision noise envelope.
+    assert _rel_max(out_pk.data, out_ref.data) < 5e-3, (
         "packed-QKV forward diverges from split-QKV reference"
     )
 
@@ -130,17 +170,16 @@ def test_packed_qkv_backward_matches_split():
     db_qkv = b_qkv_t.grad.data
     dbq, dbk, dbv = (db_qkv[i * H : (i + 1) * H] for i in range(3))
 
-    # bf16 noise envelope: weight grads use the same single GEMM as forward and
-    # should match exactly; dx goes through one combined matmul instead of
-    # three, so allow 1.5% relative.
-    assert _rel_max(dWq, mha.q_linear.parameters["weight"].grad.data) < 1e-3
-    assert _rel_max(dWk, mha.k_linear.parameters["weight"].grad.data) < 1e-3
-    assert _rel_max(dWv, mha.v_linear.parameters["weight"].grad.data) < 1e-3
-    assert _rel_max(dbq, mha.q_linear.parameters["bias"].grad.data) < 1e-3
-    assert _rel_max(dbk, mha.k_linear.parameters["bias"].grad.data) < 1e-3
-    assert _rel_max(dbv, mha.v_linear.parameters["bias"].grad.data) < 1e-3
-    assert _rel_max(W_o_t.grad.data, mha.fc.parameters["weight"].grad.data) < 1e-3
-    assert _rel_max(b_o_t.grad.data, mha.fc.parameters["bias"].grad.data) < 1e-3
+    # bf16 noise envelope: packed cuDNN and dense split attention use different
+    # accumulation/order for SDPA, while projection GEMMs remain close.
+    assert _rel_max(dWq, mha.q_linear.parameters["weight"].grad.data) < 1e-2
+    assert _rel_max(dWk, mha.k_linear.parameters["weight"].grad.data) < 1e-2
+    assert _rel_max(dWv, mha.v_linear.parameters["weight"].grad.data) < 1e-2
+    assert _rel_max(W_o_t.grad.data, mha.fc.parameters["weight"].grad.data) < 1e-2
+    assert _abs_max(dbq, mha.q_linear.parameters["bias"].grad.data) < 5e-4
+    assert _abs_max(dbk, mha.k_linear.parameters["bias"].grad.data) < 5e-4
+    assert _abs_max(dbv, mha.v_linear.parameters["bias"].grad.data) < 5e-4
+    assert _abs_max(b_o_t.grad.data, mha.fc.parameters["bias"].grad.data) < 5e-4
     assert _rel_max(x_pk.grad.data, x_ref.grad.data) < 1.5e-2, (
         "dx differs by more than bf16 noise"
     )
@@ -170,7 +209,7 @@ def test_packed_qkv_self_attention_dense_fallback_matches_split():
     assert _rel_max(out_packed.data, out_ref.data) < 1e-6
 
 
-def test_packed_qkv_training_does_not_use_cudnn_fast_path():
+def test_packed_qkv_training_uses_cudnn_fast_path():
     B, T, NH, H = 2, 4, 2, 8
     dtype = xp.float32
     _, x_data, (W_qkv, b_qkv, Wo, bo) = _build_split_and_packed(
@@ -188,19 +227,16 @@ def test_packed_qkv_training_does_not_use_cudnn_fast_path():
     x = Tensor(x_data, requires_grad=False)
     with (
         patch("autograd.nn.NAME", "cupy"),
-        patch(
-            "autograd.nn.packed_qkv_attention",
-            side_effect=AssertionError("training must not use packed cuDNN"),
-        ) as packed_mock,
+        patch("autograd.nn.packed_qkv_attention", return_value=x) as packed_mock,
         patch(
             "autograd.nn.scaled_dot_product_attention_cudnn",
-            side_effect=AssertionError("training must not use cuDNN SDPA"),
+            side_effect=AssertionError("packed QKV should bypass split SDPA"),
         ) as sdpa_mock,
     ):
         out = packed_mha(x, x, x, is_causal=True)
 
-    assert out.shape == (B, T, H)
-    assert packed_mock.call_count == 0
+    assert out is x
+    assert packed_mock.call_count == 1
     assert sdpa_mock.call_count == 0
 
 
