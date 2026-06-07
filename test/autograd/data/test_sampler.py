@@ -43,6 +43,23 @@ def test_random_sampler_replacement_respects_num_samples():
     assert all(0 <= index < len(dataset) for index in indices)
 
 
+def test_random_sampler_replacement_spans_chunk_boundaries(monkeypatch):
+    # num_samples > chunk size forces multiple draws; every yielded index must
+    # still be a valid plain Python int (downstream code indexes datasets and
+    # serializes indices without numpy-scalar surprises).
+    dataset = make_token_dataset(
+        [xp.arange(2), xp.arange(3), xp.arange(4), xp.arange(5), xp.arange(6)]
+    )
+    monkeypatch.setattr(RandomSampler, "_REPLACEMENT_CHUNK_SIZE", 3)
+
+    sampler = RandomSampler(dataset, replacement=True, num_samples=10)
+    indices = list(sampler)
+
+    assert len(indices) == 10
+    assert all(type(index) is int for index in indices)
+    assert all(0 <= index < len(dataset) for index in indices)
+
+
 def test_random_sampler_without_replacement_respects_num_samples():
     dataset = make_token_dataset([xp.arange(2), xp.arange(3), xp.arange(4)])
 
