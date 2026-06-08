@@ -150,7 +150,6 @@ class TestTokenizer(TestCase):
             mmap_path = stream_bpe._encode_to_mmap(
                 docs,
                 overwrite_encoded_data=True,
-                text_batch_size=2,
             )
 
             stream_encoded = BytePairEncoder.load_encoded(mmap_path)
@@ -209,7 +208,6 @@ class TestTokenizer(TestCase):
             mmap_path = bpe._encode_to_mmap(
                 text_source,
                 overwrite_encoded_data=True,
-                text_batch_size=1,
             )
             encoded = BytePairEncoder.load_encoded(mmap_path)
 
@@ -235,7 +233,6 @@ class TestTokenizer(TestCase):
             mmap_path = bpe._encode_to_mmap(
                 docs,
                 overwrite_encoded_data=True,
-                text_batch_size=1,
             )
             encoded = BytePairEncoder.load_encoded(mmap_path)
 
@@ -251,3 +248,69 @@ class TestTokenizer(TestCase):
     def test_train_vocabulary_rejects_bare_str(self):
         with self.assertRaises(TypeError):
             self.bpe.train_vocabulary("bare string is not allowed")
+
+    def test_load_encoded_handles_empty_file(self):
+        # Regression: np.memmap rejects 0-byte files with "cannot mmap an
+        # empty file", so encoding an empty corpus used to crash at
+        # load_encoded. The encode path writes 0 bytes; load should
+        # return an empty array, not raise.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            empty_path = os.path.join(tmpdir, "empty.bin")
+            open(empty_path, "wb").close()  # 0 bytes
+            arr = BytePairEncoder.load_encoded(empty_path)
+            self.assertEqual(arr.shape, (0,))
+            self.assertEqual(arr.dtype.str, "<i4")
+
+    def test_retrain_with_overwrite_resets_all_state(self):
+        # Regression: prior to the fix, train_vocabulary(overwrite=True) on
+        # an already-trained instance did not reset _unicode_to_int_vocab,
+        # learned_merges, new_idx, or the encoded-bytes cache. The second
+        # training extended the first's merges and produced wrong outputs.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            same = BytePairEncoder(
+                num_merges=2,
+                vocab_file_path=os.path.join(tmpdir, "vocab.pkl"),
+                encoded_data_path=os.path.join(tmpdir, "encoded.bin"),
+                n_workers=1,
+                min_word_freq=1,
+            )
+            same.train_vocabulary(["ababab"], overwrite_saved_file=True)
+            same.train_vocabulary(["zzzzzz"], overwrite_saved_file=True)
+
+            fresh = BytePairEncoder(
+                num_merges=2,
+                vocab_file_path=os.path.join(tmpdir, "vocab_fresh.pkl"),
+                encoded_data_path=os.path.join(tmpdir, "encoded_fresh.bin"),
+                n_workers=1,
+                min_word_freq=1,
+            )
+            fresh.train_vocabulary(["zzzzzz"], overwrite_saved_file=True)
+
+            self.assertEqual(same.learned_merges, fresh.learned_merges)
+            self.assertEqual(same.new_idx, fresh.new_idx)
+            self.assertEqual(same.encode("zzzz"), fresh.encode("zzzz"))
+            # The retrain should NOT carry over the first call's merges,
+            # so 'abab' must encode as bare bytes (no merges applied).
+            self.assertEqual(same.encode("abab"), fresh.encode("abab"))
+
+    def test_retrain_does_not_reuse_stale_word_freq_cache(self):
+        # Regression: a successful train left the word-freq cache file behind;
+        # a later retrain with overwrite_saved_file=False (vocab file absent)
+        # loaded that cache and learned merges from the OLD corpus, silently
+        # ignoring `texts` entirely.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bpe = BytePairEncoder(
+                num_merges=2,
+                vocab_file_path=os.path.join(tmpdir, "vocab.pkl"),
+                encoded_data_path=os.path.join(tmpdir, "encoded.bin"),
+                n_workers=1,
+                min_word_freq=1,
+            )
+            bpe.train_vocabulary(["ababab"], overwrite_saved_file=True)
+            os.remove(bpe.vocab_file_path)
+
+            bpe.train_vocabulary(["zzzzzz"], overwrite_saved_file=False)
+
+            merged_pairs = [pair for pair, _ in bpe.learned_merges]
+            self.assertIn((ord("z"), ord("z")), merged_pairs)
+            self.assertNotIn((ord("a"), ord("b")), merged_pairs)
