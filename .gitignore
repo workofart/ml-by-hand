@@ -5,6 +5,9 @@ checkpoints/
 training_data/
 training_runs/
 drafts/
+notes/
+scripts/
+bench_*.jsonl
 
 ### Python ###
 # Byte-compiled / optimized / DLL files
