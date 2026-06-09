@@ -1,5 +1,9 @@
 import pytest
-import torch
+
+try:
+    import torch
+except ImportError:
+    torch = None
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -9,6 +13,10 @@ def patch_torch_numpy():
     returns a CPU NumPy array (avoiding errors if
     the tensor is on CUDA).
     """
+    if torch is None:
+        yield
+        return
+
     old_numpy = torch.Tensor.numpy  # Keep a reference to the original
 
     def new_numpy(t):
