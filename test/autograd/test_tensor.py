@@ -553,6 +553,12 @@ class TestTensorSum(TestTensor):
         assert s.data == 2.0
         assert s.requires_grad == self.x_scalar.requires_grad
 
+    def test_x_scalar_sum_backward(self):
+        s = self.x_scalar.sum()
+        s.backward()
+        assert self.x_scalar.grad is not None
+        assert float(self.x_scalar.grad.data) == 1.0
+
     def test_1d_tensor_sum_global(self):
         s = self.x_vector.sum()
         assert s.data == 3.0

@@ -1820,8 +1820,12 @@ class Sum(Function):
         Returns:
             xp.ndarray: The sum of the tensor elements.
         """
-        # Handle scalar case
+        # Handle scalar case: sum is the identity, but backward still needs
+        # the axis/shape state set so it can broadcast the gradient back.
         if not hasattr(x, "ndim") or x.ndim == 0:
+            self.axis = None
+            self.keepdims = keepdims
+            self.x_shape = getattr(x, "shape", ())
             return x
         # Normalize axis
         self.axis = (axis,) if isinstance(axis, int) else axis
