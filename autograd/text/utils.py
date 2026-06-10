@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -274,7 +275,9 @@ def generate_text(
 
     This is a convenience wrapper around `generate`: it handles tokenizer
     encode/decode, switches the model to eval mode for generation, restores the
-    prior training mode, and streams decoded completion tokens to stdout.
+    prior training mode, and streams decoded completion tokens to stdout. After
+    generation it prints a one-line wall-time / tok/s summary so the user has a
+    stable throughput number that does not depend on tqdm's per-iter overhead.
 
     Args:
         model: Language model used for generation.
@@ -293,20 +296,37 @@ def generate_text(
     try:
         start_tokens = start_tokens or "<SOS>"
         output_ids = list(bpe.encode(start_tokens))
+        prompt_len = len(output_ids)
+        print("Prompt:")
+        print(bpe.decode(output_ids))
+        print("\nGenerated:")
+        t0 = time.perf_counter()
         result = generate(
             model=model,
             prediction_func=prediction_func,
             prompt_tokens=output_ids,
-            max_new_tokens=max_length - len(output_ids),
+            max_new_tokens=max_length - prompt_len,
             temperature=temperature,
             top_k=top_k,
             eos_token_id=bpe.encode("<|endoftext|>")[0],
             num_generations=1,
+            # Text generation only needs the tokens; skip the per-step
+            # log-softmax work since nothing reads the logprobs.
+            compute_logprobs=False,
         )[0]
+        elapsed = time.perf_counter() - t0
         output_ids.extend(result.completion_tokens)
         for next_token in result.completion_tokens:
             print(bpe.decode([next_token]), end="", flush=True)
-        print("\n--------------------------------------------------------------\n")
+        n_generated = len(result.completion_tokens)
+        total_tokens = prompt_len + n_generated
+        tok_per_sec = (n_generated / elapsed) if elapsed > 0 else float("nan")
+        print(
+            "\n--------------------------------------------------------------"
+            f"\nPrompt {prompt_len} tokens, generated {n_generated} new tokens, "
+            f"total {total_tokens}/{max_length} tokens in {elapsed:.2f}s "
+            f"({tok_per_sec:.1f} tok/s)\n"
+        )
         return bpe.decode(output_ids)
     finally:
         if was_training:

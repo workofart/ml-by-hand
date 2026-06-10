@@ -1,7 +1,9 @@
+import io
 import json
 import os
 import re
 import tempfile
+from contextlib import redirect_stdout
 from unittest import TestCase
 from unittest.mock import MagicMock, patch
 
@@ -510,6 +512,35 @@ class TestTextUtils(TestCase):
 
         self.assertEqual(result, self.bpe.decode([0] + [1] * generated_tokens))
         self.assertEqual(prediction_func.call_count, generated_tokens)
+
+    @patch("autograd.text.utils.xp.sample_categorical")
+    def test_generate_text_prints_prompt_completion_and_token_counts(self, mock_choice):
+        def fake_prediction(model, batch_data, mode):
+            seq_len = batch_data.shape[1]
+            dummy_obj = MagicMock()
+            dummy_obj.data = xp.zeros((1, seq_len, 10))
+            return dummy_obj
+
+        mock_choice.return_value = 1
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            generate_text(
+                model=MagicMock(),
+                prediction_func=MagicMock(side_effect=fake_prediction),
+                bpe=self.bpe,  # type: ignore
+                start_tokens="AB",
+                max_length=5,
+                temperature=1.0,
+                top_k=5,
+            )
+
+        output = stdout.getvalue()
+        self.assertIn("Prompt:\nAB\n\nGenerated:\nBBB", output)
+        self.assertIn(
+            "Prompt 2 tokens, generated 3 new tokens, total 5/5 tokens",
+            output,
+        )
 
     @patch("autograd.text.utils.xp.sample_categorical")
     def test_generate_text_stops_at_endoftext(self, mock_choice):
