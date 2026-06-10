@@ -91,6 +91,19 @@ class GenericTrainingConfig:
             )
         if self.checkpoint_freq <= 0:
             raise ValueError(f"checkpoint_freq must be > 0, got {self.checkpoint_freq}")
+        if (
+            self.max_steps is not None
+            and self.report_every_steps is not None
+            and self.checkpoint_freq % self.report_every_steps != 0
+        ):
+            # Checkpoints are only written on reporting steps, so a
+            # misaligned checkpoint_freq would silently degrade to
+            # lcm(report_every_steps, checkpoint_freq).
+            raise ValueError(
+                f"checkpoint_freq ({self.checkpoint_freq}) must be a multiple of "
+                f"report_every_steps ({self.report_every_steps}); checkpoints are "
+                "only written on reporting steps."
+            )
         if self.global_batch_size < 1:
             raise ValueError(
                 f"global_batch_size must be >= 1, got {self.global_batch_size}"

@@ -68,6 +68,43 @@ class TestTransformerTrainingConfig(TestCase):
         self.assertEqual(config.gradient_accumulation_steps, 8)
         self.assertEqual(config.eval_batch_size, 16)
 
+    def test_rejects_checkpoint_freq_not_multiple_of_report_every_steps(self):
+        """Checkpoints are only written on reporting steps, so a
+        checkpoint_freq that isn't a multiple of report_every_steps would
+        silently checkpoint every lcm(report, freq) steps instead."""
+        with self.assertRaisesRegex(
+            ValueError, "checkpoint_freq.*multiple of report_every_steps"
+        ):
+            TransformerTrainingConfig(
+                training_run_name="test",
+                dataset_name="dataset",
+                max_steps=100,
+                checkpoint_freq=10,
+                report_every_steps=3,
+                global_batch_size=1,
+                micro_batch_size=1,
+                model_kwargs={},
+                optimizer_kwargs={"lr": 1e-3},
+                label_smoothing=0.0,
+                teacher_forcing=False,
+            )
+
+    def test_allows_checkpoint_freq_multiple_of_report_every_steps(self):
+        config = TransformerTrainingConfig(
+            training_run_name="test",
+            dataset_name="dataset",
+            max_steps=100,
+            checkpoint_freq=10,
+            report_every_steps=5,
+            global_batch_size=1,
+            micro_batch_size=1,
+            model_kwargs={},
+            optimizer_kwargs={"lr": 1e-3},
+            label_smoothing=0.0,
+            teacher_forcing=False,
+        )
+        self.assertEqual(config.report_every_steps, 5)
+
     def test_rejects_non_positive_eval_batch_size(self):
         with self.assertRaisesRegex(ValueError, "eval_batch_size must be >= 1"):
             TransformerTrainingConfig(
