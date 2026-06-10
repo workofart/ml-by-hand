@@ -16,11 +16,11 @@ from autograd.text.tokenizer import BytePairEncoder
 logger = logging.getLogger(__name__)
 _WORKER_BPE: "BytePairEncoder | None" = None
 _WORKER_ROLE_TOKENS: "dict[str, list[int]] | None" = None
-SFT_TURN_SEPARATOR = "<|endoftext|>"
+SFT_TURN_SEPARATOR = "<|END_OF_TURN|>"
 SFT_ROLE_MARKERS = {
-    "system": "System: ",
-    "user": "User: ",
-    "assistant": "Assistant: ",
+    "system": "<|SYSTEM|>",
+    "user": "<|USER|>",
+    "assistant": "<|ASSISTANT|>",
 }
 
 
@@ -184,12 +184,8 @@ def tokenize_sft_messages(
     - `loss_mask`: same length as `tokens`; 1 means this token should be predicted.
 
     Example, conceptually:
-        User: A <|endoftext|> Assistant: B <|endoftext|>
-        mask: 0...0              0...0       1...
-
-    The textual role markers avoid tokenizer/checkpoint migration for now.
-    TODO: replace them with dedicated special tokens after vocab resizing and
-    checkpoint loading support explicit embedding/output-weight growth.
+        <|USER|>A<|END_OF_TURN|><|ASSISTANT|>B<|END_OF_TURN|>
+        mask:    0...0           0              0           1...
     """
     tokens, loss_mask = _tokenize_sft_messages_to_lists(
         chat_example,

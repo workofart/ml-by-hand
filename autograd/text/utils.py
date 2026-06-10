@@ -270,6 +270,7 @@ def generate_text(
     max_length: int = 50,
     temperature: float = 1.0,
     top_k: Optional[int] = None,
+    stop_token: str = "<|endoftext|>",
 ) -> str:
     """Generate and print text from a string prompt.
 
@@ -287,6 +288,8 @@ def generate_text(
         max_length: Maximum total token length, including prompt tokens.
         temperature: Sampling temperature passed through to `generate`.
         top_k: Optional top-k filter passed through to `generate`.
+        stop_token: Token string that stops generation when sampled. Chat
+            checkpoints stop at the turn separator instead of `<|endoftext|>`.
 
     Returns:
         Decoded prompt plus generated completion text.
@@ -308,7 +311,7 @@ def generate_text(
             max_new_tokens=max_length - prompt_len,
             temperature=temperature,
             top_k=top_k,
-            eos_token_id=bpe.encode("<|endoftext|>")[0],
+            eos_token_id=bpe.encode(stop_token)[0],
             num_generations=1,
             # Text generation only needs the tokens; skip the per-step
             # log-softmax work since nothing reads the logprobs.
