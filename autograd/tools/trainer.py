@@ -640,6 +640,10 @@ class AbstractTrainer(ABC):
         if self.last_grad_l2_norm is not None:
             row["grad_l2_norm"] = self.last_grad_l2_norm
 
+        # Append before saving so the row being reported (including the final
+        # one of the run) is part of the persisted metrics.
+        self.metric_rows.append(row)
+
         # File writes are rank-0-only under DDP (after the AllReduce in
         # optimizer_step, every rank holds identical params, so rank 0 is
         # authoritative).
@@ -649,8 +653,6 @@ class AbstractTrainer(ABC):
                 self._maybe_save_checkpoint(plan=plan, val_loss=metrics["val_loss"])
             if plan.should_save_metrics(self.global_step):
                 self._save_metrics()
-
-        self.metric_rows.append(row)
         log_payload = _format_log_values(
             {**row, "step": self.global_step, "lr": self.optimizer.lr},
             precision_overrides={"lr": 6},
