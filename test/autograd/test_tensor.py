@@ -1326,6 +1326,20 @@ class TestTensorStack(TestTensor):
         assert array_equal(self.x_vector.grad.data, self.x_vector_torch.grad.numpy())
         assert array_equal(self.y_vector.grad.data, self.y_vector_torch.grad.numpy())
 
+    def test_stack_mixed_requires_grad(self):
+        """Inputs after a non-requires-grad input must still receive gradients."""
+        a = Tensor([1.0, 2.0], requires_grad=True)
+        b = Tensor([3.0, 4.0], requires_grad=False)
+        c = Tensor([5.0, 6.0], requires_grad=True)
+
+        z = Tensor.stack([a, b, c])
+        z.backward()
+
+        assert array_equal(a.grad.data, [1.0, 1.0])
+        assert b.grad is None
+        assert c.grad is not None
+        assert array_equal(c.grad.data, [1.0, 1.0])
+
 
 class TestTensorPad(TestTensor):
     def test_pad_1d(self):

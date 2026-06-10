@@ -2690,6 +2690,8 @@ class Stack(Function):
         grads = []
         for i, tensor in enumerate(self.tensors):
             if not tensor.requires_grad:
+                # Placeholder keeps grads aligned with self.tensors in backward()
+                grads.append(None)
                 continue
 
             # Create slice indices
