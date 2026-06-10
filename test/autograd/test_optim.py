@@ -492,34 +492,34 @@ class TestAdam(TestCase):
         )
 
     def test_zero_grad(self):
-        self.optim.zero_grad()
-        self.optim.step()
-        self.torch_optim.zero_grad()
-        self.torch_optim.step()
+        self.param1.grad = self.grad1_val
+        self.param2.grad = self.grad2_val
 
-        assert allclose(
-            self.param1.data,
-            self.torch_params[0].detach().numpy(),
-            atol=1e-6,
-        )
-        assert allclose(
-            self.param2.data,
-            self.torch_params[1].detach().numpy(),
-            atol=1e-6,
-        )
+        self.optim.zero_grad()
+
+        assert self.param1.grad is None
+        assert self.param2.grad is None
+        # With cleared gradients, step() must not move the parameters.
+        before1 = float(self.param1.data)
+        before2 = float(self.param2.data)
+        self.optim.step()
+        assert float(self.param1.data) == before1
+        assert float(self.param2.data) == before2
 
     def test_step(self):
-        # Perform multiple steps and compare results
+        # Multiple consecutive steps on the same optimizer instance, so the
+        # momentum buffers and bias correction must track torch across steps.
         for _ in range(5):
-            # Step both optimizers
+            self.param1.grad = self.grad1_val
+            self.param2.grad = self.grad2_val
+            self.torch_params[0].grad = torch.tensor(self.grad1_val)
+            self.torch_params[1].grad = torch.tensor(self.grad2_val)
+
             self.optim.step()
             self.torch_optim.step()
-
-            # Zero out gradients (this is similar to our training step)
             self.optim.zero_grad()
             self.torch_optim.zero_grad()
 
-            # Compare parameters
             assert allclose(
                 self.param1.data,
                 self.torch_params[0].detach().numpy(),
@@ -530,9 +530,6 @@ class TestAdam(TestCase):
                 self.torch_params[1].detach().numpy(),
                 atol=1e-6,
             )
-
-            # Set new gradients for next step
-            self.setUp()
 
     def test_different_gradients(self):
         # Test with different gradient values
