@@ -776,6 +776,7 @@ class AbstractTrainer(ABC):
             "report_every_steps": plan.report_every_steps,
             "global_batch_size": self.config.global_batch_size,
             "micro_batch_size": self.config.micro_batch_size,
+            "eval_batch_size": self.config.eval_batch_size,
             "gradient_accumulation_steps": self.config.gradient_accumulation_steps,
             "target_epochs": (
                 cast(int, self.config.max_epochs) if plan.by_epoch else None

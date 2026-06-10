@@ -52,6 +52,9 @@ class GenericTrainingConfig:
     global_batch_size: int = 1
     # Per-forward/backward batch size that must fit in memory.
     micro_batch_size: int = 1
+    # Validation/inference batch size. Keep independent from micro_batch_size so
+    # changing training memory does not change the validation sample count.
+    eval_batch_size: int = 1
     # Optional trainer-level gradient clipping threshold.
     max_grad_norm: Optional[float] = None
     # When True under DDP, the trainer AllReduce-sums the loss numerator and
@@ -95,6 +98,10 @@ class GenericTrainingConfig:
         if self.micro_batch_size < 1:
             raise ValueError(
                 f"micro_batch_size must be >= 1, got {self.micro_batch_size}"
+            )
+        if self.eval_batch_size < 1:
+            raise ValueError(
+                f"eval_batch_size must be >= 1, got {self.eval_batch_size}"
             )
         if self.global_batch_size % self.micro_batch_size != 0:
             raise ValueError(

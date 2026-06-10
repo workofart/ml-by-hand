@@ -222,6 +222,7 @@ if __name__ == "__main__":
         checkpoint_freq=4,
         global_batch_size=train_global_batch_size,
         micro_batch_size=train_global_batch_size // 4,
+        eval_batch_size=2,
         max_grad_norm=1.0,
         model_kwargs={
             "num_attention_heads": 6,  # GPT-2 small uses 12
@@ -270,6 +271,7 @@ if __name__ == "__main__":
         report_every_steps=50,
         global_batch_size=76,
         micro_batch_size=19,
+        eval_batch_size=9,
         max_grad_norm=1.0,
         model_kwargs={
             "num_attention_heads": 9,  # GPT-2 small uses 12
@@ -319,6 +321,7 @@ if __name__ == "__main__":
         report_every_steps=100,
         global_batch_size=480,
         micro_batch_size=120,
+        eval_batch_size=60,
         max_grad_norm=1.0,
         model_kwargs={
             "num_attention_heads": 12,
@@ -491,7 +494,7 @@ if __name__ == "__main__":
     )
     test_data_loader = DataLoader(
         dataset=test_dataset,
-        batch_size=max(1, CONFIG.micro_batch_size // 2),
+        batch_size=CONFIG.eval_batch_size,
         collator=CausalLMWindowCollator(),
         sampler=test_sampler,
     )

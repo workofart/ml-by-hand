@@ -96,6 +96,7 @@ if __name__ == "__main__":
         report_every_steps=50,
         global_batch_size=32,
         micro_batch_size=4,
+        eval_batch_size=4,
         model_kwargs={
             # Architecture must match the openwebtext_gpt2_124m_baseline
             # pretraining checkpoint loaded via pretrained_checkpoint_path.
@@ -228,13 +229,12 @@ if __name__ == "__main__":
         pad_idx=pad_idx,
         sort_buffer_size=CONFIG.global_batch_size,
     )
-    val_batch_size = max(1, CONFIG.micro_batch_size // 2)
     val_data_loader = build_data_loader(
         val_examples,
-        batch_size=val_batch_size,
+        batch_size=CONFIG.eval_batch_size,
         max_tokens=max_tokens,
         pad_idx=pad_idx,
-        sort_buffer_size=val_batch_size,
+        sort_buffer_size=CONFIG.eval_batch_size,
     )
 
     trainer.fit(train_data_loader, val_data_loader)
