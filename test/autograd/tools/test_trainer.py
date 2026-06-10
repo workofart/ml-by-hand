@@ -460,6 +460,31 @@ class TestSimpleTrainer(BaseTrainerTest):
         results = run_mock_ranks(2, target)
         self.assertEqual(results, [0.75, 0.75])
 
+    @unittest.skipIf(
+        IS_MLX,
+        "MLX lazy graphs are not thread-safe under the in-process DDP mock.",
+    )
+    def test_metrics_row_allreduces_val_loss_even_when_train_loss_stays_local(
+        self,
+    ):
+        from autograd.distributed import rank
+
+        def target():
+            eval_state = TrainingState()
+            if rank() != 0:
+                eval_state.record_eval_loss(
+                    8.0,
+                    total_weight=xp.array(4.0, dtype=xp.float32),
+                )
+            row = TrainingState().metrics_row(
+                eval_state=eval_state,
+                log_global_loss=False,
+            )
+            return row["val_loss"]
+
+        results = run_mock_ranks(2, target)
+        self.assertEqual(results, [2.0, 2.0])
+
     def test_training_state_resets_report_timer(self):
         state = TrainingState()
         state.record_loss(1.0, total_weight=xp.array(4.0, dtype=xp.float32))

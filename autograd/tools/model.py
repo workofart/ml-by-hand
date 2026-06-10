@@ -7,11 +7,36 @@ import json
 import os
 from typing import Any, Dict
 
-from autograd.backend import ARRAY_TYPE, xp
+from autograd.backend import ARRAY_TYPE, resolve_dtype, xp
 from autograd.tensor import Tensor
 
 # Define a type for the serialized metadata structure
 SerializedMeta = Dict[str, Any]
+
+
+def _dtype_name(arr: Any) -> str:
+    """Return a backend-neutral short dtype name (e.g. "bfloat16").
+
+    Needed because numpy/CuPy report dtypes as "bfloat16" but MLX reports
+    them as "mlx.core.bfloat16" — keying off the short tail makes the JSON
+    sidecar portable across backends.
+    """
+    return str(arr.dtype).rsplit(".", 1)[-1]
+
+
+def _restore_array(meta: SerializedMeta, data: Dict[str, Any]) -> Any:
+    # numpy's .npy format can't natively store extension dtypes like
+    # ml_dtypes.bfloat16 — those round-trip as opaque void bytes (e.g.
+    # |V2). The sidecar carries each array's original dtype so we can
+    # view-reinterpret bytes back to it instead of guessing. Checkpoints
+    # saved before the dtype field existed load as-stored.
+    arr = data[meta["key"]]
+    if "dtype" not in meta:
+        return arr
+    target = resolve_dtype(meta["dtype"])
+    if arr.dtype != target:
+        arr = arr.view(target)
+    return arr
 
 
 def save_checkpoint(
@@ -94,6 +119,7 @@ def save_checkpoint(
             return {
                 "_type": "tensor",
                 "key": key,
+                "dtype": _dtype_name(arrays[key]),
             }
 
         if isinstance(obj, ARRAY_TYPE) or hasattr(obj, "__array__"):
@@ -102,6 +128,7 @@ def save_checkpoint(
             return {
                 "_type": "array",
                 "key": key,
+                "dtype": _dtype_name(arrays[key]),
             }
 
         # Primitive scalar types
@@ -125,8 +152,9 @@ def save_checkpoint(
     with open(json_path, "w") as f:
         json.dump(meta, f, indent=2)
 
-    # Save arrays to NPZ
-    xp.savez_compressed(npz_path, **arrays_dict)
+    # Save arrays to NPZ without compression: dense weights barely compress
+    # and the deflate pass dominates checkpoint save time.
+    xp.savez(npz_path, **arrays_dict)
     return json_path, npz_path
 
 
@@ -187,10 +215,10 @@ def load_checkpoint(
             return items if t == "list" else tuple(items)
 
         if t == "tensor":
-            return Tensor(data[meta["key"]])
+            return Tensor(_restore_array(meta, data))
 
         if t == "array":
-            return data[meta["key"]]
+            return _restore_array(meta, data)
 
         if t == "class":
             module = importlib.import_module(meta["module"])
@@ -200,7 +228,7 @@ def load_checkpoint(
             return resolved
 
         if "key" in meta and "items" not in meta and "value" not in meta:
-            return data[meta["key"]]
+            return _restore_array(meta, data)
 
         if t in ("scalar", "raw"):
             return meta["value"]
