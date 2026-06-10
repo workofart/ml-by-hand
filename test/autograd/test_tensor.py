@@ -1275,6 +1275,57 @@ class TestTensorAccumulateGradDtype(TestCase):
                 )
 
 
+class TestTensorGradAssignment(TestCase):
+    """Assigning .grad must SET the gradient; accumulation is the job of
+    _accumulate_grad during backward. Accumulate-on-assign made p.grad = 0
+    a silent no-op and surprised every external caller."""
+
+    def test_grad_assignment_replaces_existing_grad(self):
+        x = Tensor([1.0, 2.0])
+        x.grad = [5.0, 5.0]
+        x.grad = [1.0, 1.0]
+        assert array_equal(x.grad.data, [1.0, 1.0])
+
+    def test_grad_assignment_none_clears(self):
+        x = Tensor([1.0, 2.0])
+        x.grad = [5.0, 5.0]
+        x.grad = None
+        assert x.grad is None
+
+    def test_backward_still_accumulates_across_branches(self):
+        # Fan-out: y = x + x, so dy/dx = 2. Backward accumulation goes
+        # through _accumulate_grad and must be unaffected by the setter.
+        x = Tensor([1.0, 2.0])
+        y = x + x
+        y.backward()
+        assert array_equal(x.grad.data, [2.0, 2.0])
+
+    def test_grad_assignment_accepts_tensor_and_detaches(self):
+        x = Tensor([1.0, 2.0])
+        x.grad = Tensor([3.0, 4.0], requires_grad=True)
+        assert array_equal(x.grad.data, [3.0, 4.0])
+        # The stored grad is a plain value, never part of the autograd graph.
+        assert x.grad.requires_grad is False
+
+    def test_backward_across_fresh_graphs_accumulates(self):
+        # Two forward+backward passes without clearing sum the leaf grads —
+        # the contract gradient accumulation (microbatching) relies on.
+        # NOTE: calling backward() twice on the SAME graph is unsupported:
+        # backward frees the graph for memory (like retain_graph=False).
+        x = Tensor([1.0, 2.0])
+        (x * 3).backward()
+        (x * 3).backward()
+        assert array_equal(x.grad.data, [6.0, 6.0])
+
+    def test_backward_accumulates_into_manually_set_grad(self):
+        # PyTorch parity: a pre-set .grad is the accumulation starting point
+        # for backward, not something backward replaces.
+        x = Tensor([1.0, 2.0])
+        x.grad = [10.0, 10.0]
+        (x * 3).sum().backward()
+        assert array_equal(x.grad.data, [13.0, 13.0])
+
+
 class TestTensorIAdd(TestTensor):
     def test_iadd_basic(self):
         """Test basic in-place addition between two tensors"""

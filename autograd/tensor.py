@@ -274,44 +274,26 @@ class Tensor:
             >>> x = Tensor([1, 2, 3])
             >>> print(x.grad)  # Expected: None
         """
-        if self._grad is not None and not isinstance(self._grad, Tensor):
-            return Tensor(self._grad, requires_grad=False)
         return self._grad
 
     @grad.setter
     def grad(self, value: Union["Tensor", ArrayLike, None]) -> None:
         """
-        Set or accumulate gradient for this tensor.
+        Set the gradient for this tensor, replacing any existing gradient.
 
-        If the tensor does not have a gradient yet, we initialize it with the provided value.
-        Otherwise, the provided value is added in place to the existing gradient.
+        Gradient ACCUMULATION during backprop goes through _accumulate_grad;
+        plain assignment here always overwrites (so `p.grad = None` clears
+        and `p.grad = g` sets exactly g).
 
         Args:
             value (Union[Tensor, ArrayLike, None]): The gradient value or None.
         """
         if value is None:
             self._grad = None
-            return
-
-        # Convert to numpy array directly if it's a Tensor
-        if isinstance(value, Tensor):
-            value_data = value.data
+        elif isinstance(value, Tensor):
+            self._grad = Tensor(value.data, requires_grad=False)
         else:
-            value_data = xp.array(value)
-
-        # Set or accumulate gradient using numpy operations
-        if self._grad is None:
-            self._grad = Tensor(value_data, requires_grad=False)
-        else:
-            value_data = xp.broadcast_to(value_data, value_data.shape)
-            value_data = xp.array(value_data, dtype=value_data.dtype)
-            # IMPORTANT: this is not the same as self.data + value_data
-            # We need to do in-place addition here to preserve any views or references
-            # to the original gradient. For example, multiple operations
-            # (e.g. __mul__, __add__) might update the same gradient tensor,
-            # and we need to ensure that all updates are correctly reflected in
-            # the same underlying array.
-            self._grad.data += value_data
+            self._grad = Tensor(xp.array(value), requires_grad=False)
 
     def view(self, *shape: Union[int, Tuple[int, ...]]) -> "Tensor":
         """
@@ -778,7 +760,9 @@ class Tensor:
         if grad is None:
             grad = Tensor(xp.ones_like(self.data))
 
-        self.grad = grad  # store as np array directly
+        # Seed the traversal: overwrite (not accumulate) so repeated
+        # backward() calls don't compound stale gradients on the output.
+        self.grad = grad
 
         # Build computational graph in reverse order
         topological_sorted_tensors: list[Tensor] = []
