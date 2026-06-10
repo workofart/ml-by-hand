@@ -11,6 +11,7 @@ from autograd.nn import Module
 from autograd.tensor import Tensor
 from autograd.text.tokenizer import BytePairEncoder
 from autograd.tools.config_schema import GenericTrainingConfig
+from examples.gpt_2 import GPT2
 from examples.grpo import (
     GRPOBatch,
     GRPOCollator,
@@ -22,6 +23,7 @@ from examples.grpo import (
     Sample,
     Task,
     grpo_loss,
+    grpo_loss_from_selected_logits,
 )
 
 
@@ -458,6 +460,63 @@ def test_grpo_loss_matches_pytorch_reference():
     np.testing.assert_allclose(
         xp.to_numpy(logits.grad.data),
         torch_logits.grad.detach().numpy(),
+        atol=1e-6,
+    )
+
+
+def test_selected_token_forward_matches_full_logits_loss():
+    # The sparse output head must be a pure speedup: projecting only
+    # generated-token rows has to produce the same GRPO loss as the
+    # full-logits path it replaces.
+    model = GPT2(
+        vocab_size=17,
+        hidden_size=8,
+        num_attention_heads=2,
+        max_seq_len=16,
+        dropout_prob=0.0,
+        num_decoder_layers=1,
+    )
+    model.eval()
+
+    group = RolloutGroup(
+        prompt_id="math-1",
+        prompt_tokens=xp.array([3, 4], dtype=xp.int32),
+        samples=[
+            Sample(
+                completion_tokens=xp.array([5, 6], dtype=xp.int32),
+                completion_text="<answer>5</answer>",
+                sampled_token_logprobs=xp.array([-0.1, -0.2], dtype=xp.float32),
+                reward=1.0,
+                advantage=0.5,
+            ),
+            Sample(
+                completion_tokens=xp.array([7], dtype=xp.int32),
+                completion_text="<answer>7</answer>",
+                sampled_token_logprobs=xp.array([-0.3], dtype=xp.float32),
+                reward=0.0,
+                advantage=-1.0,
+            ),
+        ],
+    )
+    batch = GRPOCollator(max_tokens=8, pad_idx=0)([group])
+
+    full_logits = model(batch.input_ids)
+    full_loss = grpo_loss(full_logits, batch)
+
+    selected_logits = model(
+        batch.input_ids,
+        selected_token_indices=batch.generated_token_indices,
+    )
+    sparse_loss = grpo_loss_from_selected_logits(
+        selected_logits,
+        batch,
+        batch.generated_token_indices,
+    )
+
+    np.testing.assert_allclose(
+        xp.to_numpy(sparse_loss.data),
+        xp.to_numpy(full_loss.data),
+        rtol=1e-5,
         atol=1e-6,
     )
 
