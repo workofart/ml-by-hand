@@ -166,6 +166,50 @@ class TestOptimizer(TestCase):
             xp.array([1.0, -2.0], dtype=xp.float32),
         )
 
+    def test_scale_and_clip_gradients_matches_separate_operations(self):
+        separate_params = {
+            "param1": Tensor([1.0, 2.0, 3.0]),
+            "param2": Tensor([4.0, 5.0, 6.0]),
+        }
+        combined_params = {
+            "param1": Tensor([1.0, 2.0, 3.0]),
+            "param2": Tensor([4.0, 5.0, 6.0]),
+        }
+        separate_params["param1"].grad = Tensor(xp.array([3.0, 4.0], dtype=xp.float32))
+        separate_params["param2"].grad = Tensor(xp.array([12.0], dtype=xp.float32))
+        combined_params["param1"].grad = Tensor(xp.array([3.0, 4.0], dtype=xp.float32))
+        combined_params["param2"].grad = Tensor(xp.array([12.0], dtype=xp.float32))
+
+        separate = Optimizer(separate_params, lr=0.01)
+        combined = Optimizer(combined_params, lr=0.01)
+        scale = xp.array(0.5, dtype=xp.float32)
+
+        separate.scale_gradients(scale)
+        separate_norm = separate.clip_grad_norm(max_norm=1.0, norm_type=2.0)
+        combined_norm = combined.scale_and_clip_gradients(
+            scale,
+            max_norm=1.0,
+            norm_type=2.0,
+        )
+
+        self.assertAlmostEqual(
+            float(xp.to_scalar(combined_norm)),
+            float(xp.to_scalar(separate_norm)),
+            places=6,
+        )
+        assert allclose(
+            combined_params["param1"].grad.data,
+            separate_params["param1"].grad.data,
+            rtol=1e-6,
+            atol=1e-7,
+        )
+        assert allclose(
+            combined_params["param2"].grad.data,
+            separate_params["param2"].grad.data,
+            rtol=1e-6,
+            atol=1e-7,
+        )
+
     def test_grad_l2_norm_matches_expected_value(self):
         self.params["param1"].grad = Tensor(xp.array([3.0, 4.0], dtype=xp.float32))
         self.params["param2"].grad = Tensor(xp.array([12.0], dtype=xp.float32))

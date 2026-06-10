@@ -288,6 +288,36 @@ class Optimizer:
                 if param.grad.data.dtype != grad_dtype:
                     param.grad.data = param.grad.data.astype(grad_dtype)
 
+    def scale_and_clip_gradients(
+        self,
+        scale: Array,
+        max_norm: float,
+        norm_type: float = 2.0,
+    ) -> Any:
+        """Scale gradients and clip their post-scale global norm in one pass.
+
+        Equivalent to ``scale_gradients(scale)`` followed by
+        ``clip_grad_norm(max_norm, norm_type)``, but applies a single combined
+        factor to each gradient instead of two full-parameter scaling passes.
+        """
+        total_norm = xp.asarray(0.0, dtype=xp.float32)
+        for param in self.model_parameters.values():
+            if param.grad is not None:
+                scaled_grad = param.grad.data * scale
+                total_norm += (xp.abs(scaled_grad) ** norm_type).sum()
+
+        total_norm = total_norm ** (1.0 / norm_type)
+        clip_scale = xp.minimum(1.0, max_norm / (total_norm + 1e-10))
+        final_scale = scale * clip_scale
+        for param in self.model_parameters.values():
+            if param.grad is not None:
+                grad_dtype = param.grad.data.dtype
+                param.grad.data *= final_scale
+                if param.grad.data.dtype != grad_dtype:
+                    param.grad.data = param.grad.data.astype(grad_dtype)
+
+        return total_norm
+
     def grad_l2_norm(self) -> float:
         """Return the L2 norm of all current parameter gradients."""
         grad_norm = xp.asarray(0.0, dtype=xp.float32)
