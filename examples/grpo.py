@@ -717,12 +717,7 @@ class GRPOTrainer(AbstractTrainer):
         state.accumulated_batches = 1
         state.accumulated_loss_total_weight = total_weight
 
-        if self.optimizer_step(
-            state,
-            record_grad_norm=False,
-            materialize_loss_stats=False,
-            combine_scale_and_clip=True,
-        ):
+        if self.optimizer_step(state, record_grad_norm=False):
             self.global_step += 1
 
         return loss
