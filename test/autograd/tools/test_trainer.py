@@ -351,6 +351,19 @@ class TestSimpleTrainer(BaseTrainerTest):
         # 2 epochs * 2 train batches = 4 steps
         self.assertEqual(self.trainer.optimizer.step_call_count, 4)
 
+    def test_unknown_trainer_kwarg_raises(self):
+        """A typo'd kwarg (e.g. misspelled checkpoint_path) must raise instead
+        of being silently swallowed and training from scratch."""
+        with self.assertRaises(TypeError):
+            SimpleTrainer(
+                model_cls=MockModelClass,
+                optimizer_cls=MockOptimizerClass,
+                loss_fn=self.loss_fn,
+                config=self.config,
+                output_type="logits",
+                checkpont_path="dummy",  # intentional typo
+            )
+
     def test_forward_and_loss_returns_tensor(self):
         """Check that _forward_and_loss returns the expected scalar Tensor."""
         batch = next(iter(self.train_data))

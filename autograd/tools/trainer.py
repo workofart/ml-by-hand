@@ -391,7 +391,7 @@ class AbstractTrainer(ABC):
         optimizer_cls: type[optim.Optimizer],
         loss_fn: Callable,
         config: GenericTrainingConfig,
-        **kwargs,
+        checkpoint_path: Optional[str] = None,
     ):
         """Initializes the trainer with model, optimizer, and config.
 
@@ -400,7 +400,8 @@ class AbstractTrainer(ABC):
             optimizer_cls (type[optim.Optimizer]): Class of the optimizer to instantiate.
             loss_fn (Callable): A function or callable that computes the loss.
             config (GenericTrainingConfig): Training configuration object.
-            **kwargs: Additional arguments for specialized trainers (e.g., checkpoint paths).
+            checkpoint_path (Optional[str]): Checkpoint basename (without
+                .json/.npz) to resume training from.
         """
         self.config = config
         self.loss_fn = loss_fn
@@ -426,7 +427,7 @@ class AbstractTrainer(ABC):
             optimizer_kwargs=config.optimizer_kwargs,
             resume_epoch=config.resume_epoch,
             pretrained_checkpoint_path=config.pretrained_checkpoint_path,
-            checkpoint_path=kwargs.get("checkpoint_path"),
+            checkpoint_path=checkpoint_path,
         )
         # `global_step` counts optimizer updates. Epoch-mode configs are converted
         # to optimizer-step targets before entering the training loop.
