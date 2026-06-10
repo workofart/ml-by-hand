@@ -28,13 +28,18 @@ class MockedBPE:
     def encode(self, text: str):
         if text == "<|endoftext|>":
             return [9]
+        if text == "<|END_OF_TURN|>":
+            return [7]
         if text == "<SOS>":
             return [0]
         # For simplicity, convert each uppercase letter to an integer (A=0, B=1, …)
         return [ord(ch) - 65 for ch in text if ch.isupper()]
 
     def decode(self, tokens: list) -> str:
-        return "".join("<|endoftext|>" if t == 9 else chr(t + 65) for t in tokens)
+        return "".join(
+            "<|endoftext|>" if t == 9 else "<|END_OF_TURN|>" if t == 7 else chr(t + 65)
+            for t in tokens
+        )
 
 
 class BytesResponse:
@@ -564,6 +569,31 @@ class TestTextUtils(TestCase):
         )
 
         self.assertEqual(result, self.bpe.decode([0, 1, 9]))
+        self.assertEqual(prediction_func.call_count, 2)
+
+    @patch("autograd.text.utils.xp.sample_categorical")
+    def test_generate_text_stops_at_configured_stop_token(self, mock_choice):
+        def fake_prediction(model, batch_data, mode):
+            seq_len = batch_data.shape[1]
+            dummy_obj = MagicMock()
+            dummy_obj.data = xp.zeros((1, seq_len, 10))
+            return dummy_obj
+
+        mock_choice.side_effect = [1, 7, 1]
+        prediction_func = MagicMock(side_effect=fake_prediction)
+
+        result = generate_text(
+            model=MagicMock(),
+            prediction_func=prediction_func,
+            bpe=self.bpe,  # type: ignore
+            start_tokens="<SOS>",
+            max_length=5,
+            temperature=1.0,
+            top_k=5,
+            stop_token="<|END_OF_TURN|>",
+        )
+
+        self.assertEqual(result, self.bpe.decode([0, 1, 7]))
         self.assertEqual(prediction_func.call_count, 2)
 
     @patch("autograd.text.utils.xp.sample_categorical")

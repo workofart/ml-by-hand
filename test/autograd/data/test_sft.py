@@ -10,6 +10,8 @@ from autograd.data.data_loader import DataLoader
 from autograd.data.dataset import PairedMapDataset
 from autograd.data.sampler import RandomSampler
 from autograd.data.sft import (
+    SFT_SYSTEM_PROMPT,
+    load_gsm8k_grpo_sft,
     load_no_robots_sft,
     load_sft,
     prepare_sft_token_sequences,
@@ -22,27 +24,40 @@ from test.helpers import array_equal
 
 
 class MockBPE:
+    special_ids = {
+        "<PAD>": 0,
+        "<SOS>": 1,
+        "<|endoftext|>": 2,
+        "<UNK>": 3,
+        "<|USER|>": 4,
+        "<|ASSISTANT|>": 5,
+        "<|SYSTEM|>": 6,
+        "<|END_OF_TURN|>": 7,
+    }
+
     def encode(self, token, allowed_special=set()):
         if token in allowed_special:
-            if token == "<PAD>":
-                return [0]
-            if token == "<SOS>":
-                return [1]
-            if token == "<|endoftext|>":
-                return [2]
-        special_token = "<|endoftext|>"
-        if token == special_token:
-            return [2]
+            return [self.special_ids[token]]
+        if token in self.special_ids:
+            return [self.special_ids[token]]
 
         encoded = []
         start = 0
         while True:
-            special_index = token.find(special_token, start)
-            if special_index == -1:
+            next_special = min(
+                (
+                    (special_index, special_token)
+                    for special_token in self.special_ids
+                    if (special_index := token.find(special_token, start)) != -1
+                ),
+                default=None,
+            )
+            if next_special is None:
                 encoded.extend(ord(char) for char in token[start:])
                 break
+            special_index, special_token = next_special
             encoded.extend(ord(char) for char in token[start:special_index])
-            encoded.append(2)
+            encoded.append(self.special_ids[special_token])
             start = special_index + len(special_token)
         return encoded
 
@@ -236,6 +251,45 @@ class TestSFTData(TestCase):
         with self.assertRaisesRegex(ValueError, "Available splits"):
             load_no_robots_sft(split="validation")
 
+    @patch("autograd.data.sft.load_gsm8k_rows")
+    def test_load_gsm8k_grpo_sft_formats_questions_as_tagged_chat(
+        self, mock_load_gsm8k_rows
+    ):
+        mock_load_gsm8k_rows.return_value = [
+            {
+                "question": "Jan has 2 apples. Tom gives her 3. How many?",
+                "answer": "Jan has 2 + 3 = 5 apples. #### 5",
+            }
+        ]
+
+        examples = load_gsm8k_grpo_sft(split="train")
+
+        self.assertEqual(
+            examples,
+            [
+                {
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": SFT_SYSTEM_PROMPT,
+                        },
+                        {
+                            "role": "user",
+                            "content": "Jan has 2 apples. Tom gives her 3. How many?",
+                        },
+                        {
+                            "role": "assistant",
+                            "content": (
+                                "<think>Jan has 2 + 3 = 5 apples.</think>"
+                                "<answer>5</answer>"
+                            ),
+                        },
+                    ]
+                }
+            ],
+        )
+        mock_load_gsm8k_rows.assert_called_once_with(split="train")
+
     def test_tokenize_sft_messages_supervises_all_assistant_turns(self):
         example = tokenize_sft_messages(
             {
@@ -251,34 +305,34 @@ class TestSFTData(TestCase):
 
         expected_tokens = xp.array(
             [
-                *[ord(char) for char in "User: "],
+                4,
                 65,
-                2,
-                *[ord(char) for char in "Assistant: "],
+                7,
+                5,
                 66,
-                2,
-                *[ord(char) for char in "User: "],
+                7,
+                4,
                 67,
-                2,
-                *[ord(char) for char in "Assistant: "],
+                7,
+                5,
                 68,
                 69,
-                2,
+                7,
             ],
             dtype=xp.int32,
         )
         expected_loss_mask = xp.array(
             [
-                *([0] * len("User: ")),
                 0,
                 0,
-                *([0] * len("Assistant: ")),
+                0,
+                0,
                 1,
                 1,
-                *([0] * len("User: ")),
                 0,
                 0,
-                *([0] * len("Assistant: ")),
+                0,
+                0,
                 1,
                 1,
                 1,
@@ -336,7 +390,7 @@ class TestSFTData(TestCase):
             xp.array_equal(
                 batch.labels[0],
                 xp.array(
-                    [IGNORE_INDEX, IGNORE_INDEX, 68, 69, 2],
+                    [IGNORE_INDEX, IGNORE_INDEX, 68, 69, 7],
                     dtype=xp.int32,
                 ),
             )
@@ -365,14 +419,14 @@ class TestSFTData(TestCase):
         self.assertTrue(
             xp.array_equal(
                 batch.input_ids[0],
-                xp.array([116, 58, 32, 68, 69], dtype=xp.int32),
+                xp.array([67, 7, 5, 68, 69], dtype=xp.int32),
             )
         )
         self.assertTrue(
             xp.array_equal(
                 batch.labels[0],
                 xp.array(
-                    [IGNORE_INDEX, IGNORE_INDEX, 68, 69, 2],
+                    [IGNORE_INDEX, IGNORE_INDEX, 68, 69, 7],
                     dtype=xp.int32,
                 ),
             )
@@ -397,13 +451,13 @@ class TestSFTData(TestCase):
 
         self.assertTrue(
             xp.array_equal(
-                batch.input_ids[0], xp.array([32, 69, 70, 71], dtype=xp.int32)
+                batch.input_ids[0], xp.array([5, 69, 70, 71], dtype=xp.int32)
             )
         )
         self.assertTrue(
             xp.array_equal(
                 batch.labels[0],
-                xp.array([69, 70, 71, 2], dtype=xp.int32),
+                xp.array([69, 70, 71, 7], dtype=xp.int32),
             )
         )
 
