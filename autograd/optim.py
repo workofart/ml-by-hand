@@ -505,6 +505,24 @@ class Adam(Optimizer):
             if param.data.dtype in LOW_PRECISION_FLOAT_DTYPES:
                 self._states["master"][name] = param.data.astype(xp.float32)
 
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        """Load Adam state, restoring the invariants __init__ establishes.
+
+        The base loader rebuilds `_states` as plain dicts, but Adam relies on:
+        - m/v defaulting to 0.0 for params absent from the checkpoint
+          (otherwise step() raises KeyError for them), and
+        - an fp32 master copy existing for every low-precision param
+          (otherwise older checkpoints without a 'master' group silently
+          drop mixed-precision masters).
+        """
+        super().load_state_dict(state_dict)
+        self._states["m"] = defaultdict(float, self._states["m"])
+        self._states["v"] = defaultdict(float, self._states["v"])
+        master = self._states.setdefault("master", {})
+        for name, param in self.model_parameters.items():
+            if param.data.dtype in LOW_PRECISION_FLOAT_DTYPES and name not in master:
+                master[name] = param.data.astype(xp.float32)
+
     def step(self) -> None:
         """
         Perform a single optimization step using the Adam algorithm.
