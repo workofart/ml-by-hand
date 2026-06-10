@@ -10,7 +10,11 @@ from autograd.init import xavier_uniform
 from autograd.nn import Module
 from autograd.optim import CosineScheduler
 from autograd.tensor import Tensor
-from autograd.tools.model import load_checkpoint, save_checkpoint
+from autograd.tools.model import (
+    load_checkpoint,
+    load_checkpoint_metadata,
+    save_checkpoint,
+)
 
 
 class MockModule(Module):
@@ -240,6 +244,50 @@ class TestModel(TestCase):
         loaded = load_checkpoint(json_path=self.json_path, npz_path=self.npz_path)
 
         self.assertIs(loaded["lr_scheduler_cls"], CosineScheduler)
+
+    def test_load_checkpoint_metadata_skips_arrays_and_never_opens_npz(self):
+        save_checkpoint(
+            {
+                "step_count": 4,
+                "model_state_dict": self.model.state_dict(),
+                "model_init_kwargs": {"arg0": 999, "kwarg0": "testing_kwarg0"},
+                "optimizer_init_kwargs": {
+                    "lr": 0.01,
+                    "lr_scheduler_kwargs": {"lr_scheduler_cls": CosineScheduler},
+                },
+            },
+            checkpoint_dir=self.checkpoint_dir,
+            checkpoint_name=self.checkpoint_name,
+        )
+        # Deleting the NPZ proves metadata loading touches only the JSON
+        # sidecar — the whole point of the function.
+        os.remove(self.npz_path)
+
+        metadata = load_checkpoint_metadata(self.json_path)
+
+        self.assertEqual(metadata["step_count"], 4)
+        self.assertEqual(
+            metadata["model_init_kwargs"],
+            {"arg0": 999, "kwarg0": "testing_kwarg0"},
+        )
+        self.assertIs(
+            metadata["optimizer_init_kwargs"]["lr_scheduler_kwargs"][
+                "lr_scheduler_cls"
+            ],
+            CosineScheduler,
+        )
+        self.assertNotIn("model_state_dict", metadata)
+        self.assertNotIn("optimizer_state_dict", metadata)
+
+    def test_load_checkpoint_metadata_rejects_arrays_outside_skip_keys(self):
+        save_checkpoint(
+            {"extra_state": self.model.state_dict(), "step_count": 4},
+            checkpoint_dir=self.checkpoint_dir,
+            checkpoint_name=self.checkpoint_name,
+        )
+
+        with self.assertRaisesRegex(ValueError, "cannot contain array data"):
+            load_checkpoint_metadata(self.json_path)
 
     def test_save_persists_dtype_in_sidecar(self):
         # The JSON sidecar must carry the original dtype for every array
