@@ -74,6 +74,30 @@ class TestStructuralCausalAttention(TestCase):
 
         assert allclose(structural.data, explicit.data, atol=1e-5, rtol=1e-5)
 
+    def test_explicit_padding_mask_does_not_disable_causality(self):
+        """is_causal=True must stay causal even when a padding mask is supplied.
+
+        Regression test: `if mask is None and is_causal` skipped the causal
+        mask entirely whenever an explicit (e.g. padding) mask was passed,
+        letting the decoder attend to future positions.
+        """
+        attention = ScaledDotProductAttention(dropout_prob=0.0)
+        # All-zeros padding mask: every position allowed, so the result must
+        # match the purely causal output exactly.
+        pad_mask = Tensor(
+            xp.zeros((self.batch_size, 1, self.seq_len, self.seq_len)),
+            requires_grad=False,
+        )
+
+        causal_only = attention(
+            self.query, self.key, self.value, mask=None, is_causal=True
+        )
+        with_pad_mask = attention(
+            self.query, self.key, self.value, mask=pad_mask, is_causal=True
+        )
+
+        assert allclose(causal_only.data, with_pad_mask.data, atol=1e-5, rtol=1e-5)
+
     @skipUnless(IS_MLX, "mlx_custom requires the MLX backend")
     def test_structural_causal_attention_stays_on_dense_path(self):
         attention = ScaledDotProductAttention(dropout_prob=0.0)

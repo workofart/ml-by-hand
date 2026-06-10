@@ -1574,8 +1574,8 @@ class ScaledDotProductAttention(Module):
                 are also accepted and routed through the implementation-specific
                 gating logic before falling back to dense when unsupported.
                 Defaults to None.
-            is_causal (bool, optional): Whether to apply structural causal masking
-                when no explicit mask is supplied. Defaults to False.
+            is_causal (bool, optional): Whether to apply causal masking. Combined
+                additively with `mask` when both are given. Defaults to False.
 
         Returns:
             Tensor: The attended output.
@@ -1622,16 +1622,28 @@ class ScaledDotProductAttention(Module):
         # (batch_size, num_heads, sequence_len, sequence_len)
         att_score = (query @ key.transpose(2, 3)) * attention_scale
 
-        # Non-MLX Causal Mask
-        if mask is None and is_causal:
+        # Non-MLX Causal Mask. Applied unconditionally when is_causal so an
+        # explicit (e.g. padding) mask never disables causality. (PyTorch
+        # differs: F.scaled_dot_product_attention forbids passing both.)
+        # Both masks are additive, which makes combining well-behaved:
+        # - mask already causal + is_causal: forbidden scores get -2e9
+        #   instead of -1e9; softmax output is unchanged in fp32/bf16.
+        # - fully-masked row (padding + causal forbid every position):
+        #   softmax over a constant row gives uniform weights, not NaN.
+        # - seq_q != seq_k: triu aligns query i with key i (top-left, same
+        #   as PyTorch). That is wrong for KV-cache decoding, where query i
+        #   should align with key seq_k - seq_q + i — callers in this repo
+        #   always pass full sequences.
+        if is_causal:
             seq_q = int(query.shape[-2])
             seq_k = int(key.shape[-2])
-            mask = Tensor(
+            causal_mask = Tensor(
                 xp.triu(
                     xp.ones((seq_q, seq_k), dtype=att_score.data.dtype), k=1
                 ).reshape(1, 1, seq_q, seq_k),
                 requires_grad=False,
             )
+            att_score = att_score + (causal_mask * -1e9)
 
         # mask (optional)
         if mask is not None:
@@ -1701,8 +1713,8 @@ class MultiHeadAttention(Module):
             key (Tensor): Key tensor.
             value (Tensor): Value tensor.
             mask (Optional[Tensor], optional): Mask tensor. Defaults to None.
-            is_causal (bool, optional): Whether to apply structural causal masking
-                when no explicit mask is supplied. Defaults to False.
+            is_causal (bool, optional): Whether to apply causal masking. Combined
+                additively with `mask` when both are given. Defaults to False.
 
         Returns:
             Tensor: Output tensor after multi-head attention.
