@@ -97,6 +97,7 @@ def generate(
     *,
     show_progress: bool = True,
     num_generations: int,
+    compute_logprobs: bool = True,
 ) -> list[GenerationResult]:
     """Generate token ids autoregressively and record sampled-token logprobs.
 
@@ -116,6 +117,8 @@ def generate(
         show_progress: Whether to show token-level inference progress.
         num_generations: Number of independent completions to generate in
             parallel for the same prompt.
+        compute_logprobs: Whether to compute sampled-token logprobs. Text-only
+            generation can disable this to skip the sampling-distribution math.
 
     Returns:
         One result per generated completion.
@@ -143,42 +146,32 @@ def generate(
         if isinstance(prediction, tuple):
             prediction = prediction[0]
         next_token_logits = prediction.data[:, -1]
+        token_ids, step_logprobs = _sample_next_tokens(
+            next_token_logits=next_token_logits,
+            active=active,
+            temperature=temperature,
+            top_k=top_k,
+            eos_token_id=eos_token_id,
+            compute_logprobs=compute_logprobs,
+        )
 
-        for row_idx, is_active in enumerate(active):
-            if not is_active:
-                output_ids[row_idx].append(eos_token_id)
-                continue
+        # One device-to-host transfer per step for the whole batch, instead of
+        # per-row scalar syncs.
+        token_list = [int(token) for token in xp.to_numpy(token_ids).tolist()]
+        logprob_list = None
+        if step_logprobs is not None:
+            logprob_list = [
+                float(logprob) for logprob in xp.to_numpy(step_logprobs).tolist()
+            ]
 
-            logits = next_token_logits[row_idx]
-            if temperature <= 0:
-                # greedy decoding: choose the highest-logit token directly.
-                token_id = int(xp.argmax(logits))
-                logprob = 0.0
-            else:
-                # Temperature rescales the distribution before sampling.
-                # Larger values flatten it; smaller values make it sharper.
-                behavior_logits = xp.array(logits, dtype=xp.float32) / temperature
-                if top_k is not None and top_k < len(behavior_logits):
-                    # Top-k keeps only the k most likely tokens and masks the rest.
-                    threshold = xp.sort(behavior_logits)[-top_k]
-                    behavior_logits = xp.where(
-                        behavior_logits >= threshold,
-                        behavior_logits,
-                        xp.full(
-                            behavior_logits.shape,
-                            -float("inf"),
-                            dtype=behavior_logits.dtype,
-                        ),
-                    )
-                token_id = int(xp.to_scalar(xp.sample_categorical(behavior_logits)))
-                # Store the logprob from the same distribution that sampled the token
-                shifted = behavior_logits - xp.max(behavior_logits)
-                log_denom = xp.log(xp.sum(xp.exp(shifted)))
-                logprob = float(xp.to_scalar(shifted[token_id] - log_denom))
-
+        for row_idx, token_id in enumerate(token_list):
             output_ids[row_idx].append(token_id)
+            if not active[row_idx]:
+                continue
             completion_tokens[row_idx].append(token_id)
-            logprobs[row_idx].append(logprob)
+            logprobs[row_idx].append(
+                0.0 if logprob_list is None else logprob_list[row_idx]
+            )
             if token_id == eos_token_id:
                 stop_reasons[row_idx] = "eos"
                 active[row_idx] = False
@@ -186,13 +179,86 @@ def generate(
     return [
         GenerationResult(
             completion_tokens=tokens,
-            logprobs=result_logprobs,
+            logprobs=logprobs[row_idx],
             stop_reason=stop_reasons[row_idx],
         )
-        for row_idx, (tokens, result_logprobs) in enumerate(
-            zip(completion_tokens, logprobs)
-        )
+        for row_idx, tokens in enumerate(completion_tokens)
     ]
+
+
+def _sample_next_tokens(
+    next_token_logits: Array,
+    active: list[bool],
+    temperature: float,
+    top_k: Optional[int],
+    eos_token_id: int,
+    compute_logprobs: bool,
+) -> tuple[Array, Optional[Array]]:
+    """Sample one token per row from next-token logits.
+
+    This owns the sampling contract for the generation loop: greedy vs sampled
+    decoding, top-k masking, EOS padding for finished rows, and logprobs. The
+    math is batched across rows so each step costs one set of array ops rather
+    than one per completion.
+    """
+    num_generations = len(active)
+    if temperature <= 0:
+        sampled_ids = []
+        for row_idx, is_active in enumerate(active):
+            if is_active:
+                sampled_ids.append(
+                    xp.argmax(next_token_logits[row_idx]).astype(xp.int32)
+                )
+            else:
+                sampled_ids.append(xp.array(eos_token_id, dtype=xp.int32))
+        token_ids = xp.stack(sampled_ids, axis=0)
+        step_logprobs = (
+            xp.zeros((num_generations,), dtype=xp.float32) if compute_logprobs else None
+        )
+        return token_ids, step_logprobs
+
+    # Temperature rescales the distribution before sampling. Larger values
+    # flatten it; smaller values make it sharper.
+    behavior_logits = xp.array(next_token_logits, dtype=xp.float32) / temperature
+    if top_k is not None and top_k < behavior_logits.shape[-1]:
+        # Top-k keeps only the k most likely tokens in each row and masks the
+        # rest to -inf so softmax gives them zero probability.
+        threshold = xp.sort(behavior_logits, axis=-1)[:, -top_k]
+        behavior_logits = xp.where(
+            behavior_logits >= threshold[:, None],
+            behavior_logits,
+            xp.full(
+                behavior_logits.shape,
+                -float("inf"),
+                dtype=behavior_logits.dtype,
+            ),
+        )
+
+    sampled_ids = []
+    for row_idx, is_active in enumerate(active):
+        if is_active:
+            sampled_ids.append(
+                xp.array(
+                    xp.sample_categorical(behavior_logits[row_idx]),
+                    dtype=xp.int32,
+                )
+            )
+        else:
+            # Finished rows keep feeding EOS so batch shapes stay fixed. The
+            # caller ignores these padded tokens when building the result.
+            sampled_ids.append(xp.array(eos_token_id, dtype=xp.int32))
+    token_ids = xp.stack(sampled_ids, axis=0)
+
+    if not compute_logprobs:
+        return token_ids, None
+
+    # The reported logprob must come from the exact distribution used for
+    # sampling, after temperature and top-k have changed the logits. Subtracting
+    # the row max is the standard numerically stable log-softmax trick.
+    shifted = behavior_logits - xp.max(behavior_logits, axis=-1, keepdims=True)
+    log_denom = xp.log(xp.sum(xp.exp(shifted), axis=-1))
+    row_idx = xp.arange(num_generations)
+    return token_ids, shifted[row_idx, token_ids] - log_denom
 
 
 def generate_text(

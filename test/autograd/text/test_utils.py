@@ -392,6 +392,34 @@ class TestTextUtils(TestCase):
             [result.completion_tokens for result in results], [[1, 1], [2, 2]]
         )
 
+    @patch("autograd.text.utils.xp.sample_categorical")
+    def test_generate_can_skip_logprob_math(self, mock_choice):
+        def fake_prediction(model, batch_data, mode):
+            batch_size, seq_len = batch_data.shape
+            dummy_obj = MagicMock()
+            dummy_obj.data = xp.zeros((batch_size, seq_len, 4), dtype=xp.float32)
+            return dummy_obj
+
+        mock_choice.side_effect = [1, 2, 3, 1]
+
+        results = generate(
+            model=MagicMock(),
+            prediction_func=MagicMock(side_effect=fake_prediction),
+            prompt_tokens=[0],
+            max_new_tokens=2,
+            temperature=1.0,
+            top_k=None,
+            eos_token_id=9,
+            show_progress=False,
+            num_generations=2,
+            compute_logprobs=False,
+        )
+
+        self.assertEqual(
+            [result.completion_tokens for result in results], [[1, 3], [2, 1]]
+        )
+        self.assertEqual([result.logprobs for result in results], [[0.0, 0.0]] * 2)
+
     @patch("autograd.text.utils.tqdm")
     @patch("autograd.text.utils.xp.sample_categorical")
     def test_generate_can_disable_progress_bar(self, mock_choice, mock_tqdm):
