@@ -73,6 +73,18 @@ class TestModule(TestCase):
         assert "submodule1.running_avg" in states
         assert allclose(states["submodule1.running_avg"], [10.0])
 
+    def test_module_init_rejects_unknown_arguments(self):
+        """Module.__init__ must not swallow stray constructor arguments —
+        a config key the model ignores means the user trains a different
+        architecture than the config claims."""
+
+        class StrictModule(Module):
+            def forward(self, x):
+                return x
+
+        with self.assertRaises(TypeError):
+            StrictModule(totally_bogus_arg=True)
+
     def test_parameter_attribute_access(self):
         """A Tensor assigned via self.name = ... is registered in _parameters
         and must remain readable as a plain attribute."""

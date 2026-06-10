@@ -58,11 +58,13 @@ class Module:
         >>> output = module(input_tensor) # Expected output: [2, 4, 6]
     """
 
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self) -> None:
         """
         Initialize the Module.
 
         This constructor initializes empty dictionaries for parameters, submodules, and states.
+        It takes no arguments on purpose: silently accepting stray constructor
+        arguments would let a typo'd or unsupported config key go unnoticed.
         """
         self._parameters: Dict[str, Tensor] = {}
         self._modules: Dict[str, "Module"] = {}
@@ -578,16 +580,15 @@ class Linear(Module):
         >>> y = linear(x) # Expected shape: (3, 2)
     """
 
-    def __init__(self, input_size: int, output_size: int, **kwargs: Any) -> None:
+    def __init__(self, input_size: int, output_size: int) -> None:
         """
         Initialize the Linear layer.
 
         Args:
             input_size (int): The size of the input features.
             output_size (int): The size of the output features.
-            **kwargs: Additional keyword arguments.
         """
-        super().__init__(input_size, output_size, **kwargs)
+        super().__init__()
 
         # weight is a matrix of shape (input_size, output_size)
         self._parameters["weight"] = xavier_uniform(
@@ -649,7 +650,6 @@ class Conv2d(Module):
         stride: int = 1,
         padding_mode: str = "valid",
         bias: bool = True,
-        **kwargs: Any,
     ) -> None:
         """
         Initialize the Conv2d layer.
@@ -663,17 +663,8 @@ class Conv2d(Module):
             stride (int, optional): Stride of the convolution. Defaults to 1.
             padding_mode (str, optional): Padding mode ("valid" or "same"). Defaults to "valid".
             bias (bool, optional): Whether to include a bias term. Defaults to True.
-            **kwargs: Additional keyword arguments.
         """
-        super().__init__(
-            in_channels,
-            out_channels,
-            kernel_size,
-            stride=stride,
-            padding_mode=padding_mode,
-            bias=bias,
-            **kwargs,
-        )
+        super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.kernel_size = kernel_size
@@ -792,7 +783,6 @@ class MaxPool2d(Module):
         kernel_size: int,
         stride: Optional[int] = None,
         padding_mode: str = "valid",
-        **kwargs: Any,
     ) -> None:
         """
         Initialize the MaxPool2d layer.
@@ -801,9 +791,8 @@ class MaxPool2d(Module):
             kernel_size (int): Size of the pooling window.
             stride (Optional[int], optional): Stride of the pooling operation. Defaults to kernel_size.
             padding_mode (str, optional): Padding mode ("valid" or "same"). Defaults to "valid".
-            **kwargs: Additional keyword arguments.
         """
-        super().__init__(kernel_size, **kwargs)
+        super().__init__()
         self.kernel_size = kernel_size
         self.stride = stride if stride is not None else kernel_size
         self.padding_mode = padding_mode
@@ -874,7 +863,7 @@ class ResidualBlock(Module):
             out_channels (int): Number of output channels.
             stride (int, optional): Stride for the convolution. Defaults to 1.
         """
-        super().__init__(in_channels, out_channels, stride=stride)
+        super().__init__()
         self.conv1 = Conv2d(
             in_channels, out_channels, kernel_size=3, stride=stride, padding_mode="same"
         )
@@ -953,12 +942,7 @@ class RecurrentBlock(Module):
         W_hh: transforms the hidden state into the next hidden state
         W_hy: transforms the hidden state into the output
         """
-        super().__init__(
-            input_size,
-            hidden_size,
-            output_size=output_size,
-            dropout_prob=dropout_prob,
-        )
+        super().__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.output_size = output_size
@@ -1086,9 +1070,7 @@ class LongShortTermMemoryBlock(Module):
         W_o/bias_o: weights for the output gate
         W_hy/bias_y: weights for the final output (if output_size is specified)
         """
-        super().__init__(
-            input_size, hidden_size, output_size=output_size, dropout_prob=dropout_prob
-        )
+        super().__init__()
         self.input_size = input_size
         self.hidden_size = hidden_size
         # Apply dropout only to non-recurrent connections
@@ -1303,16 +1285,15 @@ class LayerNorm(Module):
         >>> y = ln(x) # Expected: (4, 10)
     """
 
-    def __init__(self, input_size: int, epsilon: float = 1e-5, **kwargs: Any) -> None:
+    def __init__(self, input_size: int, epsilon: float = 1e-5) -> None:
         """
         Initialize the LayerNorm layer.
 
         Args:
             input_size (int): The number of features in the input.
             epsilon (float, optional): Small constant for numerical stability. Defaults to 1e-5.
-            **kwargs: Additional keyword arguments.
         """
-        super().__init__(**kwargs)
+        super().__init__()
         self.epsilon = epsilon
         self._parameters["gain"] = Tensor(xp.ones((input_size,), dtype=xp.float32))
         self._parameters["bias"] = Tensor(xp.zeros((input_size,), dtype=xp.float32))
@@ -1382,7 +1363,6 @@ class BatchNorm(Module):
         input_size: int,
         momentum: float = 0.1,
         epsilon: float = 1e-5,
-        **kwargs: Any,
     ) -> None:
         """
         Initialize the BatchNorm layer.
@@ -1391,9 +1371,8 @@ class BatchNorm(Module):
             input_size (int): The number of features in the input.
             momentum (float, optional): Momentum factor for running statistics. Defaults to 0.1.
             epsilon (float, optional): Small constant for numerical stability. Defaults to 1e-5.
-            **kwargs: Additional keyword arguments.
         """
-        super().__init__(input_size, momentum=momentum, epsilon=epsilon, **kwargs)
+        super().__init__()
 
         self.momentum = momentum  # used in running mean and variance calculation
         self.epsilon = epsilon  # small constant for numeric stability
@@ -1485,15 +1464,14 @@ class Dropout(Module):
         >>> y = dropout(x) # Approximately half of the elements should be 0
     """
 
-    def __init__(self, p: float = 0.5, **kwargs: Any) -> None:
+    def __init__(self, p: float = 0.5) -> None:
         """
         Initialize the Dropout layer.
 
         Args:
             p (float, optional): Fraction of the input units to drop. Defaults to 0.5.
-            **kwargs: Additional keyword arguments.
         """
-        super().__init__(p=p, **kwargs)
+        super().__init__()
         self.p = p
 
     def forward(self, x: Tensor) -> Tensor:
