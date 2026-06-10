@@ -1,7 +1,9 @@
+import io
 import json
 import os
 import re
 import tempfile
+from contextlib import redirect_stdout
 from unittest import TestCase
 from unittest.mock import MagicMock, patch
 
@@ -392,6 +394,34 @@ class TestTextUtils(TestCase):
             [result.completion_tokens for result in results], [[1, 1], [2, 2]]
         )
 
+    @patch("autograd.text.utils.xp.sample_categorical")
+    def test_generate_can_skip_logprob_math(self, mock_choice):
+        def fake_prediction(model, batch_data, mode):
+            batch_size, seq_len = batch_data.shape
+            dummy_obj = MagicMock()
+            dummy_obj.data = xp.zeros((batch_size, seq_len, 4), dtype=xp.float32)
+            return dummy_obj
+
+        mock_choice.side_effect = [1, 2, 3, 1]
+
+        results = generate(
+            model=MagicMock(),
+            prediction_func=MagicMock(side_effect=fake_prediction),
+            prompt_tokens=[0],
+            max_new_tokens=2,
+            temperature=1.0,
+            top_k=None,
+            eos_token_id=9,
+            show_progress=False,
+            num_generations=2,
+            compute_logprobs=False,
+        )
+
+        self.assertEqual(
+            [result.completion_tokens for result in results], [[1, 3], [2, 1]]
+        )
+        self.assertEqual([result.logprobs for result in results], [[0.0, 0.0]] * 2)
+
     @patch("autograd.text.utils.tqdm")
     @patch("autograd.text.utils.xp.sample_categorical")
     def test_generate_can_disable_progress_bar(self, mock_choice, mock_tqdm):
@@ -482,6 +512,35 @@ class TestTextUtils(TestCase):
 
         self.assertEqual(result, self.bpe.decode([0] + [1] * generated_tokens))
         self.assertEqual(prediction_func.call_count, generated_tokens)
+
+    @patch("autograd.text.utils.xp.sample_categorical")
+    def test_generate_text_prints_prompt_completion_and_token_counts(self, mock_choice):
+        def fake_prediction(model, batch_data, mode):
+            seq_len = batch_data.shape[1]
+            dummy_obj = MagicMock()
+            dummy_obj.data = xp.zeros((1, seq_len, 10))
+            return dummy_obj
+
+        mock_choice.return_value = 1
+        stdout = io.StringIO()
+
+        with redirect_stdout(stdout):
+            generate_text(
+                model=MagicMock(),
+                prediction_func=MagicMock(side_effect=fake_prediction),
+                bpe=self.bpe,  # type: ignore
+                start_tokens="AB",
+                max_length=5,
+                temperature=1.0,
+                top_k=5,
+            )
+
+        output = stdout.getvalue()
+        self.assertIn("Prompt:\nAB\n\nGenerated:\nBBB", output)
+        self.assertIn(
+            "Prompt 2 tokens, generated 3 new tokens, total 5/5 tokens",
+            output,
+        )
 
     @patch("autograd.text.utils.xp.sample_categorical")
     def test_generate_text_stops_at_endoftext(self, mock_choice):
