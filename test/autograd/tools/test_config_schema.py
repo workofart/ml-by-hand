@@ -58,6 +58,7 @@ class TestTransformerTrainingConfig(TestCase):
             checkpoint_freq=5,
             global_batch_size=32,
             micro_batch_size=4,
+            eval_batch_size=16,
             model_kwargs={},
             optimizer_kwargs={"lr": 1e-3},
             label_smoothing=0.0,
@@ -65,6 +66,23 @@ class TestTransformerTrainingConfig(TestCase):
         )
 
         self.assertEqual(config.gradient_accumulation_steps, 8)
+        self.assertEqual(config.eval_batch_size, 16)
+
+    def test_rejects_non_positive_eval_batch_size(self):
+        with self.assertRaisesRegex(ValueError, "eval_batch_size must be >= 1"):
+            TransformerTrainingConfig(
+                training_run_name="test",
+                dataset_name="dataset",
+                max_steps=5,
+                checkpoint_freq=5,
+                global_batch_size=32,
+                micro_batch_size=4,
+                eval_batch_size=0,
+                model_kwargs={},
+                optimizer_kwargs={"lr": 1e-3},
+                label_smoothing=0.0,
+                teacher_forcing=False,
+            )
 
     def test_rejects_global_batch_size_not_divisible_by_distributed_world_size(self):
         dist._set_thread_local_rank(
