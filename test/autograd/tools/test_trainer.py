@@ -1500,7 +1500,7 @@ class TestSimpleTrainer(BaseTrainerTest):
 
         self.assertAlmostEqual(trainer.metric_rows[0]["grad_l2_norm"], 20.0, places=5)
 
-    def test_clip_enabled_uses_clip_grad_norm_for_reporting(self):
+    def test_clip_enabled_uses_scale_and_clip_for_reporting(self):
         config = GenericTrainingConfig(
             max_epochs=1,
             checkpoint_freq=1,
@@ -1535,13 +1535,13 @@ class TestSimpleTrainer(BaseTrainerTest):
             ),
             patch.object(
                 trainer.optimizer,
-                "clip_grad_norm",
-                wraps=trainer.optimizer.clip_grad_norm,
-            ) as mock_clip_grad_norm,
+                "scale_and_clip_gradients",
+                wraps=trainer.optimizer.scale_and_clip_gradients,
+            ) as mock_scale_and_clip,
         ):
             trainer.fit(train_loader)
 
-        self.assertEqual(mock_clip_grad_norm.call_count, 1)
+        self.assertEqual(mock_scale_and_clip.call_count, 1)
         self.assertAlmostEqual(trainer.metric_rows[0]["grad_l2_norm"], 20.0, places=5)
 
     def test_leftover_accumulation_matches_single_batch_update(self):

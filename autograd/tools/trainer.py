@@ -571,16 +571,18 @@ class AbstractTrainer(ABC):
             state.accumulated_loss_total_weight,
         )
 
-        self.optimizer.scale_gradients(
-            1.0
-            / xp.maximum(
-                state.accumulated_loss_total_weight,
-                xp.array(1.0, dtype=xp.float32),
-            )
+        grad_scale = 1.0 / xp.maximum(
+            state.accumulated_loss_total_weight,
+            xp.array(1.0, dtype=xp.float32),
         )
         grad_l2_norm = None
         if self.config.max_grad_norm is not None:
-            grad_l2_norm = self.optimizer.clip_grad_norm(self.config.max_grad_norm)
+            grad_l2_norm = self.optimizer.scale_and_clip_gradients(
+                grad_scale,
+                self.config.max_grad_norm,
+            )
+        else:
+            self.optimizer.scale_gradients(grad_scale)
         self.optimizer.step()
         if record_grad_norm and grad_l2_norm is not None:
             self.last_grad_l2_norm = float(xp.to_scalar(grad_l2_norm))

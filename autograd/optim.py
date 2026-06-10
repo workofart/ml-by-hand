@@ -288,6 +288,36 @@ class Optimizer:
                 if param.grad.data.dtype != grad_dtype:
                     param.grad.data = param.grad.data.astype(grad_dtype)
 
+    def scale_and_clip_gradients(
+        self,
+        scale: Array,
+        max_norm: float,
+        norm_type: float = 2.0,
+    ) -> Any:
+        """Scale gradients and clip their post-scale global norm in one pass.
+
+        Equivalent to ``scale_gradients(scale)`` followed by
+        ``clip_grad_norm(max_norm, norm_type)``, but applies a single combined
+        factor to each gradient instead of two full-parameter scaling passes.
+        """
+        total_norm = xp.asarray(0.0, dtype=xp.float32)
+        for param in self.model_parameters.values():
+            if param.grad is not None:
+                scaled_grad = param.grad.data * scale
+                total_norm += (xp.abs(scaled_grad) ** norm_type).sum()
+
+        total_norm = total_norm ** (1.0 / norm_type)
+        clip_scale = xp.minimum(1.0, max_norm / (total_norm + 1e-10))
+        final_scale = scale * clip_scale
+        for param in self.model_parameters.values():
+            if param.grad is not None:
+                grad_dtype = param.grad.data.dtype
+                param.grad.data *= final_scale
+                if param.grad.data.dtype != grad_dtype:
+                    param.grad.data = param.grad.data.astype(grad_dtype)
+
+        return total_norm
+
     def grad_l2_norm(self) -> float:
         """Return the L2 norm of all current parameter gradients."""
         grad_norm = xp.asarray(0.0, dtype=xp.float32)
@@ -418,6 +448,16 @@ class Adam(Optimizer):
     "Decoupled Weight Decay Regularization" (https://arxiv.org/abs/1711.05101).
 
     When `weight_decay` is set to 0, AdamW is equivalent to Adam.
+
+    Weight decay is only applied to params with `ndim >= 2` (Linear / Embedding
+    weights). 1D params — LayerNorm gains, biases — are excluded, matching the
+    nanoGPT / GPT-2 / Megatron-LM convention. The reasoning:
+      * LN gain is initialized at 1.0 (identity); a prior toward 0 is silent
+        ablation, not regularization.
+      * Biases are additive shifts with no overparameterization or
+        Lipschitz-bounding argument for shrinking them to 0.
+      * 1D params sit on the pre-LN scale degeneracy direction, so WD on them
+        fights WD on the matching 2D weight.
     """
 
     def __init__(
@@ -493,6 +533,11 @@ class Adam(Optimizer):
 
             # For mixed precision, keep Adam statistics in fp32 for stability.
             param_dtype = param.data.dtype
+
+            # Apply WD only to params with ndim >= 2 (Linear/Embedding weights);
+            # exclude 1D params (LN gains, biases). See class docstring for why.
+            effective_wd = weight_decay if param.data.ndim >= 2 else 0.0
+
             if grad.dtype in LOW_PRECISION_FLOAT_DTYPES:
                 grad = grad.astype(xp.float32)
             new_m = beta1 * m_old + (1 - beta1) * grad  # update first order momentum
@@ -513,14 +558,14 @@ class Adam(Optimizer):
             # For fp32 params (no master), update `param.data` directly.
             master = self._states["master"].get(name)
             if master is not None:
-                if weight_decay > 0.0:
-                    master = master - self.lr * weight_decay * master
+                if effective_wd > 0.0:
+                    master = master - self.lr * effective_wd * master
                 master -= self.lr * m_hat / (xp.sqrt(v_hat) + epsilon)
                 self._states["master"][name] = master
                 param.data = master.astype(param_dtype)
             else:
-                if weight_decay > 0.0:
-                    param.data = param.data - self.lr * weight_decay * param.data
+                if effective_wd > 0.0:
+                    param.data = param.data - self.lr * effective_wd * param.data
                 param.data -= self.lr * m_hat / (xp.sqrt(v_hat) + epsilon)
         materialize(self.model_parameters, self._states)
         return None
