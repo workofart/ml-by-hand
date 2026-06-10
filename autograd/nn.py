@@ -148,19 +148,21 @@ class Module:
 
     def __getattr__(self, name: str) -> Any:
         """
-        Retrieve a submodule or state by name.
+        Retrieve a submodule, parameter, or state by name.
 
         Args:
             name (str): The name of the attribute to retrieve.
 
         Returns:
-            Any: The submodule or state corresponding to the name.
+            Any: The submodule, parameter, or state corresponding to the name.
 
         Raises:
             AttributeError: If the attribute is not found.
         """
         if name in self._modules:
             return self._modules[name]
+        if name in self._parameters:
+            return self._parameters[name]
         if name in self._states:
             return self._states[name]
         raise AttributeError(

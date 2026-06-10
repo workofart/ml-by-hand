@@ -73,6 +73,19 @@ class TestModule(TestCase):
         assert "submodule1.running_avg" in states
         assert allclose(states["submodule1.running_avg"], [10.0])
 
+    def test_parameter_attribute_access(self):
+        """A Tensor assigned via self.name = ... is registered in _parameters
+        and must remain readable as a plain attribute."""
+        assert self.model.main_weight is self.model._parameters["main_weight"]
+        assert (
+            self.model.submodule1.sub_weight
+            is self.model.submodule1._parameters["sub_weight"]
+        )
+        # forward() uses self.main_weight directly
+        x = Tensor(xp.ones((2, 3)), requires_grad=False)
+        out = self.model(x)
+        assert out.shape == (2, 3)
+
     def test_zero_grad_clears_gradients(self):
         x = Tensor(xp.ones((2, 3)), requires_grad=False)
         main_weight = self.model.parameters["main_weight"]
