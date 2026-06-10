@@ -168,11 +168,11 @@ def main():
     labels, labels_vocab_idx = text_to_one_hot_and_sparse(
         train_y, vocab, max_sequence_length=60
     )
-    test_features, features_vocab_idx = text_to_one_hot_and_sparse(
-        train_X, vocab, max_sequence_length=120
+    test_features, _ = text_to_one_hot_and_sparse(
+        test_X, vocab, max_sequence_length=120
     )
-    test_labels, test_labels_vocab_idx = text_to_one_hot_and_sparse(
-        train_y, vocab, max_sequence_length=60
+    _, test_labels_vocab_idx = text_to_one_hot_and_sparse(
+        test_y, vocab, max_sequence_length=60
     )
 
     train_dataset = PairedMapDataset(features, labels_vocab_idx)
