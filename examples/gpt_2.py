@@ -9,7 +9,13 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from autograd import functional, nn, optim
-from autograd.backend import LOW_PRECISION_FLOAT_DTYPES, Array, resolve_dtype, xp
+from autograd.backend import (
+    LOW_PRECISION_FLOAT_DTYPES,
+    Array,
+    ArrayLike,
+    resolve_dtype,
+    xp,
+)
 from autograd.data.collator import CausalLMWindowCollator
 from autograd.data.data_loader import DataLoader
 from autograd.data.dataset import TokenWindowMapDataset
@@ -104,10 +110,14 @@ class GPT2(nn.Module):
             for parameter in self.parameters.values():
                 parameter.data = parameter.data.astype(parameter_dtype)
 
-    def forward(self, tokens: Tensor) -> Tensor:
+    def forward(
+        self, tokens: Tensor, selected_token_indices: ArrayLike | None = None
+    ) -> Tensor:
         """
         Forward pass for GPT-2.
         tokens: shape (batch_size, seq_len)
+        selected_token_indices: optional flattened token positions to project.
+            When provided, only those positions return logits.
         """
         batch_size, seq_len = tokens.shape
 
@@ -129,6 +139,12 @@ class GPT2(nn.Module):
                 h_0 = checkpoint(sublayer, h_0)
             else:
                 h_0 = sublayer(h_0)
+
+        # GRPO only scores generated tokens, so callers can skip final
+        # layernorm + vocab projection for prompt/pad positions.
+        if selected_token_indices is not None:
+            flat_h = h_0.reshape(-1, h_0.shape[-1])
+            h_0 = flat_h[xp.asarray(selected_token_indices, dtype=xp.int32)]
 
         # Final normalization
         output = self.layer_norm(h_0)

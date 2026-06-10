@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Iterable
 
 from autograd.backend import ARRAY_TYPE, resolve_dtype, xp
 from autograd.tensor import Tensor
@@ -258,3 +258,60 @@ def load_checkpoint(
         return deserialized_data.get("parameters", deserialized_data)
 
     return deserialized_data
+
+
+def _deserialize_metadata(meta: SerializedMeta) -> Any:
+    """Reconstruct non-array values from the JSON sidecar alone."""
+    t = meta["_type"]
+
+    if t == "dict":
+        return {k: _deserialize_metadata(v) for k, v in meta["items"].items()}
+
+    if t in ("list", "tuple"):
+        items = [_deserialize_metadata(x) for x in meta["items"]]
+        return items if t == "list" else tuple(items)
+
+    if t == "class":
+        module = importlib.import_module(meta["module"])
+        resolved = module
+        for attr in meta["qualname"].split("."):
+            resolved = getattr(resolved, attr)
+        return resolved
+
+    if t in ("scalar", "raw"):
+        return meta["value"]
+
+    raise ValueError(
+        f"Checkpoint metadata cannot contain array data (got _type={t!r}); "
+        "use load_checkpoint to deserialize arrays from the NPZ file"
+    )
+
+
+def load_checkpoint_metadata(
+    json_path: str,
+    *,
+    skip_keys: Iterable[str] = ("model_state_dict", "optimizer_state_dict"),
+) -> Any:
+    """Load checkpoint metadata (step count, init kwargs, ...) from the JSON
+    sidecar without opening the NPZ or deserializing any arrays.
+
+    Callers that only need bookkeeping values — e.g. reading
+    `model_init_kwargs` to build a config before the trainer loads the real
+    weights — should use this instead of `load_checkpoint`, which materializes
+    every model and optimizer array just to throw them away.
+    """
+    if not os.path.exists(json_path):
+        raise ValueError(f"Checkpoint file not found: {json_path}")
+
+    with open(json_path, "r") as f:
+        meta: SerializedMeta = json.load(f)
+
+    if meta["_type"] != "dict":
+        return _deserialize_metadata(meta)
+
+    skipped = set(skip_keys)
+    return {
+        key: _deserialize_metadata(value)
+        for key, value in meta["items"].items()
+        if key not in skipped
+    }

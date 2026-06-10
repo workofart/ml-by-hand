@@ -6,10 +6,12 @@ import torch
 
 from autograd.backend import xp
 from autograd.data.collator import Collator
+from autograd.data.sft import SFT_TURN_SEPARATOR
 from autograd.nn import Module
 from autograd.tensor import Tensor
 from autograd.text.tokenizer import BytePairEncoder
 from autograd.tools.config_schema import GenericTrainingConfig
+from examples.gpt_2 import GPT2
 from examples.grpo import (
     GRPOBatch,
     GRPOCollator,
@@ -20,8 +22,8 @@ from examples.grpo import (
     RolloutGroup,
     Sample,
     Task,
-    generation,
     grpo_loss,
+    grpo_loss_from_selected_logits,
 )
 
 
@@ -56,8 +58,10 @@ def test_grpo_training_config_extends_generic_training_config_for_rollouts():
 
 
 def test_grpo_training_config_rejects_sampling_that_breaks_logprob_contract():
-    with pytest.raises(ValueError, match="temperature=1.0 and top_k=None"):
-        _grpo_training_config(temperature=0.8)
+    with pytest.raises(ValueError, match="temperature > 0 and top_k=None"):
+        _grpo_training_config(temperature=0.0)
+    with pytest.raises(ValueError, match="temperature > 0 and top_k=None"):
+        _grpo_training_config(top_k=50)
 
 
 def test_grpo_training_config_requires_max_steps_argument():
@@ -102,31 +106,35 @@ def test_grpo_collator_aligns_generated_tokens_with_shifted_completion_labels():
         ],
     )
 
+    # Dynamic padding: rows are padded to batch_max_tokens = max(prompt+completion)
+    # over the batch (4 here), not to the configured max_tokens (5). After causal
+    # shift this yields shape (2, 3). This is a speed/memory optimization over
+    # fixed-length padding when actual rows are shorter than max_tokens.
     batch = GRPOCollator(max_tokens=5, pad_idx=0)([group])
 
     np.testing.assert_array_equal(
         xp.to_numpy(batch.input_ids),
-        np.array([[10, 11, 20, 21], [10, 11, 30, 0]], dtype=np.int32),
+        np.array([[10, 11, 20], [10, 11, 30]], dtype=np.int32),
     )
     np.testing.assert_array_equal(
         xp.to_numpy(batch.labels),
-        np.array([[11, 20, 21, 0], [11, 30, 0, 0]], dtype=np.int32),
+        np.array([[11, 20, 21], [11, 30, 0]], dtype=np.int32),
     )
     np.testing.assert_array_equal(
         xp.to_numpy(batch.generated_token_mask),
-        np.array([[0, 1, 1, 0], [0, 1, 0, 0]], dtype=np.int32),
+        np.array([[0, 1, 1], [0, 1, 0]], dtype=np.int32),
     )
     np.testing.assert_allclose(
         xp.to_numpy(batch.sampled_token_logprobs),
         np.array(
-            [[0.0, -0.1, -0.2, 0.0], [0.0, -0.3, 0.0, 0.0]],
+            [[0.0, -0.1, -0.2], [0.0, -0.3, 0.0]],
             dtype=np.float32,
         ),
     )
     np.testing.assert_allclose(
         xp.to_numpy(batch.advantages),
         np.array(
-            [[0.0, 0.5, 0.5, 0.0], [0.0, -1.0, 0.0, 0.0]],
+            [[0.0, 0.5, 0.5], [0.0, -1.0, 0.0]],
             dtype=np.float32,
         ),
     )
@@ -196,34 +204,45 @@ def test_grpo_collator_rejects_rows_longer_than_max_tokens():
 
 
 def test_math_environment_parses_answer_tags_for_reward():
+    # Exact-only reward (settled by E24/E33): format-valid completion that
+    # matches the reference answer earns 1.0; everything else earns 0.0. Shaped
+    # per-tag rewards on the previous trainer were dropped because they
+    # rewarded incoherent arithmetic without lifting pass@1.
     environment = MathEnvironment()
     task = Task(task_id="math-1", raw_input="What is 1 + 1?", answer="2")
+    eos = SFT_TURN_SEPARATOR
 
     correct = Sample(
         completion_tokens=xp.array([20], dtype=xp.int32),
-        completion_text="<think>1 + 1 = 2</think><answer>2</answer>",
+        completion_text=f"<think>1 + 1 = 2</think><answer>2</answer>{eos}",
         sampled_token_logprobs=xp.array([-0.1], dtype=xp.float32),
     )
-    wrong = Sample(
+    wrong_answer = Sample(
         completion_tokens=xp.array([21], dtype=xp.int32),
-        completion_text="<answer>3</answer>",
+        completion_text=f"<think>1 + 1 = 3</think><answer>3</answer>{eos}",
         sampled_token_logprobs=xp.array([-0.2], dtype=xp.float32),
     )
-    unformatted = Sample(
+    missing_think = Sample(
         completion_tokens=xp.array([22], dtype=xp.int32),
-        completion_text="2",
+        completion_text=f"<answer>2</answer>{eos}",
         sampled_token_logprobs=xp.array([-0.3], dtype=xp.float32),
     )
-    partial_format = Sample(
+    no_eos = Sample(
         completion_tokens=xp.array([23], dtype=xp.int32),
-        completion_text="<think>1 + 1 = 2</think><answer>3",
+        completion_text="<think>1 + 1 = 2</think><answer>2</answer>",
         sampled_token_logprobs=xp.array([-0.4], dtype=xp.float32),
     )
+    unformatted = Sample(
+        completion_tokens=xp.array([24], dtype=xp.int32),
+        completion_text="2",
+        sampled_token_logprobs=xp.array([-0.5], dtype=xp.float32),
+    )
 
-    assert environment._compute_reward(task, correct) == pytest.approx(1.4)
-    assert environment._compute_reward(task, wrong) == pytest.approx(0.2)
+    assert environment._compute_reward(task, correct) == pytest.approx(1.0)
+    assert environment._compute_reward(task, wrong_answer) == 0.0
+    assert environment._compute_reward(task, missing_think) == 0.0
+    assert environment._compute_reward(task, no_eos) == 0.0
     assert environment._compute_reward(task, unformatted) == 0.0
-    assert environment._compute_reward(task, partial_format) == pytest.approx(0.3)
 
 
 def test_math_environment_normalizes_comma_separated_answers():
@@ -231,11 +250,13 @@ def test_math_environment_normalizes_comma_separated_answers():
     task = Task(task_id="math-1", raw_input="How much profit?", answer="22500")
     sample = Sample(
         completion_tokens=xp.array([20], dtype=xp.int32),
-        completion_text="<think>math</think><answer>22,500</answer>",
+        completion_text=(
+            f"<think>math</think><answer>22,500</answer>{SFT_TURN_SEPARATOR}"
+        ),
         sampled_token_logprobs=xp.array([-0.1], dtype=xp.float32),
     )
 
-    assert environment._compute_reward(task, sample) == pytest.approx(1.4)
+    assert environment._compute_reward(task, sample) == pytest.approx(1.0)
 
 
 def test_extract_gsm8k_final_answer_from_hash_marker():
@@ -256,7 +277,12 @@ def test_gsm8k_row_to_task_uses_question_and_final_answer():
     assert task.task_id == "gsm8k-3"
     assert task.raw_input == "What is 1 + 1?"
     assert task.answer == "2"
-    assert task.metadata == {"source": "openai/gsm8k"}
+    # `reasoning` is the dataset's pre-final-answer text, kept on the Task so
+    # future rationale-target SFT (E37) can read it without re-parsing.
+    assert task.metadata == {
+        "source": "openai/gsm8k",
+        "reasoning": "1 + 1 = <<1+1=2>>2",
+    }
 
 
 def test_score_group_attaches_rewards_without_advantages():
@@ -366,23 +392,26 @@ def test_rollout_generator_batches_generation_forward_passes(monkeypatch):
         np.testing.assert_array_equal(xp.to_numpy(sample.completion_tokens), [1, 1])
 
 
-def test_generation_rejects_prompt_that_fills_context_window():
+def test_rollout_rejects_prompt_that_fills_context_window():
     class FakeModel:
         max_seq_len = 2
+        _is_training = False
 
     class FakeTokenizer:
-        def encode(self, token):
-            return [9]
+        # Rendered prompt encodes to more tokens than max_seq_len, so the
+        # rollout has no room left for completions and must raise.
+        def encode(self, text):
+            return [9, 10, 11]
+
+        def decode(self, tokens):
+            return ""
 
     with pytest.raises(ValueError, match="prompt length"):
-        generation(
-            FakeModel(),
-            xp.array([1, 2], dtype=xp.int32),
-            FakeTokenizer(),
-            num_generations=1,
-            max_generation_tokens=1,
-            temperature=1.0,
-            top_k=None,
+        RolloutGenerator(_grpo_training_config()).rollout(
+            model=cast(Module, FakeModel()),
+            task=Task(task_id="math-1", raw_input="x", answer="0"),
+            tokenizer=cast(BytePairEncoder, FakeTokenizer()),
+            environment=MathEnvironment(),
         )
 
 
@@ -435,6 +464,63 @@ def test_grpo_loss_matches_pytorch_reference():
     )
 
 
+def test_selected_token_forward_matches_full_logits_loss():
+    # The sparse output head must be a pure speedup: projecting only
+    # generated-token rows has to produce the same GRPO loss as the
+    # full-logits path it replaces.
+    model = GPT2(
+        vocab_size=17,
+        hidden_size=8,
+        num_attention_heads=2,
+        max_seq_len=16,
+        dropout_prob=0.0,
+        num_decoder_layers=1,
+    )
+    model.eval()
+
+    group = RolloutGroup(
+        prompt_id="math-1",
+        prompt_tokens=xp.array([3, 4], dtype=xp.int32),
+        samples=[
+            Sample(
+                completion_tokens=xp.array([5, 6], dtype=xp.int32),
+                completion_text="<answer>5</answer>",
+                sampled_token_logprobs=xp.array([-0.1, -0.2], dtype=xp.float32),
+                reward=1.0,
+                advantage=0.5,
+            ),
+            Sample(
+                completion_tokens=xp.array([7], dtype=xp.int32),
+                completion_text="<answer>7</answer>",
+                sampled_token_logprobs=xp.array([-0.3], dtype=xp.float32),
+                reward=0.0,
+                advantage=-1.0,
+            ),
+        ],
+    )
+    batch = GRPOCollator(max_tokens=8, pad_idx=0)([group])
+
+    full_logits = model(batch.input_ids)
+    full_loss = grpo_loss(full_logits, batch)
+
+    selected_logits = model(
+        batch.input_ids,
+        selected_token_indices=batch.generated_token_indices,
+    )
+    sparse_loss = grpo_loss_from_selected_logits(
+        selected_logits,
+        batch,
+        batch.generated_token_indices,
+    )
+
+    np.testing.assert_allclose(
+        xp.to_numpy(sparse_loss.data),
+        xp.to_numpy(full_loss.data),
+        rtol=1e-5,
+        atol=1e-6,
+    )
+
+
 def test_grpo_trainer_train_step_runs_one_optimizer_step():
     class FakeModel:
         def __init__(self):
@@ -465,8 +551,9 @@ def test_grpo_trainer_train_step_runs_one_optimizer_step():
         def _loss_total_weight(self, batch):
             return self.total_weight
 
-        def optimizer_step(self, state, *, record_grad_norm=True):
+        def optimizer_step(self, state, **kwargs):
             self.optimizer_step_called = True
+            self.optimizer_step_kwargs = kwargs
             assert state.accumulated_batches == 1
             np.testing.assert_allclose(
                 xp.to_numpy(state.accumulated_loss_total_weight),
