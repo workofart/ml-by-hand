@@ -1,3 +1,4 @@
+import hashlib
 import heapq
 import logging
 import os
@@ -62,7 +63,7 @@ class BytePairEncoder:
         Args:
             num_merges (int): Number of BPE merges to learn during training.
             vocab_file_path (str): Path to store or load the pickled vocabulary.
-            encoded_data_path (str): Path to store or load the encoded data. The extension is replaced with ``.bin`` (the stored file is a raw little-endian int32 stream); see :meth:`load_encoded`.
+            encoded_data_path (str): Path to store or load the encoded data. The extension is replaced with ``.<vocab_fingerprint>.bin`` (the stored file is a raw little-endian int32 stream); see :attr:`mmap_path` and :meth:`load_encoded`.
             n_workers (Optional[int]): Number of processes for parallel operations. If None,
                 defaults to the number of CPU cores minus one.
             min_word_freq (int): Minimum frequency for a word form to be included in
@@ -78,9 +79,7 @@ class BytePairEncoder:
         self.min_word_freq = min_word_freq
         self.vocab_file_path = vocab_file_path
         self.encoded_data_path = encoded_data_path
-        # We store the encoded corpus as a raw little-endian int32 stream.
-        # No header — the count is recovered at load time from the file size.
-        self.mmap_path = os.path.splitext(encoded_data_path)[0] + ".bin"
+        self._mmap_base = os.path.splitext(encoded_data_path)[0]
         base, ext = os.path.splitext(vocab_file_path)
         self.word_freq_cache_path = base + ".word_freq" + ext
 
@@ -116,6 +115,18 @@ class BytePairEncoder:
         self._merge_priority_cache: Optional[Dict[Tuple[int, int], Tuple[int, int]]] = (
             None
         )
+
+    @property
+    def mmap_path(self) -> str:
+        """str: Encoded-data cache path, keyed by the vocabulary fingerprint.
+
+        A different vocabulary yields a different path, so a stale cache can
+        never be silently reused (which would mix token ID spaces) — it is
+        simply re-encoded. The file is a raw little-endian int32 stream with
+        no header; the token count is recovered from the file size at load
+        time (see :meth:`load_encoded`).
+        """
+        return f"{self._mmap_base}.{self._vocab_fingerprint()[:16]}.bin"
 
     @property
     def n_vocab(self) -> int:
@@ -362,6 +373,22 @@ class BytePairEncoder:
                 "to retrain from scratch."
             ) from e
 
+        # Every special token must exist in the loaded vocab; otherwise
+        # _pretokenize splits it out as a special chunk and encode() dies
+        # with a cryptic KeyError much later. Fail fast with the cause.
+        missing = [
+            tok
+            for tok in self.SPECIAL_TOKENS
+            if tok.encode("utf-8") not in self._unicode_to_int_vocab
+        ]
+        if missing:
+            raise RuntimeError(
+                f"Vocabulary at {self.vocab_file_path} is missing special tokens "
+                f"{missing} — it was likely trained with an older SPECIAL_TOKENS "
+                "list. Retrain the vocabulary (overwrite_vocabulary_file=True) or "
+                "use a matching tokenizer version."
+            )
+
     def _construct_unicode_to_int_vocab(self) -> Dict[bytes, int]:
         """Constructs a base vocabulary for all single-byte values plus special tokens.
 
@@ -408,18 +435,22 @@ class BytePairEncoder:
         if text_batch_size < 1:
             raise ValueError(f"text_batch_size must be >= 1, got {text_batch_size}")
 
-        if os.path.exists(self.mmap_path) and not overwrite_encoded_data:
+        # mmap_path embeds the vocabulary fingerprint, so the file existing
+        # is proof it was encoded with the currently loaded vocabulary —
+        # no further validation is needed before reusing it.
+        mmap_path = self.mmap_path
+        if os.path.exists(mmap_path) and not overwrite_encoded_data:
             logger.info(
-                f"Found existing memory-mapped encoded data at '{self.mmap_path}', "
+                f"Found existing memory-mapped encoded data at '{mmap_path}', "
                 "reusing it instead of re-encoding."
             )
-            return self.mmap_path
-        parent_dir = os.path.dirname(self.mmap_path)
+            return mmap_path
+        parent_dir = os.path.dirname(mmap_path)
         if parent_dir:
             os.makedirs(parent_dir, exist_ok=True)
 
         int32_dtype = np.dtype("<i4")
-        tmp_path = f"{self.mmap_path}.tmp"
+        tmp_path = f"{mmap_path}.tmp"
 
         try:
             if os.path.exists(tmp_path):
@@ -462,12 +493,20 @@ class BytePairEncoder:
                         )
                         flat_batch.tofile(out_file)
 
-            os.replace(tmp_path, self.mmap_path)
+            os.replace(tmp_path, mmap_path)
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
-        return self.mmap_path
+        return mmap_path
+
+    def _vocab_fingerprint(self) -> str:
+        """Deterministic digest of the current vocabulary and merges."""
+        payload = pickle.dumps(
+            (sorted(self._unicode_to_int_vocab.items()), self.learned_merges),
+            protocol=4,
+        )
+        return hashlib.sha256(payload).hexdigest()
 
     @staticmethod
     def load_encoded(path: str) -> np.ndarray:
