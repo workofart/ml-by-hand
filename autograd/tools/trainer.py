@@ -27,11 +27,14 @@ from autograd.backend import (
 from autograd.data.data_loader import DataLoader
 from autograd.distributed import (
     ReduceOp,
+    allreduce_grads,
+    allreduce_sum,
     broadcast_optimizer_state,
     broadcast_parameters,
     get_backend,
     is_distributed,
     rank,
+    world_size,
 )
 from autograd.tensor import Tensor, no_grad
 from autograd.tools.config_schema import (
@@ -571,8 +574,17 @@ class AbstractTrainer(ABC):
             state.accumulated_loss_total_weight,
         )
 
-        grad_scale = 1.0 / xp.maximum(
-            state.accumulated_loss_total_weight,
+        # Synchronize across DDP ranks BEFORE scaling/clipping so the token
+        # normalization and the clip both operate on the global gradient.
+        # allreduce_grads averages the per-rank gradient sums, so multiply by
+        # world_size to recover the global sum before dividing by the global
+        # token count: world_size * mean(grad_sums) / sum(token_counts)
+        # == sum(grad_sums) / sum(token_counts). Both collectives no-op when
+        # world_size == 1.
+        allreduce_grads(self.optimizer.model_parameters)
+        global_loss_total_weight = allreduce_sum(state.accumulated_loss_total_weight)
+        grad_scale = float(world_size()) / xp.maximum(
+            global_loss_total_weight,
             xp.array(1.0, dtype=xp.float32),
         )
         grad_l2_norm = None
@@ -628,8 +640,9 @@ class AbstractTrainer(ABC):
         if self.last_grad_l2_norm is not None:
             row["grad_l2_norm"] = self.last_grad_l2_norm
 
-        # File writes are rank-0-only under DDP (after AllReduce in step(),
-        # every rank holds identical params, so rank 0 is authoritative).
+        # File writes are rank-0-only under DDP (after the AllReduce in
+        # optimizer_step, every rank holds identical params, so rank 0 is
+        # authoritative).
         # Logging auto-quiets on non-rank-0 via the logger level set in __init__.
         if rank() == 0:
             if plan.should_checkpoint(self.global_step):

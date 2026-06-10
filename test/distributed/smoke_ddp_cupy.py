@@ -40,12 +40,17 @@ def _mse_loss(W: Tensor, X, y) -> Tensor:
 
 
 def _train(W: Tensor, X, y, *, steps: int, lr: float) -> Tensor:
+    from autograd.distributed import allreduce_grads
+
     params = {"W": W}
     optimizer = optim.SGD(params, lr=lr)
     for _ in range(steps):
         W.grad = None
         loss = _mse_loss(W, X, y)
         loss.backward()
+        # Grad sync is the caller's responsibility (the trainer does this
+        # before scaling/clipping); optimizer.step() is purely local.
+        allreduce_grads(params)
         optimizer.step()
     return W
 

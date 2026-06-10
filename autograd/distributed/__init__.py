@@ -351,6 +351,19 @@ def allreduce_grads(parameters: Mapping[str, Tensor]) -> None:
             param.grad.data = summed / n_ranks
 
 
+def allreduce_sum(value: Any) -> Any:
+    """AllReduce-SUM a single array across ranks.
+
+    Used by the trainer to compute the global token count so gradient
+    normalization divides by the total tokens across all ranks rather than
+    each rank's local count. Returns the input unchanged when
+    `world_size == 1`.
+    """
+    if not is_distributed():
+        return value
+    return get_backend().all_reduce(value, op=ReduceOp.SUM)
+
+
 def _broadcast_array(
     arr: Any,
     *,
