@@ -77,9 +77,11 @@ class Module:
             >>> # Assuming module has trainable parameters with gradients.
             >>> module.zero_grad()
         """
-        # Zero gradients for parameters in current module
+        # Clear gradients for parameters in current module. Assigning None
+        # (like Optimizer.zero_grad) frees the old grad; the next backward
+        # pass starts a fresh accumulation.
         for p in self._parameters.values():
-            p.grad = 0
+            p.grad = None
 
         # Recursively zero gradients in submodules
         for module in self._modules.values():

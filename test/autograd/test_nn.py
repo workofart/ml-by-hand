@@ -73,6 +73,19 @@ class TestModule(TestCase):
         assert "submodule1.running_avg" in states
         assert allclose(states["submodule1.running_avg"], [10.0])
 
+    def test_zero_grad_clears_gradients(self):
+        x = Tensor(xp.ones((2, 3)), requires_grad=False)
+        main_weight = self.model.parameters["main_weight"]
+        (x @ main_weight).sum().backward()
+
+        assert main_weight.grad is not None
+        assert not allclose(main_weight.grad.data, 0.0)
+
+        self.model.zero_grad()
+
+        grad = main_weight.grad
+        assert grad is None or allclose(grad.data, 0.0)
+
     def test_num_parameters(self):
         # main_weight: shape (3,3) => 9 elements
         # sub_weight: shape (2,2) => 4 elements
