@@ -10,6 +10,8 @@ from autograd.data.data_loader import DataLoader
 from autograd.data.dataset import PairedMapDataset
 from autograd.data.sampler import RandomSampler
 from autograd.data.sft import (
+    SFT_SYSTEM_PROMPT,
+    load_gsm8k_grpo_sft,
     load_no_robots_sft,
     load_sft,
     prepare_sft_token_sequences,
@@ -248,6 +250,45 @@ class TestSFTData(TestCase):
 
         with self.assertRaisesRegex(ValueError, "Available splits"):
             load_no_robots_sft(split="validation")
+
+    @patch("autograd.data.sft.load_gsm8k_rows")
+    def test_load_gsm8k_grpo_sft_formats_questions_as_tagged_chat(
+        self, mock_load_gsm8k_rows
+    ):
+        mock_load_gsm8k_rows.return_value = [
+            {
+                "question": "Jan has 2 apples. Tom gives her 3. How many?",
+                "answer": "Jan has 2 + 3 = 5 apples. #### 5",
+            }
+        ]
+
+        examples = load_gsm8k_grpo_sft(split="train")
+
+        self.assertEqual(
+            examples,
+            [
+                {
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": SFT_SYSTEM_PROMPT,
+                        },
+                        {
+                            "role": "user",
+                            "content": "Jan has 2 apples. Tom gives her 3. How many?",
+                        },
+                        {
+                            "role": "assistant",
+                            "content": (
+                                "<think>Jan has 2 + 3 = 5 apples.</think>"
+                                "<answer>5</answer>"
+                            ),
+                        },
+                    ]
+                }
+            ],
+        )
+        mock_load_gsm8k_rows.assert_called_once_with(split="train")
 
     def test_tokenize_sft_messages_supervises_all_assistant_turns(self):
         example = tokenize_sft_messages(

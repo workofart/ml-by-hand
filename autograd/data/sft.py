@@ -10,6 +10,7 @@ import numpy as np
 from tqdm import tqdm
 
 from autograd.backend import Array
+from autograd.data.gsm8k import load_gsm8k_rows, split_gsm8k_answer
 from autograd.data.utils import load_data, load_parquet_rows
 from autograd.text.tokenizer import BytePairEncoder
 
@@ -22,6 +23,15 @@ SFT_ROLE_MARKERS = {
     "user": "<|USER|>",
     "assistant": "<|ASSISTANT|>",
 }
+# Template adapted from DeepSeek-R1-Zero, Table 1:
+# https://arxiv.org/abs/2501.12948
+SFT_SYSTEM_PROMPT = (
+    "A conversation between User and Assistant. The user asks a question, and "
+    "the Assistant solves it. The assistant first thinks about the reasoning "
+    "process in the mind and then provides the user with the answer. The "
+    "reasoning process and answer are enclosed within <think>...</think> and "
+    "<answer>...</answer> tags, respectively."
+)
 
 
 def _normalize_sft_messages(messages: Any) -> list[dict[str, str]]:
@@ -125,6 +135,34 @@ def load_no_robots_sft(split: str = "train") -> list[dict[str, Any]]:
 
     logger.info(
         "%s No Robots %s chat examples. Sample: %s",
+        len(chat_examples),
+        split,
+        chat_examples[0],
+    )
+    return chat_examples
+
+
+def load_gsm8k_grpo_sft(split: str = "train") -> list[dict[str, Any]]:
+    chat_examples = []
+    for row in load_gsm8k_rows(split=split):
+        reasoning, final_answer = split_gsm8k_answer(row["answer"])
+        chat_examples.append(
+            {
+                "messages": [
+                    {"role": "system", "content": SFT_SYSTEM_PROMPT},
+                    {"role": "user", "content": row["question"]},
+                    {
+                        "role": "assistant",
+                        "content": (
+                            f"<think>{reasoning}</think><answer>{final_answer}</answer>"
+                        ),
+                    },
+                ]
+            }
+        )
+
+    logger.info(
+        "%s GSM8K %s chat examples. Sample: %s",
         len(chat_examples),
         split,
         chat_examples[0],
