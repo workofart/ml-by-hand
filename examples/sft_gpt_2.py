@@ -4,7 +4,7 @@ from autograd import functional, optim
 from autograd.data.collator import BatchMaxLengthCausalLMCollator
 from autograd.data.data_loader import DataLoader
 from autograd.data.dataset import MapDataset
-from autograd.data.sampler import TokenLengthGroupedRandomSampler
+from autograd.data.sampler import SequentialSampler, TokenLengthGroupedRandomSampler
 from autograd.data.sft import (
     SFT_ROLE_MARKERS,
     SFT_SYSTEM_PROMPT,
@@ -40,11 +40,18 @@ def build_data_loader(
     max_tokens: int,
     pad_idx: int,
     sort_buffer_size: int,
+    shuffle: bool = True,
 ) -> DataLoader:
     dataset = MapDataset(examples)
     collator = BatchMaxLengthCausalLMCollator(max_tokens=max_tokens, pad_idx=pad_idx)
-    sampler = TokenLengthGroupedRandomSampler(
-        dataset, sort_buffer_size=sort_buffer_size
+    # Validation must iterate a fixed, deterministic order: with
+    # max_eval_steps capping the eval loop, a reshuffling sampler would
+    # measure a different random subset on every eval and add subset noise
+    # to the val-loss curve.
+    sampler = (
+        TokenLengthGroupedRandomSampler(dataset, sort_buffer_size=sort_buffer_size)
+        if shuffle
+        else SequentialSampler(dataset)
     )
     return DataLoader(dataset, batch_size, collator, sampler=sampler)
 
@@ -235,6 +242,7 @@ if __name__ == "__main__":
         max_tokens=max_tokens,
         pad_idx=pad_idx,
         sort_buffer_size=CONFIG.eval_batch_size,
+        shuffle=False,
     )
 
     trainer.fit(train_data_loader, val_data_loader)
