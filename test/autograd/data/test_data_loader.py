@@ -1,5 +1,9 @@
+import threading
+import time
 import unittest
 from unittest.mock import patch
+
+import numpy as np
 
 from autograd.backend import xp
 from autograd.data.collator import (
@@ -427,3 +431,108 @@ class TestDataLoader(unittest.TestCase):
         self.assertIsInstance(batch, CausalLMBatch)
         self.assertEqual(batch.input_ids.shape, (self.batch_size_llm, self.seq_len))
         self.assertEqual(batch.labels.shape, (self.batch_size_llm, self.seq_len))
+
+
+class TestDataLoaderPrefetch(unittest.TestCase):
+    """prefetch=True must be a transparent, safe drop-in for synchronous iteration."""
+
+    def _loader(self, *, prefetch, prefetch_depth=4, batch_size=4):
+        # numpy stream, matching the real mmap; the collator does the xp.array
+        # host->device copy (exercised inside the producer thread on GPU backends).
+        dataset = TokenWindowMapDataset(np.arange(200), window_len=11)
+        return DataLoader(
+            dataset,
+            batch_size=batch_size,
+            collator=CausalLMWindowCollator(),
+            sampler=SequentialSampler(dataset),
+            prefetch=prefetch,
+            prefetch_depth=prefetch_depth,
+        )
+
+    def test_prefetch_yields_identical_batches_in_order(self):
+        plain = list(self._loader(prefetch=False))
+        prefetched = list(self._loader(prefetch=True))
+        self.assertEqual(len(prefetched), len(plain))
+        self.assertGreater(len(prefetched), 1)
+        for sync_batch, pref_batch in zip(plain, prefetched):
+            self.assertTrue(xp.array_equal(sync_batch.input_ids, pref_batch.input_ids))
+            self.assertTrue(xp.array_equal(sync_batch.labels, pref_batch.labels))
+
+    def test_prefetch_len_matches_synchronous(self):
+        self.assertEqual(
+            len(self._loader(prefetch=True)), len(self._loader(prefetch=False))
+        )
+
+    def test_prefetch_rejects_invalid_depth(self):
+        dataset = TokenWindowMapDataset(np.arange(50), window_len=11)
+        with self.assertRaises(ValueError):
+            DataLoader(dataset, batch_size=4, prefetch=True, prefetch_depth=0)
+
+    def test_prefetch_reraises_producer_error_without_hanging(self):
+        # drop_last drops the only (partial) batch -> _iter_batches raises
+        # "yielded no batches" inside the producer thread. It must surface on
+        # the consumer side, not deadlock.
+        dataset = TokenWindowMapDataset(np.arange(12), window_len=11)  # 2 windows
+        loader = DataLoader(
+            dataset,
+            batch_size=4,  # > 2 windows, so drop_last drops the only partial batch
+            collator=CausalLMWindowCollator(),
+            sampler=SequentialSampler(dataset),
+            drop_last=True,
+            prefetch=True,
+        )
+        with self.assertRaises(ValueError):
+            list(loader)
+
+    def test_prefetch_no_thread_leak_on_early_break(self):
+        # The deadlock-prone path: consumer abandons iteration while the
+        # producer is blocked on a full queue. Repeating it must not accumulate
+        # threads.
+        dataset = TokenWindowMapDataset(np.arange(4000), window_len=11)
+        baseline = threading.active_count()
+        for _ in range(20):
+            loader = DataLoader(
+                dataset,
+                batch_size=4,
+                collator=CausalLMWindowCollator(),
+                sampler=SequentialSampler(dataset),
+                prefetch=True,
+                prefetch_depth=2,
+            )
+            seen = 0
+            for _ in loader:
+                seen += 1
+                if seen == 2:
+                    break
+        time.sleep(0.3)  # let the daemon producers wind down
+        self.assertLessEqual(threading.active_count() - baseline, 1)
+
+    def test_prefetch_surfaces_producer_error_to_early_stopping_consumer(self):
+        # Regression: a producer failure recorded after the consumer's last
+        # get() was silently discarded if the consumer closed the iterator
+        # before reaching the sentinel — a real data-pipeline bug never
+        # surfaced when training stopped early (max_steps, eval cutoff).
+        dataset = TokenWindowMapDataset(np.arange(200), window_len=11)
+
+        class FailingSampler(Sampler):
+            def __iter__(self):
+                yield from range(4)  # exactly one good batch
+                raise RuntimeError("sampler exploded")
+
+            def __len__(self):
+                return 8
+
+        loader = DataLoader(
+            dataset,
+            batch_size=4,
+            collator=CausalLMWindowCollator(),
+            sampler=FailingSampler(),
+            prefetch=True,
+            prefetch_depth=1,
+        )
+        iterator = iter(loader)
+        next(iterator)  # consume the one good batch, then stop early
+        # close() drains to the producer's sentinel, by which point the error
+        # is recorded — it must propagate, not vanish.
+        with self.assertRaises(RuntimeError):
+            iterator.close()

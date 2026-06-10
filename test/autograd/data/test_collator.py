@@ -264,6 +264,40 @@ def test_window_collator_shift():
     )
 
 
+def test_window_collator_preserves_unsorted_sampler_order():
+    data = np.arange(20, dtype=np.int32)
+    examples = [
+        TokenWindowExample(data, offset=8, window_len=5),
+        TokenWindowExample(data, offset=1, window_len=5),
+        TokenWindowExample(data, offset=12, window_len=5),
+    ]
+
+    batch = CausalLMWindowCollator()(examples)
+
+    np.testing.assert_array_equal(
+        xp.to_numpy(batch.input_ids),
+        np.array(
+            [
+                [8, 9, 10, 11],
+                [1, 2, 3, 4],
+                [12, 13, 14, 15],
+            ],
+            dtype=np.int32,
+        ),
+    )
+    np.testing.assert_array_equal(
+        xp.to_numpy(batch.labels),
+        np.array(
+            [
+                [9, 10, 11, 12],
+                [2, 3, 4, 5],
+                [13, 14, 15, 16],
+            ],
+            dtype=np.int32,
+        ),
+    )
+
+
 def test_window_collator_requires_shiftable_window():
     example = TokenWindowExample(np.arange(4, dtype=np.int32), offset=0, window_len=1)
 
@@ -335,4 +369,27 @@ def test_causal_lm_batch_rejects_loss_mask():
             input_ids=xp.zeros((1, 2), dtype=xp.int32),
             labels=xp.zeros((1, 2), dtype=xp.int32),
             loss_mask=xp.ones((1, 2), dtype=xp.float32),
+        )
+
+
+def test_window_collator_rejects_mixed_stream_or_window_len_batches():
+    # All offsets index examples[0].stream, so a mixed batch would silently
+    # return wrong tokens — it must fail fast instead.
+    stream_a = np.arange(20, dtype=np.int32)
+    stream_b = np.arange(100, 120, dtype=np.int32)
+
+    with pytest.raises(ValueError, match="same stream"):
+        CausalLMWindowCollator()(
+            [
+                TokenWindowExample(stream_a, offset=0, window_len=5),
+                TokenWindowExample(stream_b, offset=2, window_len=5),
+            ]
+        )
+
+    with pytest.raises(ValueError, match="window_len"):
+        CausalLMWindowCollator()(
+            [
+                TokenWindowExample(stream_a, offset=0, window_len=5),
+                TokenWindowExample(stream_a, offset=2, window_len=4),
+            ]
         )

@@ -196,6 +196,18 @@ class BytePairEncoder:
         if os.path.exists(self.vocab_file_path) and not overwrite_saved_file:
             return self._unicode_to_int_vocab, self._int_to_unicode_vocab
 
+        # Reset merge-derived state so a retrain on this same instance starts
+        # from the base byte/special vocab. Without this, a retrain would
+        # extend the previous run's merges (carrying over learned_merges,
+        # _unicode_to_int_vocab entries above 256+specials, and new_idx) and
+        # the per-chunk encode cache would still reference the old merge
+        # table — producing tokens that don't decode against the new vocab.
+        self._unicode_to_int_vocab = self._construct_unicode_to_int_vocab()
+        self._int_to_unicode_vocab = {
+            v: k for k, v in self._unicode_to_int_vocab.items()
+        }
+        self.learned_merges = []
+        self.new_idx = max(self._unicode_to_int_vocab.values()) + 1
         self._encoded_chunk_cache.clear()
         self._merge_priority_cache = None
 
@@ -210,7 +222,14 @@ class BytePairEncoder:
             logger.info("Caching word frequencies to %s", self.word_freq_cache_path)
             with open(self.word_freq_cache_path, "wb") as f:
                 pickle.dump(word_freq, f)
-        return self._learn_vocabulary_from_word_freq(word_freq)
+        result = self._learn_vocabulary_from_word_freq(word_freq)
+        # The cache exists to resume a run that crashed between the expensive
+        # counting pass and the vocab save. Once the vocab is saved, a
+        # leftover cache would silently override `texts` on the next retrain
+        # (we cannot fingerprint a lazy corpus to detect that), so remove it.
+        if os.path.exists(self.word_freq_cache_path):
+            os.remove(self.word_freq_cache_path)
+        return result
 
     def encode(self, input_text: str) -> List[int]:
         """Encodes a raw input string into a list of BPE token IDs.
@@ -455,10 +474,14 @@ class BytePairEncoder:
         """Memory-maps a raw int32 token stream written by ``_encode_to_mmap``.
 
         The file has no header, so the token count is the file size divided
-        by ``int32.itemsize`` (4 bytes per token).
+        by ``int32.itemsize`` (4 bytes per token). An empty file (zero
+        tokens — e.g. produced by encoding an empty corpus) returns an
+        empty in-memory array, since ``np.memmap`` cannot map a 0-byte file.
         """
         int32_dtype = np.dtype("<i4")
         token_count = os.path.getsize(path) // int32_dtype.itemsize
+        if token_count == 0:
+            return np.empty(0, dtype=int32_dtype)
         return np.memmap(path, dtype=int32_dtype, mode="r", shape=(token_count,))
 
     @staticmethod

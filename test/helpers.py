@@ -1,7 +1,11 @@
 import numbers
 
 import numpy as np
-import torch
+
+try:
+    import torch
+except ImportError:
+    torch = None
 
 from autograd.backend import xp
 
@@ -9,7 +13,7 @@ from autograd.backend import xp
 def _to_numpy(value):
     if isinstance(value, np.ndarray):
         return value
-    if isinstance(value, torch.Tensor):
+    if torch is not None and isinstance(value, torch.Tensor):
         return value.detach().cpu().numpy()
     if isinstance(value, (numbers.Number, bool)):
         return np.asarray(value)

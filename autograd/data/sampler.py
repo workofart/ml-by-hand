@@ -56,6 +56,8 @@ class RandomSampler(Sampler):
     attached samplers.
     """
 
+    _REPLACEMENT_CHUNK_SIZE = 8_192
+
     def __init__(
         self,
         dataset: MapDataset,
@@ -88,9 +90,15 @@ class RandomSampler(Sampler):
     def _iter_with_replacement(self) -> Iterator[int]:
         remaining = self.num_samples
         n = len(self.dataset)
-        chunk_size = min(n, 1_000_000)
+        # Draw in chunks to bound memory. Note the seeded index stream depends
+        # on the chunk size and on any other global np.random draws (e.g.
+        # numpy-backend dropout) interleaved between chunk draws, so changing
+        # either changes which indices a fixed seed produces.
+        chunk_size = min(n, self._REPLACEMENT_CHUNK_SIZE)
         while remaining > 0:
             batch = min(chunk_size, remaining)
+            # tolist() yields plain Python ints, which iterate faster than
+            # ndarray elements and skip np.int64 laundering downstream.
             yield from np.random.randint(0, n, size=batch).tolist()
             remaining -= batch
 

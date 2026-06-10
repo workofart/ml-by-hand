@@ -65,14 +65,27 @@ if IS_CUPY and xp.cuda.runtime.getDeviceCount() <= 0:
         "AUTOGRAD_BACKEND=cupy requested, but no CUDA device was detected"
     )
 
-# Pin this process to GPU `LOCAL_RANK` for DDP. The launcher
+
+# Pin to GPU `LOCAL_RANK` for DDP. The launcher
 # (`python -m autograd.distributed.launch`) sets `LOCAL_RANK=r` for the r-th
 # child; non-DDP runs see the default `0` and `.use()` is a no-op on the
-# already-default device. Must happen *before* any CuPy allocation lands —
-# `xp.array(0, …)` below would otherwise create the first allocation on
-# device 0 and route every later op there.
-if IS_CUPY:
-    xp.cuda.Device(int(os.environ.get("LOCAL_RANK", "0"))).use()
+# already-default device.
+def pin_cuda_device() -> None:
+    """Pin the calling thread to GPU ``LOCAL_RANK``. No-op off CuPy.
+
+    CuPy's "current device" is thread-local, so the import-time call below
+    only covers the main thread — any worker thread that allocates GPU
+    memory (e.g. the DataLoader prefetch producer) must call this again
+    before its first allocation, or its arrays land on device 0.
+    """
+    if IS_CUPY:
+        xp.cuda.Device(int(os.environ.get("LOCAL_RANK", "0"))).use()
+
+
+# Must happen *before* any CuPy allocation lands — `xp.array(0, …)` below
+# would otherwise create the first allocation on device 0 and route every
+# later op there.
+pin_cuda_device()
 
 ARRAY_TYPE = type(xp.array(0, dtype=xp.float32)) if IS_MLX else xp.ndarray
 
