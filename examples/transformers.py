@@ -742,12 +742,14 @@ if __name__ == "__main__":
             max_length=trainer.model.max_seq_len // 3,
         )
 
-    generate_text(
-        model=trainer.model,
-        prediction_func=TransformerForwardFn(),
-        bpe=bpe,
-        start_tokens=CONFIG.eval_start_string,
-        max_length=int(trainer.model.max_seq_len * 0.9),
-        temperature=0.8,
-        top_k=CONFIG.eval_top_k,
+    print(
+        generate_text(
+            model=trainer.model,
+            prediction_func=TransformerForwardFn(),
+            bpe=bpe,
+            start_tokens=CONFIG.eval_start_string,
+            max_length=int(trainer.model.max_seq_len * 0.9),
+            temperature=0.8,
+            top_k=CONFIG.eval_top_k,
+        )
     )

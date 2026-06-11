@@ -181,15 +181,17 @@ if __name__ == "__main__":
         _val_data_loader,
         config: TransformerTrainingConfig,
     ) -> None:
-        generate_text(
-            model=model,
-            prediction_func=GPT2ForwardFn(),
-            bpe=bpe,
-            start_tokens=config.eval_start_string,
-            max_length=min(256, int(model.max_seq_len)),
-            temperature=0.8,
-            top_k=config.eval_top_k,
-            stop_token=SFT_TURN_SEPARATOR,
+        print(
+            generate_text(
+                model=model,
+                prediction_func=GPT2ForwardFn(),
+                bpe=bpe,
+                start_tokens=config.eval_start_string,
+                max_length=min(256, int(model.max_seq_len)),
+                temperature=0.8,
+                top_k=config.eval_top_k,
+                stop_token=SFT_TURN_SEPARATOR,
+            )
         )
 
     trainer = LLMTrainer(
@@ -249,14 +251,16 @@ if __name__ == "__main__":
 
     # Inference test
     for k in range(5):
-        generate_text(
-            model=trainer.model,
-            prediction_func=GPT2ForwardFn(),
-            bpe=bpe,
-            start_tokens=CONFIG.eval_start_string,
-            max_length=int(trainer.model.max_seq_len),
-            temperature=0.8,
-            top_k=CONFIG.eval_top_k,
-            stop_token=SFT_TURN_SEPARATOR,
+        print(
+            generate_text(
+                model=trainer.model,
+                prediction_func=GPT2ForwardFn(),
+                bpe=bpe,
+                start_tokens=CONFIG.eval_start_string,
+                max_length=int(trainer.model.max_seq_len),
+                temperature=0.8,
+                top_k=CONFIG.eval_top_k,
+                stop_token=SFT_TURN_SEPARATOR,
+            )
         )
         print("\n------------------------\n")

@@ -4,7 +4,8 @@
 <img src="https://github.com/user-attachments/assets/0655f743-6bb0-46c8-9cdf-ec3a8c84058a" width="400" height="400">
 
 [![Unit Tests](https://github.com/workofart/ml-by-hand/actions/workflows/test.yml/badge.svg)](https://github.com/workofart/ml-by-hand/actions/workflows/test.yml) |
-📝 [Blog Post](https://www.henrypan.com/blog/2025-02-06-ml-by-hand/)
+📝 [Blog Post 1](https://www.henrypan.com/blog/2025-02-06-ml-by-hand/) |
+📝 [Blog Post 2](https://www.henrypan.com/blog/2026-03-14-how-deep-learning-library-enables-learning/)
 
 </div>
 
@@ -35,18 +36,91 @@ We are creating a deep learning library from scratch (that evolved from a simple
 
 </details>
 
-## **Demo/Examples**
+<table>
+<tr>
+<td width="45%" valign="top">
 
-<center><img src="https://www.henrypan.com/blog/assets/images/ml/ml-by-hand/ml-by-hand.gif" width="700" /></center>
+## Demo
 
+<img src="https://www.henrypan.com/blog/assets/images/ml/ml-by-hand/ml-by-hand.gif" width="480" />
+
+</td>
+<td width="50%" valign="top">
+
+## Try inference with the pre-trained checkpoint
+
+Using the library, we're able to pre-train GPT-2 124M model from scratch on OpenWebText (56k steps * 1024 context length * 480 global batch size = 27 billion tokens, bfloat16) at [GitHub release](https://github.com/workofart/ml-by-hand/releases/tag/gpt2-124m-openwebtext-56000), including its BPE tokenizer vocabulary.
+
+Download the weights (~240 MB) and run inference locally:
+
+```bash
+git clone https://github.com/workofart/ml-by-hand.git
+cd ml-by-hand
+./bootstrap.sh
+source .venv/bin/activate
+
+RELEASE=https://github.com/workofart/ml-by-hand/releases/download/gpt2-124m-openwebtext-56000
+CKPT=gpt2_124m_openwebtext_56000_inference
+VOCAB=openwebtext_vocab_49990.pkl
+curl -L --create-dirs -o "checkpoints/$CKPT.json" "$RELEASE/$CKPT.json"
+curl -L --create-dirs -o "checkpoints/$CKPT.npz" "$RELEASE/$CKPT.npz"
+curl -L --create-dirs -o "training_data/$VOCAB" "$RELEASE/$VOCAB"
+```
+
+Then, from the repo root (after the [Environment Setup](#environment-setup) below):
+
+```python
+from autograd.text.tokenizer import BytePairEncoder
+from autograd.text.utils import generate_text
+from autograd.tools.model import load_checkpoint
+from examples.gpt_2 import GPT2, GPT2ForwardFn
+
+ckpt = load_checkpoint(
+    "checkpoints/gpt2_124m_openwebtext_56000_inference.json",
+    "checkpoints/gpt2_124m_openwebtext_56000_inference.npz",
+)
+model = GPT2(**ckpt["model_init_kwargs"])
+model.load_state_dict(ckpt["model_state_dict"])
+
+bpe = BytePairEncoder(
+    num_merges=49990,
+    vocab_file_path="training_data/openwebtext_vocab_49990.pkl",
+)
+
+generate_text(
+    model=model,
+    prediction_func=GPT2ForwardFn(),
+    bpe=bpe,
+    start_tokens="The meaning of life is",
+    max_length=100,
+    temperature=0.8,
+    top_k=50,
+)
+
+> Inference: 100%|██████████| 95/95 [00:02<00:00, 31.90it/s]
+> [prompt 5 tokens + 95 new tokens in 2.98s, 31.9 tok/s]
+> 'The meaning of life is based on the ability to feel and remember the things that ...'
+```
+
+</td>
+</tr>
+</table>
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+## Examples
 
 Explore the [`examples/`](https://github.com/workofart/ml-by-hand/tree/main/examples) directory for real-world demonstrations of how this engine can power neural network training on various tasks:
 
-📌 **Transformers & GPT (Newly added):**
+📌 **LLMs:**
   - Original Transformers [(Code)](https://github.com/workofart/ml-by-hand/blob/main/examples/transformers.py)
   - Byte Pair Encoder (BPE) Tokenizer [(Code)](https://github.com/workofart/ml-by-hand/blob/main/autograd/text/tokenizer.py)
   - GPT-1 [(Code)](https://github.com/workofart/ml-by-hand/blob/main/examples/gpt-1.py)
   - GPT-2 [(Code)](https://github.com/workofart/ml-by-hand/blob/main/examples/gpt_2.py)
+  - (Newly added) Supervised Fine-Tuning (SFT) [(Code)](https://github.com/workofart/ml-by-hand/blob/main/examples/sft_gpt_2.py) — fine-tunes a pretrained GPT-2 on chat-formatted data ([no_robots](https://huggingface.co/datasets/HuggingFaceH4/no_robots))
+  - (Newly added) Group Relative Policy Optimization (GRPO) [(Code)](https://github.com/workofart/ml-by-hand/blob/main/examples/grpo.py) — reinforcement learning on GSM8K math problems (the technique behind DeepSeek-R1)
 
 <details>
   <summary><strong>Click to see all other examples</strong></summary>
@@ -79,8 +153,11 @@ Explore the [`examples/`](https://github.com/workofart/ml-by-hand/tree/main/exam
   - WikiSum [(Code)](https://github.com/workofart/ml-by-hand/blob/main/examples/seq2seq.py)
 </details>
 
+</td>
+<td width="50%" valign="top">
 
-## Toy Example
+## Toy Example of Using the Library
+
 <details>
   <summary><strong>Click to expand</strong></summary>
 
@@ -150,23 +227,36 @@ assert xp.to_scalar(xp.allclose(x.data @ weights + bias, y_true))
 ```
 </details>
 
-## **Documentation**
+</td>
+</tr>
+</table>
 
-Check out the modules in this project in the [docs website](https://ml-by-hand.readthedocs.io/en/latest/) built from the docs/ directory.
+## Environment Setup
 
-## **Environment Setup**
-
-This repo uses `uv.lock` as the source of truth for dependency installation.
-Use the bootstrap script for the intended setup flow:
+This repo uses `uv.lock` as the source of truth for dependency installation:
 ```bash
 ./bootstrap.sh
 source .venv/bin/activate
 ```
 
+## **Documentation**
+
+Check out the modules in this project in the [docs website](https://ml-by-hand.readthedocs.io/en/latest/) built from the docs/ directory.
+
+## Hardware Backends
+
+There are couple of hardware backends that are supported for acceleration, thanks to CuPy and MLX for the seemless NumPy-like primitive API.
+
 Backend selection happens automatically. In user code, import and use `autograd.backend.xp`; the alias is then bound to one of these backends:
 - `mlx` is preferred when available on macOS
-- `cupy` is preferred on Linux when a CUDA device is detected and CuPy is installed
-- otherwise the repo falls back to `numpy`
+- `cupy` is preferred on Linux when a CUDA device is detected
+  - `bootstrap.sh` auto-detects CUDA on Linux and syncs one of the pinned extras: `cuda11`, `cuda12`, or `cuda13`.
+  - Manual installs are also available through `pyproject.toml` extras:
+  ```bash
+  uv sync --extra dev --extra cuda12
+  ```
+  - Pick exactly one CUDA extra that matches your installed CUDA major version.
+- `numpy` is the fallback, which doesn't have any hardware acceleration
 
 You can also force a backend explicitly:
 ```bash
@@ -174,17 +264,6 @@ AUTOGRAD_BACKEND=numpy uv run pytest
 AUTOGRAD_BACKEND=mlx uv run pytest
 AUTOGRAD_BACKEND=cupy uv run pytest
 ```
-
-## CuPy Setup
-
-CuPy is optional and only used when a CUDA device is detected.
-
-- `bootstrap.sh` auto-detects CUDA on Linux and syncs one of the pinned extras: `cuda11`, `cuda12`, or `cuda13`.
-- Manual installs are also available through `pyproject.toml` extras:
-```bash
-uv sync --extra dev --extra cuda12
-```
-- Pick exactly one CUDA extra that matches your installed CUDA major version.
 
 ## Tests
 Comprehensive unit tests and integration tests available in `test/autograd`
