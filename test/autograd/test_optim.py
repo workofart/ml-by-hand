@@ -492,34 +492,34 @@ class TestAdam(TestCase):
         )
 
     def test_zero_grad(self):
-        self.optim.zero_grad()
-        self.optim.step()
-        self.torch_optim.zero_grad()
-        self.torch_optim.step()
+        self.param1.grad = self.grad1_val
+        self.param2.grad = self.grad2_val
 
-        assert allclose(
-            self.param1.data,
-            self.torch_params[0].detach().numpy(),
-            atol=1e-6,
-        )
-        assert allclose(
-            self.param2.data,
-            self.torch_params[1].detach().numpy(),
-            atol=1e-6,
-        )
+        self.optim.zero_grad()
+
+        assert self.param1.grad is None
+        assert self.param2.grad is None
+        # With cleared gradients, step() must not move the parameters.
+        before1 = float(self.param1.data)
+        before2 = float(self.param2.data)
+        self.optim.step()
+        assert float(self.param1.data) == before1
+        assert float(self.param2.data) == before2
 
     def test_step(self):
-        # Perform multiple steps and compare results
+        # Multiple consecutive steps on the same optimizer instance, so the
+        # momentum buffers and bias correction must track torch across steps.
         for _ in range(5):
-            # Step both optimizers
+            self.param1.grad = self.grad1_val
+            self.param2.grad = self.grad2_val
+            self.torch_params[0].grad = torch.tensor(self.grad1_val)
+            self.torch_params[1].grad = torch.tensor(self.grad2_val)
+
             self.optim.step()
             self.torch_optim.step()
-
-            # Zero out gradients (this is similar to our training step)
             self.optim.zero_grad()
             self.torch_optim.zero_grad()
 
-            # Compare parameters
             assert allclose(
                 self.param1.data,
                 self.torch_params[0].detach().numpy(),
@@ -530,9 +530,6 @@ class TestAdam(TestCase):
                 self.torch_params[1].detach().numpy(),
                 atol=1e-6,
             )
-
-            # Set new gradients for next step
-            self.setUp()
 
     def test_different_gradients(self):
         # Test with different gradient values
@@ -645,6 +642,53 @@ class TestAdam(TestCase):
         adam_no_wd.step()
 
         assert allclose(decayed.data, undecayed.data, atol=0.0, rtol=0.0)
+
+    def test_load_state_dict_defaults_momenta_for_new_params(self):
+        """Params absent from the checkpoint must get zero-initialized m/v
+        on the next step, not raise KeyError."""
+        params_old = {"w1": Tensor([1.0, 2.0])}
+        adam_old = Adam(params_old, lr=0.01)
+        params_old["w1"].grad = Tensor([0.1, 0.2]).data
+        adam_old.step()
+        saved = deepcopy(adam_old.state_dict())
+
+        # The new model has an extra parameter the checkpoint doesn't know about.
+        params_new = {"w1": Tensor([1.0, 2.0]), "w2": Tensor([3.0, 4.0])}
+        adam_new = Adam(params_new, lr=0.01)
+        adam_new.load_state_dict(saved)
+
+        for p in params_new.values():
+            p.grad = Tensor([0.1, 0.2]).data
+        adam_new.step()  # raised KeyError("w2") before the fix
+
+        # w1's momentum continued from the checkpointed value:
+        # beta1 * m_ckpt + (1 - beta1) * grad = 0.9 * [0.01, 0.02] + 0.1 * [0.1, 0.2]
+        assert allclose(adam_new._states["m"]["w1"], [0.019, 0.038])
+        # w2 started from zero momentum: (1 - beta1) * grad
+        assert allclose(adam_new._states["m"]["w2"], [0.01, 0.02])
+
+    def test_load_state_dict_without_master_rebuilds_fp32_masters(self):
+        """Loading a checkpoint without a 'master' group (e.g. saved before
+        master copies existed) must rebuild fp32 masters for low-precision
+        params instead of silently dropping them."""
+        if not hasattr(xp, "bfloat16"):
+            self.skipTest("backend lacks bfloat16")
+
+        param = Tensor(xp.array([1.0, -2.0], dtype=xp.bfloat16))
+        adam = Adam({"w": param}, lr=0.01)
+        assert "w" in adam._states["master"]
+
+        saved = deepcopy(adam.state_dict())
+        del saved["states"]["master"]
+
+        param2 = Tensor(xp.array([1.0, -2.0], dtype=xp.bfloat16))
+        adam2 = Adam({"w": param2}, lr=0.01)
+        adam2.load_state_dict(saved)
+
+        assert "w" in adam2._states["master"], (
+            "fp32 master copy was dropped when loading a checkpoint "
+            "without a 'master' state group"
+        )
 
     def test_bf16_step_matches_fp32_reference(self):
         if not IS_CUPY:

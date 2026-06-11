@@ -1,4 +1,5 @@
 import os
+import pickle
 import tempfile
 from unittest import TestCase
 
@@ -94,6 +95,59 @@ class TestTokenizer(TestCase):
         # the file (or change the path) before retrying.
         with self.assertRaisesRegex(RuntimeError, "Failed to load vocabulary"):
             BytePairEncoder(num_merges=50, vocab_file_path=self.bpe.vocab_file_path)
+
+    def test_load_dictionary_rejects_vocab_missing_special_tokens(self):
+        """A pickled vocab that predates the current SPECIAL_TOKENS list must
+        fail loudly at load time, not with a cryptic KeyError at encode time."""
+        self.bpe.train_vocabulary([self.original_text], overwrite_saved_file=True)
+        with open(self.bpe.vocab_file_path, "rb") as f:
+            u2i, i2u, merges = pickle.load(f)
+        removed = "<|TOOL|>".encode("utf-8")
+        token_id = u2i.pop(removed)
+        i2u.pop(token_id)
+        with open(self.bpe.vocab_file_path, "wb") as f:
+            pickle.dump((u2i, i2u, merges), f)
+
+        with self.assertRaisesRegex(RuntimeError, "missing special tokens"):
+            BytePairEncoder(num_merges=50, vocab_file_path=self.bpe.vocab_file_path)
+
+    def test_encoded_cache_is_keyed_by_vocab_fingerprint(self):
+        """The cache path embeds the vocab fingerprint, so a different
+        vocabulary must produce a different cache file rather than silently
+        reusing (and mixing token ID spaces with) another vocab's encoding."""
+        self.bpe.prepare_data(
+            [self.original_text],
+            overwrite_vocabulary_file=True,
+            overwrite_encoded_data=True,
+        )
+        first_cache_path = self.bpe.mmap_path
+        assert os.path.exists(first_cache_path)
+
+        other_vocab_path = "test_vocab_other.pkl"
+        self.addCleanup(
+            lambda: os.path.exists(other_vocab_path) and os.remove(other_vocab_path)
+        )
+        bpe2 = BytePairEncoder(
+            num_merges=5,
+            vocab_file_path=other_vocab_path,
+            encoded_data_path=self.bpe.encoded_data_path,
+        )
+        bpe2.train_vocabulary(
+            ["a completely different corpus 12345"], overwrite_saved_file=True
+        )
+        self.addCleanup(
+            lambda: os.path.exists(bpe2.mmap_path) and os.remove(bpe2.mmap_path)
+        )
+
+        assert bpe2.mmap_path != first_cache_path
+        bpe2.prepare_data(
+            ["a completely different corpus 12345"],
+            overwrite_vocabulary_file=False,
+            overwrite_encoded_data=False,
+        )
+        # Both caches coexist; neither vocab can ever load the other's tokens.
+        assert os.path.exists(first_cache_path)
+        assert os.path.exists(bpe2.mmap_path)
 
     def test_train_vocabulary_skip_if_loaded_and_no_overwrite(self):
         # First train

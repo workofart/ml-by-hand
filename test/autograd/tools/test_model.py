@@ -19,7 +19,7 @@ from autograd.tools.model import (
 
 class MockModule(Module):
     def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
+        super().__init__()
         self._parameters["weight"] = xavier_uniform(Tensor(xp.zeros((4, 5))))
         self._parameters["bias"] = xavier_uniform(Tensor(xp.zeros((1, 1))))
 

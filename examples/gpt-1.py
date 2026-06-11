@@ -48,9 +48,8 @@ class GPT1(nn.Module):
         max_seq_len,
         dropout_prob,
         num_decoder_layers,
-        **kwargs,
     ) -> None:
-        super().__init__(**kwargs)
+        super().__init__()
         self.hidden_size = hidden_size
         self.max_seq_len = max_seq_len
         self.token_embedding = nn.Embedding(vocab_size, hidden_size)
@@ -102,9 +101,8 @@ class DecoderSublayer(nn.Module):
         ff_hidden_size=2048,
         dropout_prob=0.1,
         num_attention_heads=2,
-        **kwargs,
     ) -> None:
-        super().__init__(**kwargs)
+        super().__init__()
         self.multi_head_attention = nn.MultiHeadAttention(
             hidden_size=hidden_size, num_heads=num_attention_heads
         )
@@ -260,12 +258,14 @@ if __name__ == "__main__":
             max_length=trainer.model.max_seq_len // 3,
         )
 
-    generate_text(
-        model=trainer.model,
-        prediction_func=GPT1ForwardFn(),
-        bpe=bpe,
-        start_tokens=CONFIG.eval_start_string,
-        max_length=int(trainer.model.max_seq_len * 0.9),
-        temperature=0.8,
-        top_k=CONFIG.eval_top_k,
+    print(
+        generate_text(
+            model=trainer.model,
+            prediction_func=GPT1ForwardFn(),
+            bpe=bpe,
+            start_tokens=CONFIG.eval_start_string,
+            max_length=int(trainer.model.max_seq_len * 0.9),
+            temperature=0.8,
+            top_k=CONFIG.eval_top_k,
+        )
     )

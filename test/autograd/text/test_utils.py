@@ -530,7 +530,7 @@ class TestTextUtils(TestCase):
         stdout = io.StringIO()
 
         with redirect_stdout(stdout):
-            generate_text(
+            result = generate_text(
                 model=MagicMock(),
                 prediction_func=MagicMock(side_effect=fake_prediction),
                 bpe=self.bpe,  # type: ignore
@@ -541,11 +541,10 @@ class TestTextUtils(TestCase):
             )
 
         output = stdout.getvalue()
-        self.assertIn("Prompt:\nAB\n\nGenerated:\nBBB", output)
-        self.assertIn(
-            "Prompt 2 tokens, generated 3 new tokens, total 5/5 tokens",
-            output,
-        )
+        # The text is returned (not printed); stdout only carries the summary.
+        self.assertEqual(result, "ABBBB")
+        self.assertNotIn("ABBBB", output)
+        self.assertIn("[prompt 2 tokens + 3 new tokens", output)
 
     @patch("autograd.text.utils.xp.sample_categorical")
     def test_generate_text_stops_at_endoftext(self, mock_choice):

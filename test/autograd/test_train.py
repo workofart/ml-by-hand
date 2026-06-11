@@ -13,7 +13,7 @@ from autograd.data.dataset import PairedMapDataset
 from autograd.data.sampler import RandomSampler
 from autograd.tools.config_schema import GenericTrainingConfig
 from autograd.tools.metrics import accuracy, mean_squared_error
-from autograd.tools.trainer import SimpleTrainer
+from autograd.tools.trainer import SimpleTrainer, TrainingPlan, TrainingState
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +119,39 @@ class TestTrain(TestCase):
         acc = accuracy(xp.asarray(y_pred > 0.5).astype(xp.int32).squeeze(), y)
         logger.info(f"Accuracy: {acc}")
         assert acc > 0.9
+
+    def test_report_persists_current_row(self):
+        """The metrics NPZ must include the row being reported, so the final
+        report of a run is not lost."""
+        config = GenericTrainingConfig(
+            training_run_name="metrics_row_test",
+            checkpoint_freq=1000,
+            max_steps=10,
+            model_kwargs={"input_size": 4, "hidden_size": 4, "output_size": 1},
+            optimizer_kwargs={"lr": 1e-3},
+        )
+        trainer = SimpleTrainer(
+            model_cls=RegressionModel,
+            optimizer_cls=optim.SGD,
+            loss_fn=functional.mean_squared_loss,
+            config=config,
+            output_type=None,
+        )
+        plan = TrainingPlan.for_steps(
+            max_steps=10, report_every_steps=1, checkpoint_every=1000
+        )
+        trainer.global_step = 1
+        state = TrainingState()
+        state.record_loss(2.0, total_weight=xp.array(4.0, dtype=xp.float32))
+
+        trainer.report(state, plan, eval_state=None)
+
+        path = os.path.join(
+            SimpleTrainer.METRICS_DIR, "RegressionModel_metrics_row_test.npz"
+        )
+        saved = xp.load(path)
+        assert "train_loss" in saved, "reported row missing from saved metrics"
+        assert len(saved["train_loss"]) == 1
 
     def test_regression(self):
         X, y = load_diabetes(return_X_y=True)

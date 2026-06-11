@@ -212,9 +212,7 @@ class NeuralTuringMachine(nn.Module):
             hidden_size (int): Number of hidden units in the controller.
             output_size (int): Dimensionality of the model output.
         """
-        super().__init__(
-            input_size, memory_length, memory_dim, hidden_size, output_size
-        )
+        super().__init__()
         self.memory = Memory(
             memory_length=memory_length,
             memory_dim=memory_dim,
@@ -507,7 +505,7 @@ class LSTM(nn.Module):
             hidden_size (int): The number of hidden units in the LSTM block.
             output_size (int): The dimensionality of the output.
         """
-        super().__init__(input_size, hidden_size, output_size)
+        super().__init__()
         self.lstm = nn.LongShortTermMemoryBlock(input_size, hidden_size)
         self.fc = nn.Linear(hidden_size, output_size)
         self.hidden_size = hidden_size

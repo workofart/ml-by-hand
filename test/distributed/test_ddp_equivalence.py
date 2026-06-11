@@ -17,9 +17,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from autograd import optim
+from autograd import nn, optim
 from autograd.backend import IS_MLX, xp
 from autograd.tensor import Tensor
+from autograd.tools.config_schema import GenericTrainingConfig
+from autograd.tools.trainer import SimpleTrainer, TrainingState
 
 from .mock import run_mock_ranks
 
@@ -98,7 +100,7 @@ def test_ddp_2rank_matches_single_rank_baseline():
     # ---- DDP: 2 ranks, each takes one half ----------------------------
     def per_rank_train():
         # Match the baseline init (zeros) — no per-rank divergence.
-        from autograd.distributed import rank
+        from autograd.distributed import allreduce_grads, rank
 
         W = _make_param(X.shape[1])
         params = {"W": W}
@@ -109,6 +111,9 @@ def test_ddp_2rank_matches_single_rank_baseline():
             W.grad = None
             loss = _mse_loss_and_grad(W, rank_X, rank_y)
             loss.backward()
+            # Grad sync is the caller's responsibility (the trainer does
+            # this before scaling/clipping); optimizer.step() is local.
+            allreduce_grads(params)
             optimizer.step()
         return xp.to_numpy(W.data)
 
@@ -130,6 +135,132 @@ def test_ddp_2rank_matches_single_rank_baseline():
         rtol=1e-5,
         atol=1e-5,
         err_msg="DDP 2-rank result differs from single-rank baseline",
+    )
+
+
+class _ZeroLinear(nn.Module):
+    """Deterministic zero-initialized linear map so every rank (and the
+    baseline) starts from identical weights without relying on RNG."""
+
+    def __init__(self, dim: int = 4):
+        super().__init__()
+        self._parameters["W"] = Tensor(xp.zeros((dim, 1), dtype=xp.float32))
+
+    def forward(self, x):
+        return x @ self._parameters["W"]
+
+
+def _make_trainer(max_grad_norm) -> SimpleTrainer:
+    config = GenericTrainingConfig(
+        training_run_name="ddp_trainer_equivalence",
+        checkpoint_freq=1000,
+        max_steps=100,
+        model_kwargs={"dim": 4},
+        optimizer_kwargs={"lr": 0.1},
+        global_batch_size=2,
+        micro_batch_size=1,
+        max_grad_norm=max_grad_norm,
+    )
+    return SimpleTrainer(
+        model_cls=_ZeroLinear,
+        optimizer_cls=optim.SGD,
+        loss_fn=None,  # loss is computed manually below; fit() is never called
+        config=config,
+    )
+
+
+def _train_via_trainer(
+    trainer: SimpleTrainer, X: np.ndarray, y: np.ndarray, n_steps: int
+) -> np.ndarray:
+    """Drive the production update path: backward, record token weight,
+    then trainer.optimizer_step (token normalization + clip + step)."""
+    W = trainer.model.parameters["W"]
+    X_t = Tensor(xp.asarray(X), requires_grad=False)
+    y_t = Tensor(xp.asarray(y), requires_grad=False)
+    for _ in range(n_steps):
+        state = TrainingState()
+        diff = X_t @ W - y_t
+        loss = (diff * diff).sum()  # token-sum loss; weight = number of rows
+        loss.backward()
+        state.record_loss(
+            loss, total_weight=xp.array(float(X.shape[0]), dtype=xp.float32)
+        )
+        assert trainer.optimizer_step(state)
+    return xp.to_numpy(W.data)
+
+
+def test_trainer_ddp_unequal_token_counts_match_global_token_mean():
+    """Token normalization must be global-sum / global-token-count.
+
+    With unequal per-rank token counts, normalizing per-rank before the
+    AllReduce yields a mean-of-per-rank-means, which differs from the
+    single-rank baseline that divides the full-batch gradient by the
+    full-batch token count.
+    """
+    X, y = _make_problem(seed=7, n=16, dim=4)
+    n0 = 4  # rank 0 gets 4 rows, rank 1 gets 12 — unequal on purpose
+    n_steps = 3
+
+    baseline = _train_via_trainer(_make_trainer(None), X, y, n_steps)
+
+    def per_rank():
+        from autograd.distributed import rank
+
+        trainer = _make_trainer(None)
+        Xr = X[:n0] if rank() == 0 else X[n0:]
+        yr = y[:n0] if rank() == 0 else y[n0:]
+        return _train_via_trainer(trainer, Xr, yr, n_steps)
+
+    rank_results = run_mock_ranks(2, per_rank)
+
+    np.testing.assert_allclose(
+        rank_results[1],
+        rank_results[0],
+        err_msg="ranks disagree after AllReduce",
+    )
+    np.testing.assert_allclose(
+        rank_results[0],
+        baseline,
+        rtol=1e-5,
+        atol=1e-6,
+        err_msg="DDP unequal-token result differs from single-rank baseline",
+    )
+
+
+def test_trainer_ddp_clipping_applied_to_global_gradient():
+    """Gradient clipping must clip the AllReduced global gradient.
+
+    Clipping per-rank gradients by their local norms before the AllReduce
+    applies a different clip factor on each rank; the averaged result is
+    not any valid clipping of the global gradient.
+    """
+    X, y = _make_problem(seed=11, n=16, dim=4)
+    half = X.shape[0] // 2
+    n_steps = 3
+
+    baseline = _train_via_trainer(_make_trainer(0.05), X, y, n_steps)
+
+    def per_rank():
+        from autograd.distributed import rank
+
+        trainer = _make_trainer(0.05)
+        Xr = X[:half] if rank() == 0 else X[half:]
+        yr = y[:half] if rank() == 0 else y[half:]
+        return _train_via_trainer(trainer, Xr, yr, n_steps)
+
+    rank_results = run_mock_ranks(2, per_rank)
+
+    np.testing.assert_allclose(
+        rank_results[1],
+        rank_results[0],
+        err_msg="ranks disagree after AllReduce",
+    )
+    np.testing.assert_allclose(
+        rank_results[0],
+        baseline,
+        rtol=1e-5,
+        atol=1e-6,
+        err_msg="DDP clipped result differs from single-rank baseline",
     )
 
 

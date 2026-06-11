@@ -73,6 +73,44 @@ class TestModule(TestCase):
         assert "submodule1.running_avg" in states
         assert allclose(states["submodule1.running_avg"], [10.0])
 
+    def test_module_init_rejects_unknown_arguments(self):
+        """Module.__init__ must not swallow stray constructor arguments —
+        a config key the model ignores means the user trains a different
+        architecture than the config claims."""
+
+        class StrictModule(Module):
+            def forward(self, x):
+                return x
+
+        with self.assertRaises(TypeError):
+            StrictModule(totally_bogus_arg=True)
+
+    def test_parameter_attribute_access(self):
+        """A Tensor assigned via self.name = ... is registered in _parameters
+        and must remain readable as a plain attribute."""
+        assert self.model.main_weight is self.model._parameters["main_weight"]
+        assert (
+            self.model.submodule1.sub_weight
+            is self.model.submodule1._parameters["sub_weight"]
+        )
+        # forward() uses self.main_weight directly
+        x = Tensor(xp.ones((2, 3)), requires_grad=False)
+        out = self.model(x)
+        assert out.shape == (2, 3)
+
+    def test_zero_grad_clears_gradients(self):
+        x = Tensor(xp.ones((2, 3)), requires_grad=False)
+        main_weight = self.model.parameters["main_weight"]
+        (x @ main_weight).sum().backward()
+
+        assert main_weight.grad is not None
+        assert not allclose(main_weight.grad.data, 0.0)
+
+        self.model.zero_grad()
+
+        grad = main_weight.grad
+        assert grad is None or allclose(grad.data, 0.0)
+
     def test_num_parameters(self):
         # main_weight: shape (3,3) => 9 elements
         # sub_weight: shape (2,2) => 4 elements

@@ -58,11 +58,13 @@ def compute_in_out_tensor_count(tensor: Tensor) -> tuple[int, int]:
     The counts are computed as follows:
     $$
     \begin{align}
-    \text{\# of input tensor count} &= \text{tensor.shape}[0] \times \prod_{i=2}^{n} \text{tensor.shape}[i] \\
-    \text{\# of output tensor count} &= \text{tensor.shape}[-1] \times \prod_{i=2}^{n} \text{tensor.shape}[i]
+    \text{\# of input tensor count} &= \text{tensor.shape}[1] \times \prod_{i=2}^{n} \text{tensor.shape}[i] \\
+    \text{\# of output tensor count} &= \text{tensor.shape}[0] \times \prod_{i=2}^{n} \text{tensor.shape}[i]
     \end{align}
     $$
-    where \( n \) is the number of dimensions in the tensor.
+    where \( n \) is the number of dimensions in the tensor. For 2D weights
+    (fully-connected layers) the convention is (input_size, output_size), so the
+    counts are simply (tensor.shape[0], tensor.shape[1]).
 
     Args:
         tensor (Tensor): The tensor for which to compute the number of input and output tensor counts.
@@ -85,19 +87,26 @@ def compute_in_out_tensor_count(tensor: Tensor) -> tuple[int, int]:
         >>> # (output_channels, input_channels, kernel_height, kernel_width)
         >>> tensor_conv = Tensor(xp.empty((16, 3, 3, 3)))
         >>> # The receptive field size is 3*3 = 9
-        >>> # So, input tensor count = 16 * 9 = 144, output tensor count = 3 * 9 = 27
+        >>> # So, input tensor count = 3 * 9 = 27, output tensor count = 16 * 9 = 144
         >>> compute_in_out_tensor_count(tensor_conv.data)
-        (144, 27)
+        (27, 144)
     """
     tensor_shape = tensor.shape
     if len(tensor_shape) < 2:
         raise ValueError("Tensor must have at least 2 dimensions")
 
-    receptive_field_size = 1
-    if len(tensor_shape) > 2:
-        for s in tensor_shape[2:]:
-            receptive_field_size *= s
+    # fan_in/fan_out = number of connections feeding into / out of one unit;
+    # Xavier scales the init by these to keep activation variance stable.
+    if len(tensor_shape) == 2:
+        # Fully-connected weights: (input_size, output_size)
+        return tensor_shape[0], tensor_shape[1]
 
-    input_tensor_count = tensor_shape[0] * receptive_field_size
-    output_tensor_count = tensor_shape[-1] * receptive_field_size
+    # Convolution kernels: (out_channels, in_channels, *kernel_dims) — each
+    # output unit sees in_channels * receptive_field inputs.
+    receptive_field_size = 1
+    for s in tensor_shape[2:]:
+        receptive_field_size *= s
+
+    input_tensor_count = tensor_shape[1] * receptive_field_size
+    output_tensor_count = tensor_shape[0] * receptive_field_size
     return input_tensor_count, output_tensor_count

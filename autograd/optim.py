@@ -5,7 +5,7 @@ from collections import defaultdict
 from typing import Any, Dict, Optional
 
 from autograd.backend import LOW_PRECISION_FLOAT_DTYPES, Array, materialize, xp
-from autograd.distributed import allreduce_grads, broadcast_parameters
+from autograd.distributed import broadcast_parameters
 from autograd.tensor import Tensor
 
 logger = logging.getLogger(__name__)
@@ -421,8 +421,13 @@ class SGD(Optimizer):
 
         This method updates each parameter by subtracting the product of the learning rate
         and the parameter's gradient.
+
+        Contract: step() is purely local — it consumes whatever is in each
+        param.grad and never communicates across ranks. Under DDP, the
+        caller must synchronize gradients first: call `allreduce_grads`
+        after backward (the trainer does this in optimizer_step, before
+        scaling/clipping).
         """
-        allreduce_grads(self.model_parameters)
         self.timestep += 1
         self.update_lr()
 
@@ -500,6 +505,24 @@ class Adam(Optimizer):
             if param.data.dtype in LOW_PRECISION_FLOAT_DTYPES:
                 self._states["master"][name] = param.data.astype(xp.float32)
 
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        """Load Adam state, restoring the invariants __init__ establishes.
+
+        The base loader rebuilds `_states` as plain dicts, but Adam relies on:
+        - m/v defaulting to 0.0 for params absent from the checkpoint
+          (otherwise step() raises KeyError for them), and
+        - an fp32 master copy existing for every low-precision param
+          (otherwise older checkpoints without a 'master' group silently
+          drop mixed-precision masters).
+        """
+        super().load_state_dict(state_dict)
+        self._states["m"] = defaultdict(float, self._states["m"])
+        self._states["v"] = defaultdict(float, self._states["v"])
+        master = self._states.setdefault("master", {})
+        for name, param in self.model_parameters.items():
+            if param.data.dtype in LOW_PRECISION_FLOAT_DTYPES and name not in master:
+                master[name] = param.data.astype(xp.float32)
+
     def step(self) -> None:
         """
         Perform a single optimization step using the Adam algorithm.
@@ -507,12 +530,14 @@ class Adam(Optimizer):
         This method updates the biased first and second order momentum estimates,
         applies bias correction, performs a decoupled weight decay step if specified,
         and updates the parameters accordingly.
+
+        Contract: step() is purely local — it consumes whatever is in each
+        param.grad and never communicates across ranks. Under DDP, the
+        caller must synchronize gradients first: call `allreduce_grads`
+        after backward (the trainer does this in optimizer_step, before
+        scaling/clipping), so the optimizer state (m, v) is computed
+        against the true global mean gradient.
         """
-        # Average gradients across DDP ranks before Adam consumes them, so
-        # the optimizer state (m, v) is computed against the true global
-        # mean gradient — equivalent to a single forward+backward over the
-        # concatenated global batch. No-op when world_size == 1.
-        allreduce_grads(self.model_parameters)
         self.timestep += 1
         self.update_lr()
 

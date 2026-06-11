@@ -67,9 +67,8 @@ class GPT2(nn.Module):
         num_decoder_layers: int = 12,  # GPT-2 small has 12 layers
         activation_checkpointing: bool = False,
         parameter_dtype=None,
-        **kwargs,
     ) -> None:
-        super().__init__(**kwargs)
+        super().__init__()
         if isinstance(parameter_dtype, str):
             parameter_dtype = resolve_dtype(parameter_dtype)
         self.hidden_size = hidden_size
@@ -172,9 +171,8 @@ class DecoderSublayer(nn.Module):
         ff_hidden_size: int = 3072,
         num_attention_heads: int = 12,
         dropout_prob: float = 0.1,
-        **kwargs,
     ) -> None:
-        super().__init__(**kwargs)
+        super().__init__()
 
         # First LayerNorm (for the attention sub-layer)
         self.layer_norm1 = nn.LayerNorm(hidden_size)
@@ -457,14 +455,16 @@ if __name__ == "__main__":
         _val_data_loader,
         config: TransformerTrainingConfig,
     ) -> None:
-        generate_text(
-            model=model,
-            prediction_func=GPT2ForwardFn(),
-            bpe=bpe,
-            start_tokens=config.eval_start_string,
-            max_length=min(256, int(model.max_seq_len)),
-            temperature=0.8,
-            top_k=config.eval_top_k,
+        print(
+            generate_text(
+                model=model,
+                prediction_func=GPT2ForwardFn(),
+                bpe=bpe,
+                start_tokens=config.eval_start_string,
+                max_length=min(256, int(model.max_seq_len)),
+                temperature=0.8,
+                top_k=config.eval_top_k,
+            )
         )
 
     trainer = LLMTrainer(
@@ -530,13 +530,15 @@ if __name__ == "__main__":
 
     # Inference test
     for k in range(5):
-        generate_text(
-            model=trainer.model,
-            prediction_func=GPT2ForwardFn(),
-            bpe=bpe,
-            start_tokens=CONFIG.eval_start_string,
-            max_length=int(trainer.model.max_seq_len),
-            temperature=0.8,
-            top_k=CONFIG.eval_top_k,
+        print(
+            generate_text(
+                model=trainer.model,
+                prediction_func=GPT2ForwardFn(),
+                bpe=bpe,
+                start_tokens=CONFIG.eval_start_string,
+                max_length=int(trainer.model.max_seq_len),
+                temperature=0.8,
+                top_k=CONFIG.eval_top_k,
+            )
         )
         print("\n------------------------\n")

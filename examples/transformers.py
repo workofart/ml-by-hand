@@ -36,7 +36,13 @@ class Transformer(nn.Module):
     """
 
     def __init__(
-        self, vocab_size: int, hidden_size: int, num_attention_heads: int, **kwargs: Any
+        self,
+        vocab_size: int,
+        hidden_size: int,
+        num_attention_heads: int,
+        max_seq_len: Optional[int] = None,
+        num_decoder_layers: int = 6,
+        dropout_prob: float = 0.1,
     ) -> None:
         """
         Initialize the Transformer model.
@@ -45,22 +51,28 @@ class Transformer(nn.Module):
             vocab_size (int): Size of the vocabulary.
             hidden_size (int): Dimensionality of the model.
             num_attention_heads (int): Number of attention heads.
-            **kwargs: Additional keyword arguments (may include "max_seq_len").
+            max_seq_len (Optional[int]): Maximum sequence length for generation.
+            num_decoder_layers (int): Number of decoder sublayers. Defaults to 6 (Section 3.1).
+            dropout_prob (float): Dropout probability. Defaults to 0.1 (Section 5.4).
         """
-        super().__init__(**kwargs)
+        super().__init__()
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
-        self.max_seq_len = kwargs.get("max_seq_len")
+        self.max_seq_len = max_seq_len
         self.embedding = nn.Embedding(vocab_size, hidden_size)
 
-        # Encoder and dedcoder each have 6 layers
+        # The paper uses 6 identical layers for both stacks (Section 3.1)
         self.encoder = Encoder(
-            embedding_size=hidden_size, num_attention_heads=num_attention_heads
+            embedding_size=hidden_size,
+            num_attention_heads=num_attention_heads,
+            dropout_prob=dropout_prob,
         )
         self.decoder = Decoder(
             vocab_size=vocab_size,
             hidden_size=hidden_size,
             num_attention_heads=num_attention_heads,
+            num_layers=num_decoder_layers,
+            dropout_prob=dropout_prob,
         )
 
     def forward(
@@ -102,25 +114,36 @@ class Encoder(nn.Module):
     - 6 identical EncoderSublayer (Section 3.1)
     """
 
-    def __init__(self, embedding_size: int, num_attention_heads: int) -> None:
+    def __init__(
+        self,
+        embedding_size: int,
+        num_attention_heads: int,
+        num_layers: int = 6,
+        dropout_prob: float = 0.1,
+    ) -> None:
         """
         Initialize the Encoder.
 
         Args:
             embedding_size (int): Dimensionality of the token embeddings.
             num_attention_heads (int): Number of attention heads for the self-attention mechanism.
+            num_layers (int): Number of encoder sublayers. Defaults to 6 (Section 3.1).
+            dropout_prob (float): Dropout probability. Defaults to 0.1.
         """
         super().__init__()
         self.embedding_size = embedding_size
-        self.positional_encoder = PositionalEncoding(hidden_size=embedding_size)
+        self.positional_encoder = PositionalEncoding(
+            hidden_size=embedding_size, dropout_prob=dropout_prob
+        )
         self.sublayers = nn.ModuleList(
             [
                 EncoderSublayer(
                     hidden_size=embedding_size,
                     ff_hidden_size=embedding_size * 4,
                     num_attention_heads=num_attention_heads,
+                    dropout_prob=dropout_prob,
                 )
-                for _ in range(6)
+                for _ in range(num_layers)
             ]
         )
         self.layer_norm = nn.LayerNorm(embedding_size)
@@ -164,7 +187,12 @@ class Decoder(nn.Module):
     """
 
     def __init__(
-        self, vocab_size: int, hidden_size: int, num_attention_heads: int = 2
+        self,
+        vocab_size: int,
+        hidden_size: int,
+        num_attention_heads: int = 2,
+        num_layers: int = 6,
+        dropout_prob: float = 0.1,
     ) -> None:
         """
         Initialize the Decoder.
@@ -173,9 +201,13 @@ class Decoder(nn.Module):
             vocab_size (int): Size of the vocabulary.
             hidden_size (int): Dimensionality of the model.
             num_attention_heads (int, optional): Number of attention heads. Defaults to 2.
+            num_layers (int): Number of decoder sublayers. Defaults to 6 (Section 3.1).
+            dropout_prob (float): Dropout probability. Defaults to 0.1.
         """
         super().__init__()
-        self.positional_encoder = PositionalEncoding(hidden_size=hidden_size)
+        self.positional_encoder = PositionalEncoding(
+            hidden_size=hidden_size, dropout_prob=dropout_prob
+        )
         self.hidden_size = hidden_size
         self.sublayers = nn.ModuleList(
             [
@@ -183,8 +215,9 @@ class Decoder(nn.Module):
                     hidden_size=hidden_size,
                     ff_hidden_size=hidden_size * 4,
                     num_attention_heads=num_attention_heads,
+                    dropout_prob=dropout_prob,
                 )
-                for _ in range(6)
+                for _ in range(num_layers)
             ]
         )
         self.linear = nn.Linear(hidden_size, output_size=vocab_size)
@@ -592,7 +625,9 @@ if __name__ == "__main__":
             "hidden_size": 768,
             "dropout_prob": 0.1,
             "max_seq_len": 512,
-            "num_decoder_layers": 12,
+            # 6 decoder layers, matching the paper (the previous value of 12
+            # was silently ignored by the model, which hardcoded 6).
+            "num_decoder_layers": 6,
         },
         optimizer_kwargs={
             "lr": 1e-3,
@@ -707,12 +742,14 @@ if __name__ == "__main__":
             max_length=trainer.model.max_seq_len // 3,
         )
 
-    generate_text(
-        model=trainer.model,
-        prediction_func=TransformerForwardFn(),
-        bpe=bpe,
-        start_tokens=CONFIG.eval_start_string,
-        max_length=int(trainer.model.max_seq_len * 0.9),
-        temperature=0.8,
-        top_k=CONFIG.eval_top_k,
+    print(
+        generate_text(
+            model=trainer.model,
+            prediction_func=TransformerForwardFn(),
+            bpe=bpe,
+            start_tokens=CONFIG.eval_start_string,
+            max_length=int(trainer.model.max_seq_len * 0.9),
+            temperature=0.8,
+            top_k=CONFIG.eval_top_k,
+        )
     )
