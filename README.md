@@ -5,13 +5,14 @@
 
 [![Unit Tests](https://github.com/workofart/ml-by-hand/actions/workflows/test.yml/badge.svg)](https://github.com/workofart/ml-by-hand/actions/workflows/test.yml) |
 📝 [Blog Post 1](https://www.henrypan.com/blog/2025-02-06-ml-by-hand/) |
-📝 [Blog Post 2](https://www.henrypan.com/blog/2026-03-14-how-deep-learning-library-enables-learning/)
+📝 [Blog Post 2](https://www.henrypan.com/blog/2026-03-14-how-deep-learning-library-enables-learning/) |
+📊 [GPT-2 Model Card](https://github.com/workofart/ml-by-hand/releases/tag/gpt2-124m-openwebtext-56000)
 
 </div>
 
 
 
-We are creating a deep learning library from scratch (that evolved from a simple autograd engine). It is designed to demystify the inner workings of building deep learning models by exposing every mathematical detail and stripping down the abstractions shiny ML libraries (e.g. PyTorch/TensorFlow) have. **This project tries to provide an opportunity to learn deep learning from first-principles. And use the hand-built library to create and train state-of-art models (such as [GPT-2](https://github.com/workofart/ml-by-hand/blob/main/examples/gpt_2.py))).**
+We are creating a deep learning library from scratch (that evolved from a simple autograd engine). It is designed to demystify the inner workings of building deep learning models by exposing every mathematical detail and stripping down the abstractions shiny ML libraries (e.g. PyTorch/TensorFlow) have. **This project tries to provide an opportunity to learn deep learning from first-principles. And use the hand-built library to create and train state-of-art models (such as [GPT-2](https://github.com/workofart/ml-by-hand/blob/main/examples/gpt_2.py) ([Model Card](https://github.com/workofart/ml-by-hand/releases/tag/gpt2-124m-openwebtext-56000))).**
 
 
 
@@ -52,7 +53,9 @@ We are creating a deep learning library from scratch (that evolved from a simple
 Using the library, we're able to pre-train GPT-2 124M model from scratch on OpenWebText (56k steps * 1024 context length * 480 global batch size = 27 billion tokens, bfloat16) at [GitHub release](https://github.com/workofart/ml-by-hand/releases/tag/gpt2-124m-openwebtext-56000), including its BPE tokenizer vocabulary.
 
 Download the weights (~240 MB) and run inference locally:
-
+<details>
+  <summary><strong>Click to expand</strong></summary>
+  
 ```bash
 git clone https://github.com/workofart/ml-by-hand.git
 cd ml-by-hand
@@ -101,6 +104,7 @@ generate_text(
 > [prompt 5 tokens + 95 new tokens in 2.98s, 31.9 tok/s]
 > 'The meaning of life is based on the ability to feel and remember the things that ...'
 ```
+</details>
 
 </td>
 </tr>
